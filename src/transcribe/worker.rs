@@ -259,12 +259,10 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
 
     eprintln!("[worker] Loading live preview model: {}", live_model);
     let load_start = std::time::Instant::now();
-    let parakeet = config.parakeet.clone().unwrap_or_default();
-    let streaming_config = UnifiedStreamingConfig {
-        chunk_secs: parakeet.streaming_chunk_secs,
-        left_context_secs: parakeet.streaming_left_context_secs,
-        right_context_secs: parakeet.streaming_right_context_secs,
-    };
+    // parakeet-rs's own context sizes. voxtype's [parakeet] streaming_*
+    // defaults (1.5 s left context) fail the unified model's check that
+    // contexts map to mel-frame counts divisible by 8.
+    let streaming_config = UnifiedStreamingConfig::default();
     // None = CPU: the GPU is left to the engine model.
     let unified = super::parakeet::resolve_model_path(live_model)
         .map_err(|e| e.to_string())
@@ -274,31 +272,37 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
                 .map_err(|e| e.to_string())
         });
     let mut unified = match unified {
-        Ok(u) => Some(u),
+        Ok(u) => {
+            eprintln!(
+                "[worker] Live preview model loaded in {:.2}s",
+                load_start.elapsed().as_secs_f32()
+            );
+            Some(u)
+        }
         Err(e) => {
             // No preview, but the recording still gets transcribed.
             eprintln!("[worker] Live preview model failed to load: {}", e);
             None
         }
     };
-    eprintln!(
-        "[worker] Live preview model loaded in {:.2}s",
-        load_start.elapsed().as_secs_f32()
-    );
 
     writeln!(out, "{}", READY_SIGNAL)?;
     out.flush()?;
 
     let mut samples: Vec<f32> = Vec::new();
+    // transcribe_chunk() returns only the text new in that chunk (often
+    // empty, sometimes part of a word), so the running transcript is the
+    // concatenation.
     let mut last_partial = String::new();
     for block in blocks_rx {
         samples.extend_from_slice(&block);
         let Some(u) = unified.as_mut() else { continue };
         match u.transcribe_chunk(&block) {
-            Ok(text) if text != last_partial => {
-                writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(&text)?)?;
+            Ok(delta) if !delta.is_empty() => {
+                last_partial.push_str(&delta);
+                let shown = last_partial.trim_start();
+                writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(shown)?)?;
                 out.flush()?;
-                last_partial = text;
             }
             Ok(_) => {}
             Err(e) => {
@@ -314,11 +318,11 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         write_response_to(&mut out, WorkerResponse::error("Empty audio buffer"));
         return Ok(());
     }
-    let preview_final = unified
-        .as_mut()
-        .and_then(|u| u.flush().ok())
-        .map(|t| t.trim().to_string())
-        .unwrap_or_else(|| last_partial.trim().to_string());
+    // flush() returns the text still held in the right context.
+    if let Some(tail) = unified.as_mut().and_then(|u| u.flush().ok()) {
+        last_partial.push_str(&tail);
+    }
+    let preview_final = last_partial.trim().to_string();
 
     // A short clip whose engine model is still loading gets the preview
     // model's text: waiting for the load would cost more than it gains.
