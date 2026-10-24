@@ -59,6 +59,13 @@ pub struct Config {
     #[serde(default)]
     pub live_typing: bool,
 
+    /// Seconds to keep a live worker loaded after a recording, so the next
+    /// one shows words without the preview model's load time (about 1.6 s).
+    /// The warm worker holds the preview model (about 1 GB RAM, no VRAM).
+    /// 0 = start a fresh worker for every recording.
+    #[serde(default)]
+    pub live_preview_warm_secs: u64,
+
     /// Parakeet configuration (optional, only used when engine = "parakeet")
     #[serde(default)]
     pub parakeet: Option<ParakeetConfig>,
@@ -151,6 +158,7 @@ impl Default for Config {
             engine_isolation: false,
             live_preview_model: None,
             live_typing: false,
+            live_preview_warm_secs: 0,
             parakeet: None,
             moonshine: None,
             sensevoice: None,

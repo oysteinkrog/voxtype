@@ -241,20 +241,24 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         }
     });
 
-    // Engine model in the background: its load is hidden behind speech.
+    // Engine model in the background, started by the first audio block: its
+    // load is hidden behind speech, and a worker kept warm between
+    // recordings (live_preview_warm_secs) holds no VRAM while it waits.
     let mut engine_config = config.clone();
     engine_config.engine_isolation = false;
     let engine_model = engine_config.model_name().to_string();
     let (engine_tx, engine_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let start = std::time::Instant::now();
-        let result = super::create_transcriber(&engine_config);
-        eprintln!(
-            "[worker] {} loaded in {:.2}s",
-            engine_model,
-            start.elapsed().as_secs_f32()
-        );
-        let _ = engine_tx.send(result);
+    let mut start_engine = Some(move || {
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let result = super::create_transcriber(&engine_config);
+            eprintln!(
+                "[worker] {} loaded in {:.2}s",
+                engine_model,
+                start.elapsed().as_secs_f32()
+            );
+            let _ = engine_tx.send(result);
+        });
     });
 
     eprintln!("[worker] Loading live preview model: {}", live_model);
@@ -295,6 +299,9 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     // concatenation.
     let mut last_partial = String::new();
     for block in blocks_rx {
+        if let Some(start) = start_engine.take() {
+            start();
+        }
         samples.extend_from_slice(&block);
         let Some(u) = unified.as_mut() else { continue };
         match u.transcribe_chunk(&block) {

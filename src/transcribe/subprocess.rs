@@ -23,6 +23,7 @@ use crate::config::WhisperConfig;
 use crate::error::TranscribeError;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use ureq::serde_json;
@@ -68,6 +69,10 @@ pub struct SubprocessTranscriber {
     /// Live preview model (`live_preview_model`). When set, the transcriber
     /// streams: see the [`StreamingTranscriber`] impl.
     live_model: Option<String>,
+    /// Live worker started ahead of the next recording, and how long it may
+    /// wait for one (`live_preview_warm_secs`, 0 = off).
+    warm: WarmSlot,
+    warm_secs: u64,
     /// Pre-spawned worker (from prepare())
     prepared_worker: Mutex<Option<PreparedWorker>>,
     /// Last language reported by the worker, if any. Mirrors
@@ -87,6 +92,8 @@ impl SubprocessTranscriber {
             config_path,
             engine_args: None,
             live_model: None,
+            warm: WarmSlot::default(),
+            warm_secs: 0,
             prepared_worker: Mutex::new(None),
             last_language: Arc::new(Mutex::new(None)),
         })
@@ -106,6 +113,8 @@ impl SubprocessTranscriber {
                 .live_preview_active()
                 .then(|| config.live_preview_model.clone())
                 .flatten(),
+            warm: WarmSlot::default(),
+            warm_secs: config.live_preview_warm_secs,
             prepared_worker: Mutex::new(None),
             last_language: Arc::new(Mutex::new(None)),
         }
@@ -383,6 +392,71 @@ impl Transcriber for SubprocessTranscriber {
     }
 }
 
+/// A live worker started ahead of the next recording. It loads the preview
+/// model, writes READY (read later by `start_stream`'s reader) and waits for
+/// audio. The engine model loads only when audio arrives, so it holds no VRAM.
+struct WarmWorker {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    generation: u64,
+}
+
+/// Holds at most one warm worker. A timer kills it after the keep time unless
+/// a recording took it or a newer one replaced it.
+#[derive(Clone, Default)]
+struct WarmSlot {
+    inner: Arc<Mutex<Option<WarmWorker>>>,
+    generation: Arc<AtomicU64>,
+}
+
+impl WarmSlot {
+    fn take_alive(&self) -> Option<WarmWorker> {
+        let mut worker = self.inner.lock().ok()?.take()?;
+        match worker.child.try_wait() {
+            Ok(None) => Some(worker),
+            _ => None,
+        }
+    }
+
+    fn refill(&self, mut cmd: Command, keep: std::time::Duration) {
+        let Ok(mut child) = cmd.spawn() else {
+            tracing::warn!("Could not start a warm live worker");
+            return;
+        };
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return;
+        };
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let worker = WarmWorker {
+            child,
+            stdin,
+            stdout,
+            generation,
+        };
+        if let Ok(mut slot) = self.inner.lock() {
+            if let Some(mut old) = slot.replace(worker) {
+                let _ = old.child.kill();
+                let _ = old.child.wait();
+            }
+        }
+        let inner = Arc::clone(&self.inner);
+        std::thread::spawn(move || {
+            std::thread::sleep(keep);
+            let Ok(mut slot) = inner.lock() else { return };
+            if slot.as_ref().is_some_and(|w| w.generation == generation) {
+                if let Some(mut w) = slot.take() {
+                    tracing::info!("Warm live worker idle for {}s; stopping it", keep.as_secs());
+                    let _ = w.child.kill();
+                    let _ = w.child.wait();
+                }
+            }
+        });
+    }
+}
+
 /// Live preview: audio goes to the worker in blocks while recording, its
 /// running transcript comes back as `Partial` events, and the engine model's
 /// transcript of the whole clip arrives as one `Final` after the samples
@@ -392,18 +466,35 @@ impl StreamingTranscriber for SubprocessTranscriber {
         &self,
         mut samples_rx: mpsc::Receiver<Vec<f32>>,
     ) -> Result<StreamHandle, TranscribeError> {
-        let mut cmd = self.build_worker_command()?;
-        let mut child = cmd.spawn().map_err(|e| {
-            TranscribeError::InitFailed(format!("Failed to spawn transcribe-worker: {}", e))
-        })?;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| TranscribeError::InitFailed("Worker stdin not available".to_string()))?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            TranscribeError::InitFailed("Worker stdout not available".to_string())
-        })?;
+        let (mut child, mut stdin, stdout) = match self.warm.take_alive() {
+            Some(w) => {
+                tracing::info!("Using the warm live worker");
+                (w.child, w.stdin, w.stdout)
+            }
+            None => {
+                let mut cmd = self.build_worker_command()?;
+                let mut child = cmd.spawn().map_err(|e| {
+                    TranscribeError::InitFailed(format!("Failed to spawn transcribe-worker: {}", e))
+                })?;
+                let stdin = child.stdin.take().ok_or_else(|| {
+                    TranscribeError::InitFailed("Worker stdin not available".to_string())
+                })?;
+                let stdout = child.stdout.take().ok_or_else(|| {
+                    TranscribeError::InitFailed("Worker stdout not available".to_string())
+                })?;
+                (child, stdin, stdout)
+            }
+        };
         let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+        // The next recording's worker, started once this one is done.
+        let refill = match self.warm_secs {
+            0 => None,
+            secs => Some((
+                self.build_worker_command()?,
+                self.warm.clone(),
+                std::time::Duration::from_secs(secs),
+            )),
+        };
 
         let (events_tx, events_rx) = mpsc::channel::<StreamingEvent>(64);
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
@@ -482,6 +573,9 @@ impl StreamingTranscriber for SubprocessTranscriber {
                 break;
             }
             let _ = child.wait();
+            if let Some((cmd, slot, keep)) = refill {
+                slot.refill(cmd, keep);
+            }
             send(StreamingEvent::Ended);
             Ok(())
         });
