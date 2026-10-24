@@ -66,6 +66,12 @@ pub struct Config {
     #[serde(default)]
     pub live_preview_warm_secs: u64,
 
+    /// Shell command run every 10 s while a warm worker waits. If it exits
+    /// 0, the worker stops early, e.g. to give the RAM back under memory
+    /// pressure: `grep -q 'level=pause' /path/to/pressure-level`.
+    #[serde(default)]
+    pub live_preview_warm_release_command: Option<String>,
+
     /// Parakeet configuration (optional, only used when engine = "parakeet")
     #[serde(default)]
     pub parakeet: Option<ParakeetConfig>,
@@ -159,6 +165,7 @@ impl Default for Config {
             live_preview_model: None,
             live_typing: false,
             live_preview_warm_secs: 0,
+            live_preview_warm_release_command: None,
             parakeet: None,
             moonshine: None,
             sensevoice: None,

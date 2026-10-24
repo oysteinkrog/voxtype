@@ -73,6 +73,8 @@ pub struct SubprocessTranscriber {
     /// wait for one (`live_preview_warm_secs`, 0 = off).
     warm: WarmSlot,
     warm_secs: u64,
+    /// `live_preview_warm_release_command`: checked while a warm worker waits.
+    warm_release: Option<String>,
     /// Pre-spawned worker (from prepare())
     prepared_worker: Mutex<Option<PreparedWorker>>,
     /// Last language reported by the worker, if any. Mirrors
@@ -94,6 +96,7 @@ impl SubprocessTranscriber {
             live_model: None,
             warm: WarmSlot::default(),
             warm_secs: 0,
+            warm_release: None,
             prepared_worker: Mutex::new(None),
             last_language: Arc::new(Mutex::new(None)),
         })
@@ -115,6 +118,7 @@ impl SubprocessTranscriber {
                 .flatten(),
             warm: WarmSlot::default(),
             warm_secs: config.live_preview_warm_secs,
+            warm_release: config.live_preview_warm_release_command.clone(),
             prepared_worker: Mutex::new(None),
             last_language: Arc::new(Mutex::new(None)),
         }
@@ -392,6 +396,22 @@ impl Transcriber for SubprocessTranscriber {
     }
 }
 
+/// How often a waiting warm worker runs its release check.
+const WARM_RELEASE_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run the release check (`sh -c`). Success means: stop the warm worker now.
+fn release_requested(command: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// A live worker started ahead of the next recording. It loads the preview
 /// model, writes READY (read later by `start_stream`'s reader) and waits for
 /// audio. The engine model loads only when audio arrives, so it holds no VRAM.
@@ -419,7 +439,7 @@ impl WarmSlot {
         }
     }
 
-    fn refill(&self, mut cmd: Command, keep: std::time::Duration) {
+    fn refill(&self, mut cmd: Command, keep: std::time::Duration, release: Option<String>) {
         let Ok(mut child) = cmd.spawn() else {
             tracing::warn!("Could not start a warm live worker");
             return;
@@ -444,11 +464,28 @@ impl WarmSlot {
         }
         let inner = Arc::clone(&self.inner);
         std::thread::spawn(move || {
-            std::thread::sleep(keep);
+            let deadline = std::time::Instant::now() + keep;
+            let reason = loop {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    break format!("idle for {}s", keep.as_secs());
+                }
+                std::thread::sleep(left.min(WARM_RELEASE_CHECK));
+                let still_ours = inner
+                    .lock()
+                    .map(|slot| slot.as_ref().is_some_and(|w| w.generation == generation))
+                    .unwrap_or(false);
+                if !still_ours {
+                    return;
+                }
+                if release.as_deref().is_some_and(release_requested) {
+                    break "release command said so".to_string();
+                }
+            };
             let Ok(mut slot) = inner.lock() else { return };
             if slot.as_ref().is_some_and(|w| w.generation == generation) {
                 if let Some(mut w) = slot.take() {
-                    tracing::info!("Warm live worker idle for {}s; stopping it", keep.as_secs());
+                    tracing::info!("Stopping the warm live worker: {}", reason);
                     let _ = w.child.kill();
                     let _ = w.child.wait();
                 }
@@ -493,6 +530,7 @@ impl StreamingTranscriber for SubprocessTranscriber {
                 self.build_worker_command()?,
                 self.warm.clone(),
                 std::time::Duration::from_secs(secs),
+                self.warm_release.clone(),
             )),
         };
 
@@ -573,8 +611,8 @@ impl StreamingTranscriber for SubprocessTranscriber {
                 break;
             }
             let _ = child.wait();
-            if let Some((cmd, slot, keep)) = refill {
-                slot.refill(cmd, keep);
+            if let Some((cmd, slot, keep, release)) = refill {
+                slot.refill(cmd, keep, release);
             }
             send(StreamingEvent::Ended);
             Ok(())
