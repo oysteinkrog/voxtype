@@ -375,6 +375,32 @@ fn cancel_targets_start(start_at: Option<u128>, cancel_at: Option<u128>) -> bool
 /// sent back to back can put the cancel on disk before the daemon has acted
 /// on the start signal; the recording poll then applies it once capture is
 /// live.
+/// How long a live-typing update waits for held modifiers to come up.
+const LIVE_TYPING_MODIFIER_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+/// The final replace waits longer: it is the text that stays.
+const LIVE_TYPING_FINAL_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// True once no modifier key is held, or false after `timeout`.
+async fn modifiers_released(timeout: std::time::Duration) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::output::modifier_guard::ModifierGuard::new()
+            .wait_for_release(timeout)
+            .await
+            .is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = timeout;
+        true
+    }
+}
+
+/// Number of leading chars `a` and `b` share.
+fn common_prefix_chars(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
 /// Publish the live preview text for the OSD (`live_preview_model`).
 /// Written to a temp file and renamed, so a reader never sees half a line.
 fn write_live_preview(text: &str) {
@@ -4828,8 +4854,70 @@ impl Daemon {
                     );
                     match event {
                         Some(StreamingEvent::Partial { text, .. }) if self.config.live_preview_active() => {
-                            // Shown by the OSD, never typed.
+                            // `text` is the running transcript. The OSD
+                            // always shows it; with live_typing the new
+                            // words are also typed at the cursor.
                             write_live_preview(&text);
+                            if self.config.live_typing && !file_output {
+                                if let (Some(s), Some(chain)) =
+                                    (streaming_session.as_mut(), streaming_chain.as_ref())
+                                {
+                                    // Skip this update while a modifier is
+                                    // down (e.g. the stop tap on Right Ctrl),
+                                    // or a typed letter becomes a shortcut.
+                                    // The next update types what was missed.
+                                    if let Some(delta) = text.strip_prefix(s.partial()) {
+                                        if !delta.is_empty()
+                                            && modifiers_released(LIVE_TYPING_MODIFIER_WAIT).await
+                                        {
+                                            if let Err(e) = s.type_partial_delta(
+                                                chain,
+                                                delta.to_string(),
+                                                None,
+                                                None,
+                                            ).await {
+                                                tracing::warn!("Live typing failed: {}", e);
+                                            }
+                                        }
+                                    }
+                                    if let State::Streaming { typed_chars, .. } = &mut state {
+                                        *typed_chars = s.typed_chars();
+                                    }
+                                }
+                            }
+                        }
+                        Some(StreamingEvent::Final { text, .. })
+                            if self.config.live_preview_active() && self.config.live_typing && !file_output =>
+                        {
+                            // Swap the live text for the engine model's
+                            // version: keep the prefix both agree on,
+                            // backspace the rest, type the new tail.
+                            if let (Some(s), Some(chain)) =
+                                (streaming_session.as_mut(), streaming_chain.as_ref())
+                            {
+                                let text = self.text_processor.process(&text);
+                                let common = common_prefix_chars(s.partial(), &text);
+                                let backspace = s.partial().chars().count() - common;
+                                let tail: String = text.chars().skip(common).collect();
+                                if !modifiers_released(LIVE_TYPING_FINAL_WAIT).await {
+                                    tracing::warn!("Modifier still held; typing the final text anyway");
+                                }
+                                if let Err(e) = s.replace_and_commit(
+                                    chain,
+                                    backspace,
+                                    &tail,
+                                    None,
+                                    self.config.output.pre_output_command.as_deref(),
+                                    self.config.output.post_output_command.as_deref(),
+                                ).await {
+                                    tracing::error!("Live typing final replace failed: {}", e);
+                                }
+                                if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
+                                    *typed_chars = s.typed_chars();
+                                    finalized_text.clear();
+                                    finalized_text.push_str(s.finalized_text());
+                                }
+                            }
                         }
                         Some(StreamingEvent::Partial { text, .. }) => {
                             if let Some(s) = streaming_session.as_mut() {

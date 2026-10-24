@@ -51,6 +51,14 @@ pub struct Config {
     #[serde(default)]
     pub live_preview_model: Option<String>,
 
+    /// With a live preview, also type the preview words at the cursor as
+    /// they arrive, then swap them for the engine model's text on stop
+    /// (keeping the prefix both agree on). Use `[hotkey] mode = "toggle"`
+    /// or a non-modifier key: letters typed while a modifier is held would
+    /// become shortcuts, so updates wait until modifiers are up.
+    #[serde(default)]
+    pub live_typing: bool,
+
     /// Parakeet configuration (optional, only used when engine = "parakeet")
     #[serde(default)]
     pub parakeet: Option<ParakeetConfig>,
@@ -142,6 +150,7 @@ impl Default for Config {
             engine: TranscriptionEngine::default(),
             engine_isolation: false,
             live_preview_model: None,
+            live_typing: false,
             parakeet: None,
             moonshine: None,
             sensevoice: None,
