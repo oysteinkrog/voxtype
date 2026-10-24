@@ -16,13 +16,15 @@
 //! - `transcribe()` sends audio to already-ready worker
 //! - Perceived latency is just transcription time, not model load + transcription
 
-use super::worker::READY_SIGNAL;
+use super::streaming::{StreamHandle, StreamingEvent, StreamingTranscriber};
+use super::worker::{PARTIAL_PREFIX, READY_SIGNAL};
 use super::Transcriber;
 use crate::config::WhisperConfig;
 use crate::error::TranscribeError;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, oneshot};
 use ureq::serde_json;
 
 /// Response from the transcription worker process
@@ -63,12 +65,15 @@ pub struct SubprocessTranscriber {
     /// For a non-Whisper engine: (engine name, model name). The worker reads
     /// the rest of that engine's settings from the config file.
     engine_args: Option<(String, String)>,
+    /// Live preview model (`live_preview_model`). When set, the transcriber
+    /// streams: see the [`StreamingTranscriber`] impl.
+    live_model: Option<String>,
     /// Pre-spawned worker (from prepare())
     prepared_worker: Mutex<Option<PreparedWorker>>,
     /// Last language reported by the worker, if any. Mirrors
     /// `WhisperTranscriber::last_language` so the daemon can derive a layout
     /// hint after transcription. See [`Transcriber::last_detected_language`].
-    last_language: Mutex<Option<String>>,
+    last_language: Arc<Mutex<Option<String>>>,
 }
 
 impl SubprocessTranscriber {
@@ -81,8 +86,9 @@ impl SubprocessTranscriber {
             config: config.clone(),
             config_path,
             engine_args: None,
+            live_model: None,
             prepared_worker: Mutex::new(None),
-            last_language: Mutex::new(None),
+            last_language: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -96,8 +102,12 @@ impl SubprocessTranscriber {
                 config.engine.name().to_string(),
                 config.model_name().to_string(),
             )),
+            live_model: config
+                .live_preview_active()
+                .then(|| config.live_preview_model.clone())
+                .flatten(),
             prepared_worker: Mutex::new(None),
-            last_language: Mutex::new(None),
+            last_language: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -129,6 +139,9 @@ impl SubprocessTranscriber {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit());
+            if let Some(ref live) = self.live_model {
+                cmd.arg("--live-model").arg(live);
+            }
             return Ok(cmd);
         }
 
@@ -234,10 +247,17 @@ impl SubprocessTranscriber {
     fn read_worker_response(
         stdout: &mut BufReader<ChildStdout>,
     ) -> Result<WorkerResponse, TranscribeError> {
+        // A live worker sends preview lines before the response; skip them.
         let mut line = String::new();
-        stdout.read_line(&mut line).map_err(|e| {
-            TranscribeError::InferenceFailed(format!("Failed to read worker output: {}", e))
-        })?;
+        loop {
+            line.clear();
+            stdout.read_line(&mut line).map_err(|e| {
+                TranscribeError::InferenceFailed(format!("Failed to read worker output: {}", e))
+            })?;
+            if !line.starts_with(PARTIAL_PREFIX) {
+                break;
+            }
+        }
 
         serde_json::from_str(&line).map_err(|e| {
             TranscribeError::InferenceFailed(format!(
@@ -250,6 +270,10 @@ impl SubprocessTranscriber {
 
 impl Transcriber for SubprocessTranscriber {
     fn prepare(&self) {
+        // A live transcriber spawns its worker in start_stream().
+        if self.live_model.is_some() {
+            return;
+        }
         tracing::debug!("Preparing subprocess transcriber (spawning worker)...");
         let start = std::time::Instant::now();
 
@@ -352,6 +376,130 @@ impl Transcriber for SubprocessTranscriber {
 
     fn last_detected_language(&self) -> Option<String> {
         self.last_language.lock().ok().and_then(|g| g.clone())
+    }
+
+    fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {
+        self.live_model.as_ref().map(|_| self as &dyn StreamingTranscriber)
+    }
+}
+
+/// Live preview: audio goes to the worker in blocks while recording, its
+/// running transcript comes back as `Partial` events, and the engine model's
+/// transcript of the whole clip arrives as one `Final` after the samples
+/// sender is dropped.
+impl StreamingTranscriber for SubprocessTranscriber {
+    fn start_stream(
+        &self,
+        mut samples_rx: mpsc::Receiver<Vec<f32>>,
+    ) -> Result<StreamHandle, TranscribeError> {
+        let mut cmd = self.build_worker_command()?;
+        let mut child = cmd.spawn().map_err(|e| {
+            TranscribeError::InitFailed(format!("Failed to spawn transcribe-worker: {}", e))
+        })?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| TranscribeError::InitFailed("Worker stdin not available".to_string()))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            TranscribeError::InitFailed("Worker stdout not available".to_string())
+        })?;
+        let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+
+        let (events_tx, events_rx) = mpsc::channel::<StreamingEvent>(64);
+        let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+
+        // Audio pump. The worker reads stdin on its own thread from the
+        // start, so these writes do not wait for the models to load.
+        std::thread::spawn(move || {
+            while let Some(chunk) = samples_rx.blocking_recv() {
+                if chunk.is_empty() {
+                    continue;
+                }
+                if Self::write_audio_to_worker(&mut stdin, &chunk).is_err() {
+                    break;
+                }
+            }
+            // Dropping stdin tells the worker the recording has ended.
+        });
+
+        // Cancel kills the worker; the reader below then sees EOF.
+        tokio::spawn(async move {
+            if cancel_rx.await.is_ok() {
+                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+            }
+        });
+
+        let last_language = Arc::clone(&self.last_language);
+        let task = tokio::task::spawn_blocking(move || -> Result<(), TranscribeError> {
+            let send = |event| {
+                let _ = events_tx.blocking_send(event);
+            };
+            let mut stdout = BufReader::new(stdout);
+            let mut line = String::new();
+            let mut ready = false;
+            loop {
+                line.clear();
+                match stdout.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let trimmed = line.trim_end();
+                if !ready {
+                    if trimmed == READY_SIGNAL {
+                        ready = true;
+                        continue;
+                    }
+                    // Load failure: the worker replies with an error instead.
+                } else if let Some(json) = trimmed.strip_prefix(PARTIAL_PREFIX) {
+                    if let Ok(text) = serde_json::from_str::<String>(json) {
+                        send(StreamingEvent::Partial {
+                            text,
+                            segment_id: 0,
+                        });
+                    }
+                    continue;
+                }
+                match serde_json::from_str::<WorkerResponse>(trimmed) {
+                    Ok(r) if r.ok => {
+                        if let Ok(mut guard) = last_language.lock() {
+                            *guard = r.language.clone();
+                        }
+                        let text = r.text.unwrap_or_default();
+                        if !text.trim().is_empty() {
+                            send(StreamingEvent::Final {
+                                text,
+                                segment_id: 0,
+                            });
+                        }
+                    }
+                    Ok(r) => send(StreamingEvent::Error(TranscribeError::InferenceFailed(
+                        r.error.unwrap_or_else(|| "Unknown worker error".to_string()),
+                    ))),
+                    Err(e) => send(StreamingEvent::Error(TranscribeError::InferenceFailed(
+                        format!("Failed to parse worker response: {} (output: {:?})", e, trimmed),
+                    ))),
+                }
+                break;
+            }
+            let _ = child.wait();
+            send(StreamingEvent::Ended);
+            Ok(())
+        });
+
+        let task = tokio::spawn(async move {
+            task.await.unwrap_or_else(|e| {
+                Err(TranscribeError::InferenceFailed(format!(
+                    "Live worker task panicked: {}",
+                    e
+                )))
+            })
+        });
+
+        Ok(StreamHandle {
+            events: events_rx,
+            cancel: cancel_tx,
+            task,
+        })
     }
 }
 

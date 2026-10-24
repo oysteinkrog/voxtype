@@ -52,6 +52,11 @@ pub enum Commands {
         /// Number of threads for inference (passed from parent process)
         #[arg(long)]
         threads: Option<usize>,
+
+        /// Parakeet streaming model for the live preview (passed from parent
+        /// process when live_preview_model is set)
+        #[arg(long)]
+        live_model: Option<String>,
     },
 
     /// Setup and installation utilities

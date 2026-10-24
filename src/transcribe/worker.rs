@@ -202,6 +202,195 @@ fn run_worker_with(
     Ok(())
 }
 
+/// Prefix of a live-preview line: `P <json string>\n`, the running transcript.
+pub const PARTIAL_PREFIX: &str = "P ";
+
+/// Clips shorter than this use the preview model's final text when the
+/// engine model has not finished loading yet, instead of waiting for it.
+const LIVE_MIN_WAIT_SECS: f32 = 2.5;
+
+/// Run the live-preview worker (`live_preview_model`).
+///
+/// Protocol:
+/// 1. Worker starts reading stdin at once and loads the streaming preview
+///    model (Parakeet cache-aware, CPU), then writes "READY". The engine
+///    model (e.g. Cohere) loads on a background thread meanwhile.
+/// 2. Parent sends any number of `[u32 sample_count (LE)][f32 samples...]`
+///    blocks while recording, then closes stdin.
+/// 3. For each change in the running transcript the worker writes
+///    `P <json string>`.
+/// 4. After EOF the worker writes the usual JSON response with the engine
+///    model's transcript of the whole clip and exits.
+#[cfg(feature = "parakeet")]
+pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyhow::Result<()> {
+    use parakeet_rs::{ParakeetUnified, ParakeetUnifiedHandle, UnifiedStreamingConfig};
+    use std::sync::mpsc;
+
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    // Read stdin from the start, so the parent never blocks on a full pipe
+    // while the models load.
+    let (blocks_tx, blocks_rx) = mpsc::channel::<Vec<f32>>();
+    std::thread::spawn(move || {
+        let mut stdin = io::stdin().lock();
+        while let Ok(Some(block)) = read_block(&mut stdin) {
+            if blocks_tx.send(block).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Engine model in the background: its load is hidden behind speech.
+    let mut engine_config = config.clone();
+    engine_config.engine_isolation = false;
+    let engine_model = engine_config.model_name().to_string();
+    let (engine_tx, engine_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        let result = super::create_transcriber(&engine_config);
+        eprintln!(
+            "[worker] {} loaded in {:.2}s",
+            engine_model,
+            start.elapsed().as_secs_f32()
+        );
+        let _ = engine_tx.send(result);
+    });
+
+    eprintln!("[worker] Loading live preview model: {}", live_model);
+    let load_start = std::time::Instant::now();
+    let parakeet = config.parakeet.clone().unwrap_or_default();
+    let streaming_config = UnifiedStreamingConfig {
+        chunk_secs: parakeet.streaming_chunk_secs,
+        left_context_secs: parakeet.streaming_left_context_secs,
+        right_context_secs: parakeet.streaming_right_context_secs,
+    };
+    // None = CPU: the GPU is left to the engine model.
+    let unified = super::parakeet::resolve_model_path(live_model)
+        .map_err(|e| e.to_string())
+        .and_then(|path| ParakeetUnifiedHandle::load(&path, None).map_err(|e| e.to_string()))
+        .and_then(|handle| {
+            ParakeetUnified::from_shared_with_streaming_config(&handle, streaming_config)
+                .map_err(|e| e.to_string())
+        });
+    let mut unified = match unified {
+        Ok(u) => Some(u),
+        Err(e) => {
+            // No preview, but the recording still gets transcribed.
+            eprintln!("[worker] Live preview model failed to load: {}", e);
+            None
+        }
+    };
+    eprintln!(
+        "[worker] Live preview model loaded in {:.2}s",
+        load_start.elapsed().as_secs_f32()
+    );
+
+    writeln!(out, "{}", READY_SIGNAL)?;
+    out.flush()?;
+
+    let mut samples: Vec<f32> = Vec::new();
+    let mut last_partial = String::new();
+    for block in blocks_rx {
+        samples.extend_from_slice(&block);
+        let Some(u) = unified.as_mut() else { continue };
+        match u.transcribe_chunk(&block) {
+            Ok(text) if text != last_partial => {
+                writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(&text)?)?;
+                out.flush()?;
+                last_partial = text;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[worker] Live preview failed, stopping it: {}", e);
+                unified = None;
+            }
+        }
+    }
+
+    let secs = samples.len() as f32 / 16000.0;
+    eprintln!("[worker] Received {:.2}s of audio", secs);
+    if samples.is_empty() {
+        write_response_to(&mut out, WorkerResponse::error("Empty audio buffer"));
+        return Ok(());
+    }
+    let preview_final = unified
+        .as_mut()
+        .and_then(|u| u.flush().ok())
+        .map(|t| t.trim().to_string())
+        .unwrap_or_else(|| last_partial.trim().to_string());
+
+    // A short clip whose engine model is still loading gets the preview
+    // model's text: waiting for the load would cost more than it gains.
+    let engine = if secs < LIVE_MIN_WAIT_SECS && !preview_final.is_empty() {
+        engine_rx.try_recv().ok()
+    } else {
+        engine_rx.recv().ok()
+    };
+    let response = match engine {
+        Some(Ok(transcriber)) => {
+            let start = std::time::Instant::now();
+            match transcriber.transcribe(&samples) {
+                Ok(text) => {
+                    eprintln!(
+                        "[worker] Final transcription in {:.2}s",
+                        start.elapsed().as_secs_f32()
+                    );
+                    WorkerResponse::success(text, transcriber.last_detected_language())
+                }
+                Err(e) if !preview_final.is_empty() => {
+                    eprintln!("[worker] Final transcription failed, using preview: {}", e);
+                    WorkerResponse::success(preview_final, None)
+                }
+                Err(e) => WorkerResponse::error(e.to_string()),
+            }
+        }
+        Some(Err(e)) if preview_final.is_empty() => {
+            WorkerResponse::error(format!("Failed to load model: {}", e))
+        }
+        Some(Err(e)) => {
+            eprintln!("[worker] Model failed to load, using preview: {}", e);
+            WorkerResponse::success(preview_final, None)
+        }
+        None => {
+            eprintln!("[worker] Short clip, model still loading: using preview text");
+            WorkerResponse::success(preview_final, None)
+        }
+    };
+    write_response_to(&mut out, response);
+    Ok(())
+}
+
+#[cfg(not(feature = "parakeet"))]
+pub fn run_live_worker(_config: &crate::config::Config, _live_model: &str) -> anyhow::Result<()> {
+    anyhow::bail!("live_preview_model needs voxtype built with the parakeet feature")
+}
+
+/// Read one `[u32 count][f32 samples]` block. `Ok(None)` at a clean EOF.
+fn read_block<R: Read>(reader: &mut R) -> io::Result<Option<Vec<f32>>> {
+    let mut count_buf = [0u8; 4];
+    match reader.read_exact(&mut count_buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let count = u32::from_le_bytes(count_buf) as usize;
+    if count > 16000 * 60 * 10 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("block too large: {} samples", count),
+        ));
+    }
+    let mut bytes = vec![0u8; count * 4];
+    reader.read_exact(&mut bytes)?;
+    Ok(Some(
+        bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect(),
+    ))
+}
+
 /// Write a JSON response to the given writer
 fn write_response_to<W: Write>(writer: &mut W, response: WorkerResponse) {
     if let Ok(json) = serde_json::to_string(&response) {

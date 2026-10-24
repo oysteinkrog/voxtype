@@ -41,6 +41,16 @@ pub struct Config {
     #[serde(default)]
     pub engine_isolation: bool,
 
+    /// Live preview while recording (needs `engine_isolation = true` and the
+    /// engine's `on_demand_loading = false`). The worker runs this Parakeet
+    /// cache-aware streaming model on the CPU, e.g. "parakeet-unified-en-0.6b",
+    /// and the OSD shows its running transcript. The engine's own model still
+    /// produces the text that gets typed; it loads in the background while
+    /// you speak. Partials are never typed at the cursor, so push-to-talk
+    /// stays push-to-talk.
+    #[serde(default)]
+    pub live_preview_model: Option<String>,
+
     /// Parakeet configuration (optional, only used when engine = "parakeet")
     #[serde(default)]
     pub parakeet: Option<ParakeetConfig>,
@@ -131,6 +141,7 @@ impl Default for Config {
             output: OutputConfig::default(),
             engine: TranscriptionEngine::default(),
             engine_isolation: false,
+            live_preview_model: None,
             parakeet: None,
             moonshine: None,
             sensevoice: None,
@@ -153,6 +164,23 @@ impl Default for Config {
 }
 
 impl Config {
+    /// True when the isolated worker streams a live preview to the OSD
+    /// (`live_preview_model`). Partial text is then shown, not typed, and the
+    /// final transcript is typed once when the recording stops.
+    pub fn live_preview_active(&self) -> bool {
+        self.engine_isolation
+            && self.live_preview_model.is_some()
+            && !matches!(
+                self.engine,
+                TranscriptionEngine::Whisper | TranscriptionEngine::Soniox
+            )
+    }
+
+    /// File the daemon writes the live preview text to while recording.
+    pub fn live_preview_path() -> PathBuf {
+        Self::runtime_dir().join("preview")
+    }
+
     /// Returns true if the active engine is configured for streaming output.
     ///
     /// Used to decide whether to auto-promote push-to-talk to toggle activation:

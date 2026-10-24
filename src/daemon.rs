@@ -375,6 +375,20 @@ fn cancel_targets_start(start_at: Option<u128>, cancel_at: Option<u128>) -> bool
 /// sent back to back can put the cancel on disk before the daemon has acted
 /// on the start signal; the recording poll then applies it once capture is
 /// live.
+/// Publish the live preview text for the OSD (`live_preview_model`).
+/// Written to a temp file and renamed, so a reader never sees half a line.
+fn write_live_preview(text: &str) {
+    let path = Config::live_preview_path();
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+fn clear_live_preview() {
+    let _ = std::fs::remove_file(Config::live_preview_path());
+}
+
 fn discard_stale_cancel(start_at: Option<u128>) {
     let cancel_file = Config::runtime_dir().join("cancel");
     if !cancel_file.exists() {
@@ -1586,6 +1600,7 @@ impl Daemon {
         let output_override = read_output_mode_override();
         let file_output_path = self.resolve_file_output_path(&output_override, None);
 
+        clear_live_preview();
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
         *streaming_session = Some(StreamingSession::new());
@@ -1677,13 +1692,15 @@ impl Daemon {
             // whatever the backend was still draining, and end_streaming
             // would then write an empty file. Let it drain normally so
             // end_streaming can write the real text.
+            // A live preview session has typed nothing yet: its one Final
+            // arrives after the stop, so it must not be disowned either.
             let file_output = matches!(
                 &*state,
                 State::Streaming {
                     file_output_path: Some(_),
                     ..
                 }
-            );
+            ) || self.config.live_preview_active();
             if file_output {
                 tracing::info!("Stopping streaming session (file output); closing capture");
             } else {
@@ -1831,6 +1848,7 @@ impl Daemon {
             let _ = h.task.await;
         }
         self.stop_streaming_drain_pump();
+        clear_live_preview();
 
         // File-output sessions (`--file=path`) never typed anything as
         // they went — see the event pump's `file_output` branch — so the
@@ -2034,6 +2052,7 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         notification_body: &str,
     ) {
+        clear_live_preview();
         let backend_task = streaming_handle.take().map(|h| {
             let _ = h.cancel.send(());
             h.task
@@ -4163,14 +4182,18 @@ impl Daemon {
                         (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
                             if state.is_streaming() {
-                                tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
+                                tracing::debug!("Streaming push-to-talk released; closing audio capture");
                                 self.stop_streaming_capture(&mut audio_capture).await;
                                 // Drop session/chain so the backend's
                                 // post-stop flush emission is dropped at
                                 // the event pump instead of typed.
-                                // Matches the SIGUSR2 stop path.
-                                streaming_session = None;
-                                streaming_chain = None;
+                                // Matches the SIGUSR2 stop path. A live
+                                // preview session keeps them: its Final is
+                                // the only text it types.
+                                if !self.config.live_preview_active() {
+                                    streaming_session = None;
+                                    streaming_chain = None;
+                                }
                             } else if let State::Recording { model_override, .. } = &state {
                                 let model_override = model_override.clone();
 
@@ -4804,6 +4827,10 @@ impl Daemon {
                         State::Streaming { file_output_path: Some(_), .. }
                     );
                     match event {
+                        Some(StreamingEvent::Partial { text, .. }) if self.config.live_preview_active() => {
+                            // Shown by the OSD, never typed.
+                            write_live_preview(&text);
+                        }
                         Some(StreamingEvent::Partial { text, .. }) => {
                             if let Some(s) = streaming_session.as_mut() {
                                 if file_output {
