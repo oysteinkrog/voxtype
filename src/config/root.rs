@@ -32,6 +32,15 @@ pub struct Config {
     #[serde(default)]
     pub engine: TranscriptionEngine,
 
+    /// Run ONNX engines (parakeet, cohere, moonshine, ...) in a short-lived
+    /// `transcribe-worker` subprocess, like `[whisper] gpu_isolation` does
+    /// for Whisper. The worker loads the model while you speak and exits
+    /// after the transcription, so the CUDA context, cuDNN/cuBLAS and the
+    /// ONNX Runtime arenas leave both VRAM and daemon RAM. Pair it with the
+    /// engine's `on_demand_loading = true`.
+    #[serde(default)]
+    pub engine_isolation: bool,
+
     /// Parakeet configuration (optional, only used when engine = "parakeet")
     #[serde(default)]
     pub parakeet: Option<ParakeetConfig>,
@@ -121,6 +130,7 @@ impl Default for Config {
             whisper: WhisperConfig::default(),
             output: OutputConfig::default(),
             engine: TranscriptionEngine::default(),
+            engine_isolation: false,
             parakeet: None,
             moonshine: None,
             sensevoice: None,

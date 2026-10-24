@@ -2187,7 +2187,13 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Soniox => {
                     let config = self.config.clone();
                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                        crate::transcribe::create_transcriber(&config).map(Arc::from)
+                        // prepare() lets a subprocess transcriber
+                        // (engine_isolation) load its model while the user
+                        // speaks; it is a no-op for in-process engines.
+                        crate::transcribe::create_transcriber(&config).map(|t| {
+                            t.prepare();
+                            Arc::from(t)
+                        })
                     }));
                 }
             }

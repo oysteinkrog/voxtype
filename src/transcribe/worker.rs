@@ -65,14 +65,34 @@ impl WorkerResponse {
 /// This is the main entry point called from `voxtype transcribe-worker`.
 /// It loads the model FIRST, signals ready, then waits for audio.
 pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
+    run_worker_with(&config.model, || {
+        super::whisper::WhisperTranscriber::new(config)
+            .map(|t| Box::new(t) as Box<dyn Transcriber>)
+    })
+}
+
+/// Run the transcription worker for the configured non-Whisper engine
+/// (`engine_isolation = true`). The parent passes `--engine` and `--model`,
+/// which are already applied to `config`.
+pub fn run_engine_worker(config: &crate::config::Config) -> anyhow::Result<()> {
+    let mut config = config.clone();
+    // This process is the isolated one; don't spawn another worker from it.
+    config.engine_isolation = false;
+    run_worker_with(config.model_name(), || super::create_transcriber(&config))
+}
+
+fn run_worker_with(
+    model: &str,
+    load: impl FnOnce() -> Result<Box<dyn Transcriber>, crate::error::TranscribeError>,
+) -> anyhow::Result<()> {
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();
 
     // Step 1: Load model first (while user is speaking)
-    eprintln!("[worker] Loading model: {}", config.model);
+    eprintln!("[worker] Loading model: {}", model);
     let load_start = std::time::Instant::now();
 
-    let transcriber = match super::whisper::WhisperTranscriber::new(config) {
+    let transcriber = match load() {
         Ok(t) => t,
         Err(e) => {
             // Write error and exit - parent will see no READY signal

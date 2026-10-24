@@ -144,6 +144,11 @@ pub(crate) async fn dispatch(
         } => {
             // Internal command: run transcription worker process
             // This is spawned by the daemon when gpu_isolation is enabled
+            // Non-Whisper engines (engine_isolation): the parent passed
+            // --engine/--model at the top level, already applied to config.
+            if config.engine != config::TranscriptionEngine::Whisper {
+                return transcribe::worker::run_engine_worker(&config);
+            }
             // Use command-line overrides if provided, otherwise use config
             let mut whisper_config = config.whisper.clone();
             if let Some(m) = model {

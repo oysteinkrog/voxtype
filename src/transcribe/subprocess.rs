@@ -60,6 +60,9 @@ pub struct SubprocessTranscriber {
     config: WhisperConfig,
     /// Path to the config file (if any)
     config_path: Option<std::path::PathBuf>,
+    /// For a non-Whisper engine: (engine name, model name). The worker reads
+    /// the rest of that engine's settings from the config file.
+    engine_args: Option<(String, String)>,
     /// Pre-spawned worker (from prepare())
     prepared_worker: Mutex<Option<PreparedWorker>>,
     /// Last language reported by the worker, if any. Mirrors
@@ -77,9 +80,25 @@ impl SubprocessTranscriber {
         Ok(Self {
             config: config.clone(),
             config_path,
+            engine_args: None,
             prepared_worker: Mutex::new(None),
             last_language: Mutex::new(None),
         })
+    }
+
+    /// Create a subprocess transcriber for the configured non-Whisper engine
+    /// (`engine_isolation = true`).
+    pub fn for_engine(config: &crate::config::Config) -> Self {
+        Self {
+            config: config.whisper.clone(),
+            config_path: crate::config::Config::resolve_existing_path(),
+            engine_args: Some((
+                config.engine.name().to_string(),
+                config.model_name().to_string(),
+            )),
+            prepared_worker: Mutex::new(None),
+            last_language: Mutex::new(None),
+        }
     }
 
     /// Get the path to the voxtype executable
@@ -99,6 +118,18 @@ impl SubprocessTranscriber {
         // arg in clap, so it must appear before "transcribe-worker"
         if let Some(ref config_path) = self.config_path {
             cmd.arg("--config").arg(config_path);
+        }
+
+        if let Some((ref engine, ref model)) = self.engine_args {
+            // --engine and --model are parent-level args too. ONNX Runtime
+            // logs to stderr, so let it through to the daemon's log rather
+            // than into a pipe nobody drains.
+            cmd.arg("--engine").arg(engine).arg("--model").arg(model);
+            cmd.arg("transcribe-worker")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            return Ok(cmd);
         }
 
         cmd.arg("transcribe-worker")

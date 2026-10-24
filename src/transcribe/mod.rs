@@ -161,6 +161,20 @@ pub trait Transcriber: Send + Sync {
 
 /// Factory function to create transcriber based on configured engine
 pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, TranscribeError> {
+    if config.engine_isolation
+        && !matches!(
+            config.engine,
+            TranscriptionEngine::Whisper | TranscriptionEngine::Soniox
+        )
+    {
+        tracing::info!(
+            "Using subprocess-isolated {} transcription (engine_isolation=true)",
+            config.engine.name()
+        );
+        return Ok(Box::new(subprocess::SubprocessTranscriber::for_engine(
+            config,
+        )));
+    }
     match config.engine {
         TranscriptionEngine::Whisper => {
             let transcriber = create_whisper_transcriber(&config.whisper)?;
