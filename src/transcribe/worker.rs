@@ -209,6 +209,99 @@ pub const PARTIAL_PREFIX: &str = "P ";
 /// engine model has not finished loading yet, instead of waiting for it.
 const LIVE_MIN_WAIT_SECS: f32 = 2.5;
 
+/// Splits a recording at pauses, so the engine model can transcribe each
+/// part while the user is still talking. Works on 20 ms frames; a frame is
+/// quiet when its RMS is under 3x the quietest frames of the current part,
+/// so it follows the mic level instead of a fixed threshold.
+struct PauseSplitter {
+    /// Sample index where the current part starts.
+    start: usize,
+    /// RMS of each whole frame since `start`.
+    frames: Vec<f32>,
+}
+
+const SPLIT_FRAME: usize = 320; // 20 ms at 16 kHz
+const SPLIT_MIN_SECS: f32 = 4.0;
+const SPLIT_MAX_SECS: f32 = 25.0;
+const SPLIT_PAUSE_FRAMES: usize = 25; // 0.5 s
+const SPLIT_MIN_SPEECH_FRAMES: usize = 15; // 0.3 s
+
+impl PauseSplitter {
+    fn new() -> Self {
+        Self { start: 0, frames: Vec::new() }
+    }
+
+    /// Quiet threshold for the current part: 3x its 5th-percentile frame RMS.
+    fn threshold(&self) -> f32 {
+        if self.frames.is_empty() {
+            return 1e-3;
+        }
+        let mut sorted = self.frames.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        (sorted[sorted.len() / 20] * 3.0).max(1e-3)
+    }
+
+    /// True if frames `[from, to)` of the current part hold enough speech
+    /// to be worth transcribing. Silence alone makes some models invent text.
+    fn has_speech(&self, from: usize, to: usize) -> bool {
+        let t = self.threshold();
+        self.frames[from..to].iter().filter(|&&r| r > t * 2.0).count() >= SPLIT_MIN_SPEECH_FRAMES
+    }
+
+    /// Look at the samples added since the last call. Returns the ranges of
+    /// finished parts: `(range, has_speech)`.
+    fn push(&mut self, samples: &[f32]) -> Vec<(std::ops::Range<usize>, bool)> {
+        let mut done = Vec::new();
+        loop {
+            let next = self.start + self.frames.len() * SPLIT_FRAME;
+            if next + SPLIT_FRAME > samples.len() {
+                break;
+            }
+            let f = &samples[next..next + SPLIT_FRAME];
+            self.frames.push((f.iter().map(|x| x * x).sum::<f32>() / f.len() as f32).sqrt());
+
+            let n = self.frames.len();
+            let secs = (n * SPLIT_FRAME) as f32 / 16000.0;
+            let cut = if secs >= SPLIT_MIN_SECS && n >= SPLIT_PAUSE_FRAMES {
+                let t = self.threshold();
+                if self.frames[n - SPLIT_PAUSE_FRAMES..].iter().all(|&r| r < t) {
+                    Some(n - SPLIT_PAUSE_FRAMES / 2)
+                } else if secs >= SPLIT_MAX_SECS {
+                    // No pause: cut at the quietest 100 ms of the last 3 s.
+                    let from = n - 150;
+                    let best = (from..n - 5)
+                        .min_by(|&a, &b| {
+                            let ea: f32 = self.frames[a..a + 5].iter().sum();
+                            let eb: f32 = self.frames[b..b + 5].iter().sum();
+                            ea.total_cmp(&eb)
+                        })
+                        .unwrap_or(n);
+                    Some(best + 2)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(c) = cut {
+                let speech = self.has_speech(0, c);
+                let end = self.start + c * SPLIT_FRAME;
+                done.push((self.start..end, speech));
+                self.start = end;
+                self.frames.drain(..c);
+            }
+        }
+        done
+    }
+
+    /// The unfinished part at the end of the recording, if it has speech.
+    fn tail(&self, total: usize) -> Option<std::ops::Range<usize>> {
+        let n = self.frames.len();
+        let speech = n > 0 && self.has_speech(0, n);
+        (speech && total > self.start).then(|| self.start..total)
+    }
+}
+
 /// Run the live-preview worker (`live_preview_model`).
 ///
 /// Protocol:
@@ -219,8 +312,10 @@ const LIVE_MIN_WAIT_SECS: f32 = 2.5;
 ///    blocks while recording, then closes stdin.
 /// 3. For each change in the running transcript the worker writes
 ///    `P <json string>`.
-/// 4. After EOF the worker writes the usual JSON response with the engine
-///    model's transcript of the whole clip and exits.
+/// 4. Meanwhile the engine model transcribes each part of the clip that
+///    ends in a pause (see [`PauseSplitter`]). After EOF only the last part
+///    is left; the worker writes the usual JSON response with all parts
+///    joined and exits.
 #[cfg(feature = "parakeet")]
 pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyhow::Result<()> {
     use parakeet_rs::{ParakeetUnified, ParakeetUnifiedHandle, UnifiedStreamingConfig};
@@ -247,17 +342,51 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     let mut engine_config = config.clone();
     engine_config.engine_isolation = false;
     let engine_model = engine_config.model_name().to_string();
-    let (engine_tx, engine_rx) = mpsc::channel();
+    // Parts of the clip go in on part_tx; the joined text (or the first
+    // error) comes back on done_rx once part_tx is dropped.
+    let (part_tx, part_rx) = mpsc::channel::<Vec<f32>>();
+    let (done_tx, done_rx) = mpsc::channel::<Result<(String, Option<String>), String>>();
+    let engine_loaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let loaded_flag = engine_loaded.clone();
     let mut start_engine = Some(move || {
         std::thread::spawn(move || {
             let start = std::time::Instant::now();
-            let result = super::create_transcriber(&engine_config);
+            let transcriber = match super::create_transcriber(&engine_config) {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = done_tx.send(Err(format!("Failed to load model: {}", e)));
+                    return;
+                }
+            };
             eprintln!(
                 "[worker] {} loaded in {:.2}s",
                 engine_model,
                 start.elapsed().as_secs_f32()
             );
-            let _ = engine_tx.send(result);
+            loaded_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            let mut texts: Vec<String> = Vec::new();
+            for part in part_rx {
+                let start = std::time::Instant::now();
+                match transcriber.transcribe(&part) {
+                    Ok(text) => {
+                        eprintln!(
+                            "[worker] Part {} ({:.1}s of audio) in {:.2}s",
+                            texts.len() + 1,
+                            part.len() as f32 / 16000.0,
+                            start.elapsed().as_secs_f32()
+                        );
+                        let text = text.trim().to_string();
+                        if !text.is_empty() {
+                            texts.push(text);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = done_tx.send(Err(e.to_string()));
+                        return;
+                    }
+                }
+            }
+            let _ = done_tx.send(Ok((texts.join(" "), transcriber.last_detected_language())));
         });
     });
 
@@ -294,6 +423,8 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     out.flush()?;
 
     let mut samples: Vec<f32> = Vec::new();
+    let mut splitter = PauseSplitter::new();
+    let mut parts_sent = 0usize;
     // transcribe_chunk() returns only the text new in that chunk (often
     // empty, sometimes part of a word), so the running transcript is the
     // concatenation.
@@ -303,6 +434,14 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             start();
         }
         samples.extend_from_slice(&block);
+        for (range, speech) in splitter.push(&samples) {
+            if speech {
+                // A send error means the engine failed to load; the error
+                // is waiting on done_rx.
+                let _ = part_tx.send(samples[range].to_vec());
+                parts_sent += 1;
+            }
+        }
         let Some(u) = unified.as_mut() else { continue };
         match u.transcribe_chunk(&block) {
             Ok(delta) if !delta.is_empty() => {
@@ -333,40 +472,36 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
 
     // A short clip whose engine model is still loading gets the preview
     // model's text: waiting for the load would cost more than it gains.
-    let engine = if secs < LIVE_MIN_WAIT_SECS && !preview_final.is_empty() {
-        engine_rx.try_recv().ok()
-    } else {
-        engine_rx.recv().ok()
-    };
-    let response = match engine {
-        Some(Ok(transcriber)) => {
-            let start = std::time::Instant::now();
-            match transcriber.transcribe(&samples) {
-                Ok(text) => {
-                    eprintln!(
-                        "[worker] Final transcription in {:.2}s",
-                        start.elapsed().as_secs_f32()
-                    );
-                    WorkerResponse::success(text, transcriber.last_detected_language())
-                }
-                Err(e) if !preview_final.is_empty() => {
-                    eprintln!("[worker] Final transcription failed, using preview: {}", e);
-                    WorkerResponse::success(preview_final, None)
-                }
-                Err(e) => WorkerResponse::error(e.to_string()),
-            }
+    if parts_sent == 0
+        && secs < LIVE_MIN_WAIT_SECS
+        && !preview_final.is_empty()
+        && !engine_loaded.load(std::sync::atomic::Ordering::SeqCst)
+    {
+        eprintln!("[worker] Short clip, model still loading: using preview text");
+        write_response_to(&mut out, WorkerResponse::success(preview_final, None));
+        return Ok(());
+    }
+    if let Some(range) = splitter.tail(samples.len()) {
+        let _ = part_tx.send(samples[range].to_vec());
+    }
+    drop(part_tx);
+    let start = std::time::Instant::now();
+    let response = match done_rx.recv() {
+        Ok(Ok((text, language))) => {
+            eprintln!(
+                "[worker] Final transcription in {:.2}s ({} parts done while recording)",
+                start.elapsed().as_secs_f32(),
+                parts_sent
+            );
+            WorkerResponse::success(text, language)
         }
-        Some(Err(e)) if preview_final.is_empty() => {
-            WorkerResponse::error(format!("Failed to load model: {}", e))
-        }
-        Some(Err(e)) => {
-            eprintln!("[worker] Model failed to load, using preview: {}", e);
+        Ok(Err(e)) if !preview_final.is_empty() => {
+            eprintln!("[worker] Engine model failed, using preview: {}", e);
             WorkerResponse::success(preview_final, None)
         }
-        None => {
-            eprintln!("[worker] Short clip, model still loading: using preview text");
-            WorkerResponse::success(preview_final, None)
-        }
+        Ok(Err(e)) => WorkerResponse::error(e),
+        Err(_) if !preview_final.is_empty() => WorkerResponse::success(preview_final, None),
+        Err(_) => WorkerResponse::error("Engine thread ended without a result"),
     };
     write_response_to(&mut out, response);
     Ok(())
@@ -413,6 +548,62 @@ fn write_response_to<W: Write>(writer: &mut W, response: WorkerResponse) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `secs` of fake speech: 150 ms bursts of a 200 Hz tone at `amp`
+    /// with 50 ms gaps, like syllables, over faint noise.
+    fn tone(secs: f32, amp: f32) -> Vec<f32> {
+        (0..(secs * 16000.0) as usize)
+            .map(|i| {
+                let noise = ((i * 7919) % 101) as f32 / 101.0 * 0.002 - 0.001;
+                let on = (i % 3200) < 2400;
+                let a = if on { amp } else { 0.0 };
+                a * (i as f32 * 200.0 * std::f32::consts::TAU / 16000.0).sin() + noise
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_pause_splitter_cuts_at_pause_after_min_length() {
+        let mut audio = tone(5.0, 0.3);
+        audio.extend(tone(1.0, 0.0));
+        audio.extend(tone(3.0, 0.3));
+        let mut sp = PauseSplitter::new();
+        let mut parts = Vec::new();
+        // Feed in 100 ms blocks, as the daemon does.
+        for end in (1600..=audio.len()).step_by(1600) {
+            parts.extend(sp.push(&audio[..end]));
+        }
+        assert_eq!(parts.len(), 1);
+        let (range, speech) = &parts[0];
+        assert!(*speech);
+        // Cut inside the pause, between 5.0 s and 6.0 s.
+        assert!(range.end > 5 * 16000 && range.end < 6 * 16000, "{:?}", range);
+        assert_eq!(sp.tail(audio.len()), Some(range.end..audio.len()));
+    }
+
+    #[test]
+    fn test_pause_splitter_ignores_short_pause_and_silence() {
+        let mut audio = tone(2.0, 0.3);
+        audio.extend(tone(1.0, 0.0));
+        audio.extend(tone(1.5, 0.3));
+        let mut sp = PauseSplitter::new();
+        // Pause ends at 3 s, before the 4 s minimum: no cut.
+        assert!(sp.push(&audio).is_empty());
+
+        let silence = tone(3.0, 0.0);
+        let mut sp = PauseSplitter::new();
+        assert!(sp.push(&silence).is_empty());
+        assert_eq!(sp.tail(silence.len()), None);
+    }
+
+    #[test]
+    fn test_pause_splitter_forces_cut_without_pause() {
+        let audio = tone(30.0, 0.3);
+        let mut sp = PauseSplitter::new();
+        let parts = sp.push(&audio);
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].0.end <= (SPLIT_MAX_SECS * 16000.0) as usize);
+    }
 
     #[test]
     fn test_worker_response_serialization() {
