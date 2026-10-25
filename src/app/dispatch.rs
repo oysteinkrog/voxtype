@@ -133,6 +133,11 @@ pub(crate) async fn dispatch(
                     }
                 }
             }
+            // A file has no live preview. Without this the worker would run
+            // the preview model instead of the chosen engine and save the
+            // file to the dictation corpus.
+            config.live_preview_model = None;
+            config.live_preview_corpus_dir = None;
             transcribe_file(&config, &file)?;
         }
 
