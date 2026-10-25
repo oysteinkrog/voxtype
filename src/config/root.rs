@@ -72,6 +72,12 @@ pub struct Config {
     #[serde(default)]
     pub live_preview_warm_release_command: Option<String>,
 
+    /// Keep every live-preview recording here for later review and model
+    /// fine-tuning: `<time>.wav` (16 kHz mono) and `<time>.json` with the
+    /// final and preview text. `~` is expanded. Unset keeps nothing.
+    #[serde(default)]
+    pub live_preview_corpus_dir: Option<String>,
+
     /// Parakeet configuration (optional, only used when engine = "parakeet")
     #[serde(default)]
     pub parakeet: Option<ParakeetConfig>,
@@ -166,6 +172,7 @@ impl Default for Config {
             live_typing: false,
             live_preview_warm_secs: 0,
             live_preview_warm_release_command: None,
+            live_preview_corpus_dir: None,
             parakeet: None,
             moonshine: None,
             sensevoice: None,
