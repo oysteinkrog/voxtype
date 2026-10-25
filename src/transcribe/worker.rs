@@ -211,6 +211,19 @@ pub const PARTIAL_PREFIX: &str = "P ";
 /// model is still loading.
 pub const STATUS_PREFIX: &str = "S ";
 
+/// Error text from the engine thread when the GPU has too little free memory.
+const GPU_BUSY: &str = "GPU busy";
+
+/// Free memory on the first GPU in MiB, from nvidia-smi. `None` if it
+/// cannot be read, so a missing nvidia-smi never blocks the engine.
+fn free_vram_mib() -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse().ok()
+}
+
 /// What the engine thread reports to the live worker's main loop.
 enum EngineMsg {
     /// A part is done: seconds of audio, seconds it took.
@@ -406,8 +419,16 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     let (msg_tx, msg_rx) = mpsc::channel::<EngineMsg>();
     let engine_loaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let loaded_flag = engine_loaded.clone();
-    let mut start_engine = Some(move || {
+    let min_free_vram = config.live_preview_min_free_vram_mib;
+    let mut start_engine = (config.live_preview_final != "preview").then_some(move || {
         std::thread::spawn(move || {
+            if let Some(free) = free_vram_mib().filter(|&f| f < min_free_vram) {
+                let _ = msg_tx.send(EngineMsg::Done(Err(format!(
+                    "{}: {} MiB free, {} needed",
+                    GPU_BUSY, free, min_free_vram
+                ))));
+                return;
+            }
             let start = std::time::Instant::now();
             let transcriber = match super::create_transcriber(&engine_config) {
                 Ok(t) => t,
@@ -456,13 +477,13 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     // contexts map to mel-frame counts divisible by 8.
     let streaming_config = UnifiedStreamingConfig::default();
     // None = CPU: the GPU is left to the engine model.
-    let unified = super::parakeet::resolve_model_path(live_model)
+    let handle = super::parakeet::resolve_model_path(live_model)
         .map_err(|e| e.to_string())
-        .and_then(|path| ParakeetUnifiedHandle::load(&path, None).map_err(|e| e.to_string()))
-        .and_then(|handle| {
-            ParakeetUnified::from_shared_with_streaming_config(&handle, streaming_config)
-                .map_err(|e| e.to_string())
-        });
+        .and_then(|path| ParakeetUnifiedHandle::load(&path, None).map_err(|e| e.to_string()));
+    let unified = handle.as_ref().map_err(|e| e.clone()).and_then(|handle| {
+        ParakeetUnified::from_shared_with_streaming_config(handle, streaming_config.clone())
+            .map_err(|e| e.to_string())
+    });
     let mut unified = match unified {
         Ok(u) => {
             eprintln!(
@@ -484,6 +505,7 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     let mut samples: Vec<f32> = Vec::new();
     let mut splitter = PauseSplitter::new();
     let mut parts_sent = 0usize;
+    let mut any_speech = false;
     let mut progress = Progress::default();
     let mut early_done = None;
     // transcribe_chunk() returns only the text new in that chunk (often
@@ -496,7 +518,8 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         }
         samples.extend_from_slice(&block);
         for (range, speech) in splitter.push(&samples) {
-            if speech {
+            any_speech |= speech;
+            if speech && config.live_preview_final != "preview" {
                 // A send error means the engine failed to load; the error
                 // is waiting on done_rx.
                 progress.pending.push_back(range.len() as f32 / 16000.0);
@@ -541,7 +564,38 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             out.flush()?;
         }
     }
-    let preview_final = last_partial.trim().to_string();
+    let mut preview_final = last_partial.trim().to_string();
+    any_speech |= splitter.tail(samples.len()).is_some();
+    // The streaming model has returned nothing for a whole clip with speech
+    // in it (once, on a 30 s clip). Run it once more before giving up.
+    if preview_final.is_empty() && any_speech {
+        if let Ok(h) = handle.as_ref() {
+            eprintln!("[worker] Preview text empty despite speech; running the preview model again");
+            if let Ok(mut u) = ParakeetUnified::from_shared_with_streaming_config(h, streaming_config) {
+                let mut text = String::new();
+                for chunk in samples.chunks(1600) {
+                    if let Ok(d) = u.transcribe_chunk(chunk) {
+                        text.push_str(&d);
+                    }
+                }
+                if let Ok(tail) = u.flush() {
+                    text.push_str(&tail);
+                }
+                preview_final = text.trim().to_string();
+            }
+        }
+    }
+
+    if config.live_preview_final == "preview" {
+        let response = if preview_final.is_empty() {
+            WorkerResponse::error("No speech recognized")
+        } else {
+            WorkerResponse::success(preview_final.clone(), None)
+        };
+        write_response_to(&mut out, response);
+        save_to_corpus(config, &samples, Some(&preview_final), &preview_final, "preview");
+        return Ok(());
+    }
 
     // A short clip whose engine model is still loading gets the preview
     // model's text: waiting for the load would cost more than it gains.
@@ -588,6 +642,14 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         }
         Some(Err(e)) if !preview_final.is_empty() => {
             eprintln!("[worker] Engine model failed, using preview: {}", e);
+            if e.starts_with(GPU_BUSY) {
+                let status = serde_json::json!({
+                    "text": "GPU busy: pasting the live text",
+                    "fraction": 1.0,
+                });
+                writeln!(out, "{}{}", STATUS_PREFIX, status)?;
+                out.flush()?;
+            }
             WorkerResponse::success(preview_final.clone(), None)
         }
         Some(Err(e)) => WorkerResponse::error(e),

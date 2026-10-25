@@ -78,6 +78,18 @@ pub struct Config {
     #[serde(default)]
     pub live_preview_corpus_dir: Option<String>,
 
+    /// Where the live worker's final text comes from: "engine" (the
+    /// configured engine, e.g. Cohere on the GPU) or "preview" (the live
+    /// preview model's own text: CPU only, no second model loaded).
+    #[serde(default = "default_live_preview_final")]
+    pub live_preview_final: String,
+
+    /// Load the engine model only when the GPU has at least this much free
+    /// memory (MiB, from nvidia-smi); otherwise the preview text is the
+    /// final. 0 turns the check off.
+    #[serde(default)]
+    pub live_preview_min_free_vram_mib: u64,
+
     /// Parakeet configuration (optional, only used when engine = "parakeet")
     #[serde(default)]
     pub parakeet: Option<ParakeetConfig>,
@@ -173,6 +185,8 @@ impl Default for Config {
             live_preview_warm_secs: 0,
             live_preview_warm_release_command: None,
             live_preview_corpus_dir: None,
+            live_preview_final: default_live_preview_final(),
+            live_preview_min_free_vram_mib: 0,
             parakeet: None,
             moonshine: None,
             sensevoice: None,
@@ -732,4 +746,8 @@ mod tests {
         config.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v3");
         assert!(config.parakeet.as_ref().unwrap().model_type.is_none());
     }
+}
+
+fn default_live_preview_final() -> String {
+    "engine".to_string()
 }
