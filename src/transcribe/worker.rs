@@ -565,8 +565,11 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             break Some(r);
         }
         let loaded = engine_loaded.load(std::sync::atomic::Ordering::SeqCst);
-        writeln!(out, "{}{}", STATUS_PREFIX, progress.status(loaded))?;
-        out.flush()?;
+        // Nothing left once the last part is done; the text follows at once.
+        if !loaded || !progress.pending.is_empty() {
+            writeln!(out, "{}{}", STATUS_PREFIX, progress.status(loaded))?;
+            out.flush()?;
+        }
         match msg_rx.recv() {
             Ok(EngineMsg::Part(audio, took)) => progress.part_done(audio, took),
             Ok(EngineMsg::Done(r)) => break Some(r),
@@ -576,7 +579,7 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     let response = match result {
         Some(Ok((text, language))) => {
             eprintln!(
-                "[worker] Final transcription in {:.2}s ({} parts done while recording)",
+                "[worker] Final transcription in {:.2}s ({} parts sent while recording)",
                 start.elapsed().as_secs_f32(),
                 parts_sent
             );
