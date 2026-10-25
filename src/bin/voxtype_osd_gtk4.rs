@@ -241,7 +241,10 @@ fn main() -> anyhow::Result<()> {
     );
 
     let theme = ThemeWatcher::new();
-    let palette = theme.palette();
+    let mut palette = theme.palette();
+    // [osd] opacity sets the panel background; the palette's own alpha
+    // (0.85 in the fallback) used to win.
+    palette.background.a = osd_cfg.opacity.clamp(0.0, 1.0);
 
     let state = Arc::new(SharedState::new(
         osd_cfg.peak_decay_db_per_sec,
@@ -629,7 +632,7 @@ fn preview_tail(text: &str) -> String {
     }
 }
 
-/// Dimmed text on the OSD background, like Claude Code's interim dictation.
+/// Preview and status text on the OSD background.
 fn install_preview_css(palette: &Palette, font_pt: Option<f32>) {
     let rgba = |c: &voxtype::osd::visual::Color, a: f32| {
         format!(
@@ -647,8 +650,8 @@ fn install_preview_css(palette: &Palette, font_pt: Option<f32>) {
          .voxtype-preview {{ background-color: {bg}; color: {}; padding: 6px 10px 8px 10px;{font} }}\n\
          .voxtype-status {{ background-color: {bg}; color: {}; padding: 0 10px 8px 10px; font-style: italic; }}\n\
          .voxtype-status progressbar {{ margin-bottom: 4px; }}",
-        rgba(&palette.foreground, 0.7),
-        rgba(&palette.foreground, 0.55),
+        rgba(&palette.foreground, 1.0),
+        rgba(&palette.foreground, 1.0),
     );
     let provider = gtk4::CssProvider::new();
     #[allow(deprecated)]
