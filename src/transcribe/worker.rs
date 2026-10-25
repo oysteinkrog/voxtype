@@ -534,7 +534,12 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     }
     // flush() returns the text still held in the right context.
     if let Some(tail) = unified.as_mut().and_then(|u| u.flush().ok()) {
-        last_partial.push_str(&tail);
+        if !tail.is_empty() {
+            last_partial.push_str(&tail);
+            // Show the last words too; the OSD stays up while finishing.
+            writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(last_partial.trim())?)?;
+            out.flush()?;
+        }
     }
     let preview_final = last_partial.trim().to_string();
 
