@@ -551,7 +551,8 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         && !engine_loaded.load(std::sync::atomic::Ordering::SeqCst)
     {
         eprintln!("[worker] Short clip, model still loading: using preview text");
-        write_response_to(&mut out, WorkerResponse::success(preview_final, None));
+        write_response_to(&mut out, WorkerResponse::success(preview_final.clone(), None));
+        save_to_corpus(config, &samples, Some(&preview_final), &preview_final, "preview");
         return Ok(());
     }
     if let Some(range) = splitter.tail(samples.len()) {
@@ -587,14 +588,68 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         }
         Some(Err(e)) if !preview_final.is_empty() => {
             eprintln!("[worker] Engine model failed, using preview: {}", e);
-            WorkerResponse::success(preview_final, None)
+            WorkerResponse::success(preview_final.clone(), None)
         }
         Some(Err(e)) => WorkerResponse::error(e),
-        None if !preview_final.is_empty() => WorkerResponse::success(preview_final, None),
+        None if !preview_final.is_empty() => WorkerResponse::success(preview_final.clone(), None),
         None => WorkerResponse::error("Engine thread ended without a result"),
     };
+    let final_text = response.text.clone();
     write_response_to(&mut out, response);
+    // After the response, so it adds nothing to the wait.
+    save_to_corpus(config, &samples, final_text.as_deref(), &preview_final, config.model_name());
     Ok(())
+}
+
+/// Save a recording and its texts to `live_preview_corpus_dir`, if set.
+/// Failures are logged and otherwise ignored: the text is already out.
+#[cfg(feature = "parakeet")]
+fn save_to_corpus(
+    config: &crate::config::Config,
+    samples: &[f32],
+    final_text: Option<&str>,
+    preview_text: &str,
+    final_model: &str,
+) {
+    let Some(dir) = config.live_preview_corpus_dir.as_deref() else {
+        return;
+    };
+    let dir = match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
+        _ => std::path::PathBuf::from(dir),
+    };
+    let now = chrono::Local::now();
+    let dir = dir.join(now.format("%Y-%m").to_string());
+    let stem = dir.join(now.format("%Y%m%d-%H%M%S%.3f").to_string());
+    let result = (|| -> anyhow::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut wav = hound::WavWriter::create(stem.with_extension("wav"), spec)?;
+        for &x in samples {
+            wav.write_sample((x.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
+        }
+        wav.finalize()?;
+        let meta = serde_json::json!({
+            "time": now.to_rfc3339(),
+            "seconds": samples.len() as f32 / 16000.0,
+            "final_text": final_text,
+            "final_model": final_model,
+            "preview_text": preview_text,
+            "preview_model": config.live_preview_model,
+            "corrected_text": serde_json::Value::Null,
+        });
+        std::fs::write(stem.with_extension("json"), serde_json::to_string_pretty(&meta)?)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => eprintln!("[worker] Saved recording to {}.wav", stem.display()),
+        Err(e) => eprintln!("[worker] Could not save recording: {}", e),
+    }
 }
 
 #[cfg(not(feature = "parakeet"))]
