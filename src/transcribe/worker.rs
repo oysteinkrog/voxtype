@@ -594,7 +594,10 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         None if !preview_final.is_empty() => WorkerResponse::success(preview_final.clone(), None),
         None => WorkerResponse::error("Engine thread ended without a result"),
     };
-    let final_text = response.text.clone();
+    let final_text = match &response {
+        WorkerResponse::Success { text, .. } => Some(text.clone()),
+        _ => None,
+    };
     write_response_to(&mut out, response);
     // After the response, so it adds nothing to the wait.
     save_to_corpus(config, &samples, final_text.as_deref(), &preview_final, config.model_name());
