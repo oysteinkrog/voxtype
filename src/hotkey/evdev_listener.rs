@@ -35,6 +35,8 @@ pub struct EvdevListener {
     profile_modifiers: HashMap<Key, String>,
     /// Fire on a double tap of `target_key` (see `HotkeyConfig::double_tap`)
     double_tap: Option<Duration>,
+    /// Second double-tap key (`HotkeyConfig::double_tap_alt_key`)
+    double_tap_alt: Option<Key>,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -105,6 +107,11 @@ impl EvdevListener {
             double_tap: config
                 .double_tap
                 .then(|| Duration::from_millis(config.double_tap_ms)),
+            double_tap_alt: config
+                .double_tap_alt_key
+                .as_ref()
+                .map(|k| parse_key_name(k))
+                .transpose()?,
             stop_signal: None,
         })
     }
@@ -128,6 +135,7 @@ impl HotkeyListener for EvdevListener {
         let secondary_model = self.secondary_model.clone();
         let profile_modifiers = self.profile_modifiers.clone();
         let double_tap = self.double_tap;
+        let double_tap_alt = self.double_tap_alt;
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
@@ -139,6 +147,7 @@ impl HotkeyListener for EvdevListener {
                 secondary_model,
                 profile_modifiers,
                 double_tap,
+                double_tap_alt,
                 tx,
                 stop_rx,
             ) {
@@ -535,6 +544,7 @@ fn evdev_listener_loop(
     secondary_model: Option<String>,
     profile_modifiers: HashMap<Key, String>,
     double_tap: Option<Duration>,
+    double_tap_alt: Option<Key>,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -557,6 +567,13 @@ fn evdev_listener_loop(
     if let Some(dt) = &double_tap {
         tracing::info!("Hotkey fires on a double tap (within {:?})", dt.window);
     }
+    let mut double_tap_alt = match (&double_tap, double_tap_alt) {
+        (Some(dt), Some(key)) => {
+            tracing::info!("Double tap of {:?} also fires the hotkey (\"alt\")", key);
+            Some((key, DoubleTap::new(dt.window)))
+        }
+        _ => None,
+    };
 
     if let Some(cancel) = cancel_key {
         tracing::info!(
@@ -696,8 +713,15 @@ fn evdev_listener_loop(
 
             // Double tap: one press and release per completed double tap.
             if let Some(dt) = double_tap.as_mut() {
-                if dt.event(key == target_key, value, Instant::now()) {
-                    tracing::debug!("Hotkey double tap");
+                let now = Instant::now();
+                let main = dt.event(key == target_key, value, now);
+                let alt = double_tap_alt
+                    .as_mut()
+                    .is_some_and(|(k, alt)| alt.event(key == *k, value, now));
+                if main || alt {
+                    tracing::debug!("Hotkey double tap ({})", if alt { "alt" } else { "main" });
+                    let path = crate::config::Config::runtime_dir().join("hotkey-last");
+                    let _ = std::fs::write(&path, if alt { "alt" } else { "main" });
                     let pressed = HotkeyEvent::Pressed {
                         model_override: None,
                         profile_override: last_pressed_profile.clone(),

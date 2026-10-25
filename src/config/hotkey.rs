@@ -69,6 +69,13 @@ pub struct HotkeyConfig {
     /// Longest tap, and longest gap between the two taps, in milliseconds.
     #[serde(default = "default_double_tap_ms")]
     pub double_tap_ms: u64,
+
+    /// A second key whose double tap also starts and stops recording (with
+    /// `double_tap`). Each double tap writes which key fired, "main" or
+    /// "alt", to `hotkey-last` in the runtime dir, so an output hook can act
+    /// on how the recording was stopped (e.g. paste without pressing Enter).
+    #[serde(default)]
+    pub double_tap_alt_key: Option<String>,
 }
 
 fn default_double_tap_ms() -> u64 {
@@ -87,6 +94,7 @@ impl Default for HotkeyConfig {
             profile_modifiers: HashMap::new(),
             double_tap: false,
             double_tap_ms: default_double_tap_ms(),
+            double_tap_alt_key: None,
         }
     }
 }
