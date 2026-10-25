@@ -324,6 +324,9 @@ pub struct OsdConfig {
     /// applied when `position` is `bottom-center` or `top-center` —
     /// corner anchors keep using `margin_px`.
     pub top_margin: f32,
+    /// Font size of the live preview text in points (gtk4 OSD). `None`
+    /// keeps the GTK theme's size.
+    pub preview_font_pt: Option<f32>,
     /// Background opacity, 0.0..=1.0.
     pub opacity: f32,
     /// Visible waveform window in seconds (3.0 per BRIEF).
@@ -364,6 +367,7 @@ impl Default for OsdConfig {
             position: OsdPosition::BottomCenter,
             margin_px: 24,
             top_margin: 0.85,
+            preview_font_pt: None,
             opacity: 0.95,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,

@@ -17,7 +17,7 @@
 //! - Perceived latency is just transcription time, not model load + transcription
 
 use super::streaming::{StreamHandle, StreamingEvent, StreamingTranscriber};
-use super::worker::{PARTIAL_PREFIX, READY_SIGNAL};
+use super::worker::{PARTIAL_PREFIX, READY_SIGNAL, STATUS_PREFIX};
 use super::Transcriber;
 use crate::config::WhisperConfig;
 use crate::error::TranscribeError;
@@ -267,7 +267,7 @@ impl SubprocessTranscriber {
             stdout.read_line(&mut line).map_err(|e| {
                 TranscribeError::InferenceFailed(format!("Failed to read worker output: {}", e))
             })?;
-            if !line.starts_with(PARTIAL_PREFIX) {
+            if !line.starts_with(PARTIAL_PREFIX) && !line.starts_with(STATUS_PREFIX) {
                 break;
             }
         }
@@ -587,6 +587,9 @@ impl StreamingTranscriber for SubprocessTranscriber {
                         });
                     }
                     continue;
+                } else if let Some(json) = trimmed.strip_prefix(STATUS_PREFIX) {
+                    write_live_status(json);
+                    continue;
                 }
                 match serde_json::from_str::<WorkerResponse>(trimmed) {
                     Ok(r) if r.ok => {
@@ -660,5 +663,21 @@ mod tests {
             serde_json::from_str(r#"{"ok": true, "text": "Privet", "language": "ru"}"#).unwrap();
         assert!(success.ok);
         assert_eq!(success.language, Some("ru".to_string()));
+    }
+}
+
+/// Write a worker status line (`{"text", "fraction"}`) to the file the OSD
+/// shows: the fraction on the first line (empty if unknown), the text on
+/// the second.
+fn write_live_status(json: &str) {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return;
+    };
+    let fraction = v["fraction"].as_f64().map(|f| f.to_string()).unwrap_or_default();
+    let text = v["text"].as_str().unwrap_or_default();
+    let path = crate::config::Config::live_status_path();
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, format!("{}\n{}", fraction, text)).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
     }
 }

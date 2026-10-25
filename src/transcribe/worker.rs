@@ -205,6 +205,20 @@ fn run_worker_with(
 /// Prefix of a live-preview line: `P <json string>\n`, the running transcript.
 pub const PARTIAL_PREFIX: &str = "P ";
 
+/// Prefix of a status line sent after recording stops, while the engine
+/// model finishes: `S {"text": "...", "fraction": 0.8}`. `fraction` is the
+/// share of the recording's audio transcribed so far, or null while the
+/// model is still loading.
+pub const STATUS_PREFIX: &str = "S ";
+
+/// What the engine thread reports to the live worker's main loop.
+enum EngineMsg {
+    /// A part is done: seconds of audio, seconds it took.
+    Part(f32, f32),
+    /// All parts done (joined text, language), or the first error.
+    Done(Result<(String, Option<String>), String>),
+}
+
 /// Clips shorter than this use the preview model's final text when the
 /// engine model has not finished loading yet, instead of waiting for it.
 const LIVE_MIN_WAIT_SECS: f32 = 2.5;
@@ -222,8 +236,12 @@ struct PauseSplitter {
 
 const SPLIT_FRAME: usize = 320; // 20 ms at 16 kHz
 const SPLIT_MIN_SECS: f32 = 4.0;
-const SPLIT_MAX_SECS: f32 = 25.0;
+const SPLIT_MAX_SECS: f32 = 20.0;
 const SPLIT_PAUSE_FRAMES: usize = 25; // 0.5 s
+/// After this long, a shorter pause will do, so the part left over when
+/// the recording stops stays short.
+const SPLIT_LONG_SECS: f32 = 10.0;
+const SPLIT_SHORT_PAUSE_FRAMES: usize = 15; // 0.3 s
 const SPLIT_MIN_SPEECH_FRAMES: usize = 15; // 0.3 s
 
 impl PauseSplitter {
@@ -262,10 +280,11 @@ impl PauseSplitter {
 
             let n = self.frames.len();
             let secs = (n * SPLIT_FRAME) as f32 / 16000.0;
-            let cut = if secs >= SPLIT_MIN_SECS && n >= SPLIT_PAUSE_FRAMES {
+            let pause = if secs < SPLIT_LONG_SECS { SPLIT_PAUSE_FRAMES } else { SPLIT_SHORT_PAUSE_FRAMES };
+            let cut = if secs >= SPLIT_MIN_SECS && n >= pause {
                 let t = self.threshold();
-                if self.frames[n - SPLIT_PAUSE_FRAMES..].iter().all(|&r| r < t) {
-                    Some(n - SPLIT_PAUSE_FRAMES / 2)
+                if self.frames[n - pause..].iter().all(|&r| r < t) {
+                    Some(n - pause / 2)
                 } else if secs >= SPLIT_MAX_SECS {
                     // No pause: cut at the quietest 100 ms of the last 3 s.
                     let from = n - 150;
@@ -302,6 +321,45 @@ impl PauseSplitter {
     }
 }
 
+/// How far the engine model has got through the parts sent to it.
+struct Progress {
+    /// Seconds of audio in each part sent but not done, oldest first.
+    pending: std::collections::VecDeque<f32>,
+    done_audio: f32,
+    done_took: f32,
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self { pending: Default::default(), done_audio: 0.0, done_took: 0.0 }
+    }
+}
+
+impl Progress {
+    fn part_done(&mut self, audio: f32, took: f32) {
+        self.pending.pop_front();
+        self.done_audio += audio;
+        self.done_took += took;
+    }
+
+    /// JSON for a status line. The time estimate uses the speed measured on
+    /// the parts done so far, or 0.1 s per second of audio before that.
+    fn status(&self, loaded: bool) -> String {
+        let left: f32 = self.pending.iter().sum();
+        let (text, fraction) = if !loaded {
+            ("Finishing: loading the model".to_string(), None)
+        } else {
+            let rate = if self.done_audio > 0.0 { self.done_took / self.done_audio } else { 0.1 };
+            let total = self.done_audio + left;
+            (
+                format!("Finishing: {:.0} s of audio left, about {:.1} s", left, left * rate),
+                Some(if total > 0.0 { self.done_audio / total } else { 1.0 }),
+            )
+        };
+        serde_json::json!({ "text": text, "fraction": fraction }).to_string()
+    }
+}
+
 /// Run the live-preview worker (`live_preview_model`).
 ///
 /// Protocol:
@@ -314,8 +372,8 @@ impl PauseSplitter {
 ///    `P <json string>`.
 /// 4. Meanwhile the engine model transcribes each part of the clip that
 ///    ends in a pause (see [`PauseSplitter`]). After EOF only the last part
-///    is left; the worker writes the usual JSON response with all parts
-///    joined and exits.
+///    is left; until it is done the worker writes `S <json>` status lines,
+///    then the usual JSON response with all parts joined, and exits.
 #[cfg(feature = "parakeet")]
 pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyhow::Result<()> {
     use parakeet_rs::{ParakeetUnified, ParakeetUnifiedHandle, UnifiedStreamingConfig};
@@ -342,10 +400,10 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     let mut engine_config = config.clone();
     engine_config.engine_isolation = false;
     let engine_model = engine_config.model_name().to_string();
-    // Parts of the clip go in on part_tx; the joined text (or the first
-    // error) comes back on done_rx once part_tx is dropped.
+    // Parts of the clip go in on part_tx; progress and then the joined
+    // text (or the first error) come back on msg_rx.
     let (part_tx, part_rx) = mpsc::channel::<Vec<f32>>();
-    let (done_tx, done_rx) = mpsc::channel::<Result<(String, Option<String>), String>>();
+    let (msg_tx, msg_rx) = mpsc::channel::<EngineMsg>();
     let engine_loaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let loaded_flag = engine_loaded.clone();
     let mut start_engine = Some(move || {
@@ -354,7 +412,7 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             let transcriber = match super::create_transcriber(&engine_config) {
                 Ok(t) => t,
                 Err(e) => {
-                    let _ = done_tx.send(Err(format!("Failed to load model: {}", e)));
+                    let _ = msg_tx.send(EngineMsg::Done(Err(format!("Failed to load model: {}", e))));
                     return;
                 }
             };
@@ -369,24 +427,25 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
                 let start = std::time::Instant::now();
                 match transcriber.transcribe(&part) {
                     Ok(text) => {
-                        eprintln!(
-                            "[worker] Part {} ({:.1}s of audio) in {:.2}s",
-                            texts.len() + 1,
-                            part.len() as f32 / 16000.0,
-                            start.elapsed().as_secs_f32()
-                        );
+                        let audio = part.len() as f32 / 16000.0;
+                        let took = start.elapsed().as_secs_f32();
+                        eprintln!("[worker] Part ({:.1}s of audio) in {:.2}s", audio, took);
+                        let _ = msg_tx.send(EngineMsg::Part(audio, took));
                         let text = text.trim().to_string();
                         if !text.is_empty() {
                             texts.push(text);
                         }
                     }
                     Err(e) => {
-                        let _ = done_tx.send(Err(e.to_string()));
+                        let _ = msg_tx.send(EngineMsg::Done(Err(e.to_string())));
                         return;
                     }
                 }
             }
-            let _ = done_tx.send(Ok((texts.join(" "), transcriber.last_detected_language())));
+            let _ = msg_tx.send(EngineMsg::Done(Ok((
+                texts.join(" "),
+                transcriber.last_detected_language(),
+            ))));
         });
     });
 
@@ -425,6 +484,8 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     let mut samples: Vec<f32> = Vec::new();
     let mut splitter = PauseSplitter::new();
     let mut parts_sent = 0usize;
+    let mut progress = Progress::default();
+    let mut early_done = None;
     // transcribe_chunk() returns only the text new in that chunk (often
     // empty, sometimes part of a word), so the running transcript is the
     // concatenation.
@@ -438,8 +499,15 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             if speech {
                 // A send error means the engine failed to load; the error
                 // is waiting on done_rx.
+                progress.pending.push_back(range.len() as f32 / 16000.0);
                 let _ = part_tx.send(samples[range].to_vec());
                 parts_sent += 1;
+            }
+        }
+        while let Ok(msg) = msg_rx.try_recv() {
+            match msg {
+                EngineMsg::Part(audio, took) => progress.part_done(audio, took),
+                EngineMsg::Done(r) => early_done = Some(r),
             }
         }
         let Some(u) = unified.as_mut() else { continue };
@@ -482,12 +550,26 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         return Ok(());
     }
     if let Some(range) = splitter.tail(samples.len()) {
+        progress.pending.push_back(range.len() as f32 / 16000.0);
         let _ = part_tx.send(samples[range].to_vec());
     }
     drop(part_tx);
     let start = std::time::Instant::now();
-    let response = match done_rx.recv() {
-        Ok(Ok((text, language))) => {
+    let result = loop {
+        if let Some(r) = early_done.take() {
+            break Some(r);
+        }
+        let loaded = engine_loaded.load(std::sync::atomic::Ordering::SeqCst);
+        writeln!(out, "{}{}", STATUS_PREFIX, progress.status(loaded))?;
+        out.flush()?;
+        match msg_rx.recv() {
+            Ok(EngineMsg::Part(audio, took)) => progress.part_done(audio, took),
+            Ok(EngineMsg::Done(r)) => break Some(r),
+            Err(_) => break None,
+        }
+    };
+    let response = match result {
+        Some(Ok((text, language))) => {
             eprintln!(
                 "[worker] Final transcription in {:.2}s ({} parts done while recording)",
                 start.elapsed().as_secs_f32(),
@@ -495,13 +577,13 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             );
             WorkerResponse::success(text, language)
         }
-        Ok(Err(e)) if !preview_final.is_empty() => {
+        Some(Err(e)) if !preview_final.is_empty() => {
             eprintln!("[worker] Engine model failed, using preview: {}", e);
             WorkerResponse::success(preview_final, None)
         }
-        Ok(Err(e)) => WorkerResponse::error(e),
-        Err(_) if !preview_final.is_empty() => WorkerResponse::success(preview_final, None),
-        Err(_) => WorkerResponse::error("Engine thread ended without a result"),
+        Some(Err(e)) => WorkerResponse::error(e),
+        None if !preview_final.is_empty() => WorkerResponse::success(preview_final, None),
+        None => WorkerResponse::error("Engine thread ended without a result"),
     };
     write_response_to(&mut out, response);
     Ok(())

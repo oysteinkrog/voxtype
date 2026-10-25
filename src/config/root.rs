@@ -205,6 +205,13 @@ impl Config {
         Self::runtime_dir().join("preview")
     }
 
+    /// Status of the final transcription after recording stops: the first
+    /// line is the fraction done (empty if unknown), the second the text.
+    /// Written by the daemon, shown by the OSD.
+    pub fn live_status_path() -> PathBuf {
+        Self::runtime_dir().join("preview-status")
+    }
+
     /// Returns true if the active engine is configured for streaming output.
     ///
     /// Used to decide whether to auto-promote push-to-talk to toggle activation:

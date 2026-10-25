@@ -413,6 +413,7 @@ fn write_live_preview(text: &str) {
 
 fn clear_live_preview() {
     let _ = std::fs::remove_file(Config::live_preview_path());
+    let _ = std::fs::remove_file(Config::live_status_path());
 }
 
 fn discard_stale_cancel(start_at: Option<u128>) {
@@ -4951,6 +4952,10 @@ impl Daemon {
                                     // one Final after the stop tap. Wait for
                                     // Right Ctrl to come up, or the paste
                                     // key becomes a different shortcut.
+                                    if self.config.live_preview_active() {
+                                        // The text is ready: let the OSD hide.
+                                        clear_live_preview();
+                                    }
                                     if self.config.live_preview_active()
                                         && !modifiers_released(LIVE_TYPING_FINAL_WAIT).await
                                     {

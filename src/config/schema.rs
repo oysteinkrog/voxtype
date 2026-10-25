@@ -1321,6 +1321,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Top edge as a fraction of monitor height, matching swayosd. Only used by the centered anchors.",
     ),
     spec(
+        "osd.preview_font_pt",
+        "osd",
+        "preview_font_pt",
+        KeyType::Float { min: 4.0, max: 72.0 },
+        "OSD",
+        "Preview font size",
+        "Font size of the live preview text in points (gtk4 OSD). Unset keeps the theme's size.",
+    ),
+    spec(
         "osd.opacity",
         "osd",
         "opacity",
@@ -2617,6 +2626,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "osd.height_px" => json!(cfg.osd.height_px),
         "osd.margin_px" => json!(cfg.osd.margin_px),
         "osd.top_margin" => f32_json(cfg.osd.top_margin),
+        "osd.preview_font_pt" => match cfg.osd.preview_font_pt {
+            Some(v) => f32_json(v),
+            None => Json::Null,
+        },
         "osd.opacity" => f32_json(cfg.osd.opacity),
         "osd.waveform_window_secs" => f32_json(cfg.osd.waveform_window_secs),
         "osd.peak_decay_db_per_sec" => f32_json(cfg.osd.peak_decay_db_per_sec),
