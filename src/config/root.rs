@@ -32,6 +32,46 @@ pub struct Config {
     #[serde(default)]
     pub engine: TranscriptionEngine,
 
+    /// Run ONNX engines (parakeet, cohere, moonshine, ...) in a short-lived
+    /// `transcribe-worker` subprocess, like `[whisper] gpu_isolation` does
+    /// for Whisper. The worker loads the model while you speak and exits
+    /// after the transcription, so the CUDA context, cuDNN/cuBLAS and the
+    /// ONNX Runtime arenas leave both VRAM and daemon RAM. Pair it with the
+    /// engine's `on_demand_loading = true`.
+    #[serde(default)]
+    pub engine_isolation: bool,
+
+    /// Live preview while recording (needs `engine_isolation = true` and the
+    /// engine's `on_demand_loading = false`). The worker runs this Parakeet
+    /// cache-aware streaming model on the CPU, e.g. "parakeet-unified-en-0.6b",
+    /// and the OSD shows its running transcript. The engine's own model still
+    /// produces the text that gets typed; it loads in the background while
+    /// you speak. Partials are never typed at the cursor, so push-to-talk
+    /// stays push-to-talk.
+    #[serde(default)]
+    pub live_preview_model: Option<String>,
+
+    /// With a live preview, also type the preview words at the cursor as
+    /// they arrive, then swap them for the engine model's text on stop
+    /// (keeping the prefix both agree on). Use `[hotkey] mode = "toggle"`
+    /// or a non-modifier key: letters typed while a modifier is held would
+    /// become shortcuts, so updates wait until modifiers are up.
+    #[serde(default)]
+    pub live_typing: bool,
+
+    /// Seconds to keep a live worker loaded after a recording, so the next
+    /// one shows words without the preview model's load time (about 1.6 s).
+    /// The warm worker holds the preview model (about 1 GB RAM, no VRAM).
+    /// 0 = start a fresh worker for every recording.
+    #[serde(default)]
+    pub live_preview_warm_secs: u64,
+
+    /// Shell command run every 10 s while a warm worker waits. If it exits
+    /// 0, the worker stops early, e.g. to give the RAM back under memory
+    /// pressure: `grep -q 'level=pause' /path/to/pressure-level`.
+    #[serde(default)]
+    pub live_preview_warm_release_command: Option<String>,
+
     /// Parakeet configuration (optional, only used when engine = "parakeet")
     #[serde(default)]
     pub parakeet: Option<ParakeetConfig>,
@@ -121,6 +161,11 @@ impl Default for Config {
             whisper: WhisperConfig::default(),
             output: OutputConfig::default(),
             engine: TranscriptionEngine::default(),
+            engine_isolation: false,
+            live_preview_model: None,
+            live_typing: false,
+            live_preview_warm_secs: 0,
+            live_preview_warm_release_command: None,
             parakeet: None,
             moonshine: None,
             sensevoice: None,
@@ -143,6 +188,30 @@ impl Default for Config {
 }
 
 impl Config {
+    /// True when the isolated worker streams a live preview to the OSD
+    /// (`live_preview_model`). Partial text is then shown, not typed, and the
+    /// final transcript is typed once when the recording stops.
+    pub fn live_preview_active(&self) -> bool {
+        self.engine_isolation
+            && self.live_preview_model.is_some()
+            && !matches!(
+                self.engine,
+                TranscriptionEngine::Whisper | TranscriptionEngine::Soniox
+            )
+    }
+
+    /// File the daemon writes the live preview text to while recording.
+    pub fn live_preview_path() -> PathBuf {
+        Self::runtime_dir().join("preview")
+    }
+
+    /// Status of the final transcription after recording stops: the first
+    /// line is the fraction done (empty if unknown), the second the text.
+    /// Written by the daemon, shown by the OSD.
+    pub fn live_status_path() -> PathBuf {
+        Self::runtime_dir().join("preview-status")
+    }
+
     /// Returns true if the active engine is configured for streaming output.
     ///
     /// Used to decide whether to auto-promote push-to-talk to toggle activation:

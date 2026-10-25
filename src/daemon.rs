@@ -375,6 +375,47 @@ fn cancel_targets_start(start_at: Option<u128>, cancel_at: Option<u128>) -> bool
 /// sent back to back can put the cancel on disk before the daemon has acted
 /// on the start signal; the recording poll then applies it once capture is
 /// live.
+/// How long a live-typing update waits for held modifiers to come up.
+const LIVE_TYPING_MODIFIER_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+/// The final replace waits longer: it is the text that stays.
+const LIVE_TYPING_FINAL_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// True once no modifier key is held, or false after `timeout`.
+async fn modifiers_released(timeout: std::time::Duration) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::output::modifier_guard::ModifierGuard::new()
+            .wait_for_release(timeout)
+            .await
+            .is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = timeout;
+        true
+    }
+}
+
+/// Number of leading chars `a` and `b` share.
+fn common_prefix_chars(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
+/// Publish the live preview text for the OSD (`live_preview_model`).
+/// Written to a temp file and renamed, so a reader never sees half a line.
+fn write_live_preview(text: &str) {
+    let path = Config::live_preview_path();
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+fn clear_live_preview() {
+    let _ = std::fs::remove_file(Config::live_preview_path());
+    let _ = std::fs::remove_file(Config::live_status_path());
+}
+
 fn discard_stale_cancel(start_at: Option<u128>) {
     let cancel_file = Config::runtime_dir().join("cancel");
     if !cancel_file.exists() {
@@ -1586,6 +1627,7 @@ impl Daemon {
         let output_override = read_output_mode_override();
         let file_output_path = self.resolve_file_output_path(&output_override, None);
 
+        clear_live_preview();
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
         *streaming_session = Some(StreamingSession::new());
@@ -1677,13 +1719,15 @@ impl Daemon {
             // whatever the backend was still draining, and end_streaming
             // would then write an empty file. Let it drain normally so
             // end_streaming can write the real text.
+            // A live preview session has typed nothing yet: its one Final
+            // arrives after the stop, so it must not be disowned either.
             let file_output = matches!(
                 &*state,
                 State::Streaming {
                     file_output_path: Some(_),
                     ..
                 }
-            );
+            ) || self.config.live_preview_active();
             if file_output {
                 tracing::info!("Stopping streaming session (file output); closing capture");
             } else {
@@ -1831,6 +1875,7 @@ impl Daemon {
             let _ = h.task.await;
         }
         self.stop_streaming_drain_pump();
+        clear_live_preview();
 
         // File-output sessions (`--file=path`) never typed anything as
         // they went — see the event pump's `file_output` branch — so the
@@ -2034,6 +2079,7 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         notification_body: &str,
     ) {
+        clear_live_preview();
         let backend_task = streaming_handle.take().map(|h| {
             let _ = h.cancel.send(());
             h.task
@@ -2187,7 +2233,13 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Soniox => {
                     let config = self.config.clone();
                     self.model_load_task = Some(tokio::task::spawn_blocking(move || {
-                        crate::transcribe::create_transcriber(&config).map(Arc::from)
+                        // prepare() lets a subprocess transcriber
+                        // (engine_isolation) load its model while the user
+                        // speaks; it is a no-op for in-process engines.
+                        crate::transcribe::create_transcriber(&config).map(|t| {
+                            t.prepare();
+                            Arc::from(t)
+                        })
                     }));
                 }
             }
@@ -4157,14 +4209,18 @@ impl Daemon {
                         (HotkeyEvent::Released, ActivationMode::PushToTalk) => {
                             tracing::debug!("Received HotkeyEvent::Released (push-to-talk), state.is_recording() = {}", state.is_recording());
                             if state.is_streaming() {
-                                tracing::debug!("Streaming push-to-talk released; closing audio capture and disowning session");
+                                tracing::debug!("Streaming push-to-talk released; closing audio capture");
                                 self.stop_streaming_capture(&mut audio_capture).await;
                                 // Drop session/chain so the backend's
                                 // post-stop flush emission is dropped at
                                 // the event pump instead of typed.
-                                // Matches the SIGUSR2 stop path.
-                                streaming_session = None;
-                                streaming_chain = None;
+                                // Matches the SIGUSR2 stop path. A live
+                                // preview session keeps them: its Final is
+                                // the only text it types.
+                                if !self.config.live_preview_active() {
+                                    streaming_session = None;
+                                    streaming_chain = None;
+                                }
                             } else if let State::Recording { model_override, .. } = &state {
                                 let model_override = model_override.clone();
 
@@ -4798,6 +4854,72 @@ impl Daemon {
                         State::Streaming { file_output_path: Some(_), .. }
                     );
                     match event {
+                        Some(StreamingEvent::Partial { text, .. }) if self.config.live_preview_active() => {
+                            // `text` is the running transcript. The OSD
+                            // always shows it; with live_typing the new
+                            // words are also typed at the cursor.
+                            write_live_preview(&text);
+                            if self.config.live_typing && !file_output {
+                                if let (Some(s), Some(chain)) =
+                                    (streaming_session.as_mut(), streaming_chain.as_ref())
+                                {
+                                    // Skip this update while a modifier is
+                                    // down (e.g. the stop tap on Right Ctrl),
+                                    // or a typed letter becomes a shortcut.
+                                    // The next update types what was missed.
+                                    if let Some(delta) = text.strip_prefix(s.partial()) {
+                                        if !delta.is_empty()
+                                            && modifiers_released(LIVE_TYPING_MODIFIER_WAIT).await
+                                        {
+                                            if let Err(e) = s.type_partial_delta(
+                                                chain,
+                                                delta.to_string(),
+                                                None,
+                                                None,
+                                            ).await {
+                                                tracing::warn!("Live typing failed: {}", e);
+                                            }
+                                        }
+                                    }
+                                    if let State::Streaming { typed_chars, .. } = &mut state {
+                                        *typed_chars = s.typed_chars();
+                                    }
+                                }
+                            }
+                        }
+                        Some(StreamingEvent::Final { text, .. })
+                            if self.config.live_preview_active() && self.config.live_typing && !file_output =>
+                        {
+                            // Swap the live text for the engine model's
+                            // version: keep the prefix both agree on,
+                            // backspace the rest, type the new tail.
+                            if let (Some(s), Some(chain)) =
+                                (streaming_session.as_mut(), streaming_chain.as_ref())
+                            {
+                                let text = self.text_processor.process(&text);
+                                let common = common_prefix_chars(s.partial(), &text);
+                                let backspace = s.partial().chars().count() - common;
+                                let tail: String = text.chars().skip(common).collect();
+                                if !modifiers_released(LIVE_TYPING_FINAL_WAIT).await {
+                                    tracing::warn!("Modifier still held; typing the final text anyway");
+                                }
+                                if let Err(e) = s.replace_and_commit(
+                                    chain,
+                                    backspace,
+                                    &tail,
+                                    None,
+                                    self.config.output.pre_output_command.as_deref(),
+                                    self.config.output.post_output_command.as_deref(),
+                                ).await {
+                                    tracing::error!("Live typing final replace failed: {}", e);
+                                }
+                                if let State::Streaming { typed_chars, finalized_text, .. } = &mut state {
+                                    *typed_chars = s.typed_chars();
+                                    finalized_text.clear();
+                                    finalized_text.push_str(s.finalized_text());
+                                }
+                            }
+                        }
                         Some(StreamingEvent::Partial { text, .. }) => {
                             if let Some(s) = streaming_session.as_mut() {
                                 if file_output {
@@ -4826,6 +4948,19 @@ impl Daemon {
                                     // matches spanning segment boundaries.
                                     s.commit_segment_silent(&text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
+                                    // Live preview sends the whole text as
+                                    // one Final after the stop tap. Wait for
+                                    // Right Ctrl to come up, or the paste
+                                    // key becomes a different shortcut.
+                                    if self.config.live_preview_active() {
+                                        // The text is ready: let the OSD hide.
+                                        clear_live_preview();
+                                    }
+                                    if self.config.live_preview_active()
+                                        && !modifiers_released(LIVE_TYPING_FINAL_WAIT).await
+                                    {
+                                        tracing::warn!("Modifier still held; sending the final text anyway");
+                                    }
                                     if let Err(e) = s.commit_segment(
                                         chain,
                                         &text,

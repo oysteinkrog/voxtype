@@ -241,7 +241,10 @@ fn main() -> anyhow::Result<()> {
     );
 
     let theme = ThemeWatcher::new();
-    let palette = theme.palette();
+    let mut palette = theme.palette();
+    // [osd] opacity sets the panel background; the palette's own alpha
+    // (0.85 in the fallback) used to win.
+    palette.background.a = osd_cfg.opacity.clamp(0.0, 1.0);
 
     let state = Arc::new(SharedState::new(
         osd_cfg.peak_decay_db_per_sec,
@@ -373,6 +376,7 @@ fn focused_monitor_height_px() -> Option<i32> {
 /// Build the GTK window, attach layer-shell config, mount the DrawingArea,
 /// and start the redraw tick.
 fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc<SharedState>) {
+    install_preview_css(&palette, cfg.preview_font_pt);
     let window = ApplicationWindow::builder()
         .application(app)
         .default_width(cfg.width_px as i32)
@@ -456,7 +460,33 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
     drawing_area.set_draw_func(move |_area, cr, w, h| {
         draw(cr, w, h, &palette, &state_for_draw, gain);
     });
-    window.set_child(Some(&drawing_area));
+    // Live preview text (live_preview_model) under the waveform. Hidden
+    // while there is none, so a plain recording looks as before.
+    let preview = gtk4::Label::new(None);
+    preview.set_wrap(true);
+    preview.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+    preview.set_xalign(0.0);
+    preview.set_width_chars(1);
+    preview.set_size_request(cfg.width_px as i32, -1);
+    preview.add_css_class("voxtype-preview");
+    preview.set_visible(false);
+
+    // Status of the final transcription after the recording stops: a
+    // progress bar and a line such as "Finishing: 8 s of audio left".
+    let status_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    status_box.add_css_class("voxtype-status");
+    let status_bar = gtk4::ProgressBar::new();
+    let status_label = gtk4::Label::new(None);
+    status_label.set_xalign(0.0);
+    status_box.append(&status_bar);
+    status_box.append(&status_label);
+    status_box.set_visible(false);
+
+    let column = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    column.append(&drawing_area);
+    column.append(&preview);
+    column.append(&status_box);
+    window.set_child(Some(&column));
 
     // Click-through: install an empty input region on the window's surface
     // once it's realized. Until then `realize` hasn't allocated a surface.
@@ -481,6 +511,13 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
     // Tracks GTK visibility. Starts true because `window.present()` below maps
     // the surface, the first tick's idle check then hides it.
     let visible = Cell::new(true);
+    let ticks = Cell::new(0u32);
+    let preview_path = voxtype::config::Config::live_preview_path();
+    let status_path = voxtype::config::Config::live_status_path();
+    // True while the daemon reports a final transcription in progress: the
+    // audio frames have stopped, but the OSD stays up to show it.
+    let finishing = Cell::new(false);
+    let default_size = (cfg.width_px as i32, cfg.height_px as i32);
 
     glib::timeout_add_local(Duration::from_millis(RENDER_TICK_MS as u64), move || {
         let cur_seq = redraw_state.last_seq.lock().map(|s| *s).unwrap_or(0);
@@ -489,15 +526,53 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
             .lock()
             .map(|t| *t)
             .unwrap_or_else(|_| Instant::now() - Duration::from_secs(3600));
-        let idle = last_at.elapsed().as_secs_f32() > IDLE_TIMEOUT_SECS || osd_suppressed();
+        // About 10 Hz is plenty for text; the files live on tmpfs.
+        ticks.set(ticks.get().wrapping_add(1));
+        let poll = ticks.get() % 6 == 0;
+        if poll {
+            // A status older than 30 s is left over from a crash; ignore it.
+            let fresh = std::fs::metadata(&status_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_secs(30));
+            finishing.set(fresh);
+        }
+        let idle = (last_at.elapsed().as_secs_f32() > IDLE_TIMEOUT_SECS && !finishing.get())
+            || osd_suppressed();
 
         if idle {
             if visible.get() {
                 tracing::info!("hiding (idle for {:.2}s)", last_at.elapsed().as_secs_f32());
                 redraw_window.set_visible(false);
                 visible.set(false);
+                preview.set_text("");
+                preview.set_visible(false);
+                status_box.set_visible(false);
+                // Shrink back: GTK keeps a grown window at its larger size.
+                redraw_window.set_default_size(default_size.0, default_size.1);
             }
             return glib::ControlFlow::Continue;
+        }
+
+        if poll {
+            let text = std::fs::read_to_string(&preview_path).unwrap_or_default();
+            let text = preview_tail(text.trim());
+            if preview.text() != text {
+                preview.set_visible(!text.is_empty());
+                preview.set_text(&text);
+            }
+            let status = std::fs::read_to_string(&status_path).unwrap_or_default();
+            let (fraction, label) = status.split_once('\n').unwrap_or(("", ""));
+            match fraction.trim().parse::<f64>() {
+                Ok(f) => status_bar.set_fraction(f.clamp(0.0, 1.0)),
+                // Unknown: the model is still loading.
+                Err(_) => status_bar.pulse(),
+            }
+            if status_label.text() != label {
+                status_label.set_text(label);
+            }
+            status_box.set_visible(!label.is_empty());
         }
 
         if !visible.get() {
@@ -538,6 +613,56 @@ fn build_window(app: &Application, cfg: &OsdConfig, palette: Palette, state: Arc
     // visibility from there. Mapping once at startup keeps Hyprland's
     // layer-shell state machine happy across hide/show cycles.
     window.present();
+}
+
+/// Most characters of preview text to show. The tail is what you are saying
+/// now; three lines at the default width hold about this much.
+const PREVIEW_MAX_CHARS: usize = 160;
+
+/// Keep the end of the running transcript, cut at a word boundary.
+fn preview_tail(text: &str) -> String {
+    let chars = text.chars().count();
+    if chars <= PREVIEW_MAX_CHARS {
+        return text.to_string();
+    }
+    let tail: String = text.chars().skip(chars - PREVIEW_MAX_CHARS).collect();
+    match tail.split_once(' ') {
+        Some((_, rest)) => format!("…{}", rest),
+        None => format!("…{}", tail),
+    }
+}
+
+/// Preview and status text on the OSD background.
+fn install_preview_css(palette: &Palette, font_pt: Option<f32>) {
+    let rgba = |c: &voxtype::osd::visual::Color, a: f32| {
+        format!(
+            "rgba({},{},{},{})",
+            (c.r * 255.0) as u8,
+            (c.g * 255.0) as u8,
+            (c.b * 255.0) as u8,
+            a
+        )
+    };
+    let font = font_pt.map(|pt| format!(" font-size: {}pt;", pt)).unwrap_or_default();
+    let bg = rgba(&palette.background, palette.background.a);
+    let css = format!(
+        "window {{ background: transparent; }}\n\
+         .voxtype-preview {{ background-color: {bg}; color: {}; padding: 6px 10px 8px 10px;{font} }}\n\
+         .voxtype-status {{ background-color: {bg}; color: {}; padding: 0 10px 8px 10px; font-style: italic; }}\n\
+         .voxtype-status progressbar {{ margin-bottom: 4px; }}",
+        rgba(&palette.foreground, 1.0),
+        rgba(&palette.foreground, 1.0),
+    );
+    let provider = gtk4::CssProvider::new();
+    #[allow(deprecated)]
+    provider.load_from_data(&css);
+    if let Some(display) = gtk4::gdk::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 }
 
 /// Set an empty input region on the GdkSurface so clicks pass through.

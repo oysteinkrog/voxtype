@@ -9,6 +9,7 @@
 //!   - wtype: Wayland-native, no daemon needed (preferred)
 //!   - eitype: EI protocol, works on GNOME/KDE/Sway with libei
 //!   - ydotool: Works on X11/Wayland/TTY, requires ydotoold daemon
+//!   - dotool: uinput, uses the dotoold daemon through dotoolc when it runs
 
 use super::session::{detect, DisplaySession};
 use super::TextOutput;
@@ -21,18 +22,19 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 /// Keystroke-capable drivers, in the order tried when the configured
-/// `driver_order` doesn't name any of them. dotool/clipboard/xclip have no
+/// `driver_order` doesn't name any of them. clipboard/xclip have no
 /// keystroke-simulation path, so they never appear here.
-const DEFAULT_KEYSTROKE_DRIVER_ORDER: [OutputDriver; 3] = [
+const DEFAULT_KEYSTROKE_DRIVER_ORDER: [OutputDriver; 4] = [
     OutputDriver::Wtype,
     OutputDriver::Eitype,
     OutputDriver::Ydotool,
+    OutputDriver::Dotool,
 ];
 
 /// Filter a configured `[output] driver_order` down to keystroke-capable
 /// drivers, preserving relative order. Falls back to
 /// `DEFAULT_KEYSTROKE_DRIVER_ORDER` when the configured order is absent or
-/// names none of wtype/eitype/ydotool (e.g. `["dotool", "clipboard"]`),
+/// names none of wtype/eitype/ydotool/dotool (e.g. `["clipboard"]`),
 /// since paste mode's keystroke step has nothing to run in that case.
 fn resolve_keystroke_driver_order(configured: Option<&[OutputDriver]>) -> Vec<OutputDriver> {
     let filtered: Vec<OutputDriver> = configured
@@ -161,6 +163,26 @@ impl ParsedKeystroke {
 
         Ok(args)
     }
+
+    /// Convert to a dotool chord. dotool takes modifiers only by name
+    /// (super, ctrl, alt, shift); the key goes by its evdev code.
+    /// e.g., "shift+insert" -> "shift+k:110"
+    fn to_dotool_chord(&self) -> Result<String, String> {
+        let mut parts = self
+            .modifiers
+            .iter()
+            .map(|m| match m.as_str() {
+                "ctrl" | "control" | "leftctrl" | "rightctrl" => Ok("ctrl"),
+                "shift" | "leftshift" | "rightshift" => Ok("shift"),
+                "alt" | "leftalt" => Ok("alt"),
+                "super" | "meta" | "leftmeta" => Ok("super"),
+                other => Err(format!("dotool has no modifier '{}'", other)),
+            })
+            .map(|r| r.map(str::to_string))
+            .collect::<Result<Vec<_>, _>>()?;
+        parts.push(format!("k:{}", key_name_to_evdev(&self.key)?));
+        Ok(parts.join("+"))
+    }
 }
 
 /// Convert a key name to its evdev code
@@ -243,7 +265,12 @@ pub struct PasteOutput {
     restore_clipboard: bool,
     /// Delay after paste before restoring clipboard (milliseconds)
     restore_clipboard_delay_ms: u32,
-    /// Order in which keystroke-capable drivers (wtype/eitype/ydotool) are
+    /// Also copy the text to the primary selection. Terminals such as
+    /// WezTerm and Konsole paste the primary selection on Shift+Insert,
+    /// while GUI apps paste the clipboard, so with both set Shift+Insert
+    /// works in either.
+    paste_primary: bool,
+    /// Order in which keystroke-capable drivers (wtype/eitype/ydotool/dotool) are
     /// tried for the paste keystroke and the auto-submit Enter. Derived from
     /// `[output] driver_order`; see [`resolve_keystroke_driver_order`].
     driver_order: Vec<OutputDriver>,
@@ -285,8 +312,15 @@ impl PasteOutput {
             pre_type_delay_ms,
             restore_clipboard,
             restore_clipboard_delay_ms,
+            paste_primary: false,
             driver_order,
         }
+    }
+
+    /// Also copy the text to the primary selection (Wayland only).
+    pub fn with_paste_primary(mut self, paste_primary: bool) -> Self {
+        self.paste_primary = paste_primary;
+        self
     }
 
     /// Copy text to clipboard, dispatching by session type.
@@ -338,6 +372,41 @@ impl PasteOutput {
             ));
         }
 
+        if self.paste_primary {
+            if let Err(e) = Self::copy_to_primary(text).await {
+                tracing::warn!("Failed to set primary selection: {}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Copy text to the Wayland primary selection with `wl-copy --primary`.
+    async fn copy_to_primary(text: &str) -> Result<(), OutputError> {
+        let mut child = Command::new("wl-copy")
+            .arg("--primary")
+            .arg("--type")
+            .arg(super::clipboard::WL_COPY_TEXT_MIME)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(text.as_bytes())
+                .await
+                .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| OutputError::InjectionFailed(e.to_string()))?;
+        if !status.success() {
+            return Err(OutputError::InjectionFailed(
+                "wl-copy --primary exited with error".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -608,6 +677,61 @@ impl PasteOutput {
             .unwrap_or(false)
     }
 
+    /// Check if dotool is available (installed; dotoold is optional)
+    async fn is_dotool_available(&self) -> bool {
+        Command::new("which")
+            .arg("dotool")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Run dotool commands, through dotoolc when dotoold is running so
+    /// no new virtual keyboard is created (KDE can drop its first keys).
+    async fn run_dotool(commands: &str) -> Result<(), OutputError> {
+        let binary = if super::dotool::DotoolOutput::live_daemon_pipe_path().is_some() {
+            "dotoolc"
+        } else {
+            "dotool"
+        };
+        let mut child = Command::new(binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| OutputError::CtrlVFailed(format!("{}: {}", binary, e)))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(commands.as_bytes())
+                .await
+                .map_err(|e| OutputError::CtrlVFailed(e.to_string()))?;
+        }
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| OutputError::CtrlVFailed(e.to_string()))?;
+        if !output.status.success() {
+            return Err(OutputError::CtrlVFailed(format!(
+                "{} failed: {}",
+                binary,
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Simulate paste keystroke using dotool
+    async fn simulate_paste_dotool(&self) -> Result<(), OutputError> {
+        let chord = self.keystroke.to_dotool_chord().map_err(|e| {
+            OutputError::CtrlVFailed(format!("Cannot convert keystroke for dotool: {}", e))
+        })?;
+        tracing::debug!("Running: dotool key {}", chord);
+        Self::run_dotool(&format!("key {}\n", chord)).await
+    }
+
     /// Check if ydotool is available (installed and daemon running)
     async fn is_ydotool_available(&self) -> bool {
         // Check if ydotool exists
@@ -761,7 +885,8 @@ impl PasteOutput {
                 OutputDriver::Wtype => (self.is_wtype_available().await, "wtype"),
                 OutputDriver::Eitype => (self.is_eitype_available().await, "eitype"),
                 OutputDriver::Ydotool => (self.is_ydotool_available().await, "ydotool"),
-                // driver_order is pre-filtered to the three keystroke-capable
+                OutputDriver::Dotool => (self.is_dotool_available().await, "dotool"),
+                // driver_order is pre-filtered to the four keystroke-capable
                 // drivers above; nothing else can reach this loop.
                 _ => continue,
             };
@@ -775,6 +900,7 @@ impl PasteOutput {
                 OutputDriver::Wtype => self.simulate_paste_wtype().await,
                 OutputDriver::Eitype => self.simulate_paste_eitype().await,
                 OutputDriver::Ydotool => self.simulate_paste_ydotool().await,
+                OutputDriver::Dotool => self.simulate_paste_dotool().await,
                 _ => unreachable!(),
             };
 
@@ -807,9 +933,16 @@ impl PasteOutput {
                 OutputDriver::Wtype => self.is_wtype_available().await,
                 OutputDriver::Eitype => self.is_eitype_available().await,
                 OutputDriver::Ydotool => self.is_ydotool_available().await,
+                OutputDriver::Dotool => self.is_dotool_available().await,
                 _ => continue,
             };
             if !available {
+                continue;
+            }
+            if *driver == OutputDriver::Dotool {
+                if Self::run_dotool("key enter\n").await.is_ok() {
+                    return Ok(());
+                }
                 continue;
             }
 
@@ -985,24 +1118,27 @@ impl TextOutput for PasteOutput {
             return false;
         }
 
-        // Check if wtype, eitype, or ydotool is available for keystroke simulation
+        // Check if wtype, eitype, ydotool or dotool is available for keystroke simulation
         let wtype_available = self.is_wtype_available().await;
         let eitype_available = self.is_eitype_available().await;
         let ydotool_available = self.is_ydotool_available().await;
+        let dotool_available = self.is_dotool_available().await;
 
-        if !wtype_available && !eitype_available && !ydotool_available {
+        if !wtype_available && !eitype_available && !ydotool_available && !dotool_available {
             tracing::debug!(
                 "paste mode unavailable: no keystroke tool available \
-                (wtype needs WAYLAND_DISPLAY, eitype needs libei, ydotool needs daemon running)"
+                (wtype needs WAYLAND_DISPLAY, eitype needs libei, ydotool needs daemon running, \
+                dotool needs uinput access)"
             );
             return false;
         }
 
         tracing::debug!(
-            "paste mode available (wtype: {}, eitype: {}, ydotool: {})",
+            "paste mode available (wtype: {}, eitype: {}, ydotool: {}, dotool: {})",
             wtype_available,
             eitype_available,
-            ydotool_available
+            ydotool_available,
+            dotool_available
         );
         true
     }
@@ -1031,16 +1167,32 @@ mod tests {
     }
 
     #[test]
-    fn test_driver_order_defaults_to_wtype_eitype_ydotool() {
+    fn test_driver_order_defaults_to_wtype_eitype_ydotool_dotool() {
         let output = PasteOutput::new(false, None, None, None, 10, 100, false, 200);
-        assert_eq!(
-            output.driver_order,
-            vec![
-                OutputDriver::Wtype,
-                OutputDriver::Eitype,
-                OutputDriver::Ydotool
-            ]
+        assert_eq!(output.driver_order, DEFAULT_KEYSTROKE_DRIVER_ORDER.to_vec());
+    }
+
+    #[test]
+    fn test_driver_order_keeps_dotool() {
+        let output = PasteOutput::new(
+            false,
+            None,
+            None,
+            Some(vec![OutputDriver::Dotool, OutputDriver::Clipboard]),
+            10,
+            100,
+            false,
+            200,
         );
+        assert_eq!(output.driver_order, vec![OutputDriver::Dotool]);
+    }
+
+    #[test]
+    fn test_dotool_chord_uses_evdev_codes() {
+        let k = ParsedKeystroke::parse("shift+insert").unwrap();
+        assert_eq!(k.to_dotool_chord().unwrap(), "shift+k:110");
+        let k = ParsedKeystroke::parse("ctrl+shift+v").unwrap();
+        assert_eq!(k.to_dotool_chord().unwrap(), "ctrl+shift+k:47");
     }
 
     #[test]
@@ -1066,27 +1218,20 @@ mod tests {
 
     #[test]
     fn test_driver_order_falls_back_when_config_has_no_keystroke_driver() {
-        // A driver_order of e.g. ["dotool", "clipboard"] (valid for type
-        // mode) names nothing paste mode can use for the keystroke step, so
-        // it must fall back to the default rather than trying nothing.
+        // A driver_order of e.g. ["clipboard"] (valid for type mode)
+        // names nothing paste mode can use for the keystroke step, so it
+        // must fall back to the default rather than trying nothing.
         let output = PasteOutput::new(
             false,
             None,
             None,
-            Some(vec![OutputDriver::Dotool, OutputDriver::Clipboard]),
+            Some(vec![OutputDriver::Clipboard]),
             10,
             100,
             false,
             200,
         );
-        assert_eq!(
-            output.driver_order,
-            vec![
-                OutputDriver::Wtype,
-                OutputDriver::Eitype,
-                OutputDriver::Ydotool
-            ]
-        );
+        assert_eq!(output.driver_order, DEFAULT_KEYSTROKE_DRIVER_ORDER.to_vec());
     }
 
     #[test]

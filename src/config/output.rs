@@ -102,6 +102,13 @@ pub struct OutputConfig {
     #[serde(default)]
     pub paste_keys: Option<String>,
 
+    /// In paste mode, also copy the text to the primary selection.
+    /// Terminals such as WezTerm and Konsole paste the primary selection on
+    /// Shift+Insert while GUI apps paste the clipboard, so with
+    /// `paste_keys = "shift+insert"` this makes one key work in both.
+    #[serde(default)]
+    pub paste_primary: bool,
+
     /// Keyboard layout for dotool (e.g., "de" for German, "fr" for French)
     /// Required for non-US keyboard layouts when using dotool
     #[serde(default)]
@@ -206,6 +213,7 @@ impl Default for OutputConfig {
             post_output_command: None,
             post_process: None,
             paste_keys: None,
+            paste_primary: false,
             dotool_xkb_layout: None,
             dotool_xkb_variant: None,
             eitype_xkb_layout: None,
