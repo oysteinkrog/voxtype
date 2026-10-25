@@ -57,6 +57,22 @@ pub struct HotkeyConfig {
     /// Example: { "LEFTSHIFT" = "translate" } activates [profiles.translate] when Shift is held
     #[serde(default)]
     pub profile_modifiers: HashMap<String, String>,
+
+    /// Fire the hotkey on a double tap instead of a single press. A tap is a
+    /// press and release of `key` within `double_tap_ms` with no other key
+    /// pressed meanwhile, so shortcuts that use the key (Ctrl+C on Right
+    /// Ctrl) never count. Two taps within `double_tap_ms` fire one press.
+    /// Use with `mode = "toggle"`.
+    #[serde(default)]
+    pub double_tap: bool,
+
+    /// Longest tap, and longest gap between the two taps, in milliseconds.
+    #[serde(default = "default_double_tap_ms")]
+    pub double_tap_ms: u64,
+}
+
+fn default_double_tap_ms() -> u64 {
+    300
 }
 
 impl Default for HotkeyConfig {
@@ -69,6 +85,8 @@ impl Default for HotkeyConfig {
             cancel_key: None,
             model_modifier: None,
             profile_modifiers: HashMap::new(),
+            double_tap: false,
+            double_tap_ms: default_double_tap_ms(),
         }
     }
 }

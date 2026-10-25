@@ -33,6 +33,8 @@ pub struct EvdevListener {
     secondary_model: Option<String>,
     /// Modifier keys that activate named profiles for post-processing
     profile_modifiers: HashMap<Key, String>,
+    /// Fire on a double tap of `target_key` (see `HotkeyConfig::double_tap`)
+    double_tap: Option<Duration>,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -100,6 +102,9 @@ impl EvdevListener {
             model_modifier,
             secondary_model: None, // Set later via set_secondary_model
             profile_modifiers,
+            double_tap: config
+                .double_tap
+                .then(|| Duration::from_millis(config.double_tap_ms)),
             stop_signal: None,
         })
     }
@@ -122,6 +127,7 @@ impl HotkeyListener for EvdevListener {
         let model_modifier = self.model_modifier;
         let secondary_model = self.secondary_model.clone();
         let profile_modifiers = self.profile_modifiers.clone();
+        let double_tap = self.double_tap;
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
@@ -132,6 +138,7 @@ impl HotkeyListener for EvdevListener {
                 model_modifier,
                 secondary_model,
                 profile_modifiers,
+                double_tap,
                 tx,
                 stop_rx,
             ) {
@@ -463,6 +470,61 @@ fn target_key_action(value: i32, is_pressed: bool, modifiers_satisfied: bool) ->
     }
 }
 
+/// Detects a double tap of the target key: two clean taps, each a press and
+/// release within `window` with no other key pressed in between, the second
+/// press within `window` of the first release.
+struct DoubleTap {
+    window: Duration,
+    /// When the target key went down, while the current tap is still clean.
+    down_at: Option<Instant>,
+    /// Whether the current press started within `window` of a first tap.
+    second: bool,
+    /// When the last clean first tap ended.
+    last_tap_up: Option<Instant>,
+}
+
+impl DoubleTap {
+    fn new(window: Duration) -> Self {
+        Self { window, down_at: None, second: false, last_tap_up: None }
+    }
+
+    /// Feed one key event; returns true when it completes a double tap.
+    fn event(&mut self, is_target: bool, value: i32, now: Instant) -> bool {
+        if !is_target {
+            if value == 1 {
+                // Another key: this is a shortcut, not a tap.
+                self.down_at = None;
+                self.last_tap_up = None;
+            }
+            return false;
+        }
+        match value {
+            1 => {
+                self.second = self
+                    .last_tap_up
+                    .is_some_and(|up| now.duration_since(up) <= self.window);
+                self.down_at = Some(now);
+                false
+            }
+            0 => {
+                let clean_tap = self
+                    .down_at
+                    .take()
+                    .is_some_and(|down| now.duration_since(down) <= self.window);
+                if clean_tap && self.second {
+                    self.last_tap_up = None;
+                    self.second = false;
+                    true
+                } else {
+                    self.last_tap_up = clean_tap.then_some(now);
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
 /// Main listener loop running in a blocking task
 #[allow(clippy::too_many_arguments)]
 fn evdev_listener_loop(
@@ -472,6 +534,7 @@ fn evdev_listener_loop(
     model_modifier: Option<Key>,
     secondary_model: Option<String>,
     profile_modifiers: HashMap<Key, String>,
+    double_tap: Option<Duration>,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -489,6 +552,11 @@ fn evdev_listener_loop(
 
     // Track if we're currently "pressed" (to handle repeat events)
     let mut is_pressed = false;
+
+    let mut double_tap = double_tap.map(DoubleTap::new);
+    if let Some(dt) = &double_tap {
+        tracing::info!("Hotkey fires on a double tap (within {:?})", dt.window);
+    }
 
     if let Some(cancel) = cancel_key {
         tracing::info!(
@@ -624,6 +692,23 @@ fn evdev_listener_loop(
                     }
                     continue;
                 }
+            }
+
+            // Double tap: one press and release per completed double tap.
+            if let Some(dt) = double_tap.as_mut() {
+                if dt.event(key == target_key, value, Instant::now()) {
+                    tracing::debug!("Hotkey double tap");
+                    let pressed = HotkeyEvent::Pressed {
+                        model_override: None,
+                        profile_override: last_pressed_profile.clone(),
+                    };
+                    if tx.blocking_send(pressed).is_err()
+                        || tx.blocking_send(HotkeyEvent::Released).is_err()
+                    {
+                        return Ok(()); // Channel closed
+                    }
+                }
+                continue;
             }
 
             // Check target key
@@ -932,6 +1017,47 @@ mod tests {
     fn release_ends_recording_after_modifier_released_first() {
         assert_eq!(target_key_action(0, true, false), TargetKeyAction::Release);
         assert_eq!(target_key_action(0, true, true), TargetKeyAction::Release);
+    }
+
+    #[test]
+    fn double_tap_fires_on_two_clean_taps() {
+        let w = Duration::from_millis(300);
+        let t = Instant::now();
+        let ms = |n| t + Duration::from_millis(n);
+        let mut dt = DoubleTap::new(w);
+        assert!(!dt.event(true, 1, ms(0)));
+        assert!(!dt.event(true, 0, ms(80)));
+        assert!(!dt.event(true, 1, ms(200)));
+        assert!(dt.event(true, 0, ms(260)));
+        // A third tap starts over.
+        assert!(!dt.event(true, 1, ms(400)));
+        assert!(!dt.event(true, 0, ms(450)));
+    }
+
+    #[test]
+    fn double_tap_ignores_shortcuts_slow_taps_and_long_gaps() {
+        let w = Duration::from_millis(300);
+        let t = Instant::now();
+        let ms = |n| t + Duration::from_millis(n);
+        // Ctrl+C between the taps.
+        let mut dt = DoubleTap::new(w);
+        dt.event(true, 1, ms(0));
+        dt.event(true, 0, ms(80));
+        dt.event(true, 1, ms(150));
+        dt.event(false, 1, ms(170));
+        assert!(!dt.event(true, 0, ms(220)));
+        // Held too long.
+        let mut dt = DoubleTap::new(w);
+        dt.event(true, 1, ms(0));
+        dt.event(true, 0, ms(500));
+        dt.event(true, 1, ms(600));
+        assert!(!dt.event(true, 0, ms(650)));
+        // Gap too long.
+        let mut dt = DoubleTap::new(w);
+        dt.event(true, 1, ms(0));
+        dt.event(true, 0, ms(80));
+        dt.event(true, 1, ms(500));
+        assert!(!dt.event(true, 0, ms(550)));
     }
 
     #[test]
