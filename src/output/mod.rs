@@ -401,7 +401,7 @@ pub fn create_output_chain_with_override(
                 pre_type_delay_ms,
                 config.restore_clipboard,
                 config.restore_clipboard_delay_ms,
-            )));
+            ).with_paste_primary(config.paste_primary)));
         }
         crate::config::OutputMode::File => {
             // The daemon writes the file itself before reaching the output

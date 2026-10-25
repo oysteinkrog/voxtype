@@ -4947,6 +4947,15 @@ impl Daemon {
                                     // matches spanning segment boundaries.
                                     s.commit_segment_silent(&text);
                                 } else if let Some(chain) = streaming_chain.as_ref() {
+                                    // Live preview sends the whole text as
+                                    // one Final after the stop tap. Wait for
+                                    // Right Ctrl to come up, or the paste
+                                    // key becomes a different shortcut.
+                                    if self.config.live_preview_active()
+                                        && !modifiers_released(LIVE_TYPING_FINAL_WAIT).await
+                                    {
+                                        tracing::warn!("Modifier still held; sending the final text anyway");
+                                    }
                                     if let Err(e) = s.commit_segment(
                                         chain,
                                         &text,
