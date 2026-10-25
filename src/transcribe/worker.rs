@@ -248,13 +248,15 @@ struct PauseSplitter {
 }
 
 const SPLIT_FRAME: usize = 320; // 20 ms at 16 kHz
-const SPLIT_MIN_SECS: f32 = 4.0;
-const SPLIT_MAX_SECS: f32 = 20.0;
-const SPLIT_PAUSE_FRAMES: usize = 25; // 0.5 s
+// Pauses of 0.5 s are common inside a sentence, and a part cut there loses
+// the context the model uses for casing and punctuation.
+const SPLIT_MIN_SECS: f32 = 6.0;
+const SPLIT_MAX_SECS: f32 = 30.0;
+const SPLIT_PAUSE_FRAMES: usize = 40; // 0.8 s
 /// After this long, a shorter pause will do, so the part left over when
 /// the recording stops stays short.
-const SPLIT_LONG_SECS: f32 = 10.0;
-const SPLIT_SHORT_PAUSE_FRAMES: usize = 15; // 0.3 s
+const SPLIT_LONG_SECS: f32 = 15.0;
+const SPLIT_SHORT_PAUSE_FRAMES: usize = 25; // 0.5 s
 const SPLIT_MIN_SPEECH_FRAMES: usize = 15; // 0.3 s
 
 impl PauseSplitter {
@@ -774,7 +776,7 @@ mod tests {
 
     #[test]
     fn test_pause_splitter_cuts_at_pause_after_min_length() {
-        let mut audio = tone(5.0, 0.3);
+        let mut audio = tone(6.0, 0.3);
         audio.extend(tone(1.0, 0.0));
         audio.extend(tone(3.0, 0.3));
         let mut sp = PauseSplitter::new();
@@ -786,8 +788,8 @@ mod tests {
         assert_eq!(parts.len(), 1);
         let (range, speech) = &parts[0];
         assert!(*speech);
-        // Cut inside the pause, between 5.0 s and 6.0 s.
-        assert!(range.end > 5 * 16000 && range.end < 6 * 16000, "{:?}", range);
+        // Cut inside the pause, between 6.0 s and 7.0 s.
+        assert!(range.end > 6 * 16000 && range.end < 7 * 16000, "{:?}", range);
         assert_eq!(sp.tail(audio.len()), Some(range.end..audio.len()));
     }
 
@@ -797,7 +799,7 @@ mod tests {
         audio.extend(tone(1.0, 0.0));
         audio.extend(tone(1.5, 0.3));
         let mut sp = PauseSplitter::new();
-        // Pause ends at 3 s, before the 4 s minimum: no cut.
+        // Pause ends at 3 s, before the 6 s minimum: no cut.
         assert!(sp.push(&audio).is_empty());
 
         let silence = tone(3.0, 0.0);
@@ -808,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_pause_splitter_forces_cut_without_pause() {
-        let audio = tone(30.0, 0.3);
+        let audio = tone(35.0, 0.3);
         let mut sp = PauseSplitter::new();
         let parts = sp.push(&audio);
         assert_eq!(parts.len(), 1);

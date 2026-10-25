@@ -16,6 +16,12 @@ pub struct TextConfig {
     #[serde(default)]
     pub replacements: HashMap<String, String>,
 
+    /// Extra replacements read from a separate TOML file of `"from" = "to"`
+    /// lines, so a private word list can live outside the main config.
+    /// Entries in `replacements` win over the file. `~/` is expanded.
+    #[serde(default)]
+    pub replacements_file: Option<String>,
+
     /// Smart auto-submit: say "submit" at the end of dictation to press Enter.
     /// The word "submit" is stripped from the output and Enter is pressed.
     #[serde(default)]
@@ -39,6 +45,7 @@ impl Default for TextConfig {
         Self {
             spoken_punctuation: false,
             replacements: HashMap::new(),
+            replacements_file: None,
             smart_auto_submit: false,
             filter_filler_words: true,
             filler_words: default_filler_words(),
