@@ -164,16 +164,24 @@ impl ParsedKeystroke {
         Ok(args)
     }
 
-    /// Convert to a dotool chord using evdev codes
-    /// e.g., "shift+insert" -> "k:42+k:110"
+    /// Convert to a dotool chord. dotool takes modifiers only by name
+    /// (super, ctrl, alt, shift); the key goes by its evdev code.
+    /// e.g., "shift+insert" -> "shift+k:110"
     fn to_dotool_chord(&self) -> Result<String, String> {
-        let codes = self
+        let mut parts = self
             .modifiers
             .iter()
-            .chain(std::iter::once(&self.key))
-            .map(|k| key_name_to_evdev(k).map(|c| format!("k:{}", c)))
+            .map(|m| match m.as_str() {
+                "ctrl" | "control" | "leftctrl" | "rightctrl" => Ok("ctrl"),
+                "shift" | "leftshift" | "rightshift" => Ok("shift"),
+                "alt" | "leftalt" => Ok("alt"),
+                "super" | "meta" | "leftmeta" => Ok("super"),
+                other => Err(format!("dotool has no modifier '{}'", other)),
+            })
+            .map(|r| r.map(str::to_string))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(codes.join("+"))
+        parts.push(format!("k:{}", key_name_to_evdev(&self.key)?));
+        Ok(parts.join("+"))
     }
 }
 
@@ -1182,9 +1190,9 @@ mod tests {
     #[test]
     fn test_dotool_chord_uses_evdev_codes() {
         let k = ParsedKeystroke::parse("shift+insert").unwrap();
-        assert_eq!(k.to_dotool_chord().unwrap(), "k:42+k:110");
+        assert_eq!(k.to_dotool_chord().unwrap(), "shift+k:110");
         let k = ParsedKeystroke::parse("ctrl+shift+v").unwrap();
-        assert_eq!(k.to_dotool_chord().unwrap(), "k:29+k:42+k:47");
+        assert_eq!(k.to_dotool_chord().unwrap(), "ctrl+shift+k:47");
     }
 
     #[test]
