@@ -27,6 +27,29 @@ fn misplaced_sections(contents: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Add the `"from" = "to"` pairs in `file` to `replacements`, keeping any
+/// entry already there. A missing or bad file is logged and skipped, so a
+/// word list that is not synced to this machine never stops the daemon.
+fn merge_replacements_file(replacements: &mut std::collections::HashMap<String, String>, file: &str) {
+    let path = match (file.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(file),
+    };
+    let parsed = std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|s| toml::from_str::<std::collections::HashMap<String, String>>(&s).map_err(|e| e.to_string()));
+    match parsed {
+        Ok(extra) => {
+            let n = extra.len();
+            for (from, to) in extra {
+                replacements.entry(from).or_insert(to);
+            }
+            tracing::debug!("Read {} word replacements from {:?}", n, path);
+        }
+        Err(e) => tracing::warn!("Skipping text.replacements_file {:?}: {}", path, e),
+    }
+}
+
 pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     // Start with defaults
     let mut config = Config::default();
@@ -87,6 +110,10 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
         }
     } else {
         tracing::debug!("No config file found at user or system path, using built-in defaults");
+    }
+
+    if let Some(file) = config.text.replacements_file.clone() {
+        merge_replacements_file(&mut config.text.replacements, &file);
     }
 
     // Override from environment variables
@@ -282,6 +309,22 @@ pub fn save_config(config: &Config, path: &Path) -> Result<(), VoxtypeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacements_file_adds_entries_inline_ones_win() {
+        let dir = tempfile::tempdir().unwrap();
+        let words = dir.path().join("words.toml");
+        std::fs::write(&words, "\"nos\" = \"NAS\"\n\"vox type\" = \"from file\"\n").unwrap();
+        let mut map = std::collections::HashMap::new();
+        map.insert("vox type".to_string(), "voxtype".to_string());
+        merge_replacements_file(&mut map, words.to_str().unwrap());
+        assert_eq!(map.get("nos").map(String::as_str), Some("NAS"));
+        assert_eq!(map.get("vox type").map(String::as_str), Some("voxtype"));
+
+        // A missing file leaves the map as it was.
+        merge_replacements_file(&mut map, dir.path().join("none.toml").to_str().unwrap());
+        assert_eq!(map.len(), 2);
+    }
 
     #[test]
     fn top_level_post_process_is_flagged_with_its_real_home() {

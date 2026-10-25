@@ -2974,6 +2974,19 @@ If Whisper transcribes "vox type" (or "Vox Type"), it will be replaced with "vox
 "omar key" = "Omarchy"
 ```
 
+### replacements_file
+
+**Type:** String (path)
+**Default:** none
+**Required:** No
+
+A separate TOML file of `"from" = "to"` lines, added to `replacements`. Use it to keep a long or private word list out of the main config, for example when the config lives in a public dotfiles repo. Entries in `replacements` win over the file. A leading `~/` is expanded. If the file is missing or cannot be parsed, Voxtype logs a warning and carries on without it.
+
+```toml
+[text]
+replacements_file = "~/private/voxtype-words.toml"
+```
+
 ### smart_auto_submit
 
 **Type:** Boolean
