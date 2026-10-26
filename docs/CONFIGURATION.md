@@ -3949,8 +3949,9 @@ fonts, and always draws the `swiss` look. Differences from the GTK4 popup:
 - Between dictations it holds no window and no GPU device, so it uses
   little memory while idle. Each dictation opens a new overlay, which draws
   its first frames on the CPU while the GPU starts.
-- New words fade in, and the panel grows to a new line with a short
-  animation.
+- `word_fade = true` in `[osd]` (or `--word-fade`, or
+  `VOXTYPE_OSD_WORD_FADE=1`) fades new words in. By default they appear at
+  once, as in the GTK4 popup.
 - The microphone icon is drawn from shapes, not taken from the icon theme.
 
 If `voxtype-osd-vo` is not installed, the launcher falls back to the GTK4

@@ -359,6 +359,9 @@ pub struct OsdConfig {
     pub opacity: f32,
     /// Look of the gtk4 OSD panel. `default` keeps the original look.
     pub theme: OsdTheme,
+    /// Fade new live words in (vo OSD only). Off by default: words appear
+    /// at once, as in the gtk4 OSD.
+    pub word_fade: bool,
     /// Visible waveform window in seconds (3.0 per BRIEF).
     pub waveform_window_secs: f32,
     /// Held-peak decay rate in dB/sec (6.0 per BRIEF).
@@ -400,6 +403,7 @@ impl Default for OsdConfig {
             preview_font_pt: None,
             opacity: 0.95,
             theme: OsdTheme::Default,
+            word_fade: false,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,
             waveform_gain: 10.0,

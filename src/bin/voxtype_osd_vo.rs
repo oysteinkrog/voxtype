@@ -128,6 +128,11 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_GAIN")]
     waveform_gain: Option<f32>,
 
+    /// Fade new words in instead of showing them at once. Also `[osd]
+    /// word_fade = true`.
+    #[arg(long, env = "VOXTYPE_OSD_WORD_FADE")]
+    word_fade: bool,
+
     /// Accepted for compatibility with the GTK4 frontend's flags and ignored:
     /// this frontend always draws the swiss look.
     #[arg(long, env = "VOXTYPE_OSD_THEME", hide = true)]
@@ -252,6 +257,8 @@ struct Look {
     hues: (Color, Color, Color),
     /// "tap Right Ctrl to stop", or empty.
     stop_hint: String,
+    /// New words fade in; otherwise they appear at once, as in GTK.
+    word_fade: bool,
 }
 
 impl Look {
@@ -278,6 +285,7 @@ impl Look {
             border: color(theme.border),
             hues: (color(l), color(c), color(r)),
             stop_hint,
+            word_fade: cfg.word_fade,
         }
     }
 
@@ -434,6 +442,12 @@ impl Popup {
             }
             added += 1;
         }
+        // The clock runs on every frame, the silence pump's too, until the
+        // daemon says it is finishing, as in GTK.
+        if !self.status().finishing {
+            let secs = (t - self.shown_at).max(0.0) as u64;
+            self.clock = format!("{:02}:{:02}", secs / 60, secs % 60);
+        }
         if added == 0 {
             return;
         }
@@ -453,13 +467,6 @@ impl Popup {
         self.newest_at = self.anchor + PLAYOUT_DELAY_SECS + (self.received - 1) as f64 * step;
         let raw: Vec<f64> = self.levels.iter().copied().collect();
         self.wave = smooth_levels(&raw).into_iter().map(|l| l as f32).collect();
-        // The clock stops at the end of the recording: frames during the
-        // final text come from the silence pump.
-        let status = self.status();
-        if !status.finishing {
-            let secs = (t - self.shown_at).max(0.0) as u64;
-            self.clock = format!("{:02}:{:02}", secs / 60, secs % 60);
-        }
     }
 
     fn text(&mut self, preview: &str) {
@@ -581,8 +588,6 @@ impl Popup {
             .radius(RADIUS)
             .fill(l.background)
             .stroke(l.border, BORDER)
-            .motion(Prop::Size, Spring::SNAP)
-            .motion(Prop::Position, Spring::SNAP)
             .child(self.header())
             .child(self.waveform(&status))
             .child(self.transcript())
@@ -680,18 +685,21 @@ impl Popup {
 
     fn transcript(&self) -> Element<Msg> {
         let l = &self.look;
+        let mut words = Element::live_text("words", &self.shown)
+            .text_style(l.text_style())
+            .color(l.foreground);
+        // Without word_fade nothing moves: a new word is on screen at full
+        // opacity in the first frame after it arrives, as in GTK.
+        if l.word_fade {
+            words = words
+                .motion(Prop::Opacity, Spring::SNAP)
+                .motion(Prop::Offset, Spring::SNAP)
+                .word_enter(Transition::fade().offset(0.0, 3.0));
+        }
         Element::column("text")
             .height(self.lines as f32 * l.text_line)
             .margin_edges(0.0, 0.0, TEXT_MARGIN_BOTTOM, 0.0)
-            .motion(Prop::Size, Spring::SNAP)
-            .child(
-                Element::live_text("words", &self.shown)
-                    .text_style(l.text_style())
-                    .color(l.foreground)
-                    .motion(Prop::Opacity, Spring::SNAP)
-                    .motion(Prop::Offset, Spring::SNAP)
-                    .word_enter(Transition::fade().offset(0.0, 3.0)),
-            )
+            .child(words)
     }
 
     fn status_row(&self, status: &StatusLine) -> Element<Msg> {
@@ -952,6 +960,7 @@ fn main() -> anyhow::Result<()> {
     if let Some(g) = args.waveform_gain {
         cfg.waveform_gain = g;
     }
+    cfg.word_fade |= args.word_fade;
     let theme = plasma::load();
     let look = Look::new(&cfg, &theme, stop_hint(&hotkey));
     let fonts = load_fonts(&theme)?;
