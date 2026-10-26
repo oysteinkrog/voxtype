@@ -623,12 +623,16 @@ fn build_window(
 
         if poll {
             let full = std::fs::read_to_string(&preview_path).unwrap_or_default();
-            let text = preview_tail(full.trim());
             // The daemon empties the file when the recording ends; keep the
             // last words on screen until the window hides.
-            if !text.is_empty() && preview.text() != text {
-                preview.set_visible(true);
-                preview.set_text(&text);
+            if let Chrome::Swiss(view) = &chrome {
+                view.show_text(full.trim());
+            } else {
+                let text = preview_tail(full.trim());
+                if !text.is_empty() && preview.text() != text {
+                    preview.set_visible(true);
+                    preview.set_text(&text);
+                }
             }
             let status = std::fs::read_to_string(&status_path).unwrap_or_default();
             let (fraction, label) = status.split_once('\n').unwrap_or(("", ""));
@@ -1005,6 +1009,13 @@ const SWISS_WAVE_HEIGHT_PX: i32 = 40;
 /// Transcript size in the `swiss` theme when `preview_font_pt` is unset.
 const SWISS_TEXT_PT: f32 = 18.0;
 
+/// Most transcript lines in the `swiss` panel. The text area grows a line at
+/// a time up to this, and never shrinks during one dictation.
+const SWISS_MAX_LINES: i32 = 5;
+
+/// Left plus right padding and border of `.swiss-panel`.
+const SWISS_PANEL_INSET_PX: i32 = 46;
+
 /// The `swiss` panel: a label row with elapsed time and word count, a
 /// filled gradient waveform, the transcript, and a status line with a thin
 /// progress bar while the final text is computed.
@@ -1022,6 +1033,11 @@ struct SwissView {
     live: Rc<Cell<bool>>,
     /// "tap Right Ctrl to stop", or empty when voxtype has no hotkey.
     listening_detail: String,
+    preview: gtk4::Label,
+    /// Transcript lines the text area has room for now.
+    lines: Cell<i32>,
+    /// Text width before the first allocation.
+    text_width_px: i32,
 }
 
 impl SwissView {
@@ -1075,14 +1091,11 @@ impl SwissView {
 
         preview.add_css_class("swiss-text");
         preview.set_margin_bottom(4);
-        // Reserve room for the longest tail (PREVIEW_MAX_CHARS) up front, so
-        // the panel keeps one height for the whole dictation. Each resize of
-        // the layer surface showed as a brief fade.
+        // The text area only grows (see show_text). A shrinking layer
+        // surface showed as a brief fade.
         preview.set_visible(true);
         preview.set_valign(gtk4::Align::Start);
         preview.set_yalign(0.0);
-        let lines = preview.create_pango_layout(Some("Ag\nAg\nAg\nAg"));
-        preview.set_size_request(-1, lines.pixel_size().1);
 
         let bottom_rule = gtk4::Separator::new(gtk4::Orientation::Horizontal);
         bottom_rule.add_css_class("swiss-rule");
@@ -1138,6 +1151,9 @@ impl SwissView {
             fraction,
             live,
             listening_detail,
+            preview: preview.clone(),
+            lines: Cell::new(0),
+            text_width_px: cfg.width_px as i32 - SWISS_PANEL_INSET_PX,
         };
         view.reset();
         view
@@ -1149,6 +1165,56 @@ impl SwissView {
         self.words.set_text("0");
         self.show_status("");
         self.fraction.set(None);
+        self.lines.set(0);
+        self.reserve_lines(1);
+    }
+
+    /// Show the end of the transcript in at most SWISS_MAX_LINES lines.
+    /// Empty text keeps what is on screen.
+    fn show_text(&self, full: &str) {
+        if full.is_empty() {
+            return;
+        }
+        let width = match self.preview.width() {
+            w if w > 0 => w,
+            _ => self.text_width_px,
+        };
+        let layout = self.preview.create_pango_layout(None);
+        layout.set_width(width * gtk4::pango::SCALE);
+        layout.set_wrap(gtk4::pango::WrapMode::WordChar);
+        let line_count = |text: &str| {
+            layout.set_text(text);
+            layout.line_count()
+        };
+        // Drop words from the front until the rest fits.
+        let words: Vec<&str> = full.split_whitespace().collect();
+        let mut start = words.len().saturating_sub(120);
+        let mut text = words[start..].join(" ");
+        if start > 0 {
+            text = format!("…{text}");
+        }
+        while line_count(&text) > SWISS_MAX_LINES && start + 1 < words.len() {
+            start += 1;
+            text = format!("…{}", words[start..].join(" "));
+        }
+        let lines = line_count(&text).min(SWISS_MAX_LINES);
+        self.reserve_lines(lines);
+        set_text_if_changed(&self.preview, &text);
+    }
+
+    /// Grow the text area to `lines` lines; never shrink it.
+    fn reserve_lines(&self, lines: i32) {
+        if lines <= self.lines.get() {
+            return;
+        }
+        self.lines.set(lines);
+        let sample = vec!["Ag"; lines as usize].join("\n");
+        let height = self
+            .preview
+            .create_pango_layout(Some(&sample))
+            .pixel_size()
+            .1;
+        self.preview.set_size_request(-1, height);
     }
 
     fn update(&self, elapsed: Duration, words: usize, fraction: Option<f64>, status: &str) {
