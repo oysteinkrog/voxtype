@@ -66,8 +66,7 @@ impl WorkerResponse {
 /// It loads the model FIRST, signals ready, then waits for audio.
 pub fn run_worker(config: &WhisperConfig) -> anyhow::Result<()> {
     run_worker_with(&config.model, || {
-        super::whisper::WhisperTranscriber::new(config)
-            .map(|t| Box::new(t) as Box<dyn Transcriber>)
+        super::whisper::WhisperTranscriber::new(config).map(|t| Box::new(t) as Box<dyn Transcriber>)
     })
 }
 
@@ -221,7 +220,12 @@ fn free_vram_mib() -> Option<u64> {
         .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
         .output()
         .ok()?;
-    String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse().ok()
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .next()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// What the engine thread reports to the live worker's main loop.
@@ -248,8 +252,8 @@ struct PauseSplitter {
 }
 
 const SPLIT_FRAME: usize = 320; // 20 ms at 16 kHz
-// Pauses of 0.5 s are common inside a sentence, and a part cut there loses
-// the context the model uses for casing and punctuation.
+                                // Pauses of 0.5 s are common inside a sentence, and a part cut there loses
+                                // the context the model uses for casing and punctuation.
 const SPLIT_MIN_SECS: f32 = 6.0;
 const SPLIT_MAX_SECS: f32 = 30.0;
 const SPLIT_PAUSE_FRAMES: usize = 40; // 0.8 s
@@ -261,7 +265,10 @@ const SPLIT_MIN_SPEECH_FRAMES: usize = 15; // 0.3 s
 
 impl PauseSplitter {
     fn new() -> Self {
-        Self { start: 0, frames: Vec::new() }
+        Self {
+            start: 0,
+            frames: Vec::new(),
+        }
     }
 
     /// Quiet threshold for the current part: 3x its 5th-percentile frame RMS.
@@ -278,7 +285,11 @@ impl PauseSplitter {
     /// to be worth transcribing. Silence alone makes some models invent text.
     fn has_speech(&self, from: usize, to: usize) -> bool {
         let t = self.threshold();
-        self.frames[from..to].iter().filter(|&&r| r > t * 2.0).count() >= SPLIT_MIN_SPEECH_FRAMES
+        self.frames[from..to]
+            .iter()
+            .filter(|&&r| r > t * 2.0)
+            .count()
+            >= SPLIT_MIN_SPEECH_FRAMES
     }
 
     /// Look at the samples added since the last call. Returns the ranges of
@@ -291,11 +302,16 @@ impl PauseSplitter {
                 break;
             }
             let f = &samples[next..next + SPLIT_FRAME];
-            self.frames.push((f.iter().map(|x| x * x).sum::<f32>() / f.len() as f32).sqrt());
+            self.frames
+                .push((f.iter().map(|x| x * x).sum::<f32>() / f.len() as f32).sqrt());
 
             let n = self.frames.len();
             let secs = (n * SPLIT_FRAME) as f32 / 16000.0;
-            let pause = if secs < SPLIT_LONG_SECS { SPLIT_PAUSE_FRAMES } else { SPLIT_SHORT_PAUSE_FRAMES };
+            let pause = if secs < SPLIT_LONG_SECS {
+                SPLIT_PAUSE_FRAMES
+            } else {
+                SPLIT_SHORT_PAUSE_FRAMES
+            };
             let cut = if secs >= SPLIT_MIN_SECS && n >= pause {
                 let t = self.threshold();
                 if self.frames[n - pause..].iter().all(|&r| r < t) {
@@ -340,8 +356,12 @@ impl PauseSplitter {
 /// model: split at pauses, only parts with speech. For offline replays.
 pub fn speech_parts(samples: &[f32]) -> Vec<std::ops::Range<usize>> {
     let mut splitter = PauseSplitter::new();
-    let mut parts: Vec<_> =
-        splitter.push(samples).into_iter().filter(|(_, speech)| *speech).map(|(r, _)| r).collect();
+    let mut parts: Vec<_> = splitter
+        .push(samples)
+        .into_iter()
+        .filter(|(_, speech)| *speech)
+        .map(|(r, _)| r)
+        .collect();
     parts.extend(splitter.tail(samples.len()));
     parts
 }
@@ -356,7 +376,11 @@ struct Progress {
 
 impl Default for Progress {
     fn default() -> Self {
-        Self { pending: Default::default(), done_audio: 0.0, done_took: 0.0 }
+        Self {
+            pending: Default::default(),
+            done_audio: 0.0,
+            done_took: 0.0,
+        }
     }
 }
 
@@ -374,11 +398,23 @@ impl Progress {
         let (text, fraction) = if !loaded {
             ("Finishing: loading the model".to_string(), None)
         } else {
-            let rate = if self.done_audio > 0.0 { self.done_took / self.done_audio } else { 0.1 };
+            let rate = if self.done_audio > 0.0 {
+                self.done_took / self.done_audio
+            } else {
+                0.1
+            };
             let total = self.done_audio + left;
             (
-                format!("Finishing: {:.0} s of audio left, about {:.1} s", left, left * rate),
-                Some(if total > 0.0 { self.done_audio / total } else { 1.0 }),
+                format!(
+                    "Finishing: {:.0} s of audio left, about {:.1} s",
+                    left,
+                    left * rate
+                ),
+                Some(if total > 0.0 {
+                    self.done_audio / total
+                } else {
+                    1.0
+                }),
             )
         };
         serde_json::json!({ "text": text, "fraction": fraction }).to_string()
@@ -392,16 +428,17 @@ impl Progress {
 ///    model (Parakeet cache-aware, CPU), then writes "READY". The engine
 ///    model (e.g. Cohere) loads on a background thread meanwhile.
 /// 2. Parent sends any number of `[u32 sample_count (LE)][f32 samples...]`
-///    blocks while recording, then closes stdin.
+///    blocks while recording, then an empty block (count 0) or EOF.
 /// 3. For each change in the running transcript the worker writes
 ///    `P <json string>`.
 /// 4. Meanwhile the engine model transcribes each part of the clip that
 ///    ends in a pause (see [`PauseSplitter`]). After EOF only the last part
 ///    is left; until it is done the worker writes `S <json>` status lines,
-///    then the usual JSON response with all parts joined, and exits.
+///    then the usual JSON response with all parts joined.
+/// 5. After an empty block the worker writes "READY" again and waits for the
+///    next recording with the preview model still loaded; after EOF it exits.
 #[cfg(feature = "parakeet")]
 pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyhow::Result<()> {
-    use super::revisions::RevisionLog;
     use parakeet_rs::{ParakeetUnified, ParakeetUnifiedHandle, UnifiedStreamingConfig};
     use std::sync::mpsc;
 
@@ -410,15 +447,83 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
 
     // Read stdin from the start, so the parent never blocks on a full pipe
     // while the models load.
-    let (blocks_tx, blocks_rx) = mpsc::channel::<Vec<f32>>();
+    // None marks the end of one recording.
+    let (blocks_tx, blocks_rx) = mpsc::channel::<Option<Vec<f32>>>();
     std::thread::spawn(move || {
         let mut stdin = io::stdin().lock();
         while let Ok(Some(block)) = read_block(&mut stdin) {
-            if blocks_tx.send(block).is_err() {
+            if blocks_tx
+                .send((!block.is_empty()).then_some(block))
+                .is_err()
+            {
                 break;
             }
         }
     });
+
+    eprintln!("[worker] Loading live preview model: {}", live_model);
+    let load_start = std::time::Instant::now();
+    // parakeet-rs's own context sizes. voxtype's [parakeet] streaming_*
+    // defaults (1.5 s left context) fail the unified model's check that
+    // contexts map to mel-frame counts divisible by 8.
+    let streaming_config = UnifiedStreamingConfig::default();
+    // None = CPU: the GPU is left to the engine model.
+    let handle = super::parakeet::resolve_model_path(live_model)
+        .map_err(|e| e.to_string())
+        .and_then(|path| ParakeetUnifiedHandle::load(&path, None).map_err(|e| e.to_string()));
+    let unified = handle.as_ref().map_err(|e| e.clone()).and_then(|handle| {
+        ParakeetUnified::from_shared_with_streaming_config(handle, streaming_config.clone())
+            .map_err(|e| e.to_string())
+    });
+    let mut first = match unified {
+        Ok(u) => {
+            eprintln!(
+                "[worker] Live preview model loaded in {:.2}s",
+                load_start.elapsed().as_secs_f32()
+            );
+            Some(u)
+        }
+        Err(e) => {
+            // No preview, but the recording still gets transcribed.
+            eprintln!("[worker] Live preview model failed to load: {}", e);
+            None
+        }
+    };
+
+    loop {
+        // A fresh streaming state per recording; the weights stay loaded.
+        let unified = first.take().or_else(|| {
+            let h = handle.as_ref().ok()?;
+            ParakeetUnified::from_shared_with_streaming_config(h, streaming_config.clone()).ok()
+        });
+        if !live_session(
+            config,
+            &mut out,
+            &blocks_rx,
+            unified,
+            &handle,
+            &streaming_config,
+        )? {
+            return Ok(());
+        }
+    }
+}
+
+/// One recording of the live worker: READY, audio until an empty block or
+/// EOF, then the response. Returns whether another recording may follow
+/// (false after EOF).
+#[cfg(feature = "parakeet")]
+fn live_session(
+    config: &crate::config::Config,
+    out: &mut io::StdoutLock<'_>,
+    blocks_rx: &std::sync::mpsc::Receiver<Option<Vec<f32>>>,
+    mut unified: Option<parakeet_rs::ParakeetUnified>,
+    handle: &Result<parakeet_rs::ParakeetUnifiedHandle, String>,
+    streaming_config: &parakeet_rs::UnifiedStreamingConfig,
+) -> anyhow::Result<bool> {
+    use super::revisions::RevisionLog;
+    use parakeet_rs::ParakeetUnified;
+    use std::sync::mpsc;
 
     // Engine model in the background, started by the first audio block: its
     // load is hidden behind speech, and a worker kept warm between
@@ -446,7 +551,8 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             let transcriber = match super::create_transcriber(&engine_config) {
                 Ok(t) => t,
                 Err(e) => {
-                    let _ = msg_tx.send(EngineMsg::Done(Err(format!("Failed to load model: {}", e))));
+                    let _ =
+                        msg_tx.send(EngineMsg::Done(Err(format!("Failed to load model: {}", e))));
                     return;
                 }
             };
@@ -483,35 +589,6 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         });
     });
 
-    eprintln!("[worker] Loading live preview model: {}", live_model);
-    let load_start = std::time::Instant::now();
-    // parakeet-rs's own context sizes. voxtype's [parakeet] streaming_*
-    // defaults (1.5 s left context) fail the unified model's check that
-    // contexts map to mel-frame counts divisible by 8.
-    let streaming_config = UnifiedStreamingConfig::default();
-    // None = CPU: the GPU is left to the engine model.
-    let handle = super::parakeet::resolve_model_path(live_model)
-        .map_err(|e| e.to_string())
-        .and_then(|path| ParakeetUnifiedHandle::load(&path, None).map_err(|e| e.to_string()));
-    let unified = handle.as_ref().map_err(|e| e.clone()).and_then(|handle| {
-        ParakeetUnified::from_shared_with_streaming_config(handle, streaming_config.clone())
-            .map_err(|e| e.to_string())
-    });
-    let mut unified = match unified {
-        Ok(u) => {
-            eprintln!(
-                "[worker] Live preview model loaded in {:.2}s",
-                load_start.elapsed().as_secs_f32()
-            );
-            Some(u)
-        }
-        Err(e) => {
-            // No preview, but the recording still gets transcribed.
-            eprintln!("[worker] Live preview model failed to load: {}", e);
-            None
-        }
-    };
-
     writeln!(out, "{}", READY_SIGNAL)?;
     out.flush()?;
 
@@ -528,7 +605,12 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     // Off unless live_preview_revisions_dir is set; the clock starts with
     // the first audio block.
     let mut revlog: Option<RevisionLog> = None;
-    for block in blocks_rx {
+    let mut more = false;
+    for msg in blocks_rx.iter() {
+        let Some(block) = msg else {
+            more = true;
+            break;
+        };
         if let Some(start) = start_engine.take() {
             start();
         }
@@ -572,20 +654,33 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     }
 
     let secs = samples.len() as f32 / 16000.0;
+    // EOF between recordings: the daemon let the worker go.
+    if samples.is_empty() && !more {
+        return Ok(false);
+    }
     eprintln!("[worker] Received {:.2}s of audio", secs);
     if samples.is_empty() {
-        write_response_to(&mut out, WorkerResponse::error("Empty audio buffer"));
-        return Ok(());
+        write_response_to(out, WorkerResponse::error("Empty audio buffer"));
+        return Ok(more);
     }
     // flush() returns the text still held in the right context.
     if let Some(tail) = unified.as_mut().and_then(|u| u.flush().ok()) {
         if !tail.is_empty() {
             last_partial.push_str(&tail);
             // Show the last words too; the OSD stays up while finishing.
-            writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(last_partial.trim())?)?;
+            writeln!(
+                out,
+                "{}{}",
+                PARTIAL_PREFIX,
+                serde_json::to_string(last_partial.trim())?
+            )?;
             out.flush()?;
             if let (Some(log), Some(u)) = (revlog.as_mut(), unified.as_ref()) {
-                log.preview(samples.len() as f32 / 16000.0, last_partial.trim(), preview_words(u));
+                log.preview(
+                    samples.len() as f32 / 16000.0,
+                    last_partial.trim(),
+                    preview_words(u),
+                );
             }
         }
     }
@@ -595,8 +690,12 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     // in it (once, on a 30 s clip). Run it once more before giving up.
     if preview_final.is_empty() && any_speech {
         if let Ok(h) = handle.as_ref() {
-            eprintln!("[worker] Preview text empty despite speech; running the preview model again");
-            if let Ok(mut u) = ParakeetUnified::from_shared_with_streaming_config(h, streaming_config) {
+            eprintln!(
+                "[worker] Preview text empty despite speech; running the preview model again"
+            );
+            if let Ok(mut u) =
+                ParakeetUnified::from_shared_with_streaming_config(h, streaming_config.clone())
+            {
                 let mut text = String::new();
                 for chunk in samples.chunks(1600) {
                     if let Ok(d) = u.transcribe_chunk(chunk) {
@@ -617,10 +716,16 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         } else {
             WorkerResponse::success(preview_final.clone(), None)
         };
-        write_response_to(&mut out, response);
+        write_response_to(out, response);
         save_revisions(config, revlog, Some(&preview_final), "preview");
-        save_to_corpus(config, &samples, Some(&preview_final), &preview_final, "preview");
-        return Ok(());
+        save_to_corpus(
+            config,
+            &samples,
+            Some(&preview_final),
+            &preview_final,
+            "preview",
+        );
+        return Ok(more);
     }
 
     // A short clip whose engine model is still loading gets the preview
@@ -631,10 +736,16 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         && !engine_loaded.load(std::sync::atomic::Ordering::SeqCst)
     {
         eprintln!("[worker] Short clip, model still loading: using preview text");
-        write_response_to(&mut out, WorkerResponse::success(preview_final.clone(), None));
+        write_response_to(out, WorkerResponse::success(preview_final.clone(), None));
         save_revisions(config, revlog, Some(&preview_final), "preview");
-        save_to_corpus(config, &samples, Some(&preview_final), &preview_final, "preview");
-        return Ok(());
+        save_to_corpus(
+            config,
+            &samples,
+            Some(&preview_final),
+            &preview_final,
+            "preview",
+        );
+        return Ok(more);
     }
     if let Some(range) = splitter.tail(samples.len()) {
         progress.pending.push_back(range.len() as f32 / 16000.0);
@@ -687,12 +798,22 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         WorkerResponse::Success { text, .. } => Some(text.clone()),
         _ => None,
     };
-    write_response_to(&mut out, response);
+    write_response_to(out, response);
     // After the response, so it adds nothing to the wait.
-    let source = if final_text.as_deref() == Some(preview_final.as_str()) { "preview" } else { "engine" };
+    let source = if final_text.as_deref() == Some(preview_final.as_str()) {
+        "preview"
+    } else {
+        "engine"
+    };
     save_revisions(config, revlog, final_text.as_deref(), source);
-    save_to_corpus(config, &samples, final_text.as_deref(), &preview_final, config.model_name());
-    Ok(())
+    save_to_corpus(
+        config,
+        &samples,
+        final_text.as_deref(),
+        &preview_final,
+        config.model_name(),
+    );
+    Ok(more)
 }
 
 /// The preview model's words so far, with their audio timing.
@@ -780,7 +901,10 @@ fn save_to_corpus(
             "preview_model": config.live_preview_model,
             "corrected_text": serde_json::Value::Null,
         });
-        std::fs::write(stem.with_extension("json"), serde_json::to_string_pretty(&meta)?)?;
+        std::fs::write(
+            stem.with_extension("json"),
+            serde_json::to_string_pretty(&meta)?,
+        )?;
         Ok(())
     })();
     match result {
@@ -859,7 +983,11 @@ mod tests {
         let (range, speech) = &parts[0];
         assert!(*speech);
         // Cut inside the pause, between 6.0 s and 7.0 s.
-        assert!(range.end > 6 * 16000 && range.end < 7 * 16000, "{:?}", range);
+        assert!(
+            range.end > 6 * 16000 && range.end < 7 * 16000,
+            "{:?}",
+            range
+        );
         assert_eq!(sp.tail(audio.len()), Some(range.end..audio.len()));
     }
 
