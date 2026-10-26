@@ -3888,6 +3888,48 @@ symlink is what puts the sidecar on PATH where the QML expects it. Pass
 `--skip-bridge` if your install already has the bridge on PATH. See the
 [user manual](USER_MANUAL.md#voxtype-setup-quickshell) for details.
 
+### GTK4 OSD theme
+
+The `gtk4` frontend has two looks, picked with `[osd] theme`:
+
+```toml
+[osd]
+frontend = "gtk4"
+theme = "swiss"        # Default: "default"
+preview_font_pt = 18.0 # Transcript size; the swiss theme uses 18 when unset
+```
+
+- `default`: the filled waveform with a segmented peak meter, and the live
+  preview text under it. This is the look from earlier releases.
+- `swiss`: a quiet panel on a strict grid. A small label row shows the
+  elapsed time and the word count of the live preview. Below it is a thin
+  hairline waveform whose loud ticks turn the accent color (this replaces
+  the peak meter), then the live transcript in large text, and a status line
+  at the bottom: "Listening · tap Right Ctrl to stop" while you record, then
+  "Finishing · 4 s of audio left" with a 1 px progress line while the final
+  text is computed. The stop hint follows `[hotkey]`, and is left out when
+  the built-in hotkey is off.
+
+The `swiss` theme takes its colors and fonts from the KDE Plasma color
+scheme in `~/.config/kdeglobals`, read when the OSD starts:
+
+| Element | kdeglobals key |
+|---------|----------------|
+| Panel background | `[Colors:View] BackgroundNormal` (else `[Colors:Window]`) |
+| Text | `ForegroundNormal` |
+| Labels and status | `ForegroundInactive` |
+| Accent | `[General] AccentColor`, else `[Colors:Selection] BackgroundNormal`, else `DecorationFocus` |
+| Border | mixed from background and text |
+| Fonts | `[General] font` for the transcript, `[General] fixed` for labels |
+
+Without kdeglobals, or for any missing key, it uses Breeze Dark colors and
+the default sans and monospace fonts. Restart the OSD (or the daemon) after
+changing the Plasma color scheme. `opacity` sets the panel background as in
+the default theme.
+
+The theme can also be set with `voxtype-osd-gtk4 --theme swiss` or
+`VOXTYPE_OSD_THEME=swiss`.
+
 ### Quickshell OSD customization
 
 The Quickshell frontend can customize the whole OSD without editing VoxType's
