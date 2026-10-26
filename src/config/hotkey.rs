@@ -76,6 +76,12 @@ pub struct HotkeyConfig {
     /// on how the recording was stopped (e.g. paste without pressing Enter).
     #[serde(default)]
     pub double_tap_alt_key: Option<String>,
+
+    /// A key whose double tap discards the recording, like `cancel_key`
+    /// (with `double_tap`). Unlike a single-press cancel key, a stray press
+    /// of the key alone never throws a dictation away.
+    #[serde(default)]
+    pub double_tap_cancel_key: Option<String>,
 }
 
 fn default_double_tap_ms() -> u64 {
@@ -95,6 +101,7 @@ impl Default for HotkeyConfig {
             double_tap: false,
             double_tap_ms: default_double_tap_ms(),
             double_tap_alt_key: None,
+            double_tap_cancel_key: None,
         }
     }
 }
