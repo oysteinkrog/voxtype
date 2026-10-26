@@ -26,6 +26,7 @@ use crate::osd::style::{list_installed_styles, InstalledStyle};
 pub struct OsdState {
     pub enabled: bool,
     pub frontend: String,
+    pub theme: String,
     pub style: String,
     /// Styles discovered on disk at section load, cycled by the Style field.
     pub styles: Vec<InstalledStyle>,
@@ -63,6 +64,7 @@ pub struct TextEdit {
 pub enum Field {
     Enabled,
     Frontend,
+    Theme,
     Style,
     PluginPath,
     Palette,
@@ -82,6 +84,7 @@ impl Field {
     const ALL: &'static [Field] = &[
         Field::Enabled,
         Field::Frontend,
+        Field::Theme,
         Field::Style,
         Field::PluginPath,
         Field::Palette,
@@ -101,6 +104,7 @@ impl Field {
 const TABLE: &str = "osd";
 
 const FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
+const THEME_CHOICES: &[&str] = &["default", "swiss"];
 const PALETTE_CHOICES: &[&str] = &["auto", "omarchy", "fallback", "package", "custom"];
 const LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
 const POSITION_CHOICES: &[&str] = &[
@@ -134,6 +138,9 @@ impl OsdState {
             frontend: ed
                 .get_string(TABLE, "frontend")
                 .unwrap_or_else(|| "gtk4".to_string()),
+            theme: ed
+                .get_string(TABLE, "theme")
+                .unwrap_or_else(|| "default".to_string()),
             style: ed
                 .get_string(TABLE, "style")
                 .unwrap_or_else(|| "default".to_string()),
@@ -174,6 +181,12 @@ impl OsdState {
         };
         ed.set_bool(TABLE, "enabled", self.enabled);
         ed.set_string(TABLE, "frontend", &self.frontend);
+        // Leave the key out until someone picks a theme, like palette.
+        if self.theme == "default" {
+            ed.unset(TABLE, "theme");
+        } else {
+            ed.set_string(TABLE, "theme", &self.theme);
+        }
         ed.set_string(TABLE, "style", &self.style);
         if self.plugin_path.is_empty() {
             ed.unset(TABLE, "plugin_path");
@@ -231,6 +244,7 @@ impl OsdState {
         match self.field {
             Field::Enabled => self.enabled = !self.enabled,
             Field::Frontend => self.frontend = cycle_str(FRONTEND_CHOICES, &self.frontend, delta),
+            Field::Theme => self.theme = cycle_str(THEME_CHOICES, &self.theme, delta),
             Field::Style => {
                 // Only cycle between discovered styles. A literal package
                 // path isn't in the list, and cycling would replace it with
@@ -406,6 +420,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Frontend",
             state.frontend.clone(),
         ),
+        FormRowSpec::new(state.field == Field::Theme, "Theme", state.theme.clone()),
         FormRowSpec::new(
             state.field == Field::Style,
             "Style",
@@ -553,6 +568,17 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from("              inheritance, recipe layers, and explicit custom QML."),
             Line::from(""),
             dim("If the chosen binary isn't on PATH, the wrapper falls back to whichever it finds and logs a warning."),
+        ],
+        Field::Theme => vec![
+            heading("Theme"),
+            Line::from(""),
+            Line::from("Look of the gtk4 OSD. Other frontends ignore it."),
+            Line::from(""),
+            Line::from("  default  Filled waveform with a segmented peak meter."),
+            Line::from(""),
+            Line::from("  swiss    Time and word count, a hairline waveform, large"),
+            Line::from("           transcript text and a status line, in the colors"),
+            Line::from("           and fonts of the KDE Plasma color scheme."),
         ],
         Field::Style => {
             let mut lines = vec![
@@ -823,6 +849,7 @@ mod tests {
             .map(|f| match f {
                 Field::Enabled => "osd.enabled",
                 Field::Frontend => "osd.frontend",
+                Field::Theme => "osd.theme",
                 Field::Style => "osd.style",
                 Field::PluginPath => "osd.plugin_path",
                 Field::Palette => "osd.palette",
@@ -862,6 +889,7 @@ mod tests {
         let mut state = OsdState {
             enabled: true,
             frontend: "quickshell".to_string(),
+            theme: "default".to_string(),
             style: "default".to_string(),
             styles: vec![InstalledStyle {
                 name: "default".to_string(),
@@ -905,6 +933,7 @@ mod tests {
         let mut state = OsdState {
             enabled: true,
             frontend: "quickshell".to_string(),
+            theme: "default".to_string(),
             style: "default".to_string(),
             styles: vec![
                 InstalledStyle {

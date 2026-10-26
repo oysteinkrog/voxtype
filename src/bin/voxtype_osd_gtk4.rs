@@ -584,7 +584,7 @@ fn build_window(
             .unwrap_or_else(|_| Instant::now() - Duration::from_secs(3600));
         // About 10 Hz is plenty for text; the files live on tmpfs.
         ticks.set(ticks.get().wrapping_add(1));
-        let poll = ticks.get() % 6 == 0;
+        let poll = ticks.get().is_multiple_of(6);
         if poll {
             // A status older than 30 s is left over from a crash; ignore it.
             let fresh = std::fs::metadata(&status_path)
@@ -1016,6 +1016,8 @@ struct SwissView {
     progress: DrawingArea,
     /// Progress of the final transcription; `None` while it is unknown.
     fraction: Rc<Cell<Option<f64>>>,
+    /// False after the recording stops: the waveform then drops the accent.
+    live: Rc<Cell<bool>>,
     /// "tap Right Ctrl to stop", or empty when voxtype has no hotkey.
     listening_detail: String,
 }
@@ -1061,8 +1063,11 @@ impl SwissView {
         wave.set_margin_bottom(10);
         let colors = (theme.inactive, theme.accent, theme.border);
         let gain = cfg.waveform_gain as f64;
+        let live = Rc::new(Cell::new(true));
+        let live_for_draw = live.clone();
         wave.set_draw_func(move |_area, cr, w, h| {
-            draw_swiss_wave(cr, w as f64, h as f64, colors, &state, gain);
+            let live = live_for_draw.get();
+            draw_swiss_wave(cr, w as f64, h as f64, colors, &state, gain, live);
         });
         redraw_every_frame(&wave);
 
@@ -1084,7 +1089,7 @@ impl SwissView {
         detail.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         let fraction = Rc::new(Cell::new(None));
         let progress = DrawingArea::new();
-        progress.set_content_height(1);
+        progress.set_content_height(2);
         progress.set_hexpand(true);
         progress.set_valign(gtk4::Align::Center);
         progress.set_margin_start(16);
@@ -1121,6 +1126,7 @@ impl SwissView {
             detail,
             progress,
             fraction,
+            live,
             listening_detail,
         };
         view.reset();
@@ -1158,6 +1164,7 @@ impl SwissView {
         set_text_if_changed(&self.detail, &detail);
         let finishing = !status.is_empty();
         self.progress.set_visible(finishing);
+        self.live.set(!finishing);
         if finishing {
             self.dot.add_css_class("finishing");
         } else {
@@ -1227,7 +1234,7 @@ fn install_swiss_css(theme: &PlasmaTheme, opacity: f32, font_pt: Option<f32>) {
          .swiss-state {{ font-family: {mono}; font-size: 9pt; color: {accent}; }}\n\
          .swiss-detail {{ font-family: {mono}; font-size: 9pt; color: {dim}; }}\n\
          .swiss-dot {{ min-width: 7px; min-height: 7px; background-color: {accent}; }}\n\
-         .swiss-dot.finishing {{ background-color: transparent; box-shadow: inset 0 0 0 1px {accent}; }}"
+         .swiss-dot.finishing {{ background-color: transparent; border: 1px solid {accent}; min-width: 5px; min-height: 5px; }}"
     );
     add_css(&css);
 }
@@ -1235,7 +1242,8 @@ fn install_swiss_css(theme: &PlasmaTheme, opacity: f32, font_pt: Option<f32>) {
 /// Hairline waveform: one thin tick per few frames, mirrored on a 1 px
 /// baseline. Ticks are tied to frame numbers so they scroll with the audio
 /// instead of shimmering in place. Louder ticks shift from the inactive
-/// color to the accent, which stands in for a separate level meter.
+/// color to the accent, which stands in for a separate level meter. Once
+/// the recording stops (`live` false) the frozen waveform stays inactive.
 fn draw_swiss_wave(
     cr: &Context,
     w: f64,
@@ -1243,6 +1251,7 @@ fn draw_swiss_wave(
     (quiet, loud, baseline): (Color, Color, Color),
     state: &Arc<SharedState>,
     gain: f64,
+    live: bool,
 ) {
     if w < 1.0 || h < 1.0 {
         return;
@@ -1271,7 +1280,7 @@ fn draw_swiss_wave(
     let fade_px = w * 0.2;
 
     for (i, frame) in frames.iter().enumerate() {
-        if frame.seq as usize % every != 0 {
+        if !(frame.seq as usize).is_multiple_of(every) {
             continue;
         }
         let x = (w - 1.0 - (right - i as f64) * px_per_frame).round() + 0.5;
@@ -1284,7 +1293,11 @@ fn draw_swiss_wave(
             .fold(0.0_f32, f32::max) as f64;
         let level = tick_level(amp, gain);
         let half = (level * max_half).max(1.0);
-        let t = smoothstep(0.35, 0.75, level) as f32;
+        let t = if live {
+            smoothstep(0.3, 0.65, level) as f32
+        } else {
+            0.0
+        };
         let color = Color::rgb(
             quiet.r + (loud.r - quiet.r) * t,
             quiet.g + (loud.g - quiet.g) * t,
@@ -1300,7 +1313,7 @@ fn draw_swiss_wave(
 }
 
 /// Tick height, 0.0..=1.0, from a sample peak. Uses a -60..0 dBFS scale
-/// squared, so speech fills the strip and room noise stays near the line.
+/// raised to 1.5, so speech fills the strip and room noise stays near the line.
 /// `waveform_gain` scales relative to its default of 10.
 fn tick_level(amp: f64, gain: f64) -> f64 {
     let amp = amp * gain / 10.0;
@@ -1309,7 +1322,7 @@ fn tick_level(amp: f64, gain: f64) -> f64 {
     }
     let dbfs = 20.0 * amp.log10();
     let level = peak_meter_fraction(dbfs as f32, METER_FLOOR_DBFS) as f64;
-    level * level
+    level.powf(1.5)
 }
 
 fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
