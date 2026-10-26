@@ -336,6 +336,16 @@ impl PauseSplitter {
     }
 }
 
+/// The parts of a whole recording that the live worker sends to the engine
+/// model: split at pauses, only parts with speech. For offline replays.
+pub fn speech_parts(samples: &[f32]) -> Vec<std::ops::Range<usize>> {
+    let mut splitter = PauseSplitter::new();
+    let mut parts: Vec<_> =
+        splitter.push(samples).into_iter().filter(|(_, speech)| *speech).map(|(r, _)| r).collect();
+    parts.extend(splitter.tail(samples.len()));
+    parts
+}
+
 /// How far the engine model has got through the parts sent to it.
 struct Progress {
     /// Seconds of audio in each part sent but not done, oldest first.
@@ -391,6 +401,7 @@ impl Progress {
 ///    then the usual JSON response with all parts joined, and exits.
 #[cfg(feature = "parakeet")]
 pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyhow::Result<()> {
+    use super::revisions::RevisionLog;
     use parakeet_rs::{ParakeetUnified, ParakeetUnifiedHandle, UnifiedStreamingConfig};
     use std::sync::mpsc;
 
@@ -514,9 +525,15 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     // empty, sometimes part of a word), so the running transcript is the
     // concatenation.
     let mut last_partial = String::new();
+    // Off unless live_preview_revisions_dir is set; the clock starts with
+    // the first audio block.
+    let mut revlog: Option<RevisionLog> = None;
     for block in blocks_rx {
         if let Some(start) = start_engine.take() {
             start();
+        }
+        if revlog.is_none() && config.live_preview_revisions_dir.is_some() {
+            revlog = Some(RevisionLog::new());
         }
         samples.extend_from_slice(&block);
         for (range, speech) in splitter.push(&samples) {
@@ -542,6 +559,9 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
                 let shown = last_partial.trim_start();
                 writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(shown)?)?;
                 out.flush()?;
+                if let Some(log) = revlog.as_mut() {
+                    log.preview(samples.len() as f32 / 16000.0, shown, preview_words(u));
+                }
             }
             Ok(_) => {}
             Err(e) => {
@@ -564,6 +584,9 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             // Show the last words too; the OSD stays up while finishing.
             writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(last_partial.trim())?)?;
             out.flush()?;
+            if let (Some(log), Some(u)) = (revlog.as_mut(), unified.as_ref()) {
+                log.preview(samples.len() as f32 / 16000.0, last_partial.trim(), preview_words(u));
+            }
         }
     }
     let mut preview_final = last_partial.trim().to_string();
@@ -595,6 +618,7 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             WorkerResponse::success(preview_final.clone(), None)
         };
         write_response_to(&mut out, response);
+        save_revisions(config, revlog, Some(&preview_final), "preview");
         save_to_corpus(config, &samples, Some(&preview_final), &preview_final, "preview");
         return Ok(());
     }
@@ -608,6 +632,7 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     {
         eprintln!("[worker] Short clip, model still loading: using preview text");
         write_response_to(&mut out, WorkerResponse::success(preview_final.clone(), None));
+        save_revisions(config, revlog, Some(&preview_final), "preview");
         save_to_corpus(config, &samples, Some(&preview_final), &preview_final, "preview");
         return Ok(());
     }
@@ -664,8 +689,56 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     };
     write_response_to(&mut out, response);
     // After the response, so it adds nothing to the wait.
+    let source = if final_text.as_deref() == Some(preview_final.as_str()) { "preview" } else { "engine" };
+    save_revisions(config, revlog, final_text.as_deref(), source);
     save_to_corpus(config, &samples, final_text.as_deref(), &preview_final, config.model_name());
     Ok(())
+}
+
+/// The preview model's words so far, with their audio timing.
+#[cfg(feature = "parakeet")]
+fn preview_words(u: &parakeet_rs::ParakeetUnified) -> Vec<super::revisions::Word> {
+    let timed = u.get_timed_transcript(parakeet_rs::TimestampMode::Tokens);
+    let conf = u.token_confidences();
+    super::revisions::words_from_tokens(
+        timed
+            .tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.text.as_str(), t.start, t.end, conf.get(i).copied())),
+    )
+}
+
+/// Write the revision log to `live_preview_revisions_dir`, if set.
+/// `source` is "preview" when the final text is the preview model's own.
+#[cfg(feature = "parakeet")]
+fn save_revisions(
+    config: &crate::config::Config,
+    log: Option<super::revisions::RevisionLog>,
+    final_text: Option<&str>,
+    source: &str,
+) {
+    let (Some(log), Some(dir)) = (log, config.live_preview_revisions_dir.as_deref()) else {
+        return;
+    };
+    let now = chrono::Local::now();
+    let stem = now.format("%Y%m%d-%H%M%S%.3f").to_string();
+    let model = if source == "preview" {
+        config.live_preview_model.as_deref().unwrap_or_default()
+    } else {
+        config.model_name()
+    };
+    let header = serde_json::json!({
+        "source": "live",
+        "time": now.to_rfc3339(),
+        "preview_model": config.live_preview_model,
+        "final_model": model,
+    });
+    let dir = super::revisions::expand_home(dir);
+    match log.write(&dir, &stem, header, None, source, model, final_text) {
+        Ok(path) => eprintln!("[worker] Saved revisions to {}", path.display()),
+        Err(e) => eprintln!("[worker] Could not save revisions: {}", e),
+    }
 }
 
 /// Save a recording and its texts to `live_preview_corpus_dir`, if set.
@@ -681,10 +754,7 @@ fn save_to_corpus(
     let Some(dir) = config.live_preview_corpus_dir.as_deref() else {
         return;
     };
-    let dir = match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
-        (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
-        _ => std::path::PathBuf::from(dir),
-    };
+    let dir = super::revisions::expand_home(dir);
     let now = chrono::Local::now();
     let dir = dir.join(now.format("%Y-%m").to_string());
     let stem = dir.join(now.format("%Y%m%d-%H%M%S%.3f").to_string());

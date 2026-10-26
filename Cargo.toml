@@ -332,6 +332,14 @@ path = "src/bin/voxtype_mirror_registry.rs"
 name = "inspect_cohere_onnx"
 required-features = ["cohere"]
 
+[[example]]
+name = "replay_revisions"
+required-features = ["parakeet"]
+
+[[example]]
+name = "replay_engine_final"
+required-features = ["cohere"]
+
 # TEMPORARY: openvino-genai 0.11.0's WhisperPipeline has no way to pass
 # device properties (CACHE_DIR etc.), unlike LlmPipeline/VlmPipeline in
 # the same crate which already expose with_properties(). Pinned to a
@@ -343,3 +351,7 @@ required-features = ["cohere"]
 # if needed) once that PR merges and ships in a crates.io release.
 [patch.crates-io]
 openvino-genai = { git = "https://github.com/voxtype/openvino-rs", branch = "whisper-pipeline-with-properties" }
+# Per-token confidence for the live preview's revision log
+# (live_preview_revisions_dir): parakeet-rs 0.3.5 plus one commit that keeps
+# the softmax score of each emitted token in ParakeetUnified.
+parakeet-rs = { git = "https://github.com/oysteinkrog/parakeet-rs", branch = "voxtype-confidence" }

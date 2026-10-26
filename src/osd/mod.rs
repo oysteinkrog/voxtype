@@ -12,11 +12,13 @@
 //! - [`visual`] — peak-hold decay, waveform envelope helpers, palette types.
 //! - [`config`] — `[osd]` config block (`OsdConfig`).
 //! - [`theme`] — Omarchy theme parsing + change watcher.
+//! - [`plasma`] — KDE Plasma colors and fonts for the `swiss` gtk4 theme.
 //! - [`gtk_env`] — environment workarounds for GTK4 bugs (GTK frontend only).
 
 pub mod config;
 pub mod gtk_env;
 pub mod ipc;
+pub mod plasma;
 pub mod recipe;
 pub mod style;
 pub mod supervisor;

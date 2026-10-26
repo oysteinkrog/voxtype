@@ -239,6 +239,7 @@ const LOOPBACK_CHOICES: &[&str] = &["auto", "disabled"];
 const ECHO_CANCEL_CHOICES: &[&str] = &["auto", "disabled"];
 
 const OSD_FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
+const OSD_THEME_CHOICES: &[&str] = &["default", "swiss"];
 /// `auto` is absent on purpose: the config field is `Option`, and "auto"
 /// means absent. Use `voxtype config unset osd.palette`.
 const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom"];
@@ -1328,6 +1329,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "OSD",
         "Preview font size",
         "Font size of the live preview text in points (gtk4 OSD). Unset keeps the theme's size.",
+    ),
+    spec(
+        "osd.theme",
+        "osd",
+        "theme",
+        closed(OSD_THEME_CHOICES),
+        "OSD",
+        "Theme",
+        "Look of the gtk4 OSD. `swiss` adds a header with time and word count, a hairline waveform and a status line, in the KDE Plasma colors.",
     ),
     spec(
         "osd.opacity",
@@ -2631,6 +2641,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             None => Json::Null,
         },
         "osd.opacity" => f32_json(cfg.osd.opacity),
+        "osd.theme" => serde_json::to_value(cfg.osd.theme).ok()?,
         "osd.waveform_window_secs" => f32_json(cfg.osd.waveform_window_secs),
         "osd.peak_decay_db_per_sec" => f32_json(cfg.osd.peak_decay_db_per_sec),
         "osd.waveform_gain" => f32_json(cfg.osd.waveform_gain),

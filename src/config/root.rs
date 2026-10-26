@@ -78,6 +78,13 @@ pub struct Config {
     #[serde(default)]
     pub live_preview_corpus_dir: Option<String>,
 
+    /// Log every change of the live preview text here, with times, word
+    /// timing and the final text: one `<time>.revisions.jsonl` per
+    /// recording, in a mode 0700 directory. For tuning how the overlay
+    /// animates words. `~` is expanded. Unset (the default) logs nothing.
+    #[serde(default)]
+    pub live_preview_revisions_dir: Option<String>,
+
     /// Where the live worker's final text comes from: "engine" (the
     /// configured engine, e.g. Cohere on the GPU) or "preview" (the live
     /// preview model's own text: CPU only, no second model loaded).
@@ -185,6 +192,7 @@ impl Default for Config {
             live_preview_warm_secs: 0,
             live_preview_warm_release_command: None,
             live_preview_corpus_dir: None,
+            live_preview_revisions_dir: None,
             live_preview_final: default_live_preview_final(),
             live_preview_min_free_vram_mib: 0,
             parakeet: None,

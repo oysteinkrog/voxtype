@@ -60,6 +60,29 @@ impl OsdFrontend {
     }
 }
 
+/// Look of the gtk4 OSD panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OsdTheme {
+    /// Filled waveform with a segmented peak meter.
+    #[default]
+    Default,
+    /// Header row with elapsed time and word count, a hairline waveform,
+    /// large transcript text and a status line. Colors and font come from
+    /// the KDE Plasma color scheme (`~/.config/kdeglobals`).
+    Swiss,
+}
+
+impl OsdTheme {
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "default" => Some(OsdTheme::Default),
+            "swiss" => Some(OsdTheme::Swiss),
+            _ => None,
+        }
+    }
+}
+
 /// Palette source for Quickshell OSD recipes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -329,6 +352,8 @@ pub struct OsdConfig {
     pub preview_font_pt: Option<f32>,
     /// Background opacity, 0.0..=1.0.
     pub opacity: f32,
+    /// Look of the gtk4 OSD panel. `default` keeps the original look.
+    pub theme: OsdTheme,
     /// Visible waveform window in seconds (3.0 per BRIEF).
     pub waveform_window_secs: f32,
     /// Held-peak decay rate in dB/sec (6.0 per BRIEF).
@@ -369,6 +394,7 @@ impl Default for OsdConfig {
             top_margin: 0.85,
             preview_font_pt: None,
             opacity: 0.95,
+            theme: OsdTheme::Default,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,
             waveform_gain: 10.0,
@@ -400,6 +426,7 @@ mod tests {
         assert!((c.peak_decay_db_per_sec - 6.0).abs() < 1e-6);
         assert!((c.waveform_gain - 10.0).abs() < 1e-6);
         assert_eq!(c.style, "default");
+        assert_eq!(c.theme, OsdTheme::Default);
         assert_eq!(c.palette, None);
         assert_eq!(c.layout, OsdLayout::Compact);
         assert!(c.plugin_path.is_none());
@@ -458,6 +485,15 @@ mod tests {
         assert_eq!(v, OsdFrontend::Native);
         let v: OsdFrontend = serde_json::from_str("\"quickshell\"").unwrap();
         assert_eq!(v, OsdFrontend::Quickshell);
+    }
+
+    #[test]
+    fn theme_parses_from_toml_and_str() {
+        let c: OsdConfig = toml::from_str("theme = \"swiss\"\n").unwrap();
+        assert_eq!(c.theme, OsdTheme::Swiss);
+        assert_eq!(OsdTheme::parse_str(" Swiss "), Some(OsdTheme::Swiss));
+        assert_eq!(OsdTheme::parse_str("default"), Some(OsdTheme::Default));
+        assert_eq!(OsdTheme::parse_str("glass"), None);
     }
 
     #[test]
