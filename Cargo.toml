@@ -332,6 +332,10 @@ path = "src/bin/voxtype_mirror_registry.rs"
 name = "inspect_cohere_onnx"
 required-features = ["cohere"]
 
+[[example]]
+name = "replay_revisions"
+required-features = ["parakeet"]
+
 # TEMPORARY: openvino-genai 0.11.0's WhisperPipeline has no way to pass
 # device properties (CACHE_DIR etc.), unlike LlmPipeline/VlmPipeline in
 # the same crate which already expose with_properties(). Pinned to a
