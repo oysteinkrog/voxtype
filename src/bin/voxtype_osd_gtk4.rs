@@ -1241,8 +1241,10 @@ impl SwissView {
         };
         set_text_if_changed(&self.state_label, &state);
         set_text_if_changed(&self.detail, &detail);
-        let finishing = !status.is_empty();
-        self.progress.set_visible(finishing);
+        // "Loading: live text model" comes while still recording.
+        let loading = status.starts_with("Loading");
+        let finishing = !status.is_empty() && !loading;
+        self.progress.set_visible(!status.is_empty());
         self.live.set(!finishing);
         if finishing {
             self.dot.add_css_class("finishing");
