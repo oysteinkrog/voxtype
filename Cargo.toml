@@ -336,6 +336,10 @@ required-features = ["cohere"]
 name = "replay_revisions"
 required-features = ["parakeet"]
 
+[[example]]
+name = "replay_engine_final"
+required-features = ["cohere"]
+
 # TEMPORARY: openvino-genai 0.11.0's WhisperPipeline has no way to pass
 # device properties (CACHE_DIR etc.), unlike LlmPipeline/VlmPipeline in
 # the same crate which already expose with_properties(). Pinned to a

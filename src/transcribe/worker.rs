@@ -336,6 +336,16 @@ impl PauseSplitter {
     }
 }
 
+/// The parts of a whole recording that the live worker sends to the engine
+/// model: split at pauses, only parts with speech. For offline replays.
+pub fn speech_parts(samples: &[f32]) -> Vec<std::ops::Range<usize>> {
+    let mut splitter = PauseSplitter::new();
+    let mut parts: Vec<_> =
+        splitter.push(samples).into_iter().filter(|(_, speech)| *speech).map(|(r, _)| r).collect();
+    parts.extend(splitter.tail(samples.len()));
+    parts
+}
+
 /// How far the engine model has got through the parts sent to it.
 struct Progress {
     /// Seconds of audio in each part sent but not done, oldest first.
