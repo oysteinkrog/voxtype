@@ -28,11 +28,14 @@ use gtk4::{Application, ApplicationWindow, DrawingArea};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
-use voxtype::config::{ActivationMode, Config as VoxtypeConfig, HotkeyConfig};
+use voxtype::config::{Config as VoxtypeConfig, HotkeyConfig};
 use voxtype::osd::config::{OsdConfig, OsdPosition, OsdTheme};
 use voxtype::osd::gtk_env;
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing};
 use voxtype::osd::plasma::{self, PlasmaTheme};
+use voxtype::osd::swiss::{
+    self, smooth_levels, stop_hint, tick_level, wave_hues, wave_stops, StatusLine,
+};
 use voxtype::osd::theme::ThemeWatcher;
 use voxtype::osd::visual::{
     peak_meter_fraction, project_envelope, Color, MeterZone, Palette, PeakHold,
@@ -1026,19 +1029,6 @@ enum Chrome {
     Swiss(SwissView),
 }
 
-/// Height of the `swiss` waveform strip.
-const SWISS_WAVE_HEIGHT_PX: i32 = 40;
-
-/// Transcript size in the `swiss` theme when `preview_font_pt` is unset.
-const SWISS_TEXT_PT: f32 = 18.0;
-
-/// Most transcript lines in the `swiss` panel. The text area grows a line at
-/// a time up to this, and never shrinks during one dictation.
-const SWISS_MAX_LINES: i32 = 5;
-
-/// Left plus right padding and border of `.swiss-panel`.
-const SWISS_PANEL_INSET_PX: i32 = 46;
-
 /// The `swiss` panel: a label row with elapsed time and word count, a
 /// filled gradient waveform, the transcript, and a status line with a thin
 /// progress bar while the final text is computed.
@@ -1101,7 +1091,7 @@ impl SwissView {
         header.append(&words_box);
 
         let wave = DrawingArea::new();
-        wave.set_content_height(SWISS_WAVE_HEIGHT_PX);
+        wave.set_content_height(swiss::WAVE_HEIGHT_PX);
         wave.set_margin_top(10);
         wave.set_margin_bottom(10);
         let colors = (theme.inactive, theme.accent, theme.border);
@@ -1168,11 +1158,7 @@ impl SwissView {
         panel.append(&bottom_rule);
         panel.append(&status);
 
-        let listening_detail = if stop_hint.is_empty() {
-            String::new()
-        } else {
-            format!("  ·  {stop_hint}")
-        };
+        let listening_detail = stop_hint.to_string();
         let view = Self {
             panel,
             time,
@@ -1187,7 +1173,7 @@ impl SwissView {
             preview: preview.clone(),
             text_area,
             lines: Cell::new(0),
-            text_width_px: cfg.width_px as i32 - SWISS_PANEL_INSET_PX,
+            text_width_px: cfg.width_px as i32 - swiss::PANEL_INSET_PX,
         };
         view.reset();
         view
@@ -1203,7 +1189,7 @@ impl SwissView {
         self.reserve_lines(1);
     }
 
-    /// Show the end of the transcript in at most SWISS_MAX_LINES lines.
+    /// Show the end of the transcript in at most swiss::MAX_LINES lines.
     /// Empty text keeps what is on screen.
     fn show_text(&self, full: &str) {
         if full.is_empty() {
@@ -1230,11 +1216,11 @@ impl SwissView {
         if start > 0 {
             text = format!("…{text}");
         }
-        while line_count(&text) > SWISS_MAX_LINES && start + 1 < words.len() {
+        while line_count(&text) > swiss::MAX_LINES && start + 1 < words.len() {
             start += 1;
             text = format!("…{}", words[start..].join(" "));
         }
-        let lines = line_count(&text).min(SWISS_MAX_LINES);
+        let lines = line_count(&text).min(swiss::MAX_LINES);
         self.reserve_lines(lines);
         set_text_if_changed(&self.preview, &text);
     }
@@ -1272,19 +1258,11 @@ impl SwissView {
     /// `status` is the daemon's line such as "Finishing: 4 s of audio
     /// left", or empty while recording.
     fn show_status(&self, status: &str) {
-        let (state, detail) = if status.is_empty() {
-            ("Listening".to_string(), self.listening_detail.clone())
-        } else {
-            match status.split_once(": ") {
-                Some((head, rest)) => (head.to_string(), format!("  ·  {rest}")),
-                None => (status.to_string(), String::new()),
-            }
-        };
-        set_text_if_changed(&self.state_label, &state);
-        set_text_if_changed(&self.detail, &detail);
+        let line = StatusLine::new(status, &self.listening_detail);
+        set_text_if_changed(&self.state_label, &line.state);
+        set_text_if_changed(&self.detail, &line.detail);
         // "Loading: live text model" comes while still recording.
-        let loading = status.starts_with("Loading");
-        let finishing = !status.is_empty() && !loading;
+        let finishing = line.finishing;
         self.progress.set_visible(!status.is_empty());
         self.live.set(!finishing);
         if finishing {
@@ -1342,7 +1320,7 @@ fn install_swiss_css(theme: &PlasmaTheme, opacity: f32, font_pt: Option<f32>) {
         Some(f) => format!("\"{f}\", monospace"),
         None => "monospace".to_string(),
     };
-    let text_pt = font_pt.unwrap_or(SWISS_TEXT_PT);
+    let text_pt = font_pt.unwrap_or(swiss::TEXT_PT);
     let css = format!(
         "window {{ background: transparent; }}\n\
          .swiss-panel {{ background-color: {bg}; border: 1px solid {border}; border-radius: 3px; \
@@ -1405,19 +1383,7 @@ fn draw_swiss_wave(
         .iter()
         .map(|f| tick_level(f.max.max(-f.min) as f64, gain))
         .collect();
-    let window = |v: &[f64], i: usize, r: usize| (i.saturating_sub(r), (i + r).min(v.len() - 1));
-    let peak: Vec<f64> = (0..raw.len())
-        .map(|i| {
-            let (lo, hi) = window(&raw, i, 2);
-            raw[lo..=hi].iter().fold(0.0_f64, |a, b| a.max(*b))
-        })
-        .collect();
-    let levels: Vec<f64> = (0..peak.len())
-        .map(|i| {
-            let (lo, hi) = window(&peak, i, 1);
-            peak[lo..=hi].iter().sum::<f64>() / (hi - lo + 1) as f64
-        })
-        .collect();
+    let levels = smooth_levels(&raw);
     let points: Vec<(f64, f64)> = levels
         .iter()
         .enumerate()
@@ -1447,94 +1413,16 @@ fn draw_swiss_wave(
     cr.close_path();
 
     let (left, center, right_c) = if live {
-        (
-            shift_hue(loud, -40.0, 0.12),
-            lighten(loud, 0.12),
-            shift_hue(loud, 45.0, 0.12),
-        )
+        wave_hues(loud)
     } else {
         (quiet, quiet, quiet)
     };
     let grad = cairo::LinearGradient::new(0.0, 0.0, w, 0.0);
-    let stop = |pos: f64, c: Color, a: f64| {
-        grad.add_color_stop_rgba(pos, c.r as f64, c.g as f64, c.b as f64, a)
-    };
-    stop(0.0, left, 0.0);
-    stop(0.2, left, 0.95);
-    stop(0.6, center, 1.0);
-    stop(1.0, right_c, 1.0);
+    for (pos, c, a) in wave_stops(left, center, right_c) {
+        grad.add_color_stop_rgba(pos as f64, c.r as f64, c.g as f64, c.b as f64, a as f64);
+    }
     cr.set_source(&grad).ok();
     cr.fill().ok();
-}
-
-/// Mix `c` toward white by `amount` (0..1).
-fn lighten(c: Color, amount: f32) -> Color {
-    Color::rgb(
-        c.r + (1.0 - c.r) * amount,
-        c.g + (1.0 - c.g) * amount,
-        c.b + (1.0 - c.b) * amount,
-    )
-}
-
-/// Rotate the hue of `c` by `degrees` and lighten it, keeping saturation.
-fn shift_hue(c: Color, degrees: f32, amount: f32) -> Color {
-    let (r, g, b) = (c.r, c.g, c.b);
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
-    let d = max - min;
-    if d <= f32::EPSILON {
-        return lighten(c, amount);
-    }
-    let s = if l > 0.5 {
-        d / (2.0 - max - min)
-    } else {
-        d / (max + min)
-    };
-    let mut hue = if max == r {
-        (g - b) / d + if g < b { 6.0 } else { 0.0 }
-    } else if max == g {
-        (b - r) / d + 2.0
-    } else {
-        (r - g) / d + 4.0
-    } * 60.0;
-    hue = (hue + degrees).rem_euclid(360.0);
-    let q = if l < 0.5 {
-        l * (1.0 + s)
-    } else {
-        l + s - l * s
-    };
-    let p = 2.0 * l - q;
-    let channel = |t: f32| {
-        let t = t.rem_euclid(1.0);
-        if t < 1.0 / 6.0 {
-            p + (q - p) * 6.0 * t
-        } else if t < 0.5 {
-            q
-        } else if t < 2.0 / 3.0 {
-            p + (q - p) * (2.0 / 3.0 - t) * 6.0
-        } else {
-            p
-        }
-    };
-    let h = hue / 360.0;
-    lighten(
-        Color::rgb(channel(h + 1.0 / 3.0), channel(h), channel(h - 1.0 / 3.0)),
-        amount,
-    )
-}
-
-/// Tick height, 0.0..=1.0, from a sample peak. Uses a -60..0 dBFS scale
-/// raised to 1.5, so speech fills the strip and room noise stays near the line.
-/// `waveform_gain` scales relative to its default of 10.
-fn tick_level(amp: f64, gain: f64) -> f64 {
-    let amp = amp * gain / 10.0;
-    if amp <= 0.0 {
-        return 0.0;
-    }
-    let dbfs = 20.0 * amp.log10();
-    let level = peak_meter_fraction(dbfs as f32, METER_FLOOR_DBFS) as f64;
-    level.powf(1.5)
 }
 
 /// A 1 px progress line. With no fraction (the model is still loading) a
@@ -1569,85 +1457,4 @@ fn draw_hairline_progress(
 
 fn set_source(cr: &Context, c: Color, alpha: f64) {
     cr.set_source_rgba(c.r as f64, c.g as f64, c.b as f64, alpha);
-}
-
-/// "tap Right Ctrl to stop" from `[hotkey]`, or empty when the hotkey is
-/// off (compositor bindings call `voxtype record` instead).
-fn stop_hint(hotkey: &HotkeyConfig) -> String {
-    if !hotkey.enabled {
-        return String::new();
-    }
-    let key = hotkey
-        .modifiers
-        .iter()
-        .chain(std::iter::once(&hotkey.key))
-        .map(|k| key_label(k))
-        .collect::<Vec<_>>()
-        .join("+");
-    match hotkey.mode {
-        ActivationMode::PushToTalk => format!("release {key} to stop"),
-        ActivationMode::Toggle if hotkey.double_tap => format!("double tap {key} to stop"),
-        ActivationMode::Toggle => format!("tap {key} to stop"),
-    }
-}
-
-/// "RIGHTCTRL" -> "Right Ctrl", "KEY_SCROLLLOCK" -> "Scrolllock".
-fn key_label(name: &str) -> String {
-    let upper = name.trim().to_ascii_uppercase();
-    let upper = upper.strip_prefix("KEY_").unwrap_or(&upper);
-    let (side, rest) = match (upper.strip_prefix("RIGHT"), upper.strip_prefix("LEFT")) {
-        (Some(r), _) if !r.is_empty() => ("Right ", r),
-        (_, Some(r)) if !r.is_empty() => ("Left ", r),
-        _ => ("", upper),
-    };
-    let rest = match rest {
-        "CTRL" | "CONTROL" => "Ctrl".to_string(),
-        "META" | "SUPER" => "Super".to_string(),
-        other => {
-            let mut chars = other.chars();
-            chars
-                .next()
-                .map(|c| c.to_string() + &chars.as_str().to_ascii_lowercase())
-                .unwrap_or_default()
-        }
-    };
-    format!("{side}{rest}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn key_labels_read_like_keycaps() {
-        assert_eq!(key_label("RIGHTCTRL"), "Right Ctrl");
-        assert_eq!(key_label("KEY_LEFTALT"), "Left Alt");
-        assert_eq!(key_label("SCROLLLOCK"), "Scrolllock");
-        assert_eq!(key_label("RIGHT"), "Right");
-        assert_eq!(key_label("leftmeta"), "Left Super");
-    }
-
-    #[test]
-    fn stop_hint_follows_mode() {
-        let mut hk = HotkeyConfig {
-            key: "RIGHTCTRL".into(),
-            ..HotkeyConfig::default()
-        };
-        hk.mode = ActivationMode::PushToTalk;
-        assert_eq!(stop_hint(&hk), "release Right Ctrl to stop");
-        hk.mode = ActivationMode::Toggle;
-        assert_eq!(stop_hint(&hk), "tap Right Ctrl to stop");
-        hk.double_tap = true;
-        assert_eq!(stop_hint(&hk), "double tap Right Ctrl to stop");
-        hk.enabled = false;
-        assert_eq!(stop_hint(&hk), "");
-    }
-
-    #[test]
-    fn tick_level_maps_speech_high_and_silence_low() {
-        assert_eq!(tick_level(0.0, 10.0), 0.0);
-        assert!(tick_level(0.001, 10.0) < 0.05);
-        assert!(tick_level(0.3, 10.0) > 0.6);
-        assert!(tick_level(0.03, 20.0) > tick_level(0.03, 10.0));
-    }
 }

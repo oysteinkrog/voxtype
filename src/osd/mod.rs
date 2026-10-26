@@ -13,6 +13,7 @@
 //! - [`config`] — `[osd]` config block (`OsdConfig`).
 //! - [`theme`] — Omarchy theme parsing + change watcher.
 //! - [`plasma`] — KDE Plasma colors and fonts for the `swiss` gtk4 theme.
+//! - [`swiss`] — the `swiss` look shared by the gtk4 and vo frontends.
 //! - [`gtk_env`] — environment workarounds for GTK4 bugs (GTK frontend only).
 
 pub mod config;
@@ -22,5 +23,6 @@ pub mod plasma;
 pub mod recipe;
 pub mod style;
 pub mod supervisor;
+pub mod swiss;
 pub mod theme;
 pub mod visual;
