@@ -67,7 +67,7 @@ pub enum OsdTheme {
     /// Filled waveform with a segmented peak meter.
     #[default]
     Default,
-    /// Header row with elapsed time and word count, a hairline waveform,
+    /// Header row with elapsed time and word count, a filled gradient waveform,
     /// large transcript text and a status line. Colors and font come from
     /// the KDE Plasma color scheme (`~/.config/kdeglobals`).
     Swiss,

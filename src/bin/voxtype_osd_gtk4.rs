@@ -167,7 +167,7 @@ struct Args {
     waveform_gain: Option<f32>,
 
     /// Panel look: "default" (filled waveform and peak meter) or "swiss"
-    /// (time and word count, hairline waveform, status line, KDE Plasma
+    /// (time and word count, filled gradient waveform, status line, KDE Plasma
     /// colors).
     #[arg(long, env = "VOXTYPE_OSD_THEME", value_parser = parse_theme)]
     theme: Option<OsdTheme>,
@@ -994,9 +994,6 @@ enum Chrome {
     Swiss(SwissView),
 }
 
-/// Waveform tick spacing in the `swiss` theme, in pixels.
-const SWISS_TICK_SPACING_PX: f64 = 4.0;
-
 /// Height of the `swiss` waveform strip.
 const SWISS_WAVE_HEIGHT_PX: i32 = 40;
 
@@ -1004,7 +1001,7 @@ const SWISS_WAVE_HEIGHT_PX: i32 = 40;
 const SWISS_TEXT_PT: f32 = 18.0;
 
 /// The `swiss` panel: a label row with elapsed time and word count, a
-/// hairline waveform, the transcript, and a status line with a thin
+/// filled gradient waveform, the transcript, and a status line with a thin
 /// progress bar while the final text is computed.
 struct SwissView {
     panel: gtk4::Box,
@@ -1239,11 +1236,11 @@ fn install_swiss_css(theme: &PlasmaTheme, opacity: f32, font_pt: Option<f32>) {
     add_css(&css);
 }
 
-/// Hairline waveform: one thin tick per few frames, mirrored on a 1 px
-/// baseline. Ticks are tied to frame numbers so they scroll with the audio
-/// instead of shimmering in place. Louder ticks shift from the inactive
-/// color to the accent, which stands in for a separate level meter. Once
-/// the recording stops (`live` false) the frozen waveform stays inactive.
+/// Filled waveform: the level envelope mirrored on a 1 px baseline, lightly
+/// smoothed, with a left-to-right gradient built from the Plasma accent (a
+/// cooler hue on the left, the accent in the middle, a warmer hue on the
+/// right). Older audio fades out toward the left edge. Once the recording
+/// stops (`live` false) the frozen waveform turns to the inactive color.
 fn draw_swiss_wave(
     cr: &Context,
     w: f64,
@@ -1274,42 +1271,132 @@ fn draw_swiss_wave(
         return;
     }
     let px_per_frame = w / state.window_frames;
-    let every = (SWISS_TICK_SPACING_PX / px_per_frame).ceil().max(1.0) as usize;
     let right = (frames.len() - 1) as f64 + offset;
     let max_half = h * 0.5 - 1.0;
-    let fade_px = w * 0.2;
 
-    for (i, frame) in frames.iter().enumerate() {
-        if !(frame.seq as usize).is_multiple_of(every) {
-            continue;
-        }
-        let x = (w - 1.0 - (right - i as f64) * px_per_frame).round() + 0.5;
-        if x < 0.0 || x > w {
-            continue;
-        }
-        let amp = frames[i.saturating_sub(every - 1)..=i]
-            .iter()
-            .map(|f| f.max.max(-f.min))
-            .fold(0.0_f32, f32::max) as f64;
-        let level = tick_level(amp, gain);
-        let half = (level * max_half).max(1.0);
-        let t = if live {
-            smoothstep(0.3, 0.65, level) as f32
-        } else {
-            0.0
-        };
-        let color = Color::rgb(
-            quiet.r + (loud.r - quiet.r) * t,
-            quiet.g + (loud.g - quiet.g) * t,
-            quiet.b + (loud.b - quiet.b) * t,
-        );
-        // Older audio fades out toward the left edge.
-        let alpha = (x / fade_px).min(1.0) * (0.55 + 0.45 * t as f64);
-        set_source(cr, color, alpha);
-        cr.move_to(x, mid - half);
-        cr.line_to(x, mid + half);
-        cr.stroke().ok();
+    // Level per frame, a 5-frame peak hold so speech keeps its full height,
+    // then a 3-tap mean so the outline reads as one smooth shape.
+    let raw: Vec<f64> = frames
+        .iter()
+        .map(|f| tick_level(f.max.max(-f.min) as f64, gain))
+        .collect();
+    let window = |v: &[f64], i: usize, r: usize| (i.saturating_sub(r), (i + r).min(v.len() - 1));
+    let peak: Vec<f64> = (0..raw.len())
+        .map(|i| {
+            let (lo, hi) = window(&raw, i, 2);
+            raw[lo..=hi].iter().fold(0.0_f64, |a, b| a.max(*b))
+        })
+        .collect();
+    let levels: Vec<f64> = (0..peak.len())
+        .map(|i| {
+            let (lo, hi) = window(&peak, i, 1);
+            peak[lo..=hi].iter().sum::<f64>() / (hi - lo + 1) as f64
+        })
+        .collect();
+    let points: Vec<(f64, f64)> = levels
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            (
+                w - 1.0 - (right - i as f64) * px_per_frame,
+                (l * max_half).max(0.5),
+            )
+        })
+        .filter(|(x, _)| *x >= -px_per_frame && *x <= w + px_per_frame)
+        .collect();
+    if points.len() < 2 {
+        return;
     }
+
+    cr.new_path();
+    for (i, (x, half)) in points.iter().enumerate() {
+        if i == 0 {
+            cr.move_to(*x, mid - half);
+        } else {
+            cr.line_to(*x, mid - half);
+        }
+    }
+    for (x, half) in points.iter().rev() {
+        cr.line_to(*x, mid + half);
+    }
+    cr.close_path();
+
+    let (left, center, right_c) = if live {
+        (
+            shift_hue(loud, -40.0, 0.12),
+            lighten(loud, 0.12),
+            shift_hue(loud, 45.0, 0.12),
+        )
+    } else {
+        (quiet, quiet, quiet)
+    };
+    let grad = cairo::LinearGradient::new(0.0, 0.0, w, 0.0);
+    let stop = |pos: f64, c: Color, a: f64| {
+        grad.add_color_stop_rgba(pos, c.r as f64, c.g as f64, c.b as f64, a)
+    };
+    stop(0.0, left, 0.0);
+    stop(0.2, left, 0.95);
+    stop(0.6, center, 1.0);
+    stop(1.0, right_c, 1.0);
+    cr.set_source(&grad).ok();
+    cr.fill().ok();
+}
+
+/// Mix `c` toward white by `amount` (0..1).
+fn lighten(c: Color, amount: f32) -> Color {
+    Color::rgb(
+        c.r + (1.0 - c.r) * amount,
+        c.g + (1.0 - c.g) * amount,
+        c.b + (1.0 - c.b) * amount,
+    )
+}
+
+/// Rotate the hue of `c` by `degrees` and lighten it, keeping saturation.
+fn shift_hue(c: Color, degrees: f32, amount: f32) -> Color {
+    let (r, g, b) = (c.r, c.g, c.b);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    if d <= f32::EPSILON {
+        return lighten(c, amount);
+    }
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
+    let mut hue = if max == r {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    } * 60.0;
+    hue = (hue + degrees).rem_euclid(360.0);
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    let channel = |t: f32| {
+        let t = t.rem_euclid(1.0);
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    let h = hue / 360.0;
+    lighten(
+        Color::rgb(channel(h + 1.0 / 3.0), channel(h), channel(h - 1.0 / 3.0)),
+        amount,
+    )
 }
 
 /// Tick height, 0.0..=1.0, from a sample peak. Uses a -60..0 dBFS scale
@@ -1323,11 +1410,6 @@ fn tick_level(amp: f64, gain: f64) -> f64 {
     let dbfs = 20.0 * amp.log10();
     let level = peak_meter_fraction(dbfs as f32, METER_FLOOR_DBFS) as f64;
     level.powf(1.5)
-}
-
-fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 /// A 1 px progress line. With no fraction (the model is still loading) a
