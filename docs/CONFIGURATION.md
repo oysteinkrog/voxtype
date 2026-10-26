@@ -3902,9 +3902,9 @@ preview_font_pt = 18.0 # Transcript size; the swiss theme uses 18 when unset
 - `default`: the filled waveform with a segmented peak meter, and the live
   preview text under it. This is the look from earlier releases.
 - `swiss`: a quiet panel on a strict grid. A small label row shows the
-  elapsed time and the word count of the live preview. Below it is a thin
-  hairline waveform whose loud ticks turn the accent color (this replaces
-  the peak meter), then the live transcript in large text, and a status line
+  elapsed time and the word count of the live preview. Below it is a filled
+  waveform with a gradient built from the accent color (this replaces the
+  peak meter), then the live transcript in large text, and a status line
   at the bottom: "Listening · tap Right Ctrl to stop" while you record, then
   "Finishing · 4 s of audio left" with a 1 px progress line while the final
   text is computed. The stop hint follows `[hotkey]`, and is left out when
