@@ -14,8 +14,8 @@
 //!
 //! `t_ms` is wall time since the first audio block, `audio_ms` the audio
 //! received so far. Word times are seconds into the recording. `conf` is
-//! the model's confidence for the word, or null when the model gives none
-//! (parakeet-rs does not expose token scores yet).
+//! the model's confidence for the word (the lowest token probability in
+//! it), or null when the model gives none.
 
 use serde_json::{json, Value};
 use std::io::{self, Write};
@@ -39,11 +39,15 @@ pub struct Word {
 /// SentencePiece word marker, already decoded) starts a new word; a token
 /// that is only the marker makes the next token start one. Unlike
 /// parakeet-rs's own word grouping, this never drops repeated words, so the
-/// words always join back to the text.
-pub fn words_from_tokens<'a>(tokens: impl IntoIterator<Item = (&'a str, f32, f32)>) -> Vec<Word> {
+/// words always join back to the text. A word's confidence is the lowest of
+/// its tokens' scores, so one doubtful subword marks the whole word; None
+/// if any token has no score.
+pub fn words_from_tokens<'a>(
+    tokens: impl IntoIterator<Item = (&'a str, f32, f32, Option<f32>)>,
+) -> Vec<Word> {
     let mut words: Vec<Word> = Vec::new();
     let mut boundary = true;
-    for (text, start, end) in tokens {
+    for (text, start, end, conf) in tokens {
         boundary |= text.starts_with(' ') || text.starts_with('\u{2581}');
         let piece = text.trim_start_matches([' ', '\u{2581}']);
         if piece.is_empty() {
@@ -53,12 +57,13 @@ pub fn words_from_tokens<'a>(tokens: impl IntoIterator<Item = (&'a str, f32, f32
             Some(w) if !boundary => {
                 w.text.push_str(piece);
                 w.end = end;
+                w.conf = w.conf.zip(conf).map(|(a, b)| a.min(b));
             }
             _ => words.push(Word {
                 text: piece.to_string(),
                 start,
                 end,
-                conf: None,
+                conf,
             }),
         }
         boundary = false;
@@ -190,7 +195,7 @@ mod tests {
             ("fig", 0.28, 0.36),
             (".", 0.36, 0.44),
         ];
-        let words = words_from_tokens(tokens.iter().map(|&(t, s, e)| (t, s, e)));
+        let words = words_from_tokens(tokens.iter().map(|&(t, s, e)| (t, s, e, None)));
         let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
         assert_eq!(texts, ["the", "the", "config."]);
         assert_eq!(words[2].start, 0.2);
@@ -205,22 +210,38 @@ mod tests {
             ("X", 0.16, 0.24),
             ("Y", 0.24, 0.32),
         ];
-        let words = words_from_tokens(tokens.iter().map(|&(t, s, e)| (t, s, e)));
+        let words = words_from_tokens(tokens.iter().map(|&(t, s, e)| (t, s, e, None)));
         let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
         assert_eq!(texts, ["new", "XY"]);
         assert_eq!(words[1].start, 0.16);
     }
 
     #[test]
+    fn word_confidence_is_lowest_token_score() {
+        let words = words_from_tokens([
+            (" con", 0.0, 0.1, Some(0.9)),
+            ("fig", 0.1, 0.2, Some(0.4)),
+            (" file", 0.2, 0.3, Some(0.8)),
+        ]);
+        assert_eq!(words[0].conf, Some(0.4));
+        assert_eq!(words[1].conf, Some(0.8));
+    }
+
+    #[test]
     fn write_produces_header_revisions_and_final() {
         let dir = std::env::temp_dir().join(format!("voxtype-rev-test-{}", std::process::id()));
         let mut log = RevisionLog::new();
-        log.preview_at(100, 0.1, "hel", words_from_tokens([(" hel", 0.0, 0.1)]));
+        log.preview_at(
+            100,
+            0.1,
+            "hel",
+            words_from_tokens([(" hel", 0.0, 0.1, None)]),
+        );
         log.preview_at(
             200,
             0.2,
             "hello",
-            words_from_tokens([(" hel", 0.0, 0.1), ("lo", 0.1, 0.2)]),
+            words_from_tokens([(" hel", 0.0, 0.1, None), ("lo", 0.1, 0.2, None)]),
         );
         let path = log
             .write(

@@ -25,7 +25,14 @@ const BLOCK: usize = 1600;
 
 fn words(u: &ParakeetUnified) -> Vec<Word> {
     let timed = u.get_timed_transcript(TimestampMode::Tokens);
-    words_from_tokens(timed.tokens.iter().map(|t| (t.text.as_str(), t.start, t.end)))
+    let conf = u.token_confidences();
+    words_from_tokens(
+        timed
+            .tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.text.as_str(), t.start, t.end, conf.get(i).copied())),
+    )
 }
 
 fn wavs(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {

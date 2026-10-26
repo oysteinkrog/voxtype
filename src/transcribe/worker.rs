@@ -689,7 +689,14 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
 #[cfg(feature = "parakeet")]
 fn preview_words(u: &parakeet_rs::ParakeetUnified) -> Vec<super::revisions::Word> {
     let timed = u.get_timed_transcript(parakeet_rs::TimestampMode::Tokens);
-    super::revisions::words_from_tokens(timed.tokens.iter().map(|t| (t.text.as_str(), t.start, t.end)))
+    let conf = u.token_confidences();
+    super::revisions::words_from_tokens(
+        timed
+            .tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.text.as_str(), t.start, t.end, conf.get(i).copied())),
+    )
 }
 
 /// Write the revision log to `live_preview_revisions_dir`, if set.
