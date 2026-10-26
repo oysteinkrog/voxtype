@@ -4,7 +4,7 @@
 //! Supports multiple sound themes and custom sound files.
 
 use crate::config::AudioFeedbackConfig;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{Decoder, OutputStream, Sink, Source};
 use std::io::Cursor;
 use std::path::PathBuf;
 
@@ -24,9 +24,12 @@ pub enum SoundEvent {
 }
 
 /// Audio feedback player
+///
+/// The output stream is opened for each sound and closed when it ends. A
+/// stream held open for the daemon's lifetime spun on `alsa::poll()`
+/// POLLERR after an underrun on a USB DAC: about 100k log lines a minute
+/// and most of a CPU core while idle.
 pub struct AudioFeedback {
-    _stream: OutputStream,
-    stream_handle: OutputStreamHandle,
     config: AudioFeedbackConfig,
     theme: SoundTheme,
 }
@@ -47,14 +50,12 @@ impl AudioFeedback {
             return Err("Audio feedback is disabled".to_string());
         }
 
-        let (stream, stream_handle) = OutputStream::try_default()
-            .map_err(|e| format!("Failed to open audio output: {}", e))?;
+        // Probe once so a missing output device is still reported at startup.
+        OutputStream::try_default().map_err(|e| format!("Failed to open audio output: {}", e))?;
 
         let theme = load_theme(&config.theme)?;
 
         Ok(Self {
-            _stream: stream,
-            stream_handle,
             config: config.clone(),
             theme,
         })
@@ -86,11 +87,27 @@ impl AudioFeedback {
         // Apply volume control
         let source = source.amplify(self.config.volume);
 
-        let sink = Sink::try_new(&self.stream_handle)
-            .map_err(|e| format!("Failed to create audio sink: {}", e))?;
-
-        sink.append(source);
-        sink.detach(); // Let it play in the background
+        // Play on a short-lived thread that owns the stream, so the stream
+        // closes as soon as the sound ends (OutputStream is not Send).
+        std::thread::Builder::new()
+            .name("voxtype-feedback".into())
+            .spawn(move || {
+                let (_stream, handle) = match OutputStream::try_default() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("Failed to open audio output: {}", e);
+                        return;
+                    }
+                };
+                match Sink::try_new(&handle) {
+                    Ok(sink) => {
+                        sink.append(source);
+                        sink.sleep_until_end();
+                    }
+                    Err(e) => tracing::warn!("Failed to create audio sink: {}", e),
+                }
+            })
+            .map_err(|e| format!("Failed to start feedback thread: {}", e))?;
 
         Ok(())
     }
