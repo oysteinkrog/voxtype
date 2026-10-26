@@ -576,6 +576,7 @@ fn build_window(
     // the surface, the first tick's idle check then hides it.
     let visible = Cell::new(true);
     let ticks = Cell::new(0u32);
+    let last_size = Cell::new((0, 0));
     let preview_path = voxtype::config::Config::live_preview_path();
     let status_path = voxtype::config::Config::live_status_path();
     // True while the daemon reports a final transcription in progress: the
@@ -688,6 +689,11 @@ fn build_window(
             );
             redraw_window.set_visible(true);
             visible.set(true);
+        }
+        let size = (redraw_window.width(), redraw_window.height());
+        if size != last_size.get() {
+            tracing::info!("size {}x{}", size.0, size.1);
+            last_size.set(size);
         }
 
         // Decay the held peak even when no new frame arrived this tick.
@@ -1051,6 +1057,8 @@ struct SwissView {
     /// "tap Right Ctrl to stop", or empty when voxtype has no hotkey.
     listening_detail: String,
     preview: gtk4::Label,
+    /// Holds `preview` at the height reserve_lines sets.
+    text_area: gtk4::ScrolledWindow,
     /// Transcript lines the text area has room for now.
     lines: Cell<i32>,
     /// Text width before the first allocation.
@@ -1107,12 +1115,20 @@ impl SwissView {
         redraw_every_frame(&wave);
 
         preview.add_css_class("swiss-text");
-        preview.set_margin_bottom(4);
-        // The text area only grows (see show_text). A shrinking layer
-        // surface showed as a brief fade.
         preview.set_visible(true);
         preview.set_valign(gtk4::Align::Start);
         preview.set_yalign(0.0);
+        // The text area only grows (see show_text); a shrinking layer
+        // surface showed as a brief fade. Its size comes from
+        // reserve_lines alone: when the label's own size request reached
+        // the window, the popup jumped between 600 and 1338 px wide while
+        // the text scrolled.
+        let text_area = gtk4::ScrolledWindow::new();
+        text_area.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::External);
+        text_area.set_margin_bottom(4);
+        text_area.vscrollbar().set_visible(false);
+        text_area.hscrollbar().set_visible(false);
+        text_area.set_child(Some(preview));
 
         let bottom_rule = gtk4::Separator::new(gtk4::Orientation::Horizontal);
         bottom_rule.add_css_class("swiss-rule");
@@ -1148,7 +1164,7 @@ impl SwissView {
 
         panel.append(&header);
         panel.append(&wave);
-        panel.append(preview);
+        panel.append(&text_area);
         panel.append(&bottom_rule);
         panel.append(&status);
 
@@ -1169,6 +1185,7 @@ impl SwissView {
             live,
             listening_detail,
             preview: preview.clone(),
+            text_area,
             lines: Cell::new(0),
             text_width_px: cfg.width_px as i32 - SWISS_PANEL_INSET_PX,
         };
@@ -1196,7 +1213,10 @@ impl SwissView {
             w if w > 0 => w,
             _ => self.text_width_px,
         };
-        let layout = self.preview.create_pango_layout(None);
+        // The label's own layout carries its CSS (letter spacing), so the
+        // count matches what the label draws. A count one line short made
+        // GTK widen the window to fit the text.
+        let layout = self.preview.layout().copy();
         layout.set_width(width * gtk4::pango::SCALE);
         layout.set_wrap(gtk4::pango::WrapMode::WordChar);
         let line_count = |text: &str| {
@@ -1231,7 +1251,7 @@ impl SwissView {
             .create_pango_layout(Some(&sample))
             .pixel_size()
             .1;
-        self.preview.set_size_request(-1, height);
+        self.text_area.set_size_request(-1, height);
     }
 
     fn update(&self, elapsed: Duration, words: usize, fraction: Option<f64>, status: &str) {
