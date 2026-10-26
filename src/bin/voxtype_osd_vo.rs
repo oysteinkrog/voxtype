@@ -32,7 +32,7 @@ use vo::scene::geom::{Color, Size};
 use vo::scene::taffy::{AlignItems, AlignSelf};
 use vo::scene::text::TextLayout;
 use vo::scene::timed::{Progress, Wave};
-use vo::scene::{Prop, Transition};
+use vo::scene::{Motion, Prop, Transition};
 use vo::{
     App, Cx, FontRegistry, Input, InputMode, LogDiagnostics, Options, OverlaySpec, Placement,
 };
@@ -1068,6 +1068,8 @@ fn main() -> anyhow::Result<()> {
             diagnostics: args
                 .diag
                 .then(|| Box::new(LogDiagnostics::new(Some(heap))) as Box<dyn vo::Diagnostics>),
+            // Nothing animates unless a view asks for it, as in GTK.
+            default_motion: Motion::Snap,
             ..Options::default()
         };
         let result = vo::run_overlay_with(Popup::new(look.clone(), &fonts), spec.clone(), options);
@@ -1215,6 +1217,7 @@ fn offline(look: Look, fonts: FontRegistry, dir: &Path, fps: f64) -> anyhow::Res
     let scenario = scenario(&look);
     let options = Options {
         fonts: fonts.clone(),
+        default_motion: Motion::Snap,
         ..Options::default()
     };
     let n = vo::render_offline_with(Popup::new(look, &fonts), &scenario, fps, dir, options)
