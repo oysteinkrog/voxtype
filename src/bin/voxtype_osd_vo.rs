@@ -206,28 +206,57 @@ const RULE_MARGIN_TOP: f32 = 12.0;
 const STATUS_MARGIN_TOP: f32 = 10.0;
 const DOT: f32 = 7.0;
 
-/// Line height for a font size: Noto Sans and most UI fonts set about 1.36
-/// em, as Pango does.
-fn line_height(px: f32) -> f32 {
-    (px * 1.36).round()
+/// Pixels per point as GTK4 sets them on Wayland: 96 DPI times the text
+/// scale, so text is as large as in the GTK4 popup. GTK takes the font DPI
+/// from the settings portal there, not from `gtk-xft-dpi` in settings.ini.
+fn px_per_pt() -> f32 {
+    96.0 / 72.0 * text_scaling_factor()
 }
 
-/// Pixels per point from the font DPI GTK uses (`gtk-xft-dpi` in
-/// `~/.config/gtk-4.0/settings.ini`, which Plasma writes from its font DPI
-/// setting), so text is as large as in the GTK4 popup. 96 DPI without it.
-fn px_per_pt() -> f32 {
-    let dpi = dirs::config_dir()
-        .and_then(|d| std::fs::read_to_string(d.join("gtk-4.0/settings.ini")).ok())
-        .and_then(|s| {
-            s.lines()
-                .filter_map(|l| l.split_once('='))
-                .find(|(k, _)| k.trim() == "gtk-xft-dpi")
-                .and_then(|(_, v)| v.trim().parse::<f32>().ok())
-        })
-        .map(|v| v / 1024.0)
-        .filter(|dpi| (48.0..=480.0).contains(dpi))
-        .unwrap_or(96.0);
-    dpi / 72.0
+/// `org.gnome.desktop.interface text-scaling-factor` from the settings
+/// portal, which GTK4 reads on Wayland; 1.0 when there is no portal or no
+/// usable value.
+fn text_scaling_factor() -> f32 {
+    use zbus::zvariant::Value;
+    let read = async {
+        let conn = zbus::Connection::session().await.ok()?;
+        let reply = conn
+            .call_method(
+                Some("org.freedesktop.portal.Desktop"),
+                "/org/freedesktop/portal/desktop",
+                Some("org.freedesktop.portal.Settings"),
+                "ReadOne",
+                &("org.gnome.desktop.interface", "text-scaling-factor"),
+            )
+            .await
+            .ok()?;
+        let body = reply.body();
+        let mut value: Value = body.deserialize().ok()?;
+        // Older portals wrap the value in one more variant.
+        while let Value::Value(inner) = value {
+            value = *inner;
+        }
+        match value {
+            Value::F64(f) => Some(f as f32),
+            _ => None,
+        }
+    };
+    let factor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()
+        .and_then(|rt| {
+            rt.block_on(async { tokio::time::timeout(Duration::from_millis(500), read).await })
+                .ok()
+                .flatten()
+        });
+    factor.filter(|f| (0.5..=3.0).contains(f)).unwrap_or(1.0)
+}
+
+/// A font's line height at `px` as Pango sets it: its ascent plus descent,
+/// rounded up.
+fn line_of(fonts: &FontRegistry, font: u32, px: f32) -> f32 {
+    fonts.line_height(font, px).unwrap_or((px * 1.36).round())
 }
 
 fn color(c: OsdColor) -> Color {
@@ -246,6 +275,8 @@ struct Look {
     text_px: f32,
     text_line: f32,
     gain: f64,
+    /// For line heights: each font's own, as Pango gives them.
+    fonts: FontRegistry,
     /// Seconds of audio across the waveform.
     window: f64,
     background: Color,
@@ -262,7 +293,7 @@ struct Look {
 }
 
 impl Look {
-    fn new(cfg: &OsdConfig, theme: &PlasmaTheme, stop_hint: String) -> Look {
+    fn new(cfg: &OsdConfig, theme: &PlasmaTheme, stop_hint: String, fonts: &FontRegistry) -> Look {
         let k = px_per_pt();
         let text_px = cfg.preview_font_pt.unwrap_or(swiss::TEXT_PT) * k;
         let mut background = color(theme.background);
@@ -275,8 +306,9 @@ impl Look {
             value_px: VALUE_PT * k,
             status_px: STATUS_PT * k,
             text_px,
-            text_line: line_height(text_px),
+            text_line: line_of(fonts, SANS, text_px),
             gain: cfg.waveform_gain as f64,
+            fonts: fonts.clone(),
             window: cfg.waveform_window_secs.max(0.1) as f64,
             background,
             foreground: color(theme.foreground),
@@ -294,18 +326,27 @@ impl Look {
         self.width - swiss::PANEL_INSET_PX as f32
     }
 
+    fn mono_line(&self, px: f32) -> f32 {
+        line_of(&self.fonts, MONO, px)
+    }
+
+    /// The fixed font at `px` with its own line height.
+    fn mono(&self, px: f32) -> TextStyle {
+        TextStyle::new(MONO, px, self.mono_line(px))
+    }
+
     fn text_style(&self) -> TextStyle {
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
 
     fn header_height(&self) -> f32 {
-        let stat = line_height(self.value_px) + 2.0 + line_height(self.caption_small_px);
-        stat.max(line_height(self.caption_px)).max(ICON)
+        let stat = self.mono_line(self.value_px) + 2.0 + self.mono_line(self.caption_small_px);
+        stat.max(self.mono_line(self.caption_px)).max(ICON)
     }
 
     /// The panel's height with `lines` transcript lines.
     fn panel_height(&self, lines: u32) -> f32 {
-        let status = line_height(self.status_px).max(DOT);
+        let status = self.mono_line(self.status_px).max(DOT);
         2.0 * BORDER
             + PAD_TOP
             + self.header_height()
@@ -587,7 +628,7 @@ impl Popup {
             )
             .radius(RADIUS)
             .fill(l.background)
-            .stroke(l.border, BORDER)
+            .border(l.border, BORDER)
             .child(self.header())
             .child(self.waveform(&status))
             .child(self.transcript())
@@ -604,7 +645,7 @@ impl Popup {
         let l = &self.look;
         let caption = |key: &'static str, text: &str, px: f32, tracking: f32| {
             Element::label(key, text)
-                .text_style(TextStyle::new(MONO, px, line_height(px)).tracking(tracking))
+                .text_style(l.mono(px).tracking(tracking))
                 .color(l.inactive)
         };
         let stat = |key: &'static str, value: &str, name: &'static str| {
@@ -612,7 +653,7 @@ impl Popup {
                 .gap(2.0)
                 .child(
                     Element::label("value", value)
-                        .text_style(TextStyle::new(MONO, l.value_px, line_height(l.value_px)))
+                        .text_style(l.mono(l.value_px))
                         .color(l.foreground),
                 )
                 .child(caption("caption", name, l.caption_small_px, 1.5))
@@ -704,14 +745,12 @@ impl Popup {
 
     fn status_row(&self, status: &StatusLine) -> Element<Msg> {
         let l = &self.look;
-        let mono = |px: f32| TextStyle::new(MONO, px, line_height(px));
         // A filled square while listening, a hollow one while finishing.
         let dot = if status.finishing {
             Element::shape("dot", ShapeKind::RRect)
-                .size(DOT - 1.0, DOT - 1.0)
-                .margin(0.5)
+                .size(DOT, DOT)
                 .fill(Color::TRANSPARENT)
-                .stroke(l.accent, 1.0)
+                .border(l.accent, 1.0)
         } else {
             Element::shape("dot", ShapeKind::RRect)
                 .size(DOT, DOT)
@@ -723,13 +762,13 @@ impl Popup {
             .child(dot)
             .child(
                 Element::label("state", status.state.as_str())
-                    .text_style(mono(l.status_px))
+                    .text_style(l.mono(l.status_px))
                     .color(l.accent)
                     .margin_edges(0.0, 0.0, 0.0, 10.0),
             )
             .child(
                 Element::label("detail", status.detail.as_str())
-                    .text_style(mono(l.status_px).clamp_lines(1))
+                    .text_style(l.mono(l.status_px).clamp_lines(1))
                     .color(l.inactive)
                     .shrink(1.0)
                     .min_width(0.0),
@@ -962,8 +1001,8 @@ fn main() -> anyhow::Result<()> {
     }
     cfg.word_fade |= args.word_fade;
     let theme = plasma::load();
-    let look = Look::new(&cfg, &theme, stop_hint(&hotkey));
     let fonts = load_fonts(&theme)?;
+    let look = Look::new(&cfg, &theme, stop_hint(&hotkey), &fonts);
 
     if let Some(dir) = &args.offline {
         return offline(look, fonts, dir, args.fps);
