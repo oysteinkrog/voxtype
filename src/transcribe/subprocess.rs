@@ -392,7 +392,9 @@ impl Transcriber for SubprocessTranscriber {
     }
 
     fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {
-        self.live_model.as_ref().map(|_| self as &dyn StreamingTranscriber)
+        self.live_model
+            .as_ref()
+            .map(|_| self as &dyn StreamingTranscriber)
     }
 }
 
@@ -420,6 +422,8 @@ struct WarmWorker {
     stdin: ChildStdin,
     stdout: ChildStdout,
     generation: u64,
+    /// When the worker started loading its live model.
+    spawned_at: std::time::Instant,
 }
 
 /// Holds at most one warm worker. A timer kills it after the keep time unless
@@ -455,6 +459,7 @@ impl WarmSlot {
             stdin,
             stdout,
             generation,
+            spawned_at: std::time::Instant::now(),
         };
         if let Ok(mut slot) = self.inner.lock() {
             if let Some(mut old) = slot.replace(worker) {
@@ -503,13 +508,14 @@ impl StreamingTranscriber for SubprocessTranscriber {
         &self,
         mut samples_rx: mpsc::Receiver<Vec<f32>>,
     ) -> Result<StreamHandle, TranscribeError> {
-        let (mut child, mut stdin, stdout) = match self.warm.take_alive() {
+        let (mut child, mut stdin, stdout, spawned_at) = match self.warm.take_alive() {
             Some(w) => {
                 tracing::info!("Using the warm live worker");
-                (w.child, w.stdin, w.stdout)
+                (w.child, w.stdin, w.stdout, w.spawned_at)
             }
             None => {
                 let mut cmd = self.build_worker_command()?;
+                let spawned_at = std::time::Instant::now();
                 let mut child = cmd.spawn().map_err(|e| {
                     TranscribeError::InitFailed(format!("Failed to spawn transcribe-worker: {}", e))
                 })?;
@@ -519,9 +525,10 @@ impl StreamingTranscriber for SubprocessTranscriber {
                 let stdout = child.stdout.take().ok_or_else(|| {
                     TranscribeError::InitFailed("Worker stdout not available".to_string())
                 })?;
-                (child, stdin, stdout)
+                (child, stdin, stdout, spawned_at)
             }
         };
+        let loading = LoadingStatus::start(spawned_at);
         let pid = nix::unistd::Pid::from_raw(child.id() as i32);
         // The next recording's worker, started once this one is done.
         let refill = match self.warm_secs {
@@ -576,6 +583,7 @@ impl StreamingTranscriber for SubprocessTranscriber {
                 if !ready {
                     if trimmed == READY_SIGNAL {
                         ready = true;
+                        loading.ready();
                         continue;
                     }
                     // Load failure: the worker replies with an error instead.
@@ -605,14 +613,19 @@ impl StreamingTranscriber for SubprocessTranscriber {
                         }
                     }
                     Ok(r) => send(StreamingEvent::Error(TranscribeError::InferenceFailed(
-                        r.error.unwrap_or_else(|| "Unknown worker error".to_string()),
+                        r.error
+                            .unwrap_or_else(|| "Unknown worker error".to_string()),
                     ))),
                     Err(e) => send(StreamingEvent::Error(TranscribeError::InferenceFailed(
-                        format!("Failed to parse worker response: {} (output: {:?})", e, trimmed),
+                        format!(
+                            "Failed to parse worker response: {} (output: {:?})",
+                            e, trimmed
+                        ),
                     ))),
                 }
                 break;
             }
+            loading.ready();
             let _ = child.wait();
             if let Some((cmd, slot, keep, release)) = refill {
                 slot.refill(cmd, keep, release);
@@ -673,8 +686,85 @@ fn write_live_status(json: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return;
     };
-    let fraction = v["fraction"].as_f64().map(|f| f.to_string()).unwrap_or_default();
-    let text = v["text"].as_str().unwrap_or_default();
+    write_status_file(
+        v["fraction"].as_f64(),
+        v["text"].as_str().unwrap_or_default(),
+    );
+}
+
+/// How long to wait for READY before telling the user the live model is
+/// still loading. A warm worker answers well within this.
+const LOADING_STATUS_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Shows "Loading: ..." in the OSD while the live model loads, with a
+/// progress bar from the last measured load time.
+struct LoadingStatus {
+    state: Arc<Mutex<LoadingState>>,
+    spawned_at: std::time::Instant,
+}
+
+#[derive(Default)]
+struct LoadingState {
+    ready: bool,
+    shown: bool,
+}
+
+impl LoadingStatus {
+    fn start(spawned_at: std::time::Instant) -> Self {
+        let state = Arc::new(Mutex::new(LoadingState::default()));
+        let shared = Arc::clone(&state);
+        std::thread::spawn(move || {
+            std::thread::sleep(LOADING_STATUS_DELAY);
+            let expected = std::fs::read_to_string(load_secs_path())
+                .ok()
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .filter(|s| *s > 0.0);
+            loop {
+                {
+                    let Ok(mut st) = shared.lock() else { return };
+                    if st.ready {
+                        return;
+                    }
+                    let secs = spawned_at.elapsed().as_secs_f64();
+                    // Never show a full bar: the last load time is a guess.
+                    let fraction = expected.map(|e| (secs / e).min(0.95));
+                    write_status_file(
+                        fraction,
+                        &format!("Loading: live text model, {:.0} s", secs),
+                    );
+                    st.shown = true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+        Self { state, spawned_at }
+    }
+
+    /// The live model is loaded, or the worker ended. Clears the status if
+    /// this showed it, and remembers the load time for the next bar.
+    fn ready(&self) {
+        let Ok(mut st) = self.state.lock() else {
+            return;
+        };
+        if st.ready {
+            return;
+        }
+        st.ready = true;
+        if st.shown {
+            let _ = std::fs::remove_file(crate::config::Config::live_status_path());
+            let secs = self.spawned_at.elapsed().as_secs_f64();
+            let _ = std::fs::write(load_secs_path(), format!("{:.2}", secs));
+        }
+    }
+}
+
+/// Last live model load time, read by the next loading bar.
+fn load_secs_path() -> std::path::PathBuf {
+    crate::config::Config::live_status_path().with_file_name("live-load-secs")
+}
+
+fn write_status_file(fraction: Option<f64>, text: &str) {
+    let fraction = fraction.map(|f| f.to_string()).unwrap_or_default();
     let path = crate::config::Config::live_status_path();
     let tmp = path.with_extension("tmp");
     if std::fs::write(&tmp, format!("{}\n{}", fraction, text)).is_ok() {
