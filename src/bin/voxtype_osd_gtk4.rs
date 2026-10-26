@@ -603,9 +603,12 @@ fn build_window(
                 redraw_window.set_visible(false);
                 visible.set(false);
                 preview.set_text("");
-                preview.set_visible(false);
                 match &chrome {
-                    Chrome::Default { status_box, .. } => status_box.set_visible(false),
+                    Chrome::Default { status_box, .. } => {
+                        preview.set_visible(false);
+                        status_box.set_visible(false);
+                    }
+                    // The swiss text area keeps its reserved height.
                     Chrome::Swiss(view) => view.reset(),
                 }
                 // Shrink back: GTK keeps a grown window at its larger size.
@@ -621,8 +624,10 @@ fn build_window(
         if poll {
             let full = std::fs::read_to_string(&preview_path).unwrap_or_default();
             let text = preview_tail(full.trim());
-            if preview.text() != text {
-                preview.set_visible(!text.is_empty());
+            // The daemon empties the file when the recording ends; keep the
+            // last words on screen until the window hides.
+            if !text.is_empty() && preview.text() != text {
+                preview.set_visible(true);
                 preview.set_text(&text);
             }
             let status = std::fs::read_to_string(&status_path).unwrap_or_default();
@@ -1070,6 +1075,14 @@ impl SwissView {
 
         preview.add_css_class("swiss-text");
         preview.set_margin_bottom(4);
+        // Reserve room for the longest tail (PREVIEW_MAX_CHARS) up front, so
+        // the panel keeps one height for the whole dictation. Each resize of
+        // the layer surface showed as a brief fade.
+        preview.set_visible(true);
+        preview.set_valign(gtk4::Align::Start);
+        preview.set_yalign(0.0);
+        let lines = preview.create_pango_layout(Some("Ag\nAg\nAg\nAg"));
+        preview.set_size_request(-1, lines.pixel_size().1);
 
         let bottom_rule = gtk4::Separator::new(gtk4::Orientation::Horizontal);
         bottom_rule.add_css_class("swiss-rule");
@@ -1141,7 +1154,10 @@ impl SwissView {
     fn update(&self, elapsed: Duration, words: usize, fraction: Option<f64>, status: &str) {
         let secs = elapsed.as_secs();
         set_text_if_changed(&self.time, &format!("{:02}:{:02}", secs / 60, secs % 60));
-        set_text_if_changed(&self.words, &words.to_string());
+        // The preview file is emptied at the end; keep the last count.
+        if words > 0 {
+            set_text_if_changed(&self.words, &words.to_string());
+        }
         self.fraction.set(fraction.map(|f| f.clamp(0.0, 1.0)));
         self.show_status(status);
     }
