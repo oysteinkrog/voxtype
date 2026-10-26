@@ -178,8 +178,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// A status file older than this is left over from a crash.
 const STATUS_STALE: Duration = Duration::from_secs(30);
 
-/// CSS pixels per point, as GTK counts them.
-const POINTS_PX_PER_PT: f32 = 96.0 / 72.0;
+/// Font sizes in points, as the GTK4 swiss CSS gives them.
+const CAPTION_PT: f32 = 8.5;
+const CAPTION_SMALL_PT: f32 = 7.0;
+const VALUE_PT: f32 = 11.0;
+const STATUS_PT: f32 = 9.0;
 
 /// Fonts in the registry, by id.
 const SANS: u32 = 0;
@@ -192,10 +195,6 @@ const PAD_BOTTOM: f32 = 12.0;
 const BORDER: f32 = 1.0;
 const RADIUS: f32 = 3.0;
 const ICON: f32 = 14.0;
-const CAPTION_PX: f32 = 8.5 * POINTS_PX_PER_PT;
-const CAPTION_SMALL_PX: f32 = 7.0 * POINTS_PX_PER_PT;
-const VALUE_PX: f32 = 11.0 * POINTS_PX_PER_PT;
-const STATUS_PX: f32 = 9.0 * POINTS_PX_PER_PT;
 const WAVE_MARGIN: f32 = 10.0;
 const TEXT_MARGIN_BOTTOM: f32 = 4.0;
 const RULE_MARGIN_TOP: f32 = 12.0;
@@ -208,6 +207,24 @@ fn line_height(px: f32) -> f32 {
     (px * 1.36).round()
 }
 
+/// Pixels per point from the font DPI GTK uses (`gtk-xft-dpi` in
+/// `~/.config/gtk-4.0/settings.ini`, which Plasma writes from its font DPI
+/// setting), so text is as large as in the GTK4 popup. 96 DPI without it.
+fn px_per_pt() -> f32 {
+    let dpi = dirs::config_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("gtk-4.0/settings.ini")).ok())
+        .and_then(|s| {
+            s.lines()
+                .filter_map(|l| l.split_once('='))
+                .find(|(k, _)| k.trim() == "gtk-xft-dpi")
+                .and_then(|(_, v)| v.trim().parse::<f32>().ok())
+        })
+        .map(|v| v / 1024.0)
+        .filter(|dpi| (48.0..=480.0).contains(dpi))
+        .unwrap_or(96.0);
+    dpi / 72.0
+}
+
 fn color(c: OsdColor) -> Color {
     Color::rgba(c.r, c.g, c.b, c.a)
 }
@@ -216,6 +233,11 @@ fn color(c: OsdColor) -> Color {
 #[derive(Clone)]
 struct Look {
     width: f32,
+    /// Font sizes in pixels.
+    caption_px: f32,
+    caption_small_px: f32,
+    value_px: f32,
+    status_px: f32,
     text_px: f32,
     text_line: f32,
     gain: f64,
@@ -234,12 +256,17 @@ struct Look {
 
 impl Look {
     fn new(cfg: &OsdConfig, theme: &PlasmaTheme, stop_hint: String) -> Look {
-        let text_px = cfg.preview_font_pt.unwrap_or(swiss::TEXT_PT) * POINTS_PX_PER_PT;
+        let k = px_per_pt();
+        let text_px = cfg.preview_font_pt.unwrap_or(swiss::TEXT_PT) * k;
         let mut background = color(theme.background);
         background.a = cfg.opacity.clamp(0.0, 1.0);
         let (l, c, r) = wave_hues(theme.accent);
         Look {
             width: cfg.width_px as f32,
+            caption_px: CAPTION_PT * k,
+            caption_small_px: CAPTION_SMALL_PT * k,
+            value_px: VALUE_PT * k,
+            status_px: STATUS_PT * k,
             text_px,
             text_line: line_height(text_px),
             gain: cfg.waveform_gain as f64,
@@ -264,13 +291,13 @@ impl Look {
     }
 
     fn header_height(&self) -> f32 {
-        let stat = line_height(VALUE_PX) + 2.0 + line_height(CAPTION_SMALL_PX);
-        stat.max(line_height(CAPTION_PX)).max(ICON)
+        let stat = line_height(self.value_px) + 2.0 + line_height(self.caption_small_px);
+        stat.max(line_height(self.caption_px)).max(ICON)
     }
 
     /// The panel's height with `lines` transcript lines.
     fn panel_height(&self, lines: u32) -> f32 {
-        let status = line_height(STATUS_PX).max(DOT);
+        let status = line_height(self.status_px).max(DOT);
         2.0 * BORDER
             + PAD_TOP
             + self.header_height()
@@ -580,10 +607,10 @@ impl Popup {
                 .gap(2.0)
                 .child(
                     Element::label("value", value)
-                        .text_style(TextStyle::new(MONO, VALUE_PX, line_height(VALUE_PX)))
+                        .text_style(TextStyle::new(MONO, l.value_px, line_height(l.value_px)))
                         .color(l.foreground),
                 )
-                .child(caption("caption", name, CAPTION_SMALL_PX, 1.5))
+                .child(caption("caption", name, l.caption_small_px, 1.5))
         };
         // A microphone from shapes: the capsule and its stand.
         let mic = Element::column("mic")
@@ -609,7 +636,7 @@ impl Popup {
             .align_items(AlignItems::START)
             .child(mic)
             .child(
-                caption("title", "VOICE DICTATION", CAPTION_PX, 2.0)
+                caption("title", "VOICE DICTATION", l.caption_px, 2.0)
                     .margin_edges(0.0, 0.0, 0.0, 8.0),
             )
             .child(Element::row("spacer").grow(1.0))
@@ -688,13 +715,13 @@ impl Popup {
             .child(dot)
             .child(
                 Element::label("state", status.state.as_str())
-                    .text_style(mono(STATUS_PX))
+                    .text_style(mono(l.status_px))
                     .color(l.accent)
                     .margin_edges(0.0, 0.0, 0.0, 10.0),
             )
             .child(
                 Element::label("detail", status.detail.as_str())
-                    .text_style(mono(STATUS_PX).clamp_lines(1))
+                    .text_style(mono(l.status_px).clamp_lines(1))
                     .color(l.inactive)
                     .shrink(1.0)
                     .min_width(0.0),
