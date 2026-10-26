@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use voxtype::config::Config as VoxtypeConfig;
-use voxtype::osd::config::{OsdConfig, OsdFrontend};
+use voxtype::osd::config::{OsdConfig, OsdFrontend, OsdTheme};
 
 const NATIVE_BIN: &str = "voxtype-osd-native";
 const GTK4_BIN: &str = "voxtype-osd-gtk4";
@@ -81,7 +81,18 @@ fn main() -> ExitCode {
                 .ok()
                 .and_then(|s| OsdFrontend::parse_str(&s))
         })
-        .unwrap_or_else(|| load_frontend_from_config(config_path.as_deref()));
+        .unwrap_or_else(|| load_osd_config(config_path.as_deref()).frontend);
+
+    // The vo popup draws only the swiss look; any other theme gets the GTK4
+    // popup, which draws them all.
+    let preferred = if preferred == OsdFrontend::Vo
+        && resolve_theme(&rest, config_path.as_deref()) != OsdTheme::Swiss
+    {
+        tracing::info!("the vo frontend draws only the swiss theme; using gtk4");
+        OsdFrontend::Gtk4
+    } else {
+        preferred
+    };
 
     let chosen = match resolve_installed(preferred) {
         Some(c) => c,
@@ -223,30 +234,36 @@ fn build_child_args(frontend: OsdFrontend, supervised: bool, rest: &[String]) ->
     out
 }
 
-/// Load the `[osd] frontend` value from the voxtype config file, falling
-/// back to the default when the file is missing, unreadable, or doesn't
-/// contain a usable value.
-fn load_frontend_from_config(explicit: Option<&Path>) -> OsdFrontend {
-    let path = explicit
-        .map(Path::to_path_buf)
-        .or_else(VoxtypeConfig::default_path);
-    let Some(path) = path else {
-        return OsdFrontend::default();
-    };
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return OsdFrontend::default();
-    };
-
+/// Load the `[osd]` section from the voxtype config file, falling back to
+/// the defaults when the file is missing, unreadable, or doesn't contain a
+/// usable section.
+fn load_osd_config(explicit: Option<&Path>) -> OsdConfig {
     #[derive(serde::Deserialize, Default)]
     struct PartialConfig {
         #[serde(default)]
         osd: Option<OsdConfig>,
     }
 
-    match toml::from_str::<PartialConfig>(&content) {
-        Ok(p) => p.osd.map(|o| o.frontend).unwrap_or_default(),
-        Err(_) => OsdFrontend::default(),
-    }
+    explicit
+        .map(Path::to_path_buf)
+        .or_else(VoxtypeConfig::default_path)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|content| toml::from_str::<PartialConfig>(&content).ok())
+        .and_then(|p| p.osd)
+        .unwrap_or_default()
+}
+
+/// The theme the frontend will draw, by the frontends' own precedence:
+/// `--theme`, then `VOXTYPE_OSD_THEME`, then `[osd] theme`.
+fn resolve_theme(args: &[String], config: Option<&Path>) -> OsdTheme {
+    let flag = args.iter().enumerate().find_map(|(i, a)| {
+        a.strip_prefix("--theme=")
+            .map(str::to_string)
+            .or_else(|| (a == "--theme").then(|| args.get(i + 1).cloned()).flatten())
+    });
+    flag.or_else(|| env::var("VOXTYPE_OSD_THEME").ok())
+        .and_then(|s| OsdTheme::parse_str(&s))
+        .unwrap_or_else(|| load_osd_config(config).theme)
 }
 
 struct ResolvedFrontend {
@@ -309,6 +326,20 @@ fn find_binary(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_flag_wins_in_both_forms() {
+        let none = Some(Path::new("/nonexistent/config.toml"));
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            resolve_theme(&args(&["--theme", "default"]), none),
+            OsdTheme::Default
+        );
+        assert_eq!(
+            resolve_theme(&args(&["--width-px", "400", "--theme=swiss"]), none),
+            OsdTheme::Swiss
+        );
+    }
 
     #[test]
     fn parse_strips_frontend_flag_space_form() {
