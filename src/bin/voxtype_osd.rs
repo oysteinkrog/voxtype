@@ -4,9 +4,9 @@
 //!
 //! The user's preference comes from (in priority order):
 //!
-//! 1. `--frontend gtk4|native|quickshell` on the command line
-//! 2. `VOXTYPE_OSD_FRONTEND=gtk4|native|quickshell` env var
-//! 3. `[osd] frontend = "gtk4|native|quickshell"` in `~/.config/voxtype/config.toml`
+//! 1. `--frontend gtk4|native|quickshell|vo` on the command line
+//! 2. `VOXTYPE_OSD_FRONTEND=gtk4|native|quickshell|vo` env var
+//! 3. `[osd] frontend = "gtk4|native|quickshell|vo"` in `~/.config/voxtype/config.toml`
 //! 4. Default: `gtk4`
 //!
 //! That preference is then reconciled with what's actually installed: the
@@ -49,6 +49,7 @@ use voxtype::osd::config::{OsdConfig, OsdFrontend};
 const NATIVE_BIN: &str = "voxtype-osd-native";
 const GTK4_BIN: &str = "voxtype-osd-gtk4";
 const QUICKSHELL_BIN: &str = "voxtype-osd-quickshell";
+const VO_BIN: &str = "voxtype-osd-vo";
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -86,13 +87,14 @@ fn main() -> ExitCode {
         Some(c) => c,
         None => {
             eprintln!(
-                "voxtype-osd: none of '{GTK4_BIN}', '{NATIVE_BIN}', or '{QUICKSHELL_BIN}' \
-                 was found on PATH or next to this binary.\n\
+                "voxtype-osd: none of '{GTK4_BIN}', '{NATIVE_BIN}', '{QUICKSHELL_BIN}' \
+                 or '{VO_BIN}' was found on PATH or next to this binary.\n\
                  \n\
                  If you built from source, enable at least one OSD feature:\n\
                    cargo build --release --features osd-gtk4       # GTK4 frontend\n\
                    cargo build --release --features osd-native     # SCTK + wgpu + egui\n\
                    cargo build --release --bin voxtype-osd-quickshell  # Quickshell launcher\n\
+                   cargo build --release --features osd-vo     # vo GPU overlay\n\
                  \n\
                  If you installed a package, the OSD binaries may be a separate\n\
                  optional dependency."
@@ -133,10 +135,10 @@ fn print_help() {
         "voxtype-osd {} — launcher for the on-screen mic visualizer\n\
          \n\
          USAGE:\n    \
-             voxtype-osd [--frontend gtk4|native|quickshell] [FRONTEND ARGS...]\n\
+             voxtype-osd [--frontend gtk4|native|quickshell|vo] [FRONTEND ARGS...]\n\
          \n\
          OPTIONS:\n    \
-             --frontend <gtk4|native|quickshell>\n    \
+             --frontend <gtk4|native|quickshell|vo>\n    \
                                           Which frontend to launch. Falls back to\n\
                                           whatever is installed if the preferred\n\
                                           frontend isn't found on PATH.\n    \
@@ -149,7 +151,7 @@ fn print_help() {
          \n\
          CONFIG:\n    \
              [osd]\n    \
-             frontend = \"gtk4\"  # or \"native\", \"quickshell\"\n\
+             frontend = \"gtk4\"  # or \"native\", \"quickshell\", \"vo\"\n\
          \n\
          ENV:\n    \
              VOXTYPE_OSD_FRONTEND   Same as --frontend.\n    \
@@ -258,24 +260,33 @@ struct ResolvedFrontend {
 /// don't have `qs` installed; conversely a Quickshell user who's missing
 /// their launcher falls back to Gtk4 (the default) before Native.
 fn resolve_installed(preferred: OsdFrontend) -> Option<ResolvedFrontend> {
-    let chain: [OsdFrontend; 3] = match preferred {
-        OsdFrontend::Gtk4 => [
+    let chain: &[OsdFrontend] = match preferred {
+        OsdFrontend::Gtk4 => &[
             OsdFrontend::Gtk4,
             OsdFrontend::Native,
             OsdFrontend::Quickshell,
         ],
-        OsdFrontend::Native => [
+        OsdFrontend::Native => &[
             OsdFrontend::Native,
             OsdFrontend::Gtk4,
             OsdFrontend::Quickshell,
         ],
-        OsdFrontend::Quickshell => [
+        OsdFrontend::Quickshell => &[
             OsdFrontend::Quickshell,
             OsdFrontend::Gtk4,
             OsdFrontend::Native,
+        ],
+        // Opt-in: only a user who asked for vo gets it, and a missing vo
+        // binary falls back to the GTK4 popup, which draws the same Swiss
+        // theme.
+        OsdFrontend::Vo => &[
+            OsdFrontend::Vo,
+            OsdFrontend::Gtk4,
+            OsdFrontend::Native,
+            OsdFrontend::Quickshell,
         ],
     };
-    chain.into_iter().find_map(|f| {
+    chain.iter().copied().find_map(|f| {
         find_binary(f.binary_name()).map(|path| ResolvedFrontend { frontend: f, path })
     })
 }

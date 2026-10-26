@@ -37,6 +37,9 @@ pub enum OsdFrontend {
     Gtk4,
     Native,
     Quickshell,
+    /// The Swiss popup on the vo GPU overlay framework (feature `osd-vo`).
+    /// Opt-in only: no other preference falls back to it.
+    Vo,
 }
 
 impl OsdFrontend {
@@ -47,6 +50,7 @@ impl OsdFrontend {
             OsdFrontend::Gtk4 => "voxtype-osd-gtk4",
             OsdFrontend::Native => "voxtype-osd-native",
             OsdFrontend::Quickshell => "voxtype-osd-quickshell",
+            OsdFrontend::Vo => "voxtype-osd-vo",
         }
     }
 
@@ -55,6 +59,7 @@ impl OsdFrontend {
             "gtk4" | "gtk" => Some(OsdFrontend::Gtk4),
             "native" | "wgpu" | "egui" => Some(OsdFrontend::Native),
             "quickshell" | "qml" | "qs" => Some(OsdFrontend::Quickshell),
+            "vo" => Some(OsdFrontend::Vo),
             _ => None,
         }
     }
@@ -474,6 +479,8 @@ mod tests {
         );
         assert_eq!(OsdFrontend::parse_str("qml"), Some(OsdFrontend::Quickshell));
         assert_eq!(OsdFrontend::parse_str("QS"), Some(OsdFrontend::Quickshell));
+        assert_eq!(OsdFrontend::parse_str("vo"), Some(OsdFrontend::Vo));
+        assert_eq!(OsdFrontend::Vo.binary_name(), "voxtype-osd-vo");
         assert_eq!(OsdFrontend::parse_str("nope"), None);
     }
 

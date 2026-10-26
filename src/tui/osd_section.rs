@@ -103,7 +103,7 @@ impl Field {
 
 const TABLE: &str = "osd";
 
-const FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell"];
+const FRONTEND_CHOICES: &[&str] = &["gtk4", "native", "quickshell", "vo"];
 const THEME_CHOICES: &[&str] = &["default", "swiss"];
 const PALETTE_CHOICES: &[&str] = &["auto", "omarchy", "fallback", "package", "custom"];
 const LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
