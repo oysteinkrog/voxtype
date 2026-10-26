@@ -4,9 +4,14 @@
 //! Supports multiple sound themes and custom sound files.
 
 use crate::config::AudioFeedbackConfig;
-use rodio::{Decoder, OutputStream, Sink, Source};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use rodio::source::UniformSourceIterator;
+use rodio::{Decoder, Source};
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Sound event types
 #[derive(Debug, Clone, Copy)]
@@ -25,10 +30,13 @@ pub enum SoundEvent {
 
 /// Audio feedback player
 ///
-/// The output stream is opened for each sound and closed when it ends. A
-/// stream held open for the daemon's lifetime spun on `alsa::poll()`
-/// POLLERR after an underrun on a USB DAC: about 100k log lines a minute
-/// and most of a CPU core while idle.
+/// Each sound opens its own cpal output stream, plays, and closes it. The
+/// stream's error callback only sets a flag, playback stops at the first
+/// error, and one warning is logged. rodio's long-lived stream used cpal's
+/// default callback, which printed every `alsa::poll()` POLLERR: on an
+/// output that breaks (a remote desktop sink, a USB DAC after an underrun)
+/// that was about 100k log lines a minute and most of a CPU core, and it
+/// made the whole desktop lag.
 pub struct AudioFeedback {
     config: AudioFeedbackConfig,
     theme: SoundTheme,
@@ -50,8 +58,10 @@ impl AudioFeedback {
             return Err("Audio feedback is disabled".to_string());
         }
 
-        // Probe once so a missing output device is still reported at startup.
-        OutputStream::try_default().map_err(|e| format!("Failed to open audio output: {}", e))?;
+        // Check once so a missing output device is still reported at startup.
+        cpal::default_host()
+            .default_output_device()
+            .ok_or_else(|| "Failed to open audio output: no output device".to_string())?;
 
         let theme = load_theme(&config.theme)?;
 
@@ -87,30 +97,99 @@ impl AudioFeedback {
         // Apply volume control
         let source = source.amplify(self.config.volume);
 
-        // Play on a short-lived thread that owns the stream, so the stream
-        // closes as soon as the sound ends (OutputStream is not Send).
+        // The stream lives on a short thread (cpal streams are not Send).
         std::thread::Builder::new()
             .name("voxtype-feedback".into())
             .spawn(move || {
-                let (_stream, handle) = match OutputStream::try_default() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!("Failed to open audio output: {}", e);
-                        return;
-                    }
-                };
-                match Sink::try_new(&handle) {
-                    Ok(sink) => {
-                        sink.append(source);
-                        sink.sleep_until_end();
-                    }
-                    Err(e) => tracing::warn!("Failed to create audio sink: {}", e),
+                if let Err(e) = play_on_default_output(source) {
+                    tracing::warn!("Failed to play feedback sound: {}", e);
                 }
             })
             .map_err(|e| format!("Failed to start feedback thread: {}", e))?;
 
         Ok(())
     }
+}
+
+/// Play `source` once on the default output and close the stream. Returns
+/// after the last sample, at the first stream error, or after the sound's
+/// length plus one second, whichever comes first.
+fn play_on_default_output<S>(source: S) -> Result<(), String>
+where
+    S: Source<Item = i16> + Send + 'static,
+{
+    let device = cpal::default_host()
+        .default_output_device()
+        .ok_or("no output device")?;
+    let config = device
+        .default_output_config()
+        .map_err(|e| format!("no output config: {e}"))?;
+    let format = config.sample_format();
+    let config: cpal::StreamConfig = config.into();
+    let samples: Arc<Vec<f32>> = Arc::new(
+        UniformSourceIterator::<_, f32>::new(source, config.channels, config.sample_rate.0)
+            .collect(),
+    );
+    let length = Duration::from_secs_f64(
+        samples.len() as f64 / (config.channels as f64 * config.sample_rate.0 as f64),
+    );
+
+    let pos = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicBool::new(false));
+    let err_flag = failed.clone();
+    let on_error = move |e: cpal::StreamError| {
+        if !err_flag.swap(true, Ordering::Relaxed) {
+            tracing::warn!("Feedback sound stopped: output stream error: {e}");
+        }
+    };
+    let (s, p) = (samples.clone(), pos.clone());
+    let stream = match format {
+        cpal::SampleFormat::F32 => device.build_output_stream(
+            &config,
+            move |out: &mut [f32], _| fill(out, &s, &p, |v| v),
+            on_error,
+            None,
+        ),
+        cpal::SampleFormat::I16 => device.build_output_stream(
+            &config,
+            move |out: &mut [i16], _| fill(out, &s, &p, |v| (v * i16::MAX as f32) as i16),
+            on_error,
+            None,
+        ),
+        other => return Err(format!("unsupported output format {other:?}")),
+    }
+    .map_err(|e| format!("cannot open output stream: {e}"))?;
+    stream
+        .play()
+        .map_err(|e| format!("cannot start output stream: {e}"))?;
+
+    let started = Instant::now();
+    let deadline = started + length + Duration::from_secs(1);
+    // The sound server pulls samples ahead of playback, so the stream stays
+    // open for at least the sound's length plus a short drain.
+    let heard = started + length + Duration::from_millis(80);
+    while (pos.load(Ordering::Relaxed) < samples.len() || Instant::now() < heard)
+        && !failed.load(Ordering::Relaxed)
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(stream);
+    Ok(())
+}
+
+/// Copy the next samples into `out`, converted by `conv`; silence after the end.
+fn fill<T: Copy + Default>(
+    out: &mut [T],
+    samples: &[f32],
+    pos: &AtomicUsize,
+    conv: impl Fn(f32) -> T,
+) {
+    let start = pos.load(Ordering::Relaxed);
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = samples.get(start + i).map(|v| conv(*v)).unwrap_or_default();
+    }
+    pos.store((start + out.len()).min(samples.len()), Ordering::Relaxed);
 }
 
 /// Load a sound theme by name or path
@@ -300,6 +379,23 @@ fn generate_mechanical_theme() -> SoundTheme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Needs a sound server. Run it against a silent sink, e.g.
+    /// `pactl load-module module-null-sink sink_name=vxtest` and
+    /// `PIPEWIRE_NODE=vxtest cargo test -- --ignored plays_and_closes`.
+    #[test]
+    #[ignore]
+    fn plays_and_closes() {
+        let wav = generate_tone_wav(880.0, 120, 5);
+        let source = Decoder::new(Cursor::new(wav)).unwrap();
+        let started = Instant::now();
+        play_on_default_output(source).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            started.elapsed()
+        );
+    }
 
     #[test]
     fn test_generate_tone_wav() {
