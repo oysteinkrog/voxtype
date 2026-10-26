@@ -3866,6 +3866,7 @@ the `voxtype-osd` wrapper launches via `[osd] frontend`.
 frontend = "gtk4"           # Default. Uses voxtype-osd-gtk4.
 # frontend = "native"       # wgpu/egui-based (voxtype-osd-native).
 # frontend = "quickshell"   # QML/Quickshell launcher (voxtype-osd-quickshell).
+# frontend = "vo"           # Swiss popup on the vo GPU overlay (voxtype-osd-vo).
 ```
 
 If you pick `"quickshell"`, install the QML tree first so the launcher can
@@ -3929,6 +3930,33 @@ the default theme.
 
 The theme can also be set with `voxtype-osd-gtk4 --theme swiss` or
 `VOXTYPE_OSD_THEME=swiss`.
+
+### vo OSD (experimental)
+
+`frontend = "vo"` runs `voxtype-osd-vo`, which draws the `swiss` look on
+the vo GPU overlay framework instead of GTK4. It is only built with the
+`osd-vo` feature:
+
+```bash
+cargo build --release --features osd-vo
+```
+
+It reads the same `[osd]` settings as the `swiss` theme (`width_px`,
+`position`, `top_margin`, `margin_px`, `preview_font_pt`, `opacity`,
+`waveform_gain`, `waveform_window_secs`) and the same Plasma colors and
+fonts, and always draws the `swiss` look. Differences from the GTK4 popup:
+
+- Between dictations it holds no window and no GPU device, so it uses
+  little memory while idle. Each dictation opens a new overlay, which draws
+  its first frames on the CPU while the GPU starts.
+- New words fade in, and the panel grows to a new line with a short
+  animation.
+- The microphone icon is drawn from shapes, not taken from the icon theme.
+
+If `voxtype-osd-vo` is not installed, the launcher falls back to the GTK4
+popup. Options: `--gpu-first-frame` (draw only on the GPU),
+`--diag` (print startup timing and memory to stderr), and
+`--offline DIR` (render a scripted dictation to PNG frames and exit).
 
 ### Quickshell OSD customization
 
