@@ -877,8 +877,10 @@ fn read_audio(shared: Shared, socket: PathBuf, reconnect: Duration) {
                     continue;
                 }
                 let frames: Vec<AudioFrame> = buf[..whole]
-                    .chunks_exact(FRAME_BYTES)
-                    .map(|c| AudioFrame::from_bytes(c.try_into().expect("chunk of a frame")))
+                    .as_chunks::<FRAME_BYTES>()
+                    .0
+                    .iter()
+                    .map(AudioFrame::from_bytes)
                     .collect();
                 buf.copy_within(whole..have, 0);
                 have -= whole;
