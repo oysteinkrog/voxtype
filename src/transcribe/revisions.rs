@@ -36,20 +36,24 @@ pub struct Word {
 }
 
 /// Group subword tokens into words. A token that starts with a space (the
-/// SentencePiece word marker, already decoded) starts a new word. Unlike
+/// SentencePiece word marker, already decoded) starts a new word; a token
+/// that is only the marker makes the next token start one. Unlike
 /// parakeet-rs's own word grouping, this never drops repeated words, so the
 /// words always join back to the text.
 pub fn words_from_tokens<'a>(tokens: impl IntoIterator<Item = (&'a str, f32, f32)>) -> Vec<Word> {
     let mut words: Vec<Word> = Vec::new();
+    let mut boundary = true;
     for (text, start, end) in tokens {
-        let new_word = text.starts_with(' ') || text.starts_with('\u{2581}');
+        boundary |= text.starts_with(' ') || text.starts_with('\u{2581}');
         let piece = text.trim_start_matches([' ', '\u{2581}']);
+        if piece.is_empty() {
+            continue;
+        }
         match words.last_mut() {
-            Some(w) if !new_word => {
+            Some(w) if !boundary => {
                 w.text.push_str(piece);
                 w.end = end;
             }
-            _ if piece.is_empty() => {}
             _ => words.push(Word {
                 text: piece.to_string(),
                 start,
@@ -57,6 +61,7 @@ pub fn words_from_tokens<'a>(tokens: impl IntoIterator<Item = (&'a str, f32, f32
                 conf: None,
             }),
         }
+        boundary = false;
     }
     words
 }
@@ -190,6 +195,20 @@ mod tests {
         assert_eq!(texts, ["the", "the", "config."]);
         assert_eq!(words[2].start, 0.2);
         assert_eq!(words[2].end, 0.44);
+    }
+
+    #[test]
+    fn words_from_tokens_lone_marker_starts_next_word() {
+        let tokens = [
+            (" new", 0.0, 0.08),
+            (" ", 0.08, 0.16),
+            ("X", 0.16, 0.24),
+            ("Y", 0.24, 0.32),
+        ];
+        let words = words_from_tokens(tokens.iter().map(|&(t, s, e)| (t, s, e)));
+        let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(texts, ["new", "XY"]);
+        assert_eq!(words[1].start, 0.16);
     }
 
     #[test]
