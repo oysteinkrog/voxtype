@@ -93,6 +93,12 @@ pub struct AudioFrame {
 }
 
 impl AudioFrame {
+    /// True for a frame from `spawn_silence_pump`: exactly zero samples at
+    /// the -120 dBFS floor. Real capture almost never gives this exact value.
+    pub fn is_pump_silence(&self) -> bool {
+        self.min == 0.0 && self.max == 0.0 && self.peak_dbfs <= -120.0
+    }
+
     /// Serialise to 16 bytes in native byte order.
     ///
     /// We use native order because the OSD runs on the same machine as the

@@ -98,6 +98,16 @@ const RENDER_TICK_MS: u32 = 16;
 /// hiding the surface. Matches the BRIEF's "Idle: surface destroyed" rule.
 const IDLE_TIMEOUT_SECS: f32 = 0.15;
 
+/// True while the daemon's state file says a recording is running. Audio
+/// frames can stall for more than IDLE_TIMEOUT_SECS on a loaded machine,
+/// and the surface must not hide and come back then.
+fn daemon_recording() -> bool {
+    let base = std::env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
+    std::fs::read_to_string(std::path::Path::new(&base).join("voxtype/state"))
+        .is_ok_and(|s| matches!(s.trim(), "recording" | "streaming"))
+}
+
 /// True while the daemon has marked the in-flight recording as OSD-suppressed
 /// (`voxtype record start --no-osd`).
 ///
@@ -571,6 +581,7 @@ fn build_window(
     // True while the daemon reports a final transcription in progress: the
     // audio frames have stopped, but the OSD stays up to show it.
     let finishing = Cell::new(false);
+    let recording = Cell::new(false);
     // When the surface last appeared: the start of the recording.
     let shown_at = Cell::new(Instant::now());
     let default_size = (cfg.width_px as i32, cfg.height_px as i32);
@@ -593,9 +604,10 @@ fn build_window(
                 .and_then(|t| t.elapsed().ok())
                 .is_some_and(|age| age < Duration::from_secs(30));
             finishing.set(fresh);
+            recording.set(daemon_recording());
         }
-        let idle = (last_at.elapsed().as_secs_f32() > IDLE_TIMEOUT_SECS && !finishing.get())
-            || osd_suppressed();
+        let stalled = last_at.elapsed().as_secs_f32() > IDLE_TIMEOUT_SECS;
+        let idle = (stalled && !finishing.get() && !recording.get()) || osd_suppressed();
 
         if idle {
             if visible.get() {
@@ -610,6 +622,11 @@ fn build_window(
                     }
                     // The swiss text area keeps its reserved height.
                     Chrome::Swiss(view) => view.reset(),
+                }
+                // The next recording starts with an empty waveform, even
+                // if its first frames are silence-pump frames.
+                if let Ok(mut r) = redraw_state.ring.lock() {
+                    r.clear();
                 }
                 // Shrink back: GTK keeps a grown window at its larger size.
                 redraw_window.set_default_size(default_size.0, default_size.1);
@@ -1218,8 +1235,12 @@ impl SwissView {
     }
 
     fn update(&self, elapsed: Duration, words: usize, fraction: Option<f64>, status: &str) {
-        let secs = elapsed.as_secs();
-        set_text_if_changed(&self.time, &format!("{:02}:{:02}", secs / 60, secs % 60));
+        // The silence pump keeps frames coming while finishing; the clock
+        // stops at the end of the recording.
+        if status.is_empty() || status.starts_with("Loading") {
+            let secs = elapsed.as_secs();
+            set_text_if_changed(&self.time, &format!("{:02}:{:02}", secs / 60, secs % 60));
+        }
         // The preview file is emptied at the end; keep the last count.
         if words > 0 {
             set_text_if_changed(&self.words, &words.to_string());
