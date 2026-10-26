@@ -72,6 +72,12 @@ impl FrameRing {
             .latest()
             .is_some_and(|last| frame.seq != last.seq.wrapping_add(1))
         {
+            // The daemon's silence pump (spawn_silence_pump) keeps the OSD
+            // up after the mic stops, with its own counter. Keep the
+            // recording's waveform frozen instead of scrolling silence in.
+            if frame.is_pump_silence() {
+                return;
+            }
             self.clear();
         }
         let origin = self.clock_origin.get_or_insert(now);
@@ -333,6 +339,31 @@ mod tests {
         ring.push_at(frame(0), restart);
         assert_eq!(ring.len(), 1);
         assert_eq!(ring.scroll_offset(restart), -PLAYOUT_DELAY_FRAMES);
+    }
+
+    #[test]
+    fn silence_pump_after_stop_keeps_history() {
+        let start = Instant::now();
+        let mut ring = FrameRing::new(10);
+        ring.push_at(frame(40), start);
+        ring.push_at(frame(41), start + Duration::from_millis(10));
+        let pump = |seq| AudioFrame {
+            seq,
+            min: 0.0,
+            max: 0.0,
+            peak_dbfs: -120.0,
+        };
+        for seq in 0..5 {
+            ring.push_at(
+                pump(seq),
+                start + Duration::from_millis(100 + 33 * seq as u64),
+            );
+        }
+        let seqs: Vec<u32> = ring.iter().map(|f| f.seq).collect();
+        assert_eq!(seqs, vec![40, 41]);
+        // The next recording still starts clean.
+        ring.push_at(frame(0), start + Duration::from_secs(5));
+        assert_eq!(ring.len(), 1);
     }
 
     #[test]
