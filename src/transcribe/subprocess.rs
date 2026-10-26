@@ -414,13 +414,14 @@ fn release_requested(command: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// A live worker started ahead of the next recording. It loads the preview
-/// model, writes READY (read later by `start_stream`'s reader) and waits for
-/// audio. The engine model loads only when audio arrives, so it holds no VRAM.
+/// A live worker started ahead of the next recording, or kept from the last
+/// one. It has the preview model loaded, writes READY (read later by
+/// `start_stream`'s reader) and waits for audio. The engine model loads only when audio arrives, so it holds no VRAM.
 struct WarmWorker {
     child: Child,
     stdin: ChildStdin,
-    stdout: ChildStdout,
+    /// Buffered: a reused worker's READY can already sit in the buffer.
+    stdout: BufReader<ChildStdout>,
     generation: u64,
     /// When the worker started loading its live model.
     spawned_at: std::time::Instant,
@@ -453,13 +454,34 @@ impl WarmSlot {
             let _ = child.wait();
             return;
         };
+        let stdout = BufReader::new(stdout);
+        self.park(
+            child,
+            stdin,
+            stdout,
+            std::time::Instant::now(),
+            keep,
+            release,
+        );
+    }
+
+    /// Keep a worker for the next recording, for `keep` at most.
+    fn park(
+        &self,
+        child: Child,
+        stdin: ChildStdin,
+        stdout: BufReader<ChildStdout>,
+        spawned_at: std::time::Instant,
+        keep: std::time::Duration,
+        release: Option<String>,
+    ) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let worker = WarmWorker {
             child,
             stdin,
             stdout,
             generation,
-            spawned_at: std::time::Instant::now(),
+            spawned_at,
         };
         if let Ok(mut slot) = self.inner.lock() {
             if let Some(mut old) = slot.replace(worker) {
@@ -525,12 +547,13 @@ impl StreamingTranscriber for SubprocessTranscriber {
                 let stdout = child.stdout.take().ok_or_else(|| {
                     TranscribeError::InitFailed("Worker stdout not available".to_string())
                 })?;
-                (child, stdin, stdout, spawned_at)
+                (child, stdin, BufReader::new(stdout), spawned_at)
             }
         };
         let loading = LoadingStatus::start(spawned_at);
         let pid = nix::unistd::Pid::from_raw(child.id() as i32);
-        // The next recording's worker, started once this one is done.
+        // The next recording's worker: this one if it is still alive when
+        // done, else a fresh one.
         let refill = match self.warm_secs {
             0 => None,
             secs => Some((
@@ -546,16 +569,21 @@ impl StreamingTranscriber for SubprocessTranscriber {
 
         // Audio pump. The worker reads stdin on its own thread from the
         // start, so these writes do not wait for the models to load.
+        let (stdin_back_tx, stdin_back_rx) = std::sync::mpsc::channel::<ChildStdin>();
         std::thread::spawn(move || {
             while let Some(chunk) = samples_rx.blocking_recv() {
                 if chunk.is_empty() {
                     continue;
                 }
                 if Self::write_audio_to_worker(&mut stdin, &chunk).is_err() {
-                    break;
+                    return;
                 }
             }
-            // Dropping stdin tells the worker the recording has ended.
+            // An empty block ends the recording; the worker then stays up
+            // for the next one, so stdin goes back for reuse.
+            if Self::write_audio_to_worker(&mut stdin, &[]).is_ok() {
+                let _ = stdin_back_tx.send(stdin);
+            }
         });
 
         // Cancel kills the worker; the reader below then sees EOF.
@@ -570,9 +598,10 @@ impl StreamingTranscriber for SubprocessTranscriber {
             let send = |event| {
                 let _ = events_tx.blocking_send(event);
             };
-            let mut stdout = BufReader::new(stdout);
+            let mut stdout = stdout;
             let mut line = String::new();
             let mut ready = false;
+            let mut answered = false;
             loop {
                 line.clear();
                 match stdout.read_line(&mut line) {
@@ -604,6 +633,7 @@ impl StreamingTranscriber for SubprocessTranscriber {
                         if let Ok(mut guard) = last_language.lock() {
                             *guard = r.language.clone();
                         }
+                        answered = true;
                         let text = r.text.unwrap_or_default();
                         if !text.trim().is_empty() {
                             send(StreamingEvent::Final {
@@ -612,10 +642,13 @@ impl StreamingTranscriber for SubprocessTranscriber {
                             });
                         }
                     }
-                    Ok(r) => send(StreamingEvent::Error(TranscribeError::InferenceFailed(
-                        r.error
-                            .unwrap_or_else(|| "Unknown worker error".to_string()),
-                    ))),
+                    Ok(r) => {
+                        answered = true;
+                        send(StreamingEvent::Error(TranscribeError::InferenceFailed(
+                            r.error
+                                .unwrap_or_else(|| "Unknown worker error".to_string()),
+                        )))
+                    }
                     Err(e) => send(StreamingEvent::Error(TranscribeError::InferenceFailed(
                         format!(
                             "Failed to parse worker response: {} (output: {:?})",
@@ -626,9 +659,28 @@ impl StreamingTranscriber for SubprocessTranscriber {
                 break;
             }
             loading.ready();
-            let _ = child.wait();
-            if let Some((cmd, slot, keep, release)) = refill {
-                slot.refill(cmd, keep, release);
+            // The pump hands stdin back right after the end marker, which
+            // the worker needed before it could answer.
+            let stdin = answered
+                .then(|| {
+                    stdin_back_rx
+                        .recv_timeout(std::time::Duration::from_secs(2))
+                        .ok()
+                })
+                .flatten();
+            match (stdin, refill) {
+                (Some(stdin), Some((_, slot, keep, release)))
+                    if matches!(child.try_wait(), Ok(None)) =>
+                {
+                    slot.park(child, stdin, stdout, spawned_at, keep, release);
+                }
+                (_, refill) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if let Some((cmd, slot, keep, release)) = refill {
+                        slot.refill(cmd, keep, release);
+                    }
+                }
             }
             send(StreamingEvent::Ended);
             Ok(())
