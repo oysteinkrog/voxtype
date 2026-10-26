@@ -518,6 +518,13 @@ impl App for Popup {
             Msg::Check => self.check = None,
         }
         if self.idle(t) {
+            tracing::info!(
+                recording = self.files.recording,
+                status = self.files.finishing,
+                suppressed = self.files.suppressed,
+                since_audio = self.last_audio.map(|a| t - a),
+                "closing: the daemon is idle"
+            );
             self.closing = true;
             cx.exit();
         }
@@ -904,6 +911,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    let started = std::time::Instant::now();
     let args = Args::parse();
     let (mut cfg, hotkey) = load_config(args.config.as_deref());
     if let Some(w) = args.width_px {
@@ -960,14 +968,22 @@ fn main() -> anyhow::Result<()> {
                 .wait_while(lock.lock().unwrap(), |s| !s.wants_popup())
                 .unwrap();
             let (proxy, inbox) = vo::channel();
-            proxy.send(Msg::Files(sink.files.clone()));
+            // Audio first: frames that come before the daemon's state file
+            // says "recording" must not let the popup close at once.
             for frames in sink.audio.drain(..) {
                 proxy.send(Msg::Audio(frames));
             }
+            proxy.send(Msg::Files(sink.files.clone()));
             sink.proxy = Some(proxy);
             inbox
         };
         tracing::info!("showing");
+        if args.diag {
+            eprintln!(
+                "voxtype-osd-vo: showing at {:.4} s since main",
+                started.elapsed().as_secs_f64()
+            );
+        }
         let options = Options {
             fonts: fonts.clone(),
             inbox: Some(inbox),
