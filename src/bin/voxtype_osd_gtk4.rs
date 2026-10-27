@@ -591,6 +591,7 @@ fn build_window(
     // When the surface last appeared: the start of the recording.
     let shown_at = Cell::new(Instant::now());
     let default_size = (cfg.width_px as i32, cfg.height_px as i32);
+    let mut watch = voxtype::osd::watch::RuntimeWatch::new(voxtype::config::Config::runtime_dir());
 
     glib::timeout_add_local(Duration::from_millis(RENDER_TICK_MS as u64), move || {
         let cur_seq = redraw_state.last_seq.lock().map(|s| *s).unwrap_or(0);
@@ -599,9 +600,11 @@ fn build_window(
             .lock()
             .map(|t| *t)
             .unwrap_or_else(|_| Instant::now() - Duration::from_secs(3600));
-        // About 10 Hz is plenty for text; the files live on tmpfs.
+        // The files live on tmpfs: read them when inotify reports a change,
+        // and at about 10 Hz in case it does not.
         ticks.set(ticks.get().wrapping_add(1));
-        let poll = ticks.get().is_multiple_of(6);
+        let changed = watch.changed();
+        let poll = changed || ticks.get().is_multiple_of(6);
         if poll {
             // A status older than 30 s is left over from a crash; ignore it.
             let fresh = std::fs::metadata(&status_path)
@@ -644,7 +647,9 @@ fn build_window(
             shown_at.set(Instant::now());
         }
 
-        if poll {
+        // Also on the tick that shows the window, so it opens with the
+        // current text.
+        if poll || !visible.get() {
             let full = std::fs::read_to_string(&preview_path).unwrap_or_default();
             // The daemon empties the file when the recording ends; keep the
             // last words on screen until the window hides.
