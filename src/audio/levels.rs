@@ -13,6 +13,33 @@
 //! This is a lossy, best-effort broadcast: subscribers that fall behind get
 //! disconnected. The daemon never blocks on slow consumers.
 //!
+//! ## Version 2 frames
+//!
+//! A client that wants voice features writes the 4-byte hello
+//! `b"VXA"` + `2` right after connecting. The daemon answers with an 8-byte
+//! ack, `b"VXA"` + `2` + the frame size as a native `u32` (64), and then
+//! sends 64-byte frames. A client that writes nothing gets the 16-byte
+//! frames above, as before; the daemon waits [`HELLO_WAIT`] for a hello
+//! before its first frame. A version 2 client that reads something other
+//! than the ack is talking to an older daemon: those 8 bytes are the start
+//! of a 16-byte frame.
+//!
+//! Version 2 frame, native byte order:
+//!
+//! ```text
+//! 0   seq u32, min f32, max f32, peak_dbfs f32   (the version 1 frame)
+//! 16  rms_dbfs f32      RMS of the last 25 ms
+//! 20  f0_hz f32         0 when not voiced
+//! 24  centroid_hz f32
+//! 28  flatness f32      0 tonal to 1 noise
+//! 32  flags u32         bit 0 voiced, bit 1 features present
+//! 36  mel [u8; 24]      0 = -100 dB or less, 255 = 0 dB, 50 Hz to 8 kHz
+//! 60  reserved, zero
+//! ```
+//!
+//! Silence-pump frames carry no features (flag bit 1 clear). See
+//! [`crate::audio::features`] for how the features are measured.
+//!
 //! The emitter is *additive*: it taps the existing
 //! `mpsc::Receiver<Vec<f32>>` returned by `AudioCapture::start()` (which the
 //! daemon used to discard). When recording stops, the input channel closes
@@ -51,6 +78,7 @@
 //! work as if the daemon had just started. That's an acceptable trade-off
 //! since the alternative is a permanently broken socket.
 
+use crate::audio::features::{AudioFeatures, FeatureAnalyzer, MEL_BANDS};
 use crate::config::Config;
 use std::io;
 use std::path::PathBuf;
@@ -128,6 +156,146 @@ impl AudioFrame {
     }
 }
 
+/// Wire size of a version 2 frame in bytes.
+pub const FRAME_V2_BYTES: usize = 64;
+
+/// What a version 2 client writes after connecting: `b"VXA"` + version.
+pub const HELLO_V2: [u8; 4] = *b"VXA\x02";
+
+/// How long the daemon waits for a hello before sending version 1 frames.
+pub const HELLO_WAIT: Duration = Duration::from_millis(50);
+
+/// The daemon's answer to a version 2 hello: the hello, then the frame size.
+pub fn ack_v2() -> [u8; 8] {
+    let mut ack = [0u8; 8];
+    ack[..4].copy_from_slice(&HELLO_V2);
+    ack[4..].copy_from_slice(&(FRAME_V2_BYTES as u32).to_ne_bytes());
+    ack
+}
+
+const FLAG_VOICED: u32 = 1;
+const FLAG_FEATURES: u32 = 2;
+
+/// A level frame with its voice features, when they were measured.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RichFrame {
+    pub frame: AudioFrame,
+    pub features: Option<AudioFeatures>,
+}
+
+impl From<AudioFrame> for RichFrame {
+    fn from(frame: AudioFrame) -> Self {
+        Self {
+            frame,
+            features: None,
+        }
+    }
+}
+
+impl RichFrame {
+    /// Serialise to the 64-byte version 2 layout in the module docs.
+    pub fn to_bytes_v2(self) -> [u8; FRAME_V2_BYTES] {
+        let mut buf = [0u8; FRAME_V2_BYTES];
+        buf[..FRAME_BYTES].copy_from_slice(&self.frame.to_bytes());
+        if let Some(f) = self.features {
+            buf[16..20].copy_from_slice(&f.rms_dbfs.to_ne_bytes());
+            buf[20..24].copy_from_slice(&f.f0_hz.to_ne_bytes());
+            buf[24..28].copy_from_slice(&f.centroid_hz.to_ne_bytes());
+            buf[28..32].copy_from_slice(&f.flatness.to_ne_bytes());
+            let flags = FLAG_FEATURES | if f.voiced { FLAG_VOICED } else { 0 };
+            buf[32..36].copy_from_slice(&flags.to_ne_bytes());
+            buf[36..36 + MEL_BANDS].copy_from_slice(&f.mel);
+        }
+        buf
+    }
+
+    /// Parse a version 2 frame.
+    pub fn from_bytes_v2(bytes: &[u8; FRAME_V2_BYTES]) -> Self {
+        let f32_at = |i: usize| f32::from_ne_bytes(bytes[i..i + 4].try_into().unwrap());
+        let frame = AudioFrame::from_bytes(bytes[..FRAME_BYTES].try_into().unwrap());
+        let flags = u32::from_ne_bytes(bytes[32..36].try_into().unwrap());
+        let features = (flags & FLAG_FEATURES != 0).then(|| AudioFeatures {
+            rms_dbfs: f32_at(16),
+            f0_hz: f32_at(20),
+            voiced: flags & FLAG_VOICED != 0,
+            centroid_hz: f32_at(24),
+            flatness: f32_at(28),
+            mel: bytes[36..36 + MEL_BANDS].try_into().unwrap(),
+        });
+        Self { frame, features }
+    }
+}
+
+/// A blocking client for the audio socket. It asks for version 2 frames
+/// and falls back to version 1 when the daemon is older.
+pub struct AudioReader {
+    stream: std::os::unix::net::UnixStream,
+    version: u8,
+    buf: Vec<u8>,
+    have: usize,
+}
+
+impl AudioReader {
+    /// Sends the hello and reads the answer. Blocks until the daemon sends
+    /// its ack or, if it is older, its first frame.
+    pub fn new(mut stream: std::os::unix::net::UnixStream) -> io::Result<Self> {
+        use std::io::{Read, Write};
+        stream.write_all(&HELLO_V2)?;
+        let mut first = [0u8; 8];
+        stream.read_exact(&mut first)?;
+        let mut buf = vec![0u8; FRAME_V2_BYTES * 64];
+        let (version, have) = if first == ack_v2() {
+            (2, 0)
+        } else {
+            // An older daemon: these are the first bytes of a 16-byte frame.
+            buf[..8].copy_from_slice(&first);
+            (1, 8)
+        };
+        Ok(Self {
+            stream,
+            version,
+            buf,
+            have,
+        })
+    }
+
+    /// 1 or 2.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
+    /// Blocks until at least one whole frame is in, and returns every whole
+    /// frame read so far. Version 1 frames come without features.
+    pub fn read(&mut self) -> io::Result<Vec<RichFrame>> {
+        use std::io::Read;
+        let size = if self.version == 2 {
+            FRAME_V2_BYTES
+        } else {
+            FRAME_BYTES
+        };
+        while self.have < size {
+            match self.stream.read(&mut self.buf[self.have..])? {
+                0 => return Err(io::ErrorKind::UnexpectedEof.into()),
+                n => self.have += n,
+            }
+        }
+        let whole = self.have / size * size;
+        let frames = self.buf[..whole]
+            .chunks_exact(size)
+            .map(|c| {
+                if self.version == 2 {
+                    RichFrame::from_bytes_v2(c.try_into().unwrap())
+                } else {
+                    AudioFrame::from_bytes(c.try_into().unwrap()).into()
+                }
+            })
+            .collect();
+        self.buf.copy_within(whole..self.have, 0);
+        self.have -= whole;
+        Ok(frames)
+    }
+}
+
 /// Default path for the audio-frames socket.
 pub fn default_socket_path() -> PathBuf {
     Config::runtime_dir().join("audio.sock")
@@ -159,7 +327,7 @@ pub struct LevelHub {
 struct HubState {
     /// Bounded mpsc channel: recording-session producers send frames here,
     /// the broadcaster task drains it and fans out to clients.
-    broadcast_tx: mpsc::Sender<AudioFrame>,
+    broadcast_tx: mpsc::Sender<RichFrame>,
     /// Running count of attached subscribers, for telemetry/logging.
     subscriber_count: Mutex<usize>,
 }
@@ -248,7 +416,7 @@ fn bind_and_spawn(
 
     // Frame fan-in: any number of recording-session producers can send.
     // 200 frames = 2 seconds of buffered headroom at 100 Hz, plenty.
-    let (broadcast_tx, broadcast_rx) = mpsc::channel::<AudioFrame>(200);
+    let (broadcast_tx, broadcast_rx) = mpsc::channel::<RichFrame>(200);
 
     let state = Arc::new(HubState {
         broadcast_tx,
@@ -355,6 +523,12 @@ impl FrameSink {
     /// well under the noise floor of the audio pipeline.
     #[inline]
     pub fn publish(&self, frame: AudioFrame) {
+        self.publish_rich(frame.into());
+    }
+
+    /// Like [`FrameSink::publish`], for a frame with its voice features.
+    #[inline]
+    pub fn publish_rich(&self, frame: RichFrame) {
         let state = self.inner.current();
         let _ = state.broadcast_tx.try_send(frame);
     }
@@ -363,7 +537,7 @@ impl FrameSink {
 /// One subscriber's per-connection mailbox.
 struct SubscriberSlot {
     /// Sender feeding the per-client writer task.
-    tx: mpsc::Sender<AudioFrame>,
+    tx: mpsc::Sender<RichFrame>,
 }
 
 async fn run_accept_loop(
@@ -386,7 +560,7 @@ async fn run_accept_loop(
 
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                let (tx, rx) = mpsc::channel::<AudioFrame>(SUBSCRIBER_QUEUE_DEPTH);
+                let (tx, rx) = mpsc::channel::<RichFrame>(SUBSCRIBER_QUEUE_DEPTH);
                 let slot = SubscriberSlot { tx };
                 if sub_tx.send(slot).is_err() {
                     // Broadcaster has shut down; close the new connection.
@@ -418,10 +592,29 @@ async fn run_accept_loop(
     }
 }
 
-async fn run_subscriber_writer(mut stream: UnixStream, mut rx: mpsc::Receiver<AudioFrame>) {
+/// Waits up to [`HELLO_WAIT`] for a client hello and returns the frame
+/// version to send: 2 after a version 2 hello, else 1.
+async fn read_hello(stream: &mut UnixStream) -> u8 {
+    use tokio::io::AsyncReadExt;
+    let mut hello = [0u8; 4];
+    match tokio::time::timeout(HELLO_WAIT, stream.read_exact(&mut hello)).await {
+        Ok(Ok(_)) if hello == HELLO_V2 => 2,
+        _ => 1,
+    }
+}
+
+async fn run_subscriber_writer(mut stream: UnixStream, mut rx: mpsc::Receiver<RichFrame>) {
+    let version = read_hello(&mut stream).await;
+    if version == 2 && stream.write_all(&ack_v2()).await.is_err() {
+        return;
+    }
     while let Some(frame) = rx.recv().await {
-        let bytes = frame.to_bytes();
-        if let Err(e) = stream.write_all(&bytes).await {
+        let written = if version == 2 {
+            stream.write_all(&frame.to_bytes_v2()).await
+        } else {
+            stream.write_all(&frame.frame.to_bytes()).await
+        };
+        if let Err(e) = written {
             tracing::trace!("Audio subscriber write error: {}", e);
             break;
         }
@@ -430,10 +623,10 @@ async fn run_subscriber_writer(mut stream: UnixStream, mut rx: mpsc::Receiver<Au
 }
 
 async fn run_broadcast_loop(
-    mut frame_rx: mpsc::Receiver<AudioFrame>,
+    mut frame_rx: mpsc::Receiver<RichFrame>,
     mut new_subs: mpsc::UnboundedReceiver<SubscriberSlot>,
 ) {
-    let mut subscribers: Vec<mpsc::Sender<AudioFrame>> = Vec::new();
+    let mut subscribers: Vec<mpsc::Sender<RichFrame>> = Vec::new();
 
     loop {
         tokio::select! {
@@ -486,6 +679,8 @@ pub struct LevelBucketer {
     max: f32,
     peak_abs: f32,
     seq: u32,
+    /// Voice features per frame, for [`LevelBucketer::push_rich`].
+    analyzer: Option<Box<FeatureAnalyzer>>,
 }
 
 impl LevelBucketer {
@@ -497,6 +692,26 @@ impl LevelBucketer {
             max: f32::NEG_INFINITY,
             peak_abs: 0.0,
             seq: 0,
+            analyzer: None,
+        }
+    }
+
+    /// A bucketer that also measures voice features for each frame.
+    pub fn with_features() -> Self {
+        Self {
+            analyzer: Some(Box::default()),
+            ..Self::new()
+        }
+    }
+
+    /// Like [`LevelBucketer::push`], with each frame's voice features when
+    /// the bucketer was made with [`LevelBucketer::with_features`].
+    pub fn push_rich(&mut self, samples: &[f32], out: &mut Vec<RichFrame>) {
+        for &s in samples {
+            let features = self.analyzer.as_mut().and_then(|a| a.push(s));
+            if let Some(frame) = self.step(s) {
+                out.push(RichFrame { frame, features });
+            }
         }
     }
 
@@ -505,6 +720,16 @@ impl LevelBucketer {
     /// sufficient capacity reserved by the caller.
     pub fn push(&mut self, samples: &[f32], out: &mut Vec<AudioFrame>) {
         for &s in samples {
+            if let Some(frame) = self.step(s) {
+                out.push(frame);
+            }
+        }
+    }
+
+    /// Adds one sample; returns the frame it completes, if any.
+    #[inline]
+    fn step(&mut self, s: f32) -> Option<AudioFrame> {
+        {
             if s < self.min {
                 self.min = s;
             }
@@ -529,14 +754,15 @@ impl LevelBucketer {
                     max: if self.max.is_finite() { self.max } else { 0.0 },
                     peak_dbfs,
                 };
-                out.push(frame);
                 self.seq = self.seq.wrapping_add(1);
                 self.accumulated = 0;
                 self.min = f32::INFINITY;
                 self.max = f32::NEG_INFINITY;
                 self.peak_abs = 0.0;
+                return Some(frame);
             }
         }
+        None
     }
 }
 
@@ -638,19 +864,19 @@ pub fn spawn_emitter_with_streaming_tap(
     speech_tracker: Option<SpeechTracker>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut bucketer = LevelBucketer::new();
+        let mut bucketer = LevelBucketer::with_features();
         // Reusable scratch buffer for emitted frames per chunk.
         // 4 frames is plenty for typical 10–40 ms chunks; we'll grow if needed.
-        let mut out: Vec<AudioFrame> = Vec::with_capacity(8);
+        let mut out: Vec<RichFrame> = Vec::with_capacity(8);
 
         while let Some(chunk) = chunk_rx.recv().await {
             out.clear();
-            bucketer.push(&chunk, &mut out);
+            bucketer.push_rich(&chunk, &mut out);
             for frame in out.drain(..) {
                 if let Some(tracker) = &speech_tracker {
-                    tracker.observe(frame.peak_dbfs).await;
+                    tracker.observe(frame.frame.peak_dbfs).await;
                 }
-                sink.publish(frame);
+                sink.publish_rich(frame);
             }
 
             if let Some(ref tx) = streaming_tx {
@@ -861,6 +1087,147 @@ mod tests {
         assert_eq!(got.seq, 7);
 
         // Cleanup.
+        hub.cleanup();
+    }
+
+    #[test]
+    fn rich_frame_round_trips_through_v2_bytes() {
+        let frame = AudioFrame {
+            seq: 3,
+            min: -0.5,
+            max: 0.25,
+            peak_dbfs: -6.0,
+        };
+        let mut mel = [0u8; MEL_BANDS];
+        mel[5] = 200;
+        let rich = RichFrame {
+            frame,
+            features: Some(AudioFeatures {
+                rms_dbfs: -20.0,
+                f0_hz: 140.5,
+                voiced: true,
+                centroid_hz: 900.0,
+                flatness: 0.1,
+                mel,
+            }),
+        };
+        let bytes = rich.to_bytes_v2();
+        assert_eq!(RichFrame::from_bytes_v2(&bytes), rich);
+        // The first 16 bytes are the version 1 frame.
+        assert_eq!(
+            AudioFrame::from_bytes(bytes[..FRAME_BYTES].try_into().unwrap()),
+            frame
+        );
+        // A frame without features keeps them absent.
+        let plain = RichFrame::from(frame);
+        assert_eq!(RichFrame::from_bytes_v2(&plain.to_bytes_v2()), plain);
+    }
+
+    /// A client that sends the version 2 hello gets the ack and 64-byte
+    /// frames with features.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn hello_v2_gets_rich_frames() {
+        use tokio::io::AsyncWriteExt;
+        let _guard = HUB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, path) = temp_socket_dir();
+        let hub = LevelHub::start(path.clone()).await.expect("start hub");
+        let mut client = UnixStream::connect(&path).await.expect("client connect");
+        client.write_all(&HELLO_V2).await.unwrap();
+        let mut ack = [0u8; 8];
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut ack))
+            .await
+            .expect("ack in time")
+            .unwrap();
+        assert_eq!(ack, ack_v2());
+        let features = AudioFeatures {
+            f0_hz: 120.0,
+            voiced: true,
+            ..AudioFeatures::default()
+        };
+        hub.frame_sink().publish_rich(RichFrame {
+            frame: AudioFrame {
+                seq: 9,
+                min: 0.0,
+                max: 0.0,
+                peak_dbfs: -30.0,
+            },
+            features: Some(features),
+        });
+        let mut buf = [0u8; FRAME_V2_BYTES];
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut buf))
+            .await
+            .expect("frame in time")
+            .unwrap();
+        let got = RichFrame::from_bytes_v2(&buf);
+        assert_eq!(got.frame.seq, 9);
+        assert_eq!(got.features, Some(features));
+        hub.cleanup();
+    }
+
+    /// The blocking reader negotiates version 2 and reads rich frames.
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn audio_reader_gets_version_2() {
+        let _guard = HUB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, path) = temp_socket_dir();
+        let hub = LevelHub::start(path.clone()).await.expect("start hub");
+        let reader = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || {
+                let stream = std::os::unix::net::UnixStream::connect(&path).unwrap();
+                let mut reader = AudioReader::new(stream).unwrap();
+                (reader.version(), reader.read().unwrap())
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        hub.frame_sink().publish_rich(RichFrame {
+            frame: AudioFrame {
+                seq: 4,
+                min: 0.0,
+                max: 0.0,
+                peak_dbfs: -30.0,
+            },
+            features: Some(AudioFeatures::default()),
+        });
+        let (version, frames) = tokio::time::timeout(Duration::from_secs(2), reader)
+            .await
+            .expect("reader in time")
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(frames[0].frame.seq, 4);
+        assert_eq!(frames[0].features, Some(AudioFeatures::default()));
+        hub.cleanup();
+    }
+
+    /// A client that sends nothing still gets 16-byte frames, also for a
+    /// frame that has features.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_silent_client_keeps_version_1_frames() {
+        let _guard = HUB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_tmp, path) = temp_socket_dir();
+        let hub = LevelHub::start(path.clone()).await.expect("start hub");
+        let mut client = UnixStream::connect(&path).await.expect("client connect");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        for seq in [1, 2] {
+            hub.frame_sink().publish_rich(RichFrame {
+                frame: AudioFrame {
+                    seq,
+                    min: 0.0,
+                    max: 0.0,
+                    peak_dbfs: -30.0,
+                },
+                features: Some(AudioFeatures::default()),
+            });
+        }
+        let mut buf = [0u8; 2 * FRAME_BYTES];
+        tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut buf))
+            .await
+            .expect("frames in time")
+            .unwrap();
+        let second = AudioFrame::from_bytes(buf[FRAME_BYTES..].try_into().unwrap());
+        assert_eq!(second.seq, 2);
         hub.cleanup();
     }
 
