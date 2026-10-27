@@ -110,6 +110,11 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// A green oscilloscope instrument: a vector trace over a graticule, a
+    /// readout column with level, time and words per minute, and the words
+    /// in a monospaced readout panel with a block caret. Drawn by the vo
+    /// frontend only; the gtk4 frontend draws `swiss` for it.
+    Scope,
     /// Cinema subtitles: the words in two large centred lines on a soft
     /// dark backdrop, the newest word in accent blue, lines that roll up, and
     /// a small red dot that pulses while the mic is live. Drawn by the vo
@@ -157,6 +162,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "scope" => Some(OsdTheme::Scope),
             "captions" => Some(OsdTheme::Captions),
             "karaoke" => Some(OsdTheme::Karaoke),
             "island" => Some(OsdTheme::Island),

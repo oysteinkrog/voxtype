@@ -42,6 +42,7 @@ pub(crate) fn source(theme: OsdTheme) -> &'static str {
         #[allow(unreachable_patterns)]
         OsdTheme::Karaoke => "concept 14",
         OsdTheme::Captions => "concept 13",
+        OsdTheme::Scope => "concept 18",
         _ => "",
     }
 }

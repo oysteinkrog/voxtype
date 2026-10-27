@@ -1,0 +1,681 @@
+//! The `scope` look of the vo popup, after mock-up 18: a green oscilloscope
+//! instrument. A bright vector trace runs over a graticule with a dBFS
+//! scale, a readout column shows the input level, the elapsed time and the
+//! words per minute with small segment meters, and the words show in a
+//! monospaced readout panel with corner brackets and a block caret.
+//!
+//! The trace is rebuilt from the audio levels every frame as one polyline
+//! with a glow; it freezes at the stop while a cursor sweeps with the
+//! progress, and goes flat once the text is pasted. The readout numbers
+//! change at most twice a second.
+//!
+//! The mock-up's latency and model readouts have no source in the popup, so
+//! those two rows show the elapsed time and the word count instead.
+//!
+//! It shares the stop and final-text times with the showcase look
+//! (`Extra::finish_at`, `Extra::final_at`).
+
+use super::*;
+
+use std::sync::OnceLock;
+
+use vo::scene::canvas::Painter;
+use vo::scene::display::{Paint, ShapeInstance};
+use vo::scene::geom::{Affine, Point, RRect};
+use vo::scene::path::{icons, Contour, Outline, StrokeStyle};
+use vo::scene::roll::digit_roll;
+use vo::scene::taffy;
+use vo::scene::taffy::prelude::{auto, length};
+
+const BG: u32 = 0x04100b;
+const PANEL: u32 = 0x061711;
+const EDGE: u32 = 0x1fcf7c;
+const FRAME: u32 = 0x16573a;
+const GRID: u32 = 0x0f3a27;
+const TRACE: u32 = 0x3dff8f;
+const VALUE: u32 = 0x5cffa4;
+const LABEL: u32 = 0x7fd6a6;
+const TEXT: u32 = 0x5ef7a3;
+const DIM: u32 = 0x2d7a54;
+const OFF: u32 = 0x10392a;
+
+fn hex(c: u32) -> Color {
+    Color::hex(c, 1.0)
+}
+
+/// The mock-up's 912 x 598 panel at 0.75.
+const S: f32 = 0.75;
+const W: f32 = 912.0 * S;
+const H: f32 = 598.0 * S;
+const MARGIN: f32 = 14.0;
+
+/// Boxes, in the mock-up's pixels before scaling.
+const SCOPE: (f32, f32, f32, f32) = (13.0, 58.0, 723.0, 230.0);
+const SCALE_W: f32 = 60.0;
+const READ: (f32, f32, f32, f32) = (745.0, 58.0, 155.0, 230.0);
+const TRANS: (f32, f32, f32, f32) = (13.0, 300.0, 887.0, 255.0);
+const INNER: (f32, f32, f32, f32) = (20.0, 336.0, 873.0, 210.0);
+const STATUS_Y: f32 = 573.0;
+
+const TEXT_PX: f32 = 28.0 * S;
+const LINE: f32 = 43.0 * S;
+const TEXT_X: f32 = 50.0 * S;
+const TEXT_TOP: f32 = 350.0 * S;
+const WRAP: f32 = 800.0 * S;
+pub(crate) const MAX_LINES: u32 = 4;
+
+/// Seconds of audio across the graticule.
+const WINDOW: f64 = 2.6;
+/// Sample points per second of the trace's carrier.
+const CARRIER_HZ: f64 = 420.0;
+/// The level that reaches the top of the graticule.
+const FULL: f32 = 0.95;
+
+#[derive(Clone, Copy)]
+struct Fonts {
+    mono: u32,
+    bold: u32,
+}
+
+fn fonts(reg: &FontRegistry) -> Fonts {
+    static FONTS: OnceLock<Fonts> = OnceLock::new();
+    *FONTS.get_or_init(|| {
+        let add = |pattern: &str, or: u32| reg.add_system(pattern).unwrap_or(or);
+        Fonts {
+            mono: add("JetBrains Mono:medium", MONO),
+            bold: add("JetBrains Mono:semibold", MONO),
+        }
+    })
+}
+
+fn reduced() -> bool {
+    static R: OnceLock<bool> = OnceLock::new();
+    *R.get_or_init(|| {
+        std::env::var("VO_REDUCED_MOTION").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
+    })
+}
+
+pub(crate) fn text_style(look: &Look) -> TextStyle {
+    TextStyle::new(fonts(&look.fonts).mono, TEXT_PX, LINE).tracking(0.4)
+}
+
+pub(crate) fn text_width(_look: &Look) -> f32 {
+    WRAP
+}
+
+fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
+    e.layout(|s| {
+        s.position = taffy::Position::Absolute;
+        s.inset = taffy::Rect {
+            left: length(x),
+            top: length(y),
+            right: auto(),
+            bottom: auto(),
+        };
+    })
+}
+
+fn ease_out(k: f64) -> f32 {
+    let k = k.clamp(0.0, 1.0);
+    (1.0 - (1.0 - k).powi(3)) as f32
+}
+
+/// A number from 0 to 1 that depends only on `n`.
+fn noise(n: i64) -> f32 {
+    let mut x = (n as u64 as u32).wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x2C1B_3C6D);
+    x ^= x >> 12;
+    (x & 0xFFFF) as f32 / 65535.0
+}
+
+fn scaled(r: (f32, f32, f32, f32)) -> Rect {
+    Rect::new(r.0 * S, r.1 * S, r.2 * S, r.3 * S)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Loading,
+    Listening,
+    Finishing,
+    Done,
+    Cancelled,
+}
+
+impl Mode {
+    fn name(self) -> &'static str {
+        match self {
+            Mode::Loading => "LOADING",
+            Mode::Listening => "LISTENING",
+            Mode::Finishing => "FINISHING",
+            Mode::Done => "DONE",
+            Mode::Cancelled => "CANCELLED",
+        }
+    }
+}
+
+/// State only the scope look keeps.
+pub struct State {
+    mode: Option<Mode>,
+    mode_at: f64,
+    prog: (f32, f32, f64),
+    /// The readouts as last shown, and when they last changed.
+    dbfs: Option<f32>,
+    wpm: u32,
+    read_at: f64,
+    word_at: f64,
+    words: usize,
+}
+
+impl Default for State {
+    fn default() -> State {
+        State {
+            mode: None,
+            mode_at: f64::NEG_INFINITY,
+            prog: (0.0, 0.0, 0.0),
+            dbfs: None,
+            wpm: 0,
+            read_at: f64::NEG_INFINITY,
+            word_at: f64::NEG_INFINITY,
+            words: 0,
+        }
+    }
+}
+
+/// What the canvas draws.
+#[derive(Clone)]
+struct Scene {
+    mode: Mode,
+    mode_at: f64,
+    shown_at: f64,
+    levels: Arc<[f32]>,
+    newest_at: f64,
+    finish_at: Option<f64>,
+    final_at: Option<f64>,
+    prog: Option<(f32, f32, f64)>,
+    /// Lit segments of the three meters, out of 14, 10 and 10.
+    meters: [usize; 3],
+    caret: Option<(Point, f64)>,
+}
+
+impl Scene {
+    fn until(&self, now: f64) -> f64 {
+        match self.mode {
+            Mode::Loading | Mode::Listening | Mode::Finishing => now + 0.25,
+            _ => (now + 0.2).max(self.mode_at + 0.6),
+        }
+    }
+
+    fn level_at(&self, s: f64) -> f32 {
+        let n = self.levels.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let back = ((self.newest_at - s) * FRAME_HZ as f64).max(0.0);
+        let i = (n - 1) as f64 - back;
+        if i < 0.0 {
+            return 0.0;
+        }
+        let (a, k) = (i.floor() as usize, (i - i.floor()) as f32);
+        let b = (a + 1).min(n - 1);
+        self.levels[a] * (1.0 - k) + self.levels[b] * k
+    }
+
+    fn draw(&self, t: f64, _rect: Rect, p: &mut Painter) {
+        let card = RRect::new(Rect::new(MARGIN, MARGIN, W, H), 12.0 * S);
+        p.shape(ShapeInstance::rrect(
+            card,
+            Paint::glow(hex(EDGE).fade(0.25), 6.0, 0.5),
+        ));
+        p.shape(
+            ShapeInstance::rrect(card, Paint::solid(hex(BG).fade(0.96)))
+                .with_stroke(Paint::solid(hex(EDGE).fade(0.85)), 1.2),
+        );
+        p.layer(Affine::translate(MARGIN, MARGIN), 1.0, |p| {
+            self.draw_frames(p);
+            self.draw_grid(p);
+            self.draw_trace(t, p);
+            self.draw_meters(p);
+            self.draw_icons(t, p);
+            self.draw_caret(t, p);
+        });
+    }
+
+    fn boxed(&self, r: Rect, radius: f32, p: &mut Painter) {
+        p.shape(
+            ShapeInstance::rrect(RRect::new(r, radius), Paint::solid(hex(PANEL).fade(0.9)))
+                .with_stroke(Paint::solid(hex(FRAME)), 1.0),
+        );
+    }
+
+    fn draw_frames(&self, p: &mut Painter) {
+        // The header rule.
+        p.shape(ShapeInstance::rrect(
+            RRect::new(Rect::new(0.0, 46.0 * S, W, 1.0), 0.0),
+            Paint::solid(hex(FRAME)),
+        ));
+        self.boxed(scaled(SCOPE), 6.0 * S, p);
+        let sc = scaled(SCOPE);
+        self.boxed(Rect::new(sc.x, sc.y, SCALE_W * S, sc.h), 6.0 * S, p);
+        self.boxed(scaled(READ), 6.0 * S, p);
+        self.boxed(scaled(TRANS), 8.0 * S, p);
+        let inner = scaled(INNER);
+        p.shape(
+            ShapeInstance::rrect(RRect::new(inner, 2.0), Paint::solid(hex(BG).fade(0.6)))
+                .with_stroke(Paint::solid(hex(FRAME).fade(0.8)), 1.0),
+        );
+        // Corner brackets in the transcript box.
+        for c in vo::scene::path::make::brackets(
+            inner.x + 7.0 * S,
+            inner.y + 7.0 * S,
+            inner.w - 14.0 * S,
+            inner.h - 14.0 * S,
+            10.0 * S,
+        ) {
+            p.stroke(&c, &StrokeStyle::solid(1.4, hex(TEXT)));
+        }
+        // The EN tag.
+        let tag = Rect::new(862.0 * S, 307.0 * S, 30.0 * S, 22.0 * S);
+        p.shape(
+            ShapeInstance::rrect(RRect::new(tag, 3.0), Paint::NONE)
+                .with_stroke(Paint::solid(hex(EDGE).fade(0.8)), 1.0),
+        );
+    }
+
+    fn graticule(&self) -> Rect {
+        let sc = scaled(SCOPE);
+        Rect::new(
+            sc.x + SCALE_W * S + 1.0,
+            sc.y + 1.0,
+            sc.w - SCALE_W * S - 14.0 * S,
+            sc.h - 14.0 * S,
+        )
+    }
+
+    fn draw_grid(&self, p: &mut Painter) {
+        let g = self.graticule();
+        let (cols, rows) = (24, 8);
+        for i in 0..=cols {
+            let x = g.x + g.w * i as f32 / cols as f32;
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(x, g.y, 1.0, g.h), 0.0),
+                Paint::solid(hex(GRID)),
+            ));
+        }
+        for j in 0..=rows {
+            let y = g.y + g.h * j as f32 / rows as f32;
+            let c = if j == rows / 2 { hex(GRID).fade(1.0) } else { hex(GRID) };
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(g.x, y, g.w, 1.0), 0.0),
+                Paint::solid(c),
+            ));
+        }
+    }
+
+    /// The trace: a dense carrier under the voice's envelope, newest at the
+    /// right. Each point's sign and size come from its own sample number,
+    /// so the trace scrolls rather than flickers.
+    fn draw_trace(&self, t: f64, p: &mut Painter) {
+        let g = self.graticule();
+        let cy = g.y + g.h / 2.0;
+        let t_eff = self.finish_at.map_or(t, |f| t.min(f));
+        let flat = self.final_at.map_or(0.0, |f| ease_out((t - f) / 0.35));
+        let frozen = self.finish_at.is_some();
+        let n = (g.w / 1.25) as usize;
+        let mut pts = Vec::with_capacity(n);
+        for i in 0..n {
+            let u = i as f64 / (n - 1) as f64;
+            let s = t_eff - (1.0 - u) * WINDOW;
+            let k = (s * CARRIER_HZ).floor() as i64;
+            // A spiky envelope: loud syllables stand out of a low floor.
+            let env = (self.level_at(s) / FULL).min(1.0).powf(1.7);
+            let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+            let z = noise(k);
+            let mag = 0.08 + 0.92 * z * z;
+            let y = cy - sign * mag * env * (g.h / 2.0 - 4.0) * (1.0 - flat);
+            pts.push(Point::new(g.x + u as f32 * g.w, y));
+        }
+        let colour = if self.mode == Mode::Cancelled {
+            hex(DIM)
+        } else if frozen {
+            hex(TRACE).fade(0.55)
+        } else {
+            hex(TRACE)
+        };
+        let line = Contour::polyline(&pts, false);
+        p.stroke(&line, &StrokeStyle::solid(2.5, colour.fade(0.14)).glow(4.0));
+        p.stroke(&line, &StrokeStyle::solid(1.1, colour));
+        // While finishing, a cursor sweeps the frozen trace with the progress.
+        if let (Mode::Finishing, Some((a, b, at))) = (self.mode, self.prog) {
+            let f = a + (b - a) * ease_out((t - at) / 0.35);
+            let x = g.x + g.w * f;
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(x - 0.75, g.y, 1.5, g.h), 0.0),
+                Paint::glow(hex(TRACE).fade(0.7), 4.0, 0.7),
+            ));
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(x - 0.75, g.y, 1.5, g.h), 0.0),
+                Paint::solid(hex(TRACE)),
+            ));
+        }
+    }
+
+    /// The segment meters under the readouts.
+    fn draw_meters(&self, p: &mut Painter) {
+        let r = scaled(READ);
+        let x0 = r.x + 15.0 * S;
+        let w = r.w - 30.0 * S;
+        let rows = [(108.0 * S, 14usize), (172.0 * S, 10), (234.0 * S, 10)];
+        for (m, (y, n)) in rows.iter().enumerate() {
+            let pitch = w / *n as f32;
+            if m > 0 {
+                p.shape(
+                    ShapeInstance::rrect(
+                        RRect::new(Rect::new(x0, *y - 0.5, w, 6.0 * S), 1.0),
+                        Paint::NONE,
+                    )
+                    .with_stroke(Paint::solid(hex(OFF)), 1.0),
+                );
+            }
+            for i in 0..*n {
+                let lit = i < self.meters[m];
+                if m > 0 && !lit {
+                    continue;
+                }
+                p.shape(ShapeInstance::rrect(
+                    RRect::new(
+                        Rect::new(x0 + i as f32 * pitch, *y, pitch - 1.5, 5.0 * S),
+                        0.5,
+                    ),
+                    Paint::solid(if lit { hex(VALUE) } else { hex(OFF) }),
+                ));
+            }
+        }
+    }
+
+    fn draw_icons(&self, t: f64, p: &mut Painter) {
+        let mic = |c: Point, scale: f32, colour: Color, p: &mut Painter| {
+            let o = Outline::new(&icons::mic(), 0.05).transform(
+                &Affine::translate(-12.0, -12.0)
+                    .then(&Affine::scale(scale))
+                    .then(&Affine::translate(c.x, c.y)),
+            );
+            if let Some(head) = o.contours.first() {
+                p.fill([head], &StrokeStyle::solid(0.0, colour));
+            }
+            for k in o.contours.iter().skip(1) {
+                p.stroke(k, &StrokeStyle::solid(1.4, colour));
+            }
+        };
+        mic(Point::new(27.0 * S, 24.0 * S), 0.85, hex(TEXT), p);
+        // The activity dots at the top right blink with the voice.
+        let live = self.mode == Mode::Listening;
+        for i in 0..6 {
+            let (col, row) = (i % 3, i / 3);
+            let c = Point::new((862.0 + col as f32 * 11.0) * S, (19.0 + row as f32 * 11.0) * S);
+            let on = live
+                && !reduced()
+                && noise(((t - self.shown_at) * 6.0) as i64 * 7 + i as i64) > 0.4;
+            let colour = if on || (i == 0 && self.mode != Mode::Cancelled) {
+                hex(VALUE)
+            } else {
+                hex(DIM)
+            };
+            p.shape(ShapeInstance::circle(c, 2.6 * S, Paint::solid(colour)));
+        }
+        // The status mic in its dark disc.
+        let c = Point::new(323.0 * S, STATUS_Y * S);
+        p.shape(ShapeInstance::circle(c, 11.0 * S, Paint::solid(hex(0x0d3a26))));
+        mic(c, 0.55, hex(VALUE), p);
+    }
+
+    fn draw_caret(&self, t: f64, p: &mut Painter) {
+        let Some((c, since)) = self.caret else {
+            return;
+        };
+        let idle = t - since - 0.4;
+        let on = idle < 0.0 || reduced() || (idle * 1.1).fract() < 0.55;
+        if on {
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(c.x, c.y, 3.0, LINE * 0.62), 0.0),
+                Paint::solid(hex(TEXT)),
+            ));
+        }
+    }
+}
+
+impl Popup {
+    fn scope_mode(&self) -> Mode {
+        let status = self.status();
+        if self.extra.final_at.is_some() {
+            Mode::Done
+        } else if self.ended() {
+            if self.extra.finish_at.is_some() {
+                Mode::Done
+            } else {
+                Mode::Cancelled
+            }
+        } else if status.loading {
+            Mode::Loading
+        } else if status.finishing || self.extra.finish_at.is_some() {
+            Mode::Finishing
+        } else {
+            Mode::Listening
+        }
+    }
+
+    /// The input level in dBFS from the newest levels, or `None` when quiet.
+    fn scope_dbfs(&self) -> Option<f32> {
+        // The levels are `tick_level`'s meter fraction to the power 1.5,
+        // after the visual gain; undo both.
+        let peak = self.levels.iter().rev().take(25).copied().fold(0.0f64, f64::max);
+        (peak > 1e-3).then(|| {
+            let f = peak.powf(2.0 / 3.0);
+            (60.0 * f - 60.0 - 20.0 * (self.look.gain / 10.0).log10()) as f32
+        })
+    }
+
+    pub(crate) fn sync_scope(&mut self, t: f64) {
+        if self.look.theme != OsdTheme::Scope {
+            return;
+        }
+        let mode = self.scope_mode();
+        let dbfs = self.scope_dbfs();
+        let elapsed = (t - self.shown_at).max(1.0) / 60.0;
+        let wpm = (self.word_count as f64 / elapsed).round() as u32;
+        let s = &mut self.scope;
+        if s.mode != Some(mode) {
+            if s.mode.is_some() {
+                s.mode_at = t;
+            }
+            s.mode = Some(mode);
+        }
+        let f = self.files.fraction.unwrap_or(0.0).clamp(0.0, 1.0) as f32;
+        if (f - s.prog.1).abs() > 1e-4 {
+            let cur = s.prog.0 + (s.prog.1 - s.prog.0) * ease_out((t - s.prog.2) / 0.35);
+            s.prog = (cur, f, t);
+        }
+        // Readouts change at most twice a second, and freeze at the stop.
+        if mode == Mode::Listening && t - s.read_at >= 0.5 {
+            s.dbfs = dbfs;
+            s.wpm = wpm;
+            s.read_at = t;
+        }
+        if self.word_count != s.words {
+            s.words = self.word_count;
+            s.word_at = t;
+        }
+    }
+
+    pub(crate) fn arm_scope_tick(&mut self, _cx: &mut Cx<Msg>) {}
+
+    pub(crate) fn scope_surface(_look: &Look) -> Size {
+        Size::new((W + 2.0 * MARGIN).ceil(), (H + 2.0 * MARGIN).ceil())
+    }
+
+    pub(crate) fn scope_view(&self) -> Element<Msg> {
+        let size = Self::scope_surface(&self.look);
+        let root = Element::column("root").size(size.w, size.h);
+        if self.closing {
+            return root;
+        }
+        root.child(self.scope_panel(size, 0.0, 0.0))
+    }
+
+    fn scope_panel(&self, size: Size, x: f32, y: f32) -> Element<Msg> {
+        let l = &self.look;
+        let s = &self.scope;
+        let mode = s.mode.unwrap_or(Mode::Loading);
+        let f = fonts(&l.fonts);
+        let o = MARGIN;
+        let style = l.text_style();
+        let all = self.stable_lines(&style, WRAP);
+        let lines = &all[all.len().saturating_sub(MAX_LINES as usize)..];
+
+        let caret = (mode == Mode::Listening).then(|| {
+            let (row, w) = lines
+                .last()
+                .map_or((0usize, 0.0), |(_, w)| (lines.len() - 1, *w));
+            (
+                Point::new(TEXT_X + w + 8.0, TEXT_TOP + row as f32 * LINE + LINE * 0.18),
+                s.word_at,
+            )
+        });
+        let level_segs = s
+            .dbfs
+            .map_or(0, |d| (((d + 60.0) / 60.0).clamp(0.0, 1.0) * 14.0).round() as usize);
+        let secs = (self.extra.now - self.shown_at).max(0.0);
+        let scene = Scene {
+            mode,
+            mode_at: s.mode_at,
+            shown_at: self.shown_at,
+            levels: self.wave.clone(),
+            newest_at: self.newest_at,
+            finish_at: self.extra.finish_at,
+            final_at: self.extra.final_at,
+            prog: (mode == Mode::Finishing && self.files.fraction.is_some()).then_some(s.prog),
+            meters: [
+                level_segs,
+                ((secs / 6.0).min(10.0)) as usize,
+                ((s.wpm as f32 / 20.0).min(10.0)) as usize,
+            ],
+            caret: caret.map(|(c, at)| (Point::new(c.x + o, c.y + o), at)),
+        };
+        let until = scene.until(self.extra.now);
+        let canvas = at(
+            Element::canvas("scope", until, move |t, r, p| scene.draw(t, r, p)),
+            0.0,
+            0.0,
+        )
+        .size(size.w, size.h);
+
+        let mono = |px: f32| TextStyle::new(f.mono, px, px * 1.3).tracking(0.6);
+        let bold = |px: f32| TextStyle::new(f.bold, px, px * 1.3).tracking(0.6);
+        let label = |key: String, text: String, style: TextStyle, colour: Color, px: f32, py: f32| {
+            at(
+                Element::label(key, text).text_style(style).color(colour),
+                o + px * S,
+                o + py * S,
+            )
+        };
+        let mut panel = at(Element::layer("scope"), x, y)
+            .size(size.w, size.h)
+            .presence(Transition::fade(), Transition::fade().scale(0.98))
+            .child(canvas)
+            .child(label("title".into(), "VOICE DICTATION".into(), bold(14.0 * S * 1.15), hex(TEXT), 61.0, 15.0))
+            .child(
+                label(
+                    format!("mode-{}", mode.name()),
+                    mode.name().into(),
+                    mono(11.0 * S * 1.2),
+                    hex(LABEL),
+                    845.0 - self.measure.layout(mode.name(), &mono(11.0 * S * 1.2), None).size.w / S,
+                    17.0,
+                )
+                .presence(Transition::fade(), Transition::fade()),
+            )
+            .child(label("live".into(), "LIVE TRANSCRIPT".into(), bold(13.0 * S * 1.2), hex(0xc6f3dc), 28.0, 309.0))
+            .child(label("en".into(), "EN".into(), bold(12.0 * S * 1.2), hex(0xc6f3dc), 868.0, 309.0));
+        // The dBFS scale.
+        for (i, mark) in ["0 dBFS", "-12", "-24", "-36", "-48", "-60"].iter().enumerate() {
+            panel = panel.child(label(
+                format!("scale{i}"),
+                (*mark).into(),
+                mono(12.0 * S * 1.2),
+                hex(0xb9e9cf),
+                23.0,
+                68.0 + i as f32 * 34.6,
+            ));
+        }
+        // The readouts: name, value and unit, with the digits rolling.
+        let roll = Spring::critical_to_98(0.25);
+        let name = |key: &'static str, text: &'static str, py: f32| {
+            label(key.into(), text.into(), mono(10.5 * S * 1.25), hex(LABEL), 760.0, py)
+        };
+        let value = |key: &'static str, text: String, py: f32| {
+            at(
+                digit_roll(key, &text, mono(17.0 * S * 1.25), hex(VALUE), roll),
+                o + 760.0 * S,
+                o + py * S,
+            )
+        };
+        let dbfs = s.dbfs.map_or("--.- dBFS".to_string(), |d| format!("{d:.1} dBFS"));
+        panel = panel
+            .child(name("n-level", "INPUT LEVEL", 66.0))
+            .child(value("v-level", dbfs, 81.0))
+            .child(name("n-time", "ELAPSED", 131.0))
+            .child(value("v-time", format!("{} s", secs as u32), 146.0))
+            .child(name("n-wpm", "WORDS / MIN", 193.0))
+            .child(value("v-wpm", format!("{} wpm", s.wpm), 208.0))
+            .child(name("n-words", "WORDS", 253.0))
+            .child(value("v-words", format!("{}", self.word_count), 268.0));
+
+        // The transcript lines, one live text each so a line keeps its place.
+        let colour = if mode == Mode::Cancelled { hex(DIM) } else { hex(TEXT) };
+        for (i, (words, _)) in lines.iter().enumerate() {
+            panel = panel.child(
+                at(
+                    Element::live_text(format!("line-{}", words[0].id), words)
+                        .text_style(style)
+                        .color(colour)
+                        .motion(Prop::Opacity, Spring::critical_to_98(0.08))
+                        .word_enter(Transition::fade())
+                        .word_change(Transition::fade().opacity(0.3))
+                        .text_halo(hex(TEXT).fade(0.18), 3.0),
+                    o + TEXT_X,
+                    o + TEXT_TOP + i as f32 * LINE,
+                )
+                .motion(Prop::Position, Spring::critical_to_98(0.12))
+                .presence(Transition::fade(), Transition::fade()),
+            );
+        }
+
+        // The status row.
+        let status = self.status();
+        let text = match mode {
+            Mode::Done => {
+                let app = self
+                    .files
+                    .live
+                    .as_ref()
+                    .and_then(|d| d.target.as_ref())
+                    .map(|t| t.app.clone())
+                    .filter(|a| !a.is_empty());
+                app.map_or("PASTED".to_string(), |a| format!("PASTED  ·  into {a}"))
+            }
+            Mode::Cancelled => "CANCELLED".to_string(),
+            _ => format!("{}{}", status.state, status.detail),
+        };
+        panel.child(
+            label(
+                format!("status-{}", status.state),
+                text,
+                mono(13.0 * S * 1.2),
+                hex(0xc6f3dc),
+                343.0,
+                STATUS_Y - 9.0,
+            )
+            .presence(Transition::fade(), Transition::fade()),
+        )
+    }
+}
