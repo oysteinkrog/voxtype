@@ -38,11 +38,11 @@ pub(crate) fn source(theme: OsdTheme) -> &'static str {
         OsdTheme::Synthwave => "concept 04",
         OsdTheme::Mecha => "concept 23",
         OsdTheme::Island => "concept 03, family 03",
-        // A look added later shows no source until it gets a row here.
-        #[allow(unreachable_patterns)]
         OsdTheme::Karaoke => "concept 14",
         OsdTheme::Captions => "concept 13",
         OsdTheme::Scope => "concept 18",
+        // A look added later shows no source until it gets a row here.
+        #[allow(unreachable_patterns)]
         _ => "",
     }
 }
