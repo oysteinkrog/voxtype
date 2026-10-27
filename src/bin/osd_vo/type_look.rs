@@ -414,7 +414,7 @@ impl Popup {
         for line in self.doubt_lines() {
             text = text.child(line);
         }
-        text
+        self.with_margin_ellipsis(text)
     }
 
     fn type_status(&self, status: &StatusLine) -> Element<Msg> {

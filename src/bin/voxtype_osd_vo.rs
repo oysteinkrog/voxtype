@@ -651,6 +651,15 @@ impl Look {
         TextStyle::new(MONO, px, self.mono_line(px))
     }
 
+    /// Whether the "…" before cut text hangs in the left margin, so it never
+    /// changes where the lines break. The other looks put it on the word.
+    fn margin_ellipsis(&self) -> bool {
+        matches!(
+            self.theme,
+            OsdTheme::Default | OsdTheme::Swiss | OsdTheme::Type
+        )
+    }
+
     fn text_style(&self) -> TextStyle {
         if self.theme == OsdTheme::Amber {
             return amber::text_style(self);
@@ -1222,7 +1231,8 @@ impl Popup {
             let h = self.measure.layout(&text, &style, width).size.h;
             (h / style.line_height).round() as u32
         };
-        let (cut, shown) = cut_lines(&words, self.cut, self.look.max_lines(), lines_of);
+        let inline = !self.look.margin_ellipsis();
+        let (cut, shown) = cut_lines(&words, self.cut, self.look.max_lines(), inline, lines_of);
         self.cut = cut;
         self.lines = self
             .lines
@@ -1587,10 +1597,36 @@ impl Popup {
                 .motion(Prop::Offset, Spring::SNAP)
                 .word_enter(Transition::fade().offset(0.0, 3.0));
         }
-        Element::column("text")
+        let text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
             .margin_edges(0.0, 0.0, TEXT_MARGIN_BOTTOM, 0.0)
-            .child(words)
+            .child(words);
+        self.with_margin_ellipsis(text)
+    }
+
+    /// Adds the "…" that hangs left of the first line once earlier lines are
+    /// cut, for the looks whose [`Look::margin_ellipsis`] is on.
+    fn with_margin_ellipsis(&self, text: Element<Msg>) -> Element<Msg> {
+        let l = &self.look;
+        if !l.margin_ellipsis() || self.cut == 0 || self.shown.is_empty() {
+            return text;
+        }
+        let style = l.text_style();
+        let w = self.measure.layout("…", &style, None).size.w;
+        text.child(
+            Element::label("ellipsis", "…")
+                .text_style(style)
+                .color(l.foreground)
+                .layout(|s| {
+                    s.position = vo::scene::taffy::Position::Absolute;
+                    s.inset = vo::scene::taffy::Rect {
+                        left: vo::scene::taffy::LengthPercentageAuto::length(-w),
+                        top: vo::scene::taffy::LengthPercentageAuto::length(0.0),
+                        right: vo::scene::taffy::LengthPercentageAuto::auto(),
+                        bottom: vo::scene::taffy::LengthPercentageAuto::auto(),
+                    };
+                }),
+        )
     }
 
     fn status_row(&self, status: &StatusLine) -> Element<Msg> {
@@ -2328,10 +2364,11 @@ fn run_wall(
     vo::run_overlay_with(app, spec, options(inbox)).map_err(|e| anyhow::anyhow!("wall: {e}"))
 }
 
-/// The words from `start` on, with "…" on the first when earlier words are cut.
-fn tail(words: &[Word], start: usize) -> Vec<Word> {
+/// The words from `start` on. With `inline`, the first starts with "…" when
+/// earlier words are cut.
+fn tail(words: &[Word], start: usize, inline: bool) -> Vec<Word> {
     let mut shown = words[start..].to_vec();
-    if start > 0 {
+    if inline && start > 0 {
         if let Some(first) = shown.first_mut() {
             first.text = format!("…{}", first.text);
         }
@@ -2341,23 +2378,25 @@ fn tail(words: &[Word], start: usize) -> Vec<Word> {
 
 /// The tail of `words` that fits in `max` lines, and where it starts. From
 /// `start`, the whole first line of the layout is dropped until the rest fits,
-/// so the text moves only when a line fills, and then by one line.
+/// so the text moves only when a line fills, and then by one line. `inline`
+/// puts the "…" on the new first word, as [`tail`] does.
 fn cut_lines(
     words: &[Word],
     start: usize,
     max: u32,
+    inline: bool,
     lines_of: impl Fn(&[Word]) -> u32,
 ) -> (usize, Vec<Word>) {
     let last = words.len().saturating_sub(1);
     let mut start = start.min(last).max(words.len().saturating_sub(120));
-    let mut shown = tail(words, start);
+    let mut shown = tail(words, start, inline);
     while start < last && lines_of(&shown) > max {
         let mut first_line = 1;
         while first_line < shown.len() && lines_of(&shown[..=first_line]) == 1 {
             first_line += 1;
         }
         start = (start + first_line).min(last);
-        shown = tail(words, start);
+        shown = tail(words, start, inline);
     }
     (start, shown)
 }
@@ -2470,7 +2509,7 @@ mod tests {
         for n in 1..=all.len() {
             model.update(&all[..n].join(" "));
             let words = model.words();
-            let (next, shown) = cut_lines(&words, cut, 3, lines_of);
+            let (next, shown) = cut_lines(&words, cut, 3, true, lines_of);
             assert!(lines_of(&shown) <= 3, "fits in three lines");
             if next != cut {
                 moves += 1;
@@ -2479,6 +2518,35 @@ mod tests {
                 assert_eq!(next - cut, first, "a whole line goes at once");
                 assert!(shown[0].text.starts_with('…'));
                 assert_eq!(shown[0].text, format!("…{}", words[next].text));
+            }
+            (cut, before) = (next, shown);
+        }
+        assert!(moves >= 2, "the sample scrolls more than once");
+    }
+
+    /// With the "…" in the margin, a cut moves the text by exactly one line:
+    /// every other line keeps its words, and no word carries the "…".
+    #[test]
+    fn a_margin_ellipsis_cut_is_one_block_scroll() {
+        let text = "the quick brown fox jumps over a lazy dog while seven tired \
+                    cats watch from under the old green garden bench at noon today";
+        let all: Vec<&str> = text.split_whitespace().collect();
+        let lines_of = |shown: &[Word]| wrapped(shown, 18).len() as u32;
+        let mut model = WordModel::new();
+        let (mut cut, mut before) = (0, Vec::new());
+        let mut moves = 0;
+        for n in 1..=all.len() {
+            model.update(&all[..n].join(" "));
+            let words = model.words();
+            let (next, shown) = cut_lines(&words, cut, 3, false, lines_of);
+            assert!(shown.iter().all(|w| !w.text.contains('…')));
+            if next != cut {
+                moves += 1;
+                let old = wrapped(&before, 18);
+                let new = wrapped(&shown, 18);
+                // All but the line still filling stay as they were, one row up.
+                assert_eq!(new[..old.len() - 2], old[1..old.len() - 1]);
+                assert!(new[old.len() - 2].starts_with(&old[old.len() - 1]));
             }
             (cut, before) = (next, shown);
         }
