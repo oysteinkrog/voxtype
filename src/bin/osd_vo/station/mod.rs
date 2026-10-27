@@ -751,6 +751,8 @@ pub(crate) fn run(
         fonts: fonts.clone(),
         inbox,
         default_motion: Motion::Spring(Spring::SOFT),
+        // 3D elements (vo-3d) in the exhibits that use them.
+        renderer_setup: Some(Arc::new(vo_3d::install)),
         ..Options::default()
     };
     if let Some(dir) = &args.offline {

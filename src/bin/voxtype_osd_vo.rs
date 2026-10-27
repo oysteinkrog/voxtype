@@ -2230,6 +2230,7 @@ fn main() -> anyhow::Result<()> {
                 .diag
                 .then(|| Box::new(LogDiagnostics::new(Some(heap))) as Box<dyn vo::Diagnostics>),
             default_motion: default_motion(&look),
+            renderer_setup: Some(Arc::new(vo_3d::install)),
             ..Options::default()
         };
         let mut popup = Popup::new(look.clone(), &fonts);
@@ -2472,6 +2473,7 @@ fn offline(
                 sink.lock().unwrap().push((key, f.timings.total_ms));
             }) as vo::FrameTimingsSink
         }),
+        renderer_setup: Some(Arc::new(vo_3d::install)),
         ..Options::default()
     };
     let n = vo::render_offline_with(Popup::new(look, &fonts), &scenario, fps, dir, options)
@@ -2577,6 +2579,7 @@ fn run_wall(
         fonts: fonts.clone(),
         inbox,
         default_motion: Motion::Spring(Spring::SOFT),
+        renderer_setup: Some(Arc::new(vo_3d::install)),
         ..Options::default()
     };
     if let Some(dir) = &args.offline {
