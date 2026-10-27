@@ -1716,6 +1716,7 @@ fn default_motion(look: &Look) -> Motion {
             | OsdTheme::Karaoke
             | OsdTheme::Island
             | OsdTheme::Jarvis
+            | OsdTheme::Synthwave
             | OsdTheme::Mecha
             | OsdTheme::Cyberpunk
     ) {
