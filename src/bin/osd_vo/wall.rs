@@ -62,6 +62,8 @@ pub(crate) enum Script {
     Demo,
     /// The daemon's socket and runtime files.
     Live,
+    /// One moment scenario (MO-07), looping.
+    Moment(super::moments::Moment),
 }
 
 pub(crate) struct Wall {
@@ -87,7 +89,7 @@ impl Wall {
         size: Size,
         script: Script,
     ) -> Wall {
-        let (demo, demo_len) = demo_script(&looks[0]);
+        let (demo, demo_len) = demo_script(&looks[0], script);
         let mut wall = Wall {
             looks,
             fonts: fonts.clone(),
@@ -138,8 +140,20 @@ impl Wall {
 }
 
 /// The full dictation, then the cancelled one, which starts with
-/// `Msg::Loop` so the cells start afresh.
-fn demo_script(look: &Look) -> (Vec<(f64, Msg)>, f64) {
+/// `Msg::Loop` so the cells start afresh. With a moment, that moment alone.
+fn demo_script(look: &Look, script: Script) -> (Vec<(f64, Msg)>, f64) {
+    if let Script::Moment(m) = script {
+        let s = super::moments::scenario(look, m);
+        let out = s
+            .inputs
+            .into_iter()
+            .filter_map(|(t, input)| match input {
+                Input::Msg(m) => Some((t, m)),
+                _ => None,
+            })
+            .collect();
+        return (out, s.duration + SCRIPT_GAP);
+    }
     let mut out = Vec::new();
     let mut at = 0.0;
     for cancel in [false, true] {
@@ -177,7 +191,7 @@ impl App for Wall {
         for p in &mut self.cells {
             p.init(cx);
         }
-        if self.script == Script::Demo {
+        if self.script != Script::Live {
             self.schedule_demo(cx);
         }
     }
@@ -186,7 +200,7 @@ impl App for Wall {
         match msg {
             Msg::Loop => {
                 self.restart(cx);
-                if self.script == Script::Demo && cx.t() >= self.loop_end - 1e-3 {
+                if self.script != Script::Live && cx.t() >= self.loop_end - 1e-3 {
                     self.schedule_demo(cx);
                 }
             }

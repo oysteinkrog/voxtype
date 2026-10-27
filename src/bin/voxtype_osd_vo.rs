@@ -91,6 +91,10 @@ mod cyberpunk;
 mod wall;
 #[path = "osd_vo/replay.rs"]
 mod replay;
+#[path = "osd_vo/moments.rs"]
+mod moments;
+#[path = "osd_vo/station/mod.rs"]
+mod station;
 #[path = "osd_vo/synthwave.rs"]
 mod synthwave;
 #[path = "osd_vo/mecha.rs"]
@@ -275,6 +279,68 @@ struct Args {
         requires = "wall"
     )]
     wall_size: String,
+
+    /// Motion features to switch on, comma separated, as the motion station's
+    /// exhibits do: for example `palimpsest,reduced-motion`. Each look reads
+    /// the names it knows and ignores the rest.
+    #[arg(
+        long,
+        value_name = "NAMES",
+        value_delimiter = ',',
+        env = "VOXTYPE_OSD_VO_MOTION"
+    )]
+    motion: Vec<String>,
+
+    /// With `--offline`: render one scripted moment instead of the demo
+    /// dictation, for example `revision-burst` or `cancel`. `--moment list`
+    /// prints them all.
+    #[arg(long, value_name = "MOMENT")]
+    moment: Option<String>,
+
+    /// Development: the motion station, every motion exhibit as a labelled
+    /// popup tile, page by page. With `--offline`, renders one page.
+    #[arg(long)]
+    station: bool,
+
+    /// With `--station`: `live` follows the daemon (tiles loop their moments
+    /// between dictations), `demo` only loops the moments. Default: live when
+    /// the daemon runs, else demo.
+    #[arg(long, value_name = "SCRIPT", requires = "station")]
+    station_script: Option<String>,
+
+    /// With `--station`: only these exhibits, comma separated, by MO id
+    /// (`MO-20`), number (`20`) or name.
+    #[arg(long, value_name = "IDS", requires = "station", value_delimiter = ',')]
+    station_only: Vec<String>,
+
+    /// With `--station`: hold this page (from 1) instead of turning pages.
+    #[arg(long, value_name = "N", requires = "station")]
+    station_page: Option<usize>,
+
+    /// With `--station`: seconds each page shows.
+    #[arg(long, value_name = "SECS", default_value = "30", requires = "station")]
+    station_dwell: f64,
+
+    /// With `--station`: tiles per row.
+    #[arg(long, value_name = "N", default_value = "4", requires = "station")]
+    station_cols: usize,
+
+    /// With `--station`: rows of tiles per page.
+    #[arg(long, value_name = "N", default_value = "3", requires = "station")]
+    station_rows: usize,
+
+    /// With `--station`: the layout size in logical pixels, `WxH`.
+    #[arg(
+        long,
+        value_name = "WxH",
+        default_value = "2560x1440",
+        requires = "station"
+    )]
+    station_size: String,
+
+    /// With `--station`: every tile in its reduced-motion form.
+    #[arg(long, requires = "station")]
+    station_reduced: bool,
 }
 
 /// Silence on the audio socket longer than this, with no recording and no
@@ -498,6 +564,8 @@ struct Look {
     /// With `anchor = "reading-line"`: the newest text line's height on the
     /// output, as a fraction. `None` places the popup by its top edge.
     reading_line: Option<f32>,
+    /// Motion features switched on (`--motion`, a station exhibit).
+    features: Arc<[String]>,
 }
 
 impl Look {
@@ -530,7 +598,15 @@ impl Look {
             mic: load_mic_icon(fonts),
             reading_line: (cfg.anchor == OsdAnchor::ReadingLine)
                 .then(|| cfg.reading_line.clamp(0.0, 1.0)),
+            features: Arc::from([]),
         }
+    }
+
+    /// Whether the motion feature `name` is switched on. Read by the looks
+    /// that have motion features.
+    #[allow(dead_code)]
+    fn on(&self, name: &str) -> bool {
+        self.features.iter().any(|f| f == name)
     }
 
     /// The centre of the newest text line in logical pixels below the
@@ -929,6 +1005,8 @@ enum Msg {
     Tick,
     /// The theme wall starts its cells afresh. A popup ignores it.
     Loop,
+    /// A timer of the motion station. A popup ignores it.
+    Station(Box<station::Cue>),
 }
 
 /// The popup for one dictation. It closes itself when the daemon goes idle.
@@ -1343,7 +1421,7 @@ impl App for Popup {
             }
             Msg::Check => self.check = None,
             Msg::Tick => self.extra.tick = None,
-            Msg::Loop => {}
+            Msg::Loop | Msg::Station(_) => {}
         }
         if let Some(ending) = self.ending() {
             if self.ended_at.is_none() {
@@ -2015,13 +2093,24 @@ fn main() -> anyhow::Result<()> {
     }
     let theme = plasma::load();
     let fonts = load_fonts(&theme)?;
-    let look = Look::new(&cfg, &theme, stop_hint(&hotkey), &fonts);
+    let mut look = Look::new(&cfg, &theme, stop_hint(&hotkey), &fonts);
+    look.features = args.motion.clone().into();
 
+    if args.moment.as_deref() == Some("list") {
+        println!("{}", moments::Moment::names().replace(", ", "\n"));
+        return Ok(());
+    }
+    if args.station {
+        return station::run(&args, &cfg, &theme, stop_hint(&hotkey), fonts);
+    }
     if args.wall {
         return run_wall(&args, &cfg, &theme, stop_hint(&hotkey), fonts);
     }
     if args.envelope {
         return envelope::run(look, fonts, args.fps, args.cancel);
+    }
+    if let (Some(dir), Some(m)) = (&args.offline, &args.moment) {
+        return moments::offline(look, fonts, dir, args.fps, m);
     }
     if let Some(dir) = &args.offline {
         return offline(look, fonts, dir, args.fps, args.cancel);
@@ -2369,7 +2458,9 @@ fn run_wall(
         .map(|&t| {
             let mut c = cfg.clone();
             c.theme = t;
-            Look::new(&c, theme, stop_hint.clone(), &fonts)
+            let mut look = Look::new(&c, theme, stop_hint.clone(), &fonts);
+            look.features = args.motion.clone().into();
+            look
         })
         .collect();
     let (w, h) = args
@@ -2381,7 +2472,13 @@ fn run_wall(
     let script = match args.wall_script.as_str() {
         "demo" => wall::Script::Demo,
         "live" => wall::Script::Live,
-        s => anyhow::bail!("--wall-script is demo or live, not {s:?}"),
+        s => match moments::Moment::parse(s) {
+            Some(m) => wall::Script::Moment(m),
+            None => anyhow::bail!(
+                "--wall-script is demo, live or a moment ({}), not {s:?}",
+                moments::Moment::names()
+            ),
+        },
     };
     let app = wall::Wall::new(looks, &fonts, args.wall_cols, size, script);
     let options = |inbox| Options {
