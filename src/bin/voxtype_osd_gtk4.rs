@@ -602,6 +602,7 @@ fn build_window(
         OsdTheme::Swiss
         | OsdTheme::Showcase
         | OsdTheme::Type
+        | OsdTheme::Mission
         | OsdTheme::Palette
         | OsdTheme::Dotmatrix
         | OsdTheme::Swissfi

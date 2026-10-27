@@ -110,6 +110,12 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// A mission-control telemetry panel: tiles for the model, VRAM,
+    /// latency, microphone and elapsed time, a large transcript tile with
+    /// corner brackets, a waveform strip with a LIVE meter, orange and white
+    /// on dark slate. Drawn by the vo frontend only; the gtk4 frontend draws
+    /// `swiss` for it.
+    Mission,
     /// A command palette: a crisp dark card with chips for the engine, the
     /// output and the latency, the transcript as input text with a caret,
     /// unsure words softly underlined and key badges in the status. Drawn by
@@ -177,6 +183,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "mission" => Some(OsdTheme::Mission),
             "palette" => Some(OsdTheme::Palette),
             "dotmatrix" => Some(OsdTheme::Dotmatrix),
             "swissfi" => Some(OsdTheme::Swissfi),
