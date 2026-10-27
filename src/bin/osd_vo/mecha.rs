@@ -71,17 +71,29 @@ pub(crate) struct Fonts {
     cjk: u32,
 }
 
-/// The look's fonts, added to the shared registry once. A family that is
-/// missing falls back to the popup's own sans.
+/// The look's fonts, added to the shared registry once. Labels use the
+/// framework's built-in Barlow Condensed and Japanese label subset; the
+/// transcript uses Saira ExtraCondensed ExtraBold, built in when the
+/// framework has it, else from fontconfig, else the built-in condensed bold.
 fn fonts(reg: &FontRegistry) -> Fonts {
     static FONTS: OnceLock<Fonts> = OnceLock::new();
     *FONTS.get_or_init(|| {
-        let add = |family: &str| reg.add_system(family).unwrap_or(SANS);
+        let asset = |name: &str, fallback: u32| reg.asset(name).unwrap_or(fallback);
+        let label = asset("condensed-bold", SANS);
+        let small = asset("condensed", MONO);
+        let cjk = asset("jp-labels-bold", SANS);
+        let text = reg
+            .asset("extra-condensed-bold")
+            .or_else(|_| reg.add_system("Saira ExtraCondensed:extrabold"))
+            .unwrap_or(label);
+        for f in [text, label, small] {
+            reg.set_fallbacks(f, &[cjk]);
+        }
         Fonts {
-            text: add("Saira ExtraCondensed:extrabold"),
-            label: add("Barlow Semi Condensed:semibold"),
-            small: add("Barlow Condensed:medium"),
-            cjk: add("Noto Sans CJK JP:bold"),
+            text,
+            label,
+            small,
+            cjk,
         }
     })
 }
@@ -103,7 +115,6 @@ pub(crate) fn text_style(look: &Look) -> TextStyle {
 
 /// The centre of the newest transcript line, from the surface top. It is
 /// always the box's last line: the transcript is anchored to the bottom.
-#[allow(dead_code)]
 pub(crate) fn newest_line_centre(look: &Look) -> f32 {
     (TEXT_Y + (MAX_LINES as f32 - 0.5) * TEXT_LINE) * scale(look)
 }

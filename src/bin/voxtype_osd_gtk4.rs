@@ -29,7 +29,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
 use voxtype::config::{Config as VoxtypeConfig, HotkeyConfig};
-use voxtype::osd::config::{OsdConfig, OsdPosition, OsdTheme};
+use voxtype::osd::config::{OsdAnchor, OsdConfig, OsdPosition, OsdTheme};
 use voxtype::osd::gtk_env;
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing};
 use voxtype::osd::plasma::{self, PlasmaTheme};
@@ -173,6 +173,18 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_MARGIN")]
     margin_px: Option<u32>,
 
+    /// What the centered positions place: "top" puts the panel's top edge
+    /// at `top_margin` and grows it downward; "reading-line" puts the newest
+    /// text line at `--reading-line` and grows the panel upward, so the line
+    /// you read stays put.
+    #[arg(long, env = "VOXTYPE_OSD_ANCHOR", value_parser = parse_anchor)]
+    anchor: Option<OsdAnchor>,
+
+    /// Height of the newest text line as a fraction of the screen, with
+    /// `--anchor reading-line`. 0.5 is the middle.
+    #[arg(long, env = "VOXTYPE_OSD_READING_LINE")]
+    reading_line: Option<f32>,
+
     /// Visual gain applied to audio samples before drawing the waveform.
     /// Higher = waveform fills more of the vertical for quiet inputs.
     /// Reduce for hot mics (e.g. 4.0); raise for quiet sources (e.g. 14.0).
@@ -184,6 +196,11 @@ struct Args {
     /// colors).
     #[arg(long, env = "VOXTYPE_OSD_THEME", value_parser = parse_theme)]
     theme: Option<OsdTheme>,
+}
+
+fn parse_anchor(s: &str) -> Result<OsdAnchor, String> {
+    OsdAnchor::from_name(s)
+        .ok_or_else(|| format!("unknown anchor '{s}' (expected top or reading-line)"))
 }
 
 fn parse_theme(s: &str) -> Result<OsdTheme, String> {
@@ -274,6 +291,12 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(t) = args.theme {
         osd_cfg.theme = t;
+    }
+    if let Some(a) = args.anchor {
+        osd_cfg.anchor = a;
+    }
+    if let Some(r) = args.reading_line {
+        osd_cfg.reading_line = r;
     }
     // peak_decay_db_per_sec has a clap default value, so this always
     // overrides whatever the file said. That's intentional: if the user
@@ -459,8 +482,26 @@ fn build_window(
         cfg.position,
         OsdPosition::BottomCenter | OsdPosition::TopCenter
     );
+    // With anchor = "reading-line": the line's height as a fraction of the
+    // monitor, and the monitor's height.
+    let mut reading_line = None;
 
-    if centered {
+    if centered && cfg.anchor == OsdAnchor::ReadingLine {
+        // Anchored to the bottom edge, the window grows upward. The tick
+        // sets the margin once it can measure how far the newest line sits
+        // above the window's bottom edge; this first guess centres the
+        // window on the line.
+        let monitor_height = focused_monitor_height_px().unwrap_or(1080);
+        let fraction = cfg.reading_line.clamp(0.0, 1.0);
+        let bottom_px =
+            ((1.0 - fraction) * monitor_height as f32) as i32 - cfg.height_px as i32 / 2;
+        window.set_anchor(Edge::Top, false);
+        window.set_anchor(Edge::Bottom, true);
+        window.set_anchor(Edge::Left, false);
+        window.set_anchor(Edge::Right, false);
+        window.set_margin(Edge::Bottom, bottom_px.max(0));
+        reading_line = Some((fraction, monitor_height));
+    } else if centered {
         // Resolve monitor height to translate the fractional offset into
         // pixels. Falls back to a conservative 1080 if the display can't be
         // queried (extremely rare on Wayland-only systems where layer-shell
@@ -549,6 +590,7 @@ fn build_window(
             window.set_child(Some(&column));
             redraw_every_frame(&drawing_area);
             Chrome::Default {
+                drawing_area,
                 status_box,
                 status_bar,
                 status_label,
@@ -558,6 +600,8 @@ fn build_window(
         OsdTheme::Swiss
         | OsdTheme::Showcase
         | OsdTheme::Type
+        | OsdTheme::Island
+        | OsdTheme::Jarvis
         | OsdTheme::Synthwave
         | OsdTheme::Mecha
         | OsdTheme::Cyberpunk => {
@@ -593,6 +637,11 @@ fn build_window(
     // audio frames have stopped, but the OSD stays up to show it.
     let finishing = Cell::new(false);
     let recording = Cell::new(false);
+    // A recording ran since the window appeared, and whether its final text
+    // was made: in the moment between the daemon going idle and the window
+    // hiding, the status line says "Done" or "Stopped", not "Listening".
+    let was_recording = Cell::new(false);
+    let finished = Cell::new(false);
     // When the surface last appeared: the start of the recording.
     let shown_at = Cell::new(Instant::now());
     let default_size = (cfg.width_px as i32, cfg.height_px as i32);
@@ -619,6 +668,12 @@ fn build_window(
                 .is_some_and(|age| age < Duration::from_secs(30));
             finishing.set(fresh);
             recording.set(daemon_recording());
+            was_recording.set(was_recording.get() || recording.get());
+        }
+        // Before the idle check, so the window's first mapping at startup
+        // already sets the margin for the first recording.
+        if let (Some((fraction, monitor_height)), true) = (reading_line, visible.get()) {
+            place_reading_line(&redraw_window, &chrome, &preview, fraction, monitor_height);
         }
         let stalled = last_at.elapsed().as_secs_f32() > IDLE_TIMEOUT_SECS;
         let idle = (stalled && !finishing.get() && !recording.get()) || osd_suppressed();
@@ -628,6 +683,8 @@ fn build_window(
                 tracing::info!("hiding (idle for {:.2}s)", last_at.elapsed().as_secs_f32());
                 redraw_window.set_visible(false);
                 visible.set(false);
+                was_recording.set(false);
+                finished.set(false);
                 preview.set_text("");
                 match &chrome {
                     Chrome::Default { status_box, .. } => {
@@ -675,6 +732,7 @@ fn build_window(
                     status_box,
                     status_bar,
                     status_label,
+                    ..
                 } => {
                     match fraction {
                         Some(f) => status_bar.set_fraction(f.clamp(0.0, 1.0)),
@@ -691,7 +749,10 @@ fn build_window(
                     // stops there too.
                     let elapsed = last_at.saturating_duration_since(shown_at.get());
                     let words = full.split_whitespace().count();
-                    view.update(elapsed, words, fraction, label);
+                    finished.set(finished.get() || StatusLine::new(label, "").finishing);
+                    let ended = (was_recording.get() && !recording.get() && label.is_empty())
+                        .then(|| if finished.get() { "Done" } else { "Stopped" });
+                    view.update(elapsed, words, fraction, label, ended);
                 }
             }
         }
@@ -1034,11 +1095,66 @@ fn redraw_every_frame(area: &DrawingArea) {
 /// The widgets around the preview text that differ between themes.
 enum Chrome {
     Default {
+        drawing_area: DrawingArea,
         status_box: gtk4::Box,
         status_bar: gtk4::ProgressBar,
         status_label: gtk4::Label,
     },
     Swiss(SwissView),
+}
+
+impl Chrome {
+    /// The centre of the newest text line, in pixels below the window's top
+    /// edge, once GTK has laid the window out.
+    fn newest_line_y(&self, preview: &gtk4::Label, window: &ApplicationWindow) -> Option<f32> {
+        let line = preview.create_pango_layout(Some("Ag")).pixel_size().1 as f32;
+        // The text's bottom line, or where the first line will appear.
+        let (widget, first): (gtk4::Widget, bool) = match self {
+            Chrome::Swiss(view) => (view.text_area.clone().upcast(), false),
+            Chrome::Default { drawing_area, .. } if !preview.is_visible() => {
+                (drawing_area.clone().upcast(), true)
+            }
+            Chrome::Default { .. } => (preview.clone().upcast(), false),
+        };
+        let b = widget.compute_bounds(window)?;
+        if b.height() <= 0.0 {
+            return None;
+        }
+        let bottom = b.y() + b.height();
+        Some(if first {
+            bottom + line / 2.0
+        } else {
+            bottom - line / 2.0
+        })
+    }
+}
+
+/// Keep the newest text line at `fraction` of the monitor's height. The
+/// window is anchored to the bottom edge, so as it grows the line stays.
+/// Kept on the monitor when the window is taller than the room below.
+fn place_reading_line(
+    window: &ApplicationWindow,
+    chrome: &Chrome,
+    preview: &gtk4::Label,
+    fraction: f32,
+    monitor_height: i32,
+) {
+    let height = window.height();
+    if height <= 0 {
+        return;
+    }
+    let Some(y) = chrome.newest_line_y(preview, window) else {
+        return;
+    };
+    let below = height as f32 - y;
+    let margin = ((1.0 - fraction) * monitor_height as f32 - below).round() as i32;
+    let margin = margin.min(monitor_height - height).max(0);
+    if window.margin(Edge::Bottom) != margin {
+        tracing::info!(
+            "reading line: bottom margin {margin} (line {below:.1} px above the window's bottom)"
+        );
+        window.set_margin(Edge::Bottom, margin);
+    }
 }
 
 /// The `swiss` panel: a label row with elapsed time and word count, a
@@ -1252,10 +1368,19 @@ impl SwissView {
         self.text_area.set_size_request(-1, height);
     }
 
-    fn update(&self, elapsed: Duration, words: usize, fraction: Option<f64>, status: &str) {
+    /// `ended` is "Done" or "Stopped" once the daemon is idle and the window
+    /// is about to hide.
+    fn update(
+        &self,
+        elapsed: Duration,
+        words: usize,
+        fraction: Option<f64>,
+        status: &str,
+        ended: Option<&str>,
+    ) {
         // The silence pump keeps frames coming while finishing; the clock
         // stops at the end of the recording.
-        if status.is_empty() || status.starts_with("Loading") {
+        if ended.is_none() && (status.is_empty() || status.starts_with("Loading")) {
             let secs = elapsed.as_secs();
             set_text_if_changed(&self.time, &format!("{:02}:{:02}", secs / 60, secs % 60));
         }
@@ -1264,18 +1389,36 @@ impl SwissView {
             set_text_if_changed(&self.words, &words.to_string());
         }
         self.fraction.set(fraction.map(|f| f.clamp(0.0, 1.0)));
-        self.show_status(status);
+        match ended {
+            // The waveform stays grey and the progress bar goes.
+            Some(state) => self.show_line(
+                &StatusLine {
+                    state: state.into(),
+                    detail: String::new(),
+                    loading: false,
+                    finishing: true,
+                },
+                false,
+            ),
+            None => self.show_status(status),
+        }
     }
 
     /// `status` is the daemon's line such as "Finishing: 4 s of audio
     /// left", or empty while recording.
     fn show_status(&self, status: &str) {
-        let line = StatusLine::new(status, &self.listening_detail);
+        self.show_line(
+            &StatusLine::new(status, &self.listening_detail),
+            !status.is_empty(),
+        );
+    }
+
+    fn show_line(&self, line: &StatusLine, progress: bool) {
         set_text_if_changed(&self.state_label, &line.state);
         set_text_if_changed(&self.detail, &line.detail);
         // "Loading: live text model" comes while still recording.
         let finishing = line.finishing;
-        self.progress.set_visible(!status.is_empty());
+        self.progress.set_visible(progress);
         self.live.set(!finishing);
         if finishing {
             self.dot.add_css_class("finishing");
