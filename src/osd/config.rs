@@ -177,6 +177,11 @@ pub enum OsdTheme {
     /// level readouts, and the transcript centred in a chamfered frame. Drawn
     /// by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Jarvis,
+    /// Mock-up 09, particle words: a navy glass card with a swirl of dotted
+    /// light round the microphone that follows the voice, and large centred
+    /// words that form out of particles. Drawn by the vo frontend only; the
+    /// gtk4 frontend draws `swiss` for it.
+    Particles,
     /// Retro synthwave neon: a magenta to cyan neon tube round a dark card,
     /// a chrome title that names the state, a neon bar waveform over a
     /// scrolling perspective grid, and white centred words. Drawn by the vo
@@ -215,6 +220,7 @@ impl OsdTheme {
             "karaoke" => Some(OsdTheme::Karaoke),
             "island" => Some(OsdTheme::Island),
             "jarvis" => Some(OsdTheme::Jarvis),
+            "particles" => Some(OsdTheme::Particles),
             "cyberpunk" => Some(OsdTheme::Cyberpunk),
             "synthwave" => Some(OsdTheme::Synthwave),
             "mecha" => Some(OsdTheme::Mecha),

@@ -87,6 +87,8 @@ mod island;
 mod envelope;
 #[path = "osd_vo/jarvis.rs"]
 mod jarvis;
+#[path = "osd_vo/particles.rs"]
+mod particles;
 #[path = "osd_vo/cyberpunk.rs"]
 mod cyberpunk;
 #[path = "osd_vo/wall.rs"]
@@ -635,6 +637,7 @@ impl Look {
             OsdTheme::Showcase => showcase::newest_line_centre(self, lines),
             OsdTheme::Type => type_look::newest_line_centre(self, lines),
             OsdTheme::Jarvis => Some(jarvis::newest_line_centre(self, lines)),
+            OsdTheme::Particles => Some(particles::newest_line_centre(self, lines)),
             _ => None,
         }
     }
@@ -677,6 +680,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Jarvis {
             return jarvis::text_width(self);
+        }
+        if self.theme == OsdTheme::Particles {
+            return particles::text_width(self);
         }
         if self.theme == OsdTheme::Synthwave {
             return synthwave::text_width(self);
@@ -780,6 +786,9 @@ impl Look {
         if self.theme == OsdTheme::Jarvis {
             return jarvis::text_style(self);
         }
+        if self.theme == OsdTheme::Particles {
+            return particles::text_style(self);
+        }
         if self.theme == OsdTheme::Synthwave {
             return synthwave::text_style(self);
         }
@@ -856,6 +865,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Jarvis {
             return Popup::jarvis_surface(self);
+        }
+        if self.theme == OsdTheme::Particles {
+            return Popup::particles_surface(self);
         }
         if self.theme == OsdTheme::Showcase {
             return Popup::showcase_surface(self);
@@ -1561,6 +1573,9 @@ impl Popup {
         if self.look.theme == OsdTheme::Jarvis {
             return self.jarvis_view();
         }
+        if self.look.theme == OsdTheme::Particles {
+            return self.particles_view();
+        }
         if self.look.theme == OsdTheme::Synthwave {
             return self.synthwave_view();
         }
@@ -1849,6 +1864,7 @@ fn default_motion(look: &Look) -> Motion {
             | OsdTheme::Karaoke
             | OsdTheme::Island
             | OsdTheme::Jarvis
+            | OsdTheme::Particles
             | OsdTheme::Synthwave
             | OsdTheme::Mecha
             | OsdTheme::Cyberpunk
@@ -2459,6 +2475,7 @@ const WALL_THEMES: &[OsdTheme] = &[
     OsdTheme::Showcase,
     OsdTheme::Type,
     OsdTheme::Jarvis,
+    OsdTheme::Particles,
     OsdTheme::Cyberpunk,
     OsdTheme::Synthwave,
     OsdTheme::Mecha,

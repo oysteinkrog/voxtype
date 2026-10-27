@@ -38,6 +38,7 @@ pub(crate) fn source(theme: OsdTheme) -> &'static str {
         OsdTheme::Dotmatrix => "concept 21",
         OsdTheme::Swissfi => "concept 12",
         OsdTheme::Jarvis => "concept 02",
+        OsdTheme::Particles => "concept 09",
         OsdTheme::Cyberpunk => "concept 11",
         OsdTheme::Synthwave => "concept 04",
         OsdTheme::Mecha => "concept 23",

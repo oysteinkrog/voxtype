@@ -615,6 +615,7 @@ fn build_window(
         | OsdTheme::Karaoke
         | OsdTheme::Island
         | OsdTheme::Jarvis
+        | OsdTheme::Particles
         | OsdTheme::Synthwave
         | OsdTheme::Mecha
         | OsdTheme::Cyberpunk => {

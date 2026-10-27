@@ -273,6 +273,7 @@ fn vo_draws(theme: OsdTheme) -> bool {
             | OsdTheme::Karaoke
             | OsdTheme::Island
             | OsdTheme::Jarvis
+            | OsdTheme::Particles
             | OsdTheme::Synthwave
             | OsdTheme::Mecha
             | OsdTheme::Cyberpunk
