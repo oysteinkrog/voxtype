@@ -10,6 +10,7 @@
 //!
 //! - [`ipc`] — Unix-socket connection, frame decode, ring buffer, reconnect.
 //! - [`live`]: the live preview as JSON (`preview.json`), with word timing.
+//! - [`target`]: the app that has keyboard focus, for the paste toast.
 //! - [`visual`] — peak-hold decay, waveform envelope helpers, palette types.
 //! - [`config`] — `[osd]` config block (`OsdConfig`).
 //! - [`theme`] — Omarchy theme parsing + change watcher.
@@ -29,6 +30,7 @@ pub mod showcase;
 pub mod style;
 pub mod supervisor;
 pub mod swiss;
+pub mod target;
 pub mod theme;
 pub mod visual;
 #[cfg(target_os = "linux")]

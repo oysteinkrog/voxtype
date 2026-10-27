@@ -137,6 +137,8 @@ impl LiveDoc {
 
 struct Live {
     doc: LiveDoc,
+    /// Counts dictations, so a late answer about one does not land in the next.
+    session: u64,
     /// Timing for the next preview, and the text it belongs to.
     timed: Option<Vec<TimedWord>>,
 }
@@ -150,6 +152,7 @@ static LIVE: Mutex<Live> = Mutex::new(Live {
         status: None,
         target: None,
     },
+    session: 0,
     timed: None,
 });
 
@@ -176,15 +179,22 @@ pub fn timed_words(words: Vec<TimedWord>) {
     live.timed = Some(words);
 }
 
-/// A new preview text. Returns true for the first one of a dictation.
-pub fn preview(text: &str) -> bool {
-    let mut first = false;
+/// A new preview text. On the first one of a dictation, looks up the app
+/// that will receive the text on another thread.
+pub fn preview(text: &str) {
+    let mut first = None;
     with_live(|live| {
         let timed = live.timed.take();
         live.doc.apply_preview(text, timed.as_deref());
-        first = live.doc.rev == 1;
+        first = (live.doc.rev == 1).then_some(live.session);
     });
-    first
+    if let Some(session) = first {
+        std::thread::spawn(move || {
+            if let Some(app) = crate::osd::target::focused_app() {
+                target(session, app);
+            }
+        });
+    }
 }
 
 pub fn status(phase: Phase, fraction: Option<f64>, text: &str) {
@@ -201,8 +211,13 @@ pub fn clear_status() {
     with_live(|live| live.doc.status = None);
 }
 
-pub fn target(app: String) {
-    with_live(|live| live.doc.target = Some(LiveTarget { app }));
+/// The app that will receive the text of dictation `session`.
+fn target(session: u64, app: String) {
+    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    if live.session == session && live.doc.rev > 0 {
+        live.doc.target = Some(LiveTarget { app });
+        write(&live.doc);
+    }
 }
 
 /// The dictation ended: forget it and remove the file.
@@ -213,6 +228,7 @@ pub fn clear() {
         ..LiveDoc::default()
     };
     live.timed = None;
+    live.session += 1;
     let _ = std::fs::remove_file(path());
 }
 
