@@ -1289,6 +1289,16 @@ impl Daemon {
 
     /// Play audio feedback sound if enabled
     fn play_feedback(&self, event: SoundEvent) {
+        // Each dictation ends with one of these sounds, so they also tell
+        // the popup how it ended, whether or not sounds are on.
+        use crate::osd::outcome::{self, Outcome};
+        match event {
+            SoundEvent::RecordingStart => outcome::clear(),
+            SoundEvent::TranscriptionComplete => outcome::write(Outcome::Done),
+            SoundEvent::Cancelled => outcome::write(Outcome::Cancelled),
+            SoundEvent::Error => outcome::write(Outcome::Failed),
+            SoundEvent::RecordingStop => {}
+        }
         if let Some(ref feedback) = self.audio_feedback {
             feedback.play(event);
         }

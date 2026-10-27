@@ -24,6 +24,7 @@ pub mod config;
 pub mod gtk_env;
 pub mod ipc;
 pub mod live;
+pub mod outcome;
 pub mod plasma;
 pub mod recipe;
 pub mod showcase;
