@@ -7,7 +7,7 @@
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
 
-use super::kit::{ease_out, hex, mix, reduced, Levels, Mode};
+use super::kit::{at, ease_out, hex, mix, reduced, Levels, Mode};
 use super::*;
 
 use std::sync::OnceLock;
@@ -15,6 +15,7 @@ use std::sync::OnceLock;
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::Point;
+use vo::scene::roll::digit_roll;
 
 /// Colours sampled from the mock-up.
 const RED: u32 = 0xFD4A46;
@@ -50,6 +51,8 @@ const STATUS_TOP: f32 = 43.6;
 const STATUS_H: f32 = 20.0;
 const STATUS_PX: f32 = 20.0;
 const PAD_BOTTOM: f32 = 34.0;
+/// The status row ends this far from the panel's right edge.
+const STATUS_RIGHT: f32 = 30.0;
 const MAX_LINES: u32 = 5;
 
 /// Seconds per letter as the status resolves from scrambled glyphs, and
@@ -58,6 +61,42 @@ const RESOLVE_SECS: f64 = 0.018;
 const SCRAMBLE_SECS: f64 = 0.045;
 /// The baseline lights from the centre, this long per column.
 const LIGHT_SECS: f64 = 0.006;
+
+/// Dot sortation (MO-60): a new word's dots lift out of the meter, fall
+/// into its letters and land; the meter under the word is short of them
+/// and regrows them.
+const LIFT_SECS: f64 = 0.08;
+const FALL_SECS: f64 = 0.2;
+const LAND_SECS: f64 = 0.12;
+const REGROW_SECS: f64 = 0.22;
+/// How far a dot lifts before it falls, and the gap between letters' dots.
+const LIFT_PX: f32 = 10.0;
+const LETTER_GAP: f64 = 0.015;
+/// Letters of one word that take a dot.
+const MAX_LETTERS: usize = 12;
+/// Rows the meter is short under a new word.
+const SHORT_ROWS: usize = 2;
+/// The word count's room in the status row, and the notch's room.
+const NOTCH_ROOM: f32 = 8.0;
+
+/// Seconds from a word's arrival until the meter has regrown its dots.
+fn sort_secs() -> f64 {
+    LIFT_SECS + FALL_SECS + REGROW_SECS
+}
+
+/// How many rows the meter is short `s` seconds after a word took its
+/// dots: all of them until they land, then fewer as they regrow.
+fn short_rows(s: f64) -> usize {
+    let landed = LIFT_SECS + FALL_SECS;
+    if !(0.0..sort_secs()).contains(&s) {
+        0
+    } else if s < landed {
+        SHORT_ROWS
+    } else {
+        let k = 1.0 - (s - landed) / REGROW_SECS;
+        (k * SHORT_ROWS as f64).ceil() as usize
+    }
+}
 
 /// The fonts the look adds to the registry.
 #[derive(Clone, Copy)]
@@ -143,9 +182,22 @@ struct Columns {
     mode_at: f64,
     finish_at: Option<f64>,
     progress: Option<f32>,
+    /// Spans of the meter that gave their dots to a word, in canvas x, and
+    /// when.
+    taken: Vec<(f32, f32, f64)>,
 }
 
 impl Columns {
+    /// Rows column `x` is short at `t`.
+    fn short(&self, x: f32, t: f64) -> usize {
+        self.taken
+            .iter()
+            .filter(|(x0, x1, _)| (*x0..=*x1).contains(&x))
+            .map(|(_, _, at)| short_rows(t - at))
+            .max()
+            .unwrap_or(0)
+    }
+
     fn until(&self) -> f64 {
         match self.mode {
             Mode::Loading | Mode::Listening | Mode::Finishing => f64::INFINITY,
@@ -206,12 +258,17 @@ impl Columns {
             let level = (self.levels.at(at) * jitter).min(1.0) * drain;
             // Quiet columns are the baseline alone, as in the mock-up.
             let rows = (((level - 0.3) / 0.55).clamp(0.0, 1.0) * ROWS as f32).round() as usize;
+            // Under a new word the meter is short: top dots gone and the
+            // baseline dot dimmed until they regrow.
+            let short = self.short(x - r.x, t);
+            let rows = rows.saturating_sub(short);
             let c = hex(DOT).fade(dim);
+            let base_c = if short > 0 { hex(GREY).fade(dim) } else { c };
             let base_r = if rows == 0 { 1.5 } else { DOT_R };
             p.shape(ShapeInstance::circle(
                 Point::new(x, cy),
                 base_r * k.min(1.0),
-                Paint::solid(c),
+                Paint::solid(base_c),
             ));
             for row in 1..=rows {
                 let u = row as f32 / ROWS as f32;
@@ -228,6 +285,85 @@ impl Columns {
                     Paint::solid(c),
                 ));
             }
+        }
+    }
+}
+
+/// One dot on its way from the meter to a letter.
+#[derive(Clone, Copy, Debug)]
+struct Flyer {
+    from: Point,
+    to: Point,
+    at: f64,
+}
+
+impl Flyer {
+    /// Where the dot is `s` seconds after it left, how large and how
+    /// bright, or `None` once it has gone into its letter.
+    fn at(&self, s: f64) -> Option<(Point, f32, f32)> {
+        if s < 0.0 {
+            return None;
+        }
+        if s < LIFT_SECS {
+            let k = ease_out(s / LIFT_SECS);
+            return Some((Point::new(self.from.x, self.from.y - LIFT_PX * k), 1.0, 1.0));
+        }
+        let top = Point::new(self.from.x, self.from.y - LIFT_PX);
+        let s = s - LIFT_SECS;
+        if s < FALL_SECS {
+            // Falling: slow off the top, fast into the letter.
+            let k = (s / FALL_SECS) as f32;
+            let kx = ease_out(s / FALL_SECS);
+            let ky = k * k;
+            return Some((
+                Point::new(
+                    top.x + (self.to.x - top.x) * kx,
+                    top.y + (self.to.y - top.y) * ky,
+                ),
+                1.0,
+                1.0,
+            ));
+        }
+        let s = s - FALL_SECS;
+        if s < LAND_SECS {
+            // It lands bright and sinks into the ink.
+            let k = (s / LAND_SECS) as f32;
+            return Some((self.to, 1.0 - 0.6 * k, 1.0 - k));
+        }
+        None
+    }
+}
+
+/// The dots falling from the meter into new words, over the whole panel.
+#[derive(Clone)]
+struct Sort {
+    flyers: Vec<Flyer>,
+}
+
+impl Sort {
+    fn until(&self) -> f64 {
+        self.flyers
+            .iter()
+            .map(|f| f.at + LIFT_SECS + FALL_SECS + LAND_SECS)
+            .fold(0.0, f64::max)
+    }
+
+    fn draw(&self, t: f64, r: Rect, p: &mut Painter) {
+        for f in &self.flyers {
+            let Some((q, size, a)) = f.at(t - f.at) else {
+                continue;
+            };
+            let q = Point::new(r.x + q.x, r.y + q.y);
+            p.shape(ShapeInstance::circle(
+                q,
+                DOT_R * 1.6 * size,
+                Paint::glow(hex(DOT).fade(0.35 * a), 4.0, 0.5),
+            ));
+            p.shape(ShapeInstance::circle(
+                q,
+                DOT_R * size,
+                Paint::solid(hex(DOT).fade(a)),
+            ));
         }
     }
 }
@@ -315,6 +451,7 @@ impl Popup {
         } else {
             Transition::fade().offset(0.0, -6.0)
         };
+        let (sort, taken) = self.dotmatrix_sort();
         let columns = Columns {
             levels: self.kit_raw_levels(),
             shown_at: self.shown_at,
@@ -322,6 +459,7 @@ impl Popup {
             mode_at,
             finish_at: self.extra.finish_at,
             progress: self.kit_progress(),
+            taken,
         };
         let until = columns.until();
         let wave = Element::canvas("dots", until, move |t, r, p| columns.draw(t, r, p))
@@ -334,21 +472,118 @@ impl Popup {
             .fill(hex(BODY).fade(0.97))
             .border(hex(EDGE), 1.0)
             .presence(Transition::fade().offset(0.0, 6.0), exit)
+            .child(self.dotmatrix_cast())
             .child(wave)
             .child(self.dotmatrix_text(mode))
             .child(self.dotmatrix_status(mode, mode_at))
+            .child(
+                at(
+                    Element::canvas("sort", sort.until(), move |t, r, p| sort.draw(t, r, p)),
+                    0.0,
+                    0.0,
+                )
+                .size(l.width, panel_h(self.lines.min(MAX_LINES))),
+            )
+    }
+
+    /// The transcript's top left in the panel.
+    fn dotmatrix_text_origin(&self) -> Point {
+        Point::new(TEXT_X, WAVE_TOP + WAVE_H + TEXT_TOP)
+    }
+
+    /// The dots on their way into the new words, in panel coordinates, and
+    /// the spans of the meter they left, in the meter canvas's x (MO-60).
+    fn dotmatrix_sort(&self) -> (Sort, Vec<(f32, f32, f64)>) {
+        if !self.motion("dot-sort") || self.still() || self.extra.final_at.is_some() {
+            return (Sort { flyers: Vec::new() }, Vec::new());
+        }
+        let l = &self.look;
+        let style = l.text_style();
+        let o = self.dotmatrix_text_origin();
+        let k = l.width / DESIGN_W;
+        let (x0, x1) = (COL_X0 * k, COL_X1 * k);
+        let pitch = COL_PITCH * k;
+        let cy = WAVE_TOP + WAVE_H / 2.0;
+        let mut flyers = Vec::new();
+        let mut taken = Vec::new();
+        for (b, at) in self.tally_arrivals(&style, l.text_width(), sort_secs()) {
+            let n = b.letters.len().min(MAX_LETTERS);
+            let mut lo = f32::MAX;
+            let mut hi = f32::MIN;
+            for (i, &(lx, lw)) in b.letters.iter().take(n).enumerate() {
+                let to = Point::new(o.x + lx + lw / 2.0, o.y + b.baseline - style.size * 0.35);
+                // The meter column over the letter gives the dot.
+                let col = ((to.x - x0) / pitch).round().max(0.0);
+                let fx = (x0 + col * pitch).min(x1);
+                lo = lo.min(fx);
+                hi = hi.max(fx);
+                flyers.push(Flyer {
+                    from: Point::new(fx, cy - ROW_PITCH * k),
+                    to,
+                    at: at + i as f64 * LETTER_GAP,
+                });
+            }
+            if lo <= hi {
+                taken.push((lo - pitch / 2.0, hi + pitch / 2.0, at));
+            }
+        }
+        (Sort { flyers }, taken)
+    }
+
+    /// The new word's cast into the notch by the word count (MO-65), as a
+    /// block of dots under the transcript.
+    fn dotmatrix_cast(&self) -> Element<Msg> {
+        let l = &self.look;
+        if !self.motion("count-cast") {
+            return at(Element::layer("cast"), 0.0, 0.0);
+        }
+        let (count_x, status_y) = self.dotmatrix_count_at();
+        let notch = Rect::new(
+            count_x - NOTCH_ROOM + 1.0,
+            status_y + 3.0,
+            2.5,
+            STATUS_H - 6.0,
+        );
+        let casts = self.tally_casts(self.dotmatrix_text_origin(), notch, hex(DOT), true);
+        at(
+            Element::canvas("cast", casts.until(), move |t, r, p| casts.draw(t, r, p)),
+            0.0,
+            0.0,
+        )
+        .size(l.width, panel_h(self.lines.min(MAX_LINES)))
+    }
+
+    /// The word count's left edge and the status row's top, in the panel.
+    fn dotmatrix_count_at(&self) -> (f32, f32) {
+        let l = &self.look;
+        let style = TextStyle::new(fonts(&l.fonts).dots, STATUS_PX, STATUS_H + 4.0);
+        let w = self.measure.layout("0", &style, None).size.w * self.tally_count().len() as f32
+            + self.measure.layout(" WORDS", &style, None).size.w;
+        let y = WAVE_TOP
+            + WAVE_H
+            + TEXT_TOP
+            + self.lines.min(MAX_LINES) as f32 * TEXT_LINE
+            + STATUS_TOP;
+        (l.width - STATUS_RIGHT - w, y)
     }
 
     fn dotmatrix_text(&self, mode: Mode) -> Element<Msg> {
         let l = &self.look;
         let dim = if mode == Mode::Cancelled { 0.45 } else { 1.0 };
+        // A new word stands at 70 % ink where it lands, readable at once,
+        // and the dots falling into it bring it to full ink (MO-60).
+        let enter = if !self.motion("dot-sort") || self.still() {
+            Transition::fade().opacity(0.0).offset(0.0, 6.0)
+        } else {
+            Transition::fade().opacity(0.7)
+        };
         let words = Element::live_text("words", &self.shown)
             .text_style(l.text_style())
             .color(hex(INK))
             .opacity(dim)
-            .motion(Prop::Opacity, Spring::critical_to_98(0.14))
+            .motion(Prop::Opacity, Spring::critical_to_98(0.3))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0))
+            .word_enter(enter)
             .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
         let words = self.handoff_or(
             words,
@@ -381,7 +616,22 @@ impl Popup {
         let shown = scrambled(&text, since);
         let mark = Mark { mode, mode_at };
         let until = mark.until();
-        Element::row("status")
+        let count = Element::row("count")
+            .align_items(AlignItems::CENTER)
+            .child(digit_roll(
+                "count",
+                &self.tally_count(),
+                style,
+                hex(STATUS),
+                Spring::critical_to_98(0.28),
+            ))
+            .child(
+                Element::label("words", " WORDS")
+                    .text_style(style)
+                    .color(hex(STATUS)),
+            );
+        let row = Element::row("status")
+            .width(l.width - 30.0 - STATUS_RIGHT)
             .height(STATUS_H)
             .align_items(AlignItems::CENTER)
             .margin_edges(STATUS_TOP, 0.0, 0.0, 30.0)
@@ -390,9 +640,16 @@ impl Popup {
             )
             .child(
                 Element::label("state", shown)
-                    .text_style(style)
+                    .text_style(style.clamp_lines(1))
                     .color(hex(STATUS))
                     .margin_edges(0.0, 0.0, 0.0, 12.0),
             )
+            .child(Element::row("spacer").grow(1.0));
+        // The word count, the notch its casts land in (MO-65).
+        if self.motion("count-cast") {
+            row.child(count)
+        } else {
+            row
+        }
     }
 }
