@@ -492,6 +492,7 @@ impl Look {
                     + swiss::WAVE_HEIGHT_PX as f32
                     + (lines as f32 - 0.5) * self.text_line,
             ),
+            OsdTheme::Mecha => Some(mecha::newest_line_centre(self)),
             _ => None,
         }
     }
