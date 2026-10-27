@@ -33,10 +33,10 @@ const STAT_SCALE: f32 = 1.3;
 const NOTCH_ROOM: f32 = 7.0;
 /// The status icon's box.
 const ICON_BOX: f32 = 18.0;
-/// The icon's done step (ring closes, then the check) plays this much
-/// faster than the framework's, so the check is drawn before the popup
-/// closes, about half a second after the final text.
-const DONE_SPEED: f64 = 2.0;
+/// Seconds for the icon's done step (ring closes, then the check), so the
+/// check is drawn before the popup closes, about half a second after the
+/// final text.
+const DONE_SECS: f32 = 0.45;
 /// Below this confidence a word gets a wavy underline.
 const DOUBT: f32 = 0.6;
 /// The wavy underline: wave height and length, stroke width, in logical
@@ -76,7 +76,13 @@ pub enum IconEvent {
 /// `Extra::files` has noted the stop and the final text.
 pub(crate) fn note_icon(x: &mut showcase::Extra, old: &Files, new: &Files, t: f64) {
     let last = x.icon_events.last().map(|e| e.0);
-    let working = StatusLine::new(&new.status, "").finishing;
+    let working = new.transcribing || StatusLine::new(&new.status, "").finishing;
+    // The daemon says the dictation came to nothing. An older daemon writes
+    // no outcome; then a stop with nothing to finish counts as a cancel.
+    let nothing = match new.outcome {
+        Some(o) => o != Outcome::Done,
+        None => !working && new.status.is_empty() && x.finish_at.is_none(),
+    };
     let mut push = |e: IconEvent| x.icon_events.push((e, t));
     match last {
         None if new.recording => push(IconEvent::Record),
@@ -84,12 +90,14 @@ pub(crate) fn note_icon(x: &mut showcase::Extra, old: &Files, new: &Files, t: f6
             push(IconEvent::Stop);
             if working {
                 push(IconEvent::Finish);
-            } else if new.status.is_empty() && x.finish_at.is_none() {
-                // Stopped with nothing to finish: cancelled.
+            } else if nothing {
                 push(IconEvent::Cancel);
             }
         }
         Some(IconEvent::Stop) if working => push(IconEvent::Finish),
+        Some(IconEvent::Stop | IconEvent::Finish) if x.final_at.is_none() && nothing => {
+            push(IconEvent::Cancel)
+        }
         Some(IconEvent::Finish) if x.final_at.is_some() => push(IconEvent::Done),
         _ => {}
     }
@@ -356,7 +364,7 @@ impl Popup {
             done: l.accent,
             cancel: l.inactive,
             width: 0.08,
-            done_secs: None,
+            done_secs: Some(DONE_SECS),
         });
         for &(e, t) in &self.extra.icon_events {
             match e {
@@ -367,24 +375,11 @@ impl Popup {
                 IconEvent::Cancel => icon.cancel(t),
             }
         }
-        let done_at = self
-            .extra
-            .icon_events
-            .iter()
-            .find(|e| e.0 == IconEvent::Done)
-            .map(|e| e.1);
-        let fast = move |t: f64| match done_at {
-            Some(d) if t > d => d + (t - d) * DONE_SPEED,
-            _ => t,
-        };
-        let until = match done_at {
-            Some(d) if icon.until().is_finite() => d + (icon.until() - d) / DONE_SPEED,
-            _ => icon.until(),
-        };
+        let until = icon.until();
         let icon = Arc::new(icon);
         Element::canvas("icon", until, move |t, r, p| {
             let centre = Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
-            icon.paint(fast(t), centre, r.w.min(r.h), p);
+            icon.paint(t, centre, r.w.min(r.h), p);
         })
         .size(ICON_BOX, ICON_BOX)
     }
