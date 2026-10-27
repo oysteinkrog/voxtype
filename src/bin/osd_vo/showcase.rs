@@ -237,7 +237,7 @@ impl EmitterSource for OrbField {
         EmitterLook {
             origin: self.origin,
             size: 7.0,
-            brightness: open * (0.9 + 0.5 * l),
+            brightness: open * (0.55 + 0.4 * l),
             ramp: [c(ICE).fade(0.0), c(TEAL).fade(0.8), c(TEAL).fade(0.0)],
             style: SpriteStyle::Bokeh {
                 focus: 0.55,
@@ -693,6 +693,8 @@ impl Popup {
             .size(surface.w, surface.h)
             .blend(BlendMode::Add)
             .bloom(if live { 0.6 + 0.8 * level } else { 0.3 }, 10.0)
+            // Swirling particles leave short comet tails.
+            .trail(0.06)
             .child(
                 at(
                     Element::emitter("ring", Emitter::new(Arc::new(ring), RING_PARTICLES, 7)),
@@ -859,12 +861,17 @@ impl Popup {
             let y = (sc::RIBBON_PX - h) / 2.0;
             at(Element::wave(key, w), 0.0, y).size(l.text_width(), h)
         };
-        let bloom = if frozen { 0.15 } else { 0.5 + self.level_now() };
+        // The bloom spreads the light round the wave; no faked halo.
+        let bloom = if frozen {
+            0.2
+        } else {
+            0.8 + 1.2 * self.level_now()
+        };
         let lights = Element::layer("lights")
             .size(l.text_width(), sc::RIBBON_PX)
             .blend(BlendMode::Add)
             .bloom(bloom, 12.0)
-            .child(wave("halo", sc::RIBBON_PX, body, 0.10, 1.0))
+            .motion(Prop::Bloom, Spring::SOFT)
             .child(wave("body", sc::RIBBON_PX * 0.6, body, 0.45, 0.75))
             .child(wave("core", sc::RIBBON_PX * 0.22, core, 0.8, 0.5));
         Element::column("ribbon")
@@ -924,6 +931,10 @@ impl Popup {
             .radius(8.0)
             .fill(strip_fill)
             .hairline(c(SLATE).fade(0.25))
+            // A specular edge at the top left, and one sheen across the
+            // strip when it appears.
+            .rim(c(ICE).fade(0.35), 1.0, 0.12, -0.375, 0.0)
+            .sheen(c(ICE).fade(0.10), 0.7)
             .child(words)
     }
 
@@ -1131,6 +1142,7 @@ impl Popup {
                         )
                         .size(w.max(0.01), h.max(0.01))
                         .stroke(c(EMBER).fade(flare), 1.2)
+                        .glow(c(EMBER), 6.0, 0.6 * flare)
                         .presence(Transition::fade(), Transition::fade()),
                     );
                 }
