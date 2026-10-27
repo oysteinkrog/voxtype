@@ -600,6 +600,7 @@ fn build_window(
         OsdTheme::Swiss
         | OsdTheme::Showcase
         | OsdTheme::Type
+        | OsdTheme::Island
         | OsdTheme::Jarvis
         | OsdTheme::Synthwave
         | OsdTheme::Mecha

@@ -53,6 +53,8 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/island.rs"]
+mod island;
 #[path = "osd_vo/jarvis.rs"]
 mod jarvis;
 #[path = "osd_vo/cyberpunk.rs"]
@@ -511,6 +513,9 @@ impl Look {
 
     /// Width of the transcript: the panel less padding and border.
     fn text_width(&self) -> f32 {
+        if self.theme == OsdTheme::Island {
+            return island::text_width(self);
+        }
         if self.theme == OsdTheme::Jarvis {
             return jarvis::text_width(self);
         }
@@ -528,6 +533,9 @@ impl Look {
 
     /// Transcript lines the look has room for.
     fn max_lines(&self) -> u32 {
+        if self.theme == OsdTheme::Island {
+            return island::MAX_LINES;
+        }
         if self.theme == OsdTheme::Mecha {
             return mecha::MAX_LINES;
         }
@@ -544,6 +552,9 @@ impl Look {
     }
 
     fn text_style(&self) -> TextStyle {
+        if self.theme == OsdTheme::Island {
+            return island::text_style(self);
+        }
         if self.theme == OsdTheme::Jarvis {
             return jarvis::text_style(self);
         }
@@ -585,6 +596,9 @@ impl Look {
     /// inside it, so the surface never resizes; the rest is transparent and
     /// click-through.
     fn surface(&self) -> Size {
+        if self.theme == OsdTheme::Island {
+            return Popup::island_surface(self);
+        }
         if self.theme == OsdTheme::Jarvis {
             return Popup::jarvis_surface(self);
         }
@@ -687,6 +701,8 @@ struct Popup {
     was_recording: bool,
     /// What only the showcase look keeps.
     extra: showcase::Extra,
+    /// What only the island look keeps.
+    island: island::State,
     /// What only the jarvis look keeps.
     jarvis: jarvis::Extra,
     /// What only the cyberpunk look keeps.
@@ -720,6 +736,7 @@ impl Popup {
             in_wall: false,
             was_recording: false,
             extra: showcase::Extra::default(),
+            island: island::State::default(),
             jarvis: jarvis::Extra::default(),
             cyber: cyberpunk::State::default(),
             synth: synthwave::State::default(),
@@ -911,8 +928,10 @@ impl App for Popup {
         self.shown_at = cx.t();
         self.extra.now = cx.t();
         self.sync_showcase(cx.t());
+        self.sync_island(cx.t());
         self.sync_cyber(cx.t());
         self.arm_tick(cx);
+        self.arm_island_tick(cx);
         self.arm_cyber_tick(cx);
     }
 
@@ -952,10 +971,12 @@ impl App for Popup {
             Msg::Loop => {}
         }
         self.sync_showcase(t);
+        self.sync_island(t);
         self.sync_jarvis(t);
         self.sync_cyber(t);
         self.sync_synthwave(t);
         self.arm_tick(cx);
+        self.arm_island_tick(cx);
         self.arm_cyber_tick(cx);
         if !tick && self.idle(t) {
             tracing::info!(
@@ -988,6 +1009,9 @@ impl App for Popup {
 impl Popup {
     fn look_view(&self, _: &vo::Tokens) -> Element<Msg> {
         let root = Element::column("root").align_items(AlignItems::CENTER);
+        if self.look.theme == OsdTheme::Island {
+            return self.island_view();
+        }
         if self.look.theme == OsdTheme::Showcase {
             return self.showcase_view();
         }
@@ -1209,6 +1233,7 @@ fn default_motion(look: &Look) -> Motion {
         look.theme,
         OsdTheme::Showcase
             | OsdTheme::Type
+            | OsdTheme::Island
             | OsdTheme::Jarvis
             | OsdTheme::Mecha
             | OsdTheme::Cyberpunk
