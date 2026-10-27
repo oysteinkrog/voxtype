@@ -683,11 +683,6 @@ impl Popup {
         // newest at the top on both sides. It leaves when the check lands.
         if self.extra.final_at.is_none() {
             let resting = rest_at.is_some();
-            let (low, high) = if resting {
-                (hex(SLATE, 0.12), hex(SLATE, 0.4))
-            } else {
-                (hex(CYAN, 0.45), hex(HOT, 1.0))
-            };
             let r = 160.0 * g.k;
             // The mel bands from the signal bus, low bands at the top on both
             // sides; the level history when the daemon sends no voice frames.
@@ -701,23 +696,35 @@ impl Popup {
                     release: 0.18,
                 }
             };
-            let spectrum = Spectrum::new(low, high)
-                .bands(bands)
-                .count(SPECTRUM_BARS)
-                .mirror()
-                .ring(62.0 / 160.0, 0.95)
-                .rest(3.0 * g.k)
-                .width(0.3)
-                .curve(1.6)
-                .glow(1.2 * g.k, 1.2);
-            let e = at(
-                Element::spectrum_ring("spectrum", spectrum),
-                g.cx - r,
-                g.cy - r,
-            )
-            .size(2.0 * r, 2.0 * r)
-            .presence(Transition::fade(), Transition::fade());
-            layer = layer.child(e);
+            let ring = |low: Color, high: Color, width: f32| {
+                Spectrum::new(low, high)
+                    .bands(bands.clone())
+                    .count(SPECTRUM_BARS)
+                    .mirror()
+                    .ring(62.0 / 160.0, 0.95)
+                    .rest(3.0 * g.k)
+                    .width(width)
+                    .curve(1.6)
+            };
+            let place = |key: &'static str, spectrum: Spectrum| {
+                at(Element::spectrum_ring(key, spectrum), g.cx - r, g.cy - r)
+                    .size(2.0 * r, 2.0 * r)
+                    .presence(Transition::fade(), Transition::fade())
+            };
+            // Saturated cyan bars with their glow, and while listening a thin
+            // near-white core that only the loud bars light.
+            let (low, high) = if resting {
+                (hex(SLATE, 0.12), hex(SLATE, 0.4))
+            } else {
+                (hex(CYAN, 0.5), hex(CYAN, 1.0))
+            };
+            layer = layer.child(place("spectrum", ring(low, high, 0.3).glow(1.2 * g.k, 1.2)));
+            if !resting {
+                layer = layer.child(place(
+                    "spectrum-core",
+                    ring(hex(HOT, 0.0), hex(HOT, 0.9), 0.1),
+                ));
+            }
         }
         let ring = at(
             Element::canvas("ring", until, move |t, _, p| hud.draw(t, p)),
