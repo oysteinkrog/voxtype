@@ -686,8 +686,20 @@ impl Popup {
                 (hex(CYAN, 0.45), hex(BRIGHT, 1.0))
             };
             let r = 160.0 * g.k;
+            // The mel bands from the signal bus, low bands at the top on both
+            // sides; the level history when the daemon sends no voice frames.
+            let bands = if self.signals.get().is_empty() {
+                Bands::Fixed(hud.bar_energies(self.extra.now))
+            } else {
+                Bands::Signals {
+                    lo: 0,
+                    hi: 23,
+                    attack: 0.015,
+                    release: 0.18,
+                }
+            };
             let spectrum = Spectrum::new(low, high)
-                .bands(Bands::Fixed(hud.bar_energies(self.extra.now)))
+                .bands(bands)
                 .count(2 * HALF_BARS as u32)
                 .mirror()
                 .ring(62.0 / 160.0, 0.95)
