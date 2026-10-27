@@ -683,7 +683,7 @@ impl Popup {
         // newest at the top on both sides. It leaves when the check lands.
         if self.extra.final_at.is_none() {
             let resting = rest_at.is_some();
-            let r = 160.0 * g.k;
+            let r = 170.0 * g.k;
             // The mel bands from the signal bus, low bands at the top on both
             // sides; the level history when the daemon sends no voice frames.
             let bands = if self.signals.get().is_empty() {
@@ -701,10 +701,10 @@ impl Popup {
                     .bands(bands.clone())
                     .count(SPECTRUM_BARS)
                     .mirror()
-                    .ring(62.0 / 160.0, 0.95)
+                    .ring(62.0 / 170.0, 0.97)
                     .rest(3.0 * g.k)
                     .width(width)
-                    .curve(1.6)
+                    .curve(1.3)
                     // Fixed per-bar variation, the same seed on both rings so
                     // the cores match their bars. No drift, so the scene sleeps
                     // when the bus is quiet.
