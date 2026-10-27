@@ -319,8 +319,12 @@ impl Handoff {
         if self.reduced {
             let a = 1.0 - clamp01(s / FADE_SECS);
             self.paint_text(o, a, |_| (0.0, 1.0, 1.0), p);
-            self.paint_tick(o, rect.w, if d.enter { 1.0 } else { 0.0 }, 0.0, p);
-            self.paint_receipt(o, 1.0, p);
+            // The marks come once the text has gone, without travel.
+            let shown = if s >= FADE_SECS { 1.0 } else { 0.0 };
+            self.paint_tick(o, rect.w, if d.enter { shown } else { 0.0 }, 0.0, p);
+            if shown > 0.0 {
+                self.paint_receipt(o, 1.0, p);
+            }
             return;
         }
         match d.via {
