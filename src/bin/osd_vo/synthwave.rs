@@ -42,7 +42,7 @@ const TITLE_PX: f32 = 72.0;
 const TITLE_Y: f32 = 55.0;
 /// Waveform centre line, tallest half height and bar pitch.
 const WAVE_Y: f32 = 151.0;
-const WAVE_HALF: f32 = 56.0;
+const WAVE_HALF: f32 = 62.0;
 const WAVE_X0: f32 = 18.0;
 const WAVE_X1: f32 = 582.0;
 const BAR_PITCH: f32 = 7.1;
@@ -627,7 +627,7 @@ impl Popup {
                 );
                 p.shape(ShapeInstance::rrect(
                     rc,
-                    Paint::solid(lerp(hue, Color::WHITE, 0.3).fade(alpha * 0.6)),
+                    Paint::solid(lerp(hue, Color::WHITE, 0.35).fade(alpha * 0.35)),
                 ));
             }
             if finishing {
@@ -645,7 +645,7 @@ impl Popup {
         Element::layer("lights")
             .size(w, bottom + 4.0)
             .blend(BlendMode::Add)
-            .bloom(0.6, 6.0)
+            .bloom(0.45, 6.0)
             .child(at(grid, 0.0, 0.0))
             .child(at(wave, 0.0, 0.0))
     }
@@ -738,7 +738,8 @@ impl Popup {
                     continue;
                 };
                 let d = (i as f32 - mid) / mid.max(1.0);
-                let spread = d * 0.6 * total / 2.0;
+                // A cancel shows for a moment only, so its title barely tracks.
+                let spread = d * if cancelled { 0.08 } else { 0.6 } * total / 2.0;
                 let secs = 0.28 + 0.14 * d.abs() as f64;
                 out.push(at(
                     Element::label(format!("{layer}-{word}-{i}"), ch.to_string())
@@ -748,7 +749,7 @@ impl Popup {
                         .motion(Prop::Opacity, Spring::critical_to_98(0.14))
                         .presence(
                             Transition::fade().offset(spread, 0.0),
-                            Transition::fade().offset(spread * 1.2, -8.0 * s),
+                            Transition::fade().offset(spread * 0.3, -10.0 * s),
                         ),
                     x0 + g.pos.x,
                     0.0,
