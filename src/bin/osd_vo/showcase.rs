@@ -20,15 +20,11 @@ use vo::scene::emitter::{
     tilt_x, Emitter, EmitterLook, EmitterSim, EmitterSource, LevelTrack, Shape, Shock, SpriteStyle,
     WordParticles,
 };
-use vo::scene::geom::{Point, Rect, Size};
+use vo::scene::geom::{Point, Rect};
 use vo::scene::glass::Glass;
-use vo::scene::gpu::GpuSource;
 use vo::scene::path::{icons, make, Morph, Outline, StrokeStyle};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
-use vo_3d::{
-    Camera, Frame3d, Light, Mat4, Material, Mesh, MeshDraw, MeshId, Projection, Source3d, Vec3,
-};
 use vo_dots::{
     assemble, check_cells, Change, DotField, DotFont, DotMeter, DotText, Dots, Look as DotLook,
     Springs, TextStyle as DotStyle,
@@ -89,101 +85,14 @@ pub struct Extra {
     level: LevelTrack,
     /// The level last pushed to `level`.
     level_sent: Option<f32>,
-    /// The 3D hoop, made once so its mesh is uploaded once.
-    hoop: Option<(Arc<dyn GpuSource>, Arc<HoopTimes>)>,
 }
 
-/// A thin lit metal hoop in 3D along the particle ring, seen from a little
-/// above. A key light circles it while listening, so a glint runs round the
-/// hoop; from the stop on it holds still and goes grey, and it flares once
-/// when the final text lands. The times it reacts to are set once, through
-/// `HoopTimes`, so the frames stay a function of `t`.
-#[derive(Debug)]
-struct Hoop {
-    shown_at: f64,
-    times: Arc<HoopTimes>,
-}
-
-/// When the recording stopped and when the final text came, each set once.
-#[derive(Debug, Default)]
-struct HoopTimes {
-    finish_at: OnceLock<f64>,
-    final_at: OnceLock<f64>,
-}
-
-impl Source3d for Hoop {
-    fn meshes(&self) -> Vec<Mesh> {
-        vec![Mesh::torus(1.0, 0.004, 192, 8)]
-    }
-
-    fn frame(&self, t: f64, size: Size) -> Frame3d {
-        let finish = self.times.finish_at.get().copied();
-        let age = (finish.map_or(t, |f| t.min(f)) - self.shown_at).max(0.0);
-        let open = ease_out(((t - self.shown_at) / sc::OPEN_SECS).clamp(0.0, 1.0)) as f32;
-        let flare = self.times.final_at.get().map_or(0.0, |&f| {
-            if t < f {
-                0.0
-            } else {
-                1.0 - ((t - f) / (2.0 * sc::FINAL_PULSE_SECS)).min(1.0) as f32
-            }
-        });
-        // The box is the ring's extent plus room for the tube: a radius of
-        // one world unit spans the box's width less that room.
-        let px_per_unit = 0.5 * (size.w - 2.0 * HOOP_ROOM);
-        let a = (age * 0.9) as f32;
-        // Seen from just far enough above that the hoop is an ellipse as
-        // flat as the box.
-        let pitch = ((size.h - 2.0 * HOOP_ROOM) / (size.w - 2.0 * HOOP_ROOM)).asin();
-        let hue = if finish.is_some_and(|f| t >= f) {
-            mix(SLATE, ICE, flare)
-        } else {
-            mix(TEAL, ICE, 0.4)
-        };
-        Frame3d {
-            camera: Camera {
-                projection: Projection::Orthographic {
-                    height: size.h / px_per_unit,
-                },
-                ..Camera::orbit(Vec3::ZERO, 0.0, pitch, 4.0)
-            },
-            light: Light {
-                dir: Vec3::new(a.cos(), -0.5, a.sin()),
-                intensity: 1.4,
-                rim: 0.6,
-                ..Light::default()
-            },
-            meshes: vec![MeshDraw {
-                mesh: MeshId(0),
-                // A little inside the particle ring, and faint: an accent
-                // under the ring, not a second outline.
-                model: Mat4::uniform_scale(HOOP_SCALE * (0.6 + 0.4 * open)),
-                material: Material {
-                    color: c(hue).fade(open * (0.4 + 0.2 * flare)),
-                    emissive: 0.1 + 0.5 * flare,
-                    specular: 0.6,
-                    shininess: 80.0,
-                },
-            }],
-            ..Frame3d::default()
-        }
-    }
-
-    fn until(&self) -> f64 {
-        match (self.times.finish_at.get(), self.times.final_at.get()) {
-            (_, Some(f)) => f + 2.0 * sc::FINAL_PULSE_SECS,
-            (Some(f), None) => f.max(self.shown_at + sc::OPEN_SECS),
-            (None, None) => f64::INFINITY,
-        }
-    }
-}
-
-/// The hoop's radius as a share of the particle ring's.
-const HOOP_SCALE: f32 = 0.9;
-/// Room round the hoop in its box, in logical pixels.
-const HOOP_ROOM: f32 = 6.0;
+/// Reach of the card's glow. Its falloff is exp(-d / GLOW_PX), so it is
+/// gone well inside the surface's transparent margin.
+const GLOW_PX: f32 = 8.0;
 
 /// Orbs in the out-of-focus field around the card.
-const ORB_PARTICLES: u32 = 64;
+const ORB_PARTICLES: u32 = 20;
 
 /// Soft orbs at different depths around the card, drawn out of focus by
 /// their distance from the focal plane. They drift while listening, brighten
@@ -215,7 +124,7 @@ impl EmitterSource for OrbField {
         };
         EmitterSim {
             shape: Shape::Box {
-                half: [self.half[0], self.half[1], 160.0],
+                half: [self.half[0], self.half[1], 60.0],
             },
             emit: if live { 1.0 } else { 0.3 },
             life: 5.0,
@@ -240,8 +149,8 @@ impl EmitterSource for OrbField {
         let open = ((t - self.shown_at) / sc::OPEN_SECS).clamp(0.0, 1.0) as f32;
         EmitterLook {
             origin: self.origin,
-            size: 7.0,
-            brightness: open * (0.55 + 0.4 * l),
+            size: 3.0,
+            brightness: open * (0.2 + 0.15 * l),
             ramp: [c(ICE).fade(0.0), c(TEAL).fade(0.8), c(TEAL).fade(0.0)],
             style: SpriteStyle::Bokeh {
                 focus: 0.55,
@@ -253,7 +162,7 @@ impl EmitterSource for OrbField {
 }
 
 /// Particles in the voice ring.
-const RING_PARTICLES: u32 = 3072;
+const RING_PARTICLES: u32 = 1536;
 
 /// The tilted ring of light behind the card's top edge, as GPU particles. It
 /// swells and spins faster with the voice, rests once the recording stops,
@@ -311,8 +220,8 @@ impl EmitterSource for VoiceRing {
         });
         EmitterSim {
             swirl: if live { 0.35 + 1.6 * l } else { 0.04 },
-            spawn_speed: r * (0.02 + 0.25 * l),
-            noise: r * 0.4 * l,
+            spawn_speed: 4.0 + 16.0 * l,
+            noise: 6.0 + 18.0 * l,
             noise_scale: 3.0 / r.max(1.0),
             life: 1.8 - 0.6 * l,
             emit: if live { 1.0 } else { 0.4 },
@@ -329,15 +238,15 @@ impl EmitterSource for VoiceRing {
         let l = self.level(t);
         let flare = self.flare(t);
         let brightness = if self.live(t) {
-            0.35 + 0.55 * l
+            0.18 + 0.25 * l
         } else {
-            0.3 + 0.9 * flare
+            0.12 + 0.4 * flare
         };
         let mid = if self.live(t) { TEAL } else { SLATE };
         EmitterLook {
             origin: self.origin,
             rotation: tilt_x(self.tilt),
-            size: 1.2 + 0.8 * l,
+            size: 0.8 + 0.3 * l,
             brightness,
             ramp: [
                 c(mix(mid, ICE, 0.6 + 0.4 * flare)),
@@ -451,11 +360,10 @@ impl Extra {
         let final_seen = self.final_at.is_some();
         let h = self.dots.get_or_insert_with(|| DotHeader::new(t, cols));
         let before = (h.clock.text(), h.count.text(), h.slate, h.checked);
-        // Digits change in one step, so the clock and the count read at
-        // every frame.
-        h.clock.set(&mut h.field, t, clock, Change::Cut);
+        // Changed digits morph dot by dot; the rest stay put.
+        h.clock.set(&mut h.field, t, clock, Change::Morph);
         h.count
-            .set(&mut h.field, t, &count_text(words), Change::Cut);
+            .set(&mut h.field, t, &count_text(words), Change::Morph);
         let finishing = phase == Phase::Finishing;
         if finishing != h.slate {
             h.slate = finishing;
@@ -494,22 +402,6 @@ impl Popup {
     pub(crate) fn sync_showcase(&mut self, t: f64) {
         if !self.look_is_showcase() {
             return;
-        }
-        if self.extra.hoop.is_none() {
-            let times = Arc::new(HoopTimes::default());
-            let hoop = Hoop {
-                shown_at: self.shown_at,
-                times: times.clone(),
-            };
-            self.extra.hoop = Some((vo_3d::item(hoop), times));
-        }
-        if let Some((_, times)) = &self.extra.hoop {
-            if let Some(f) = self.extra.finish_at {
-                let _ = times.finish_at.set(f);
-            }
-            if let Some(f) = self.extra.final_at {
-                let _ = times.final_at.set(f);
-            }
         }
         let phase = self.showcase_phase();
         let level = if phase.ambient() {
@@ -639,10 +531,6 @@ impl Popup {
         }
         let phase = self.showcase_phase();
         let card_h = Self::showcase_card_height(l, self.lines);
-        let root = match self.hoop() {
-            Some(hoop) => root.child(hoop),
-            None => root,
-        };
         root.child(self.backdrop(phase, card_h))
             .child(self.card(phase))
             .child(self.front(phase, card_h))
@@ -662,10 +550,10 @@ impl Popup {
     fn aura(&self, phase: Phase) -> (OsdColor, f32) {
         let pulse = self.final_pulse();
         match phase {
-            Phase::Done => (mix(TEAL, ICE, pulse), 0.12 + 0.6 * pulse),
-            Phase::Finishing => (SLATE, 0.1),
-            _ if phase.ambient() => (TEAL, 0.15 + 0.3 * self.level_now()),
-            _ => (TEAL, 0.1),
+            Phase::Done => (mix(TEAL, ICE, pulse), 0.05 + 0.2 * pulse),
+            Phase::Finishing => (SLATE, 0.04),
+            _ if phase.ambient() => (TEAL, 0.05 + 0.1 * self.level_now()),
+            _ => (TEAL, 0.04),
         }
     }
 
@@ -678,12 +566,12 @@ impl Popup {
         let level = self.level_now();
         let live = phase.ambient();
         let surface = Self::showcase_surface(l);
-        let (rx, ry) = (l.width * 0.5, 30.0);
+        let (rx, ry) = (l.width * 0.42, 26.0);
         let (cx0, cy0) = (m + l.width / 2.0, m - 2.0);
         // Out-of-focus orbs drifting in depth around the card.
         let orbs = OrbField {
             level: self.extra.level.clone(),
-            half: [l.width / 2.0 + 0.8 * m, card_h / 2.0 + 0.5 * m],
+            half: [l.width / 2.0 + 0.3 * m, card_h / 2.0 + 0.2 * m],
             origin: Point::new(0.0, m + card_h / 2.0 - surface.h / 2.0),
             shown_at: self.shown_at,
             finish_at: self.extra.finish_at,
@@ -704,7 +592,7 @@ impl Popup {
         at(Element::layer("back"), 0.0, 0.0)
             .size(surface.w, surface.h)
             .blend(BlendMode::Add)
-            .bloom(if live { 0.6 + 0.8 * level } else { 0.3 }, 10.0)
+            .bloom(if live { 0.2 + 0.2 * level } else { 0.1 }, 6.0)
             // Swirling particles leave short comet tails.
             .trail(0.06)
             .child(
@@ -721,25 +609,6 @@ impl Popup {
                     .size(surface.w, surface.h)
                     .presence(Transition::fade(), Transition::fade().offset(0.0, -24.0)),
             )
-    }
-
-    /// The 3D hoop along the particle ring, behind everything else.
-    fn hoop(&self) -> Option<Element<Msg>> {
-        let (source, _) = self.extra.hoop.as_ref()?;
-        let l = &self.look;
-        let m = sc::MARGIN_PX;
-        let (rx, ry) = (l.width * 0.5, 30.0);
-        let (w, h) = (2.0 * (rx + HOOP_ROOM), 2.0 * (ry + HOOP_ROOM));
-        let (cx0, cy0) = (m + l.width / 2.0, m - 2.0);
-        Some(
-            at(
-                Element::gpu("hoop", source.clone()),
-                cx0 - w / 2.0,
-                cy0 - h / 2.0,
-            )
-            .size(w, h)
-            .presence(Transition::fade(), Transition::fade()),
-        )
     }
 
     /// The card: glass-dark body, header, ribbon, transcript strip, status.
@@ -766,7 +635,7 @@ impl Popup {
             .glass(self.card_glass(tint))
             // The rim element in front draws the border line.
             .border(Color::TRANSPARENT, BORDER)
-            .glow(c(aura.0), 14.0 + 10.0 * self.level_now(), aura.1)
+            .glow(c(aura.0), GLOW_PX, aura.1)
             .motion(Prop::Glow, Spring::SOFT)
             .motion(Prop::Scale, Spring::POP)
             .presence(Transition::fade().scale(0.94).offset(0.0, 14.0), exit)
@@ -877,12 +746,12 @@ impl Popup {
         let bloom = if frozen {
             0.2
         } else {
-            0.8 + 1.2 * self.level_now()
+            0.3 + 0.4 * self.level_now()
         };
         let lights = Element::layer("lights")
             .size(l.text_width(), sc::RIBBON_PX)
             .blend(BlendMode::Add)
-            .bloom(bloom, 12.0)
+            .bloom(bloom, 8.0)
             .motion(Prop::Bloom, Spring::SOFT)
             .child(wave("body", sc::RIBBON_PX * 0.6, body, 0.45, 0.75))
             .child(wave("core", sc::RIBBON_PX * 0.22, core, 0.8, 0.5));
@@ -924,7 +793,9 @@ impl Popup {
         // scatters and re-forms only the glyphs that changed.
         if phase.ambient() {
             words = words.word_particles(WordParticles {
-                color: c(mix(TEAL, ICE, 0.5)),
+                color: c(mix(TEAL, ICE, 0.5)).fade(0.7),
+                size: 0.6,
+                density: 0.6,
                 ..WordParticles::default()
             });
         }
@@ -1137,7 +1008,7 @@ impl Popup {
                 0.14,
                 1.0 / sc::ORBIT_LAP_SECS as f32,
                 c(mix(EMBER, ICE, 0.35)).fade(bright),
-                10.0,
+                4.0,
             );
         }
         layer = layer.child(rim);
@@ -1162,7 +1033,7 @@ impl Popup {
                         )
                         .size(w.max(0.01), h.max(0.01))
                         .stroke(c(EMBER).fade(flare), 1.2)
-                        .glow(c(EMBER), 6.0, 0.6 * flare)
+                        .glow(c(EMBER), 3.0, 0.3 * flare)
                         .presence(Transition::fade(), Transition::fade()),
                     );
                 }
