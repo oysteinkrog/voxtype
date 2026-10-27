@@ -20,6 +20,7 @@ use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
+use vo::scene::flow::Revise;
 use vo::scene::taffy;
 use vo::scene::Insets;
 use vo::scene::taffy::prelude::{auto, length};
@@ -1436,8 +1437,8 @@ impl Popup {
         } else {
             hex(PAPER)
         };
-        // New words rise into place; a revised word jolts sideways and
-        // springs back.
+        // New words rise into place; a revised word rolls up and out while
+        // its replacement rolls in from below.
         let words = Element::live_text("words", &self.shown)
             .text_style(l.text_style())
             .color(colour)
@@ -1445,7 +1446,7 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.10))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(Transition::fade().offset(0.0, 6.0))
-            .word_change(Transition::fade().opacity(0.4).offset(-5.0, 0.0))
+            .word_revise(Revise::Roll)
             .text_halo(Color::WHITE.fade(if cancelled { 0.0 } else { 0.12 }), 3.0);
         let mut text = at(
             Element::column("text")
