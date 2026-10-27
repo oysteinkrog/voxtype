@@ -92,6 +92,8 @@ pub(crate) struct Delivered {
     pub app: Option<String>,
     /// Scene time the popup saw the report.
     pub at: f64,
+    /// Reduced motion: the text fades and the marks stand still.
+    pub reduced: bool,
 }
 
 impl Delivered {
@@ -104,6 +106,7 @@ impl Delivered {
             latency_ms: d.latency_ms,
             app,
             at,
+            reduced: kit::reduced(),
         }
     }
 
@@ -134,7 +137,7 @@ impl Delivered {
 
     /// When the text has left, `letters` letters on `lines` lines, relative to `at`.
     fn text_gone(&self, letters: usize) -> f64 {
-        if kit::reduced() {
+        if self.reduced {
             return FADE_SECS;
         }
         match self.via {
@@ -219,7 +222,8 @@ impl Popup {
         }
         if self.life.delivered.is_none() && self.ending() == Some(Ending::Done) {
             if let Some(d) = &self.files.delivery {
-                let d = Delivered::new(d, self.life.app.clone(), t);
+                let mut d = Delivered::new(d, self.life.app.clone(), t);
+                d.reduced |= self.look.on("reduced-motion");
                 tracing::info!(via = ?d.via, enter = d.enter, chars = d.chars, "delivered");
                 self.life.delivered = Some(d);
             }
@@ -266,7 +270,7 @@ impl Popup {
                         size: style.size,
                         ink,
                         accent,
-                        reduced: kit::reduced(),
+                        reduced: d.reduced,
                     });
                     *cache = Some((text, key, h.clone()));
                     h
