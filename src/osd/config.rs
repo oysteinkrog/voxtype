@@ -81,6 +81,11 @@ pub enum OsdTheme {
     /// the swiss popup's layout. Drawn by the vo frontend only; the gtk4
     /// frontend draws `swiss` for it.
     Showcase,
+    /// The swiss popup's layout led by type and line: the frame draws
+    /// itself on, the clock and word count roll their digits, the icon
+    /// morphs from microphone to stop to check, and words rise into place.
+    /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
+    Type,
 }
 
 impl OsdTheme {
@@ -89,6 +94,7 @@ impl OsdTheme {
             "default" => Some(OsdTheme::Default),
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
+            "type" => Some(OsdTheme::Type),
             _ => None,
         }
     }

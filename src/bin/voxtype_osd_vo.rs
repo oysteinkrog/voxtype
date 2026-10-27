@@ -51,6 +51,8 @@ use voxtype::osd::visual::Color as OsdColor;
 
 #[path = "osd_vo/showcase.rs"]
 mod showcase;
+#[path = "osd_vo/type_look.rs"]
+mod type_look;
 
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;
@@ -136,9 +138,9 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_WORD_FADE")]
     word_fade: bool,
 
-    /// Look to draw: `swiss` (default here) or `showcase`, a rich look that
-    /// shows off the GPU renderer. Also `[osd] theme`. Other themes draw
-    /// swiss.
+    /// Look to draw: `swiss` (default here), `showcase`, a rich look that
+    /// shows off the GPU renderer, or `type`, led by type and line. Also
+    /// `[osd] theme`. Other themes draw swiss.
     #[arg(long, env = "VOXTYPE_OSD_THEME")]
     theme: Option<String>,
 
@@ -383,7 +385,7 @@ struct Look {
     stop_hint: String,
     /// New words fade in; otherwise they appear at once, as in GTK.
     word_fade: bool,
-    /// `Swiss` or `Showcase`; anything else draws swiss.
+    /// `Swiss`, `Showcase` or `Type`; anything else draws swiss.
     theme: OsdTheme,
     /// The icon theme's microphone as a registered path and its viewBox, or `None` to draw
     /// one from shapes.
@@ -729,6 +731,9 @@ impl App for Popup {
         if self.look.theme == OsdTheme::Showcase {
             return self.showcase_view();
         }
+        if self.look.theme == OsdTheme::Type {
+            return self.type_view();
+        }
         if self.closing {
             return root;
         }
@@ -925,10 +930,10 @@ impl Popup {
     }
 }
 
-/// Swiss: nothing animates unless a view asks for it, as in GTK. Showcase:
-/// everything springs.
+/// Swiss: nothing animates unless a view asks for it, as in GTK. Showcase
+/// and type: everything springs.
 fn default_motion(look: &Look) -> Motion {
-    if look.theme == OsdTheme::Showcase {
+    if matches!(look.theme, OsdTheme::Showcase | OsdTheme::Type) {
         Motion::Spring(Spring::SOFT)
     } else {
         Motion::Snap

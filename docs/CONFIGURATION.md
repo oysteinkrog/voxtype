@@ -3954,14 +3954,22 @@ fonts, and draws the `swiss` look. Differences from the GTK4 popup:
   once, as in the GTK4 popup.
 - The microphone icon is drawn from shapes, not taken from the icon theme.
 
-It also draws a second look, `theme = "showcase"`, which only this frontend
-has (the GTK4 popup draws `swiss` for it). It keeps the swiss popup's layout
-and behaviour and adds a lot on top: a glass panel, a glowing ribbon
+It also draws two more looks that only this frontend has (the GTK4 popup
+draws `swiss` for them). Both keep the swiss popup's layout and behaviour.
+
+`theme = "type"` keeps the Plasma colors and fonts and puts the motion in
+the type and lines: the frame draws itself on when the popup opens, the
+clock and word count roll their digits like an odometer, the microphone
+turns into a stop square when you stop and a check mark when the final
+text lands, and new words rise into place. A cancelled dictation erases the
+frame as it closes.
+
+`theme = "showcase"` adds a lot on top: a glass panel, a glowing ribbon
 waveform, a light that runs round the panel's rim while you speak, a tilted
-ring of particles and a 3D hoop that follow your voice, out-of-focus orbs
-around the panel, a dot-matrix clock, words that form from particles, and a
-check mark made of dots when the final text lands. The transcript stays on a
-calm, solid strip so it reads as easily as in `swiss`. It uses
+ring of particles that follows your voice, out-of-focus orbs around the
+panel, a dot-matrix clock and word count, words that form from particles,
+and a check mark made of dots when the final text lands. The transcript
+stays on a calm, solid strip so it reads as easily as in `swiss`. It uses
 more GPU time than `swiss` and runs frames all the time while you speak, so
 it suits a desktop more than a laptop on battery. Its colors are fixed and
 do not follow the Plasma scheme.
@@ -3969,11 +3977,11 @@ do not follow the Plasma scheme.
 ```toml
 [osd]
 frontend = "vo"
-theme = "showcase"
+theme = "type"    # or "showcase"
 ```
 
 If `voxtype-osd-vo` is not installed, the launcher falls back to the GTK4
-popup. Options: `--theme swiss|showcase` (also `VOXTYPE_OSD_THEME`),
+popup. Options: `--theme swiss|showcase|type` (also `VOXTYPE_OSD_THEME`),
 `--gpu-first-frame` (draw only on the GPU),
 `--diag` (print startup timing and memory to stderr), and
 `--offline DIR` (render a scripted dictation to PNG frames and exit;
