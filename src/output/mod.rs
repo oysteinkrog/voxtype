@@ -392,16 +392,19 @@ pub fn create_output_chain_with_override(
         }
         crate::config::OutputMode::Paste => {
             // Only paste mode (no fallback as requested)
-            chain.push(Box::new(paste::PasteOutput::new(
-                config.auto_submit,
-                config.append_text.clone(),
-                config.paste_keys.clone(),
-                config.driver_order.clone(),
-                config.type_delay_ms,
-                pre_type_delay_ms,
-                config.restore_clipboard,
-                config.restore_clipboard_delay_ms,
-            ).with_paste_primary(config.paste_primary)));
+            chain.push(Box::new(
+                paste::PasteOutput::new(
+                    config.auto_submit,
+                    config.append_text.clone(),
+                    config.paste_keys.clone(),
+                    config.driver_order.clone(),
+                    config.type_delay_ms,
+                    pre_type_delay_ms,
+                    config.restore_clipboard,
+                    config.restore_clipboard_delay_ms,
+                )
+                .with_paste_primary(config.paste_primary),
+            ));
         }
         crate::config::OutputMode::File => {
             // The daemon writes the file itself before reaching the output
@@ -484,6 +487,16 @@ pub async fn output_with_fallback(
     text: &str,
     options: OutputOptions<'_>,
 ) -> Result<(), OutputError> {
+    output_via(chain, text, options).await.map(|_| ())
+}
+
+/// Like [`output_with_fallback`], and returns the name of the method that
+/// delivered the text.
+pub async fn output_via(
+    chain: &[Box<dyn TextOutput>],
+    text: &str,
+    options: OutputOptions<'_>,
+) -> Result<&'static str, OutputError> {
     // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
     let normalized_text = normalize_quotes(text);
 
@@ -551,7 +564,7 @@ pub async fn output_with_fallback(
         match output.output(&normalized_text).await {
             Ok(()) => {
                 tracing::debug!("Text output via {}", output.name());
-                result = Ok(());
+                result = Ok(output.name());
                 break;
             }
             Err(e) => {
