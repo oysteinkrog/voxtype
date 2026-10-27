@@ -32,6 +32,7 @@ use voxtype::config::{Config as VoxtypeConfig, HotkeyConfig};
 use voxtype::osd::config::{OsdAnchor, OsdConfig, OsdPosition, OsdTheme};
 use voxtype::osd::gtk_env;
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing};
+use voxtype::osd::outcome::Outcome;
 use voxtype::osd::plasma::{self, PlasmaTheme};
 use voxtype::osd::swiss::{
     self, smooth_levels, stop_hint, tick_level, wave_hues, wave_stops, StatusLine,
@@ -101,14 +102,15 @@ const RENDER_TICK_MS: u32 = 16;
 /// hiding the surface. Matches the BRIEF's "Idle: surface destroyed" rule.
 const IDLE_TIMEOUT_SECS: f32 = 0.15;
 
-/// True while the daemon's state file says a recording is running. Audio
-/// frames can stall for more than IDLE_TIMEOUT_SECS on a loaded machine,
-/// and the surface must not hide and come back then.
-fn daemon_recording() -> bool {
+/// The daemon's state file: "recording", "transcribing", "idle" and so on.
+/// Audio frames can stall for more than IDLE_TIMEOUT_SECS on a loaded
+/// machine, and the surface must not hide and come back then.
+fn daemon_state() -> String {
     let base = std::env::var("XDG_RUNTIME_DIR")
         .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
     std::fs::read_to_string(std::path::Path::new(&base).join("voxtype/state"))
-        .is_ok_and(|s| matches!(s.trim(), "recording" | "streaming"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// True while the daemon has marked the in-flight recording as OSD-suppressed
@@ -640,6 +642,8 @@ fn build_window(
     // audio frames have stopped, but the OSD stays up to show it.
     let finishing = Cell::new(false);
     let recording = Cell::new(false);
+    // Stopped, with the final text still to come.
+    let transcribing = Cell::new(false);
     // A recording ran since the window appeared, and whether its final text
     // was made: in the moment between the daemon going idle and the window
     // hiding, the status line says "Done" or "Stopped", not "Listening".
@@ -670,7 +674,9 @@ fn build_window(
                 .and_then(|t| t.elapsed().ok())
                 .is_some_and(|age| age < Duration::from_secs(30));
             finishing.set(fresh);
-            recording.set(daemon_recording());
+            let state = daemon_state();
+            recording.set(matches!(state.as_str(), "recording" | "streaming"));
+            transcribing.set(state == "transcribing");
             was_recording.set(was_recording.get() || recording.get());
         }
         // Before the idle check, so the window's first mapping at startup
@@ -679,7 +685,8 @@ fn build_window(
             place_reading_line(&redraw_window, &chrome, &preview, fraction, monitor_height);
         }
         let stalled = last_at.elapsed().as_secs_f32() > IDLE_TIMEOUT_SECS;
-        let idle = (stalled && !finishing.get() && !recording.get()) || osd_suppressed();
+        let idle = (stalled && !finishing.get() && !recording.get() && !transcribing.get())
+            || osd_suppressed();
 
         if idle {
             if visible.get() {
@@ -752,9 +759,28 @@ fn build_window(
                     // stops there too.
                     let elapsed = last_at.saturating_duration_since(shown_at.get());
                     let words = full.split_whitespace().count();
-                    finished.set(finished.get() || StatusLine::new(label, "").finishing);
-                    let ended = (was_recording.get() && !recording.get() && label.is_empty())
-                        .then(|| if finished.get() { "Done" } else { "Stopped" });
+                    finished.set(
+                        finished.get()
+                            || transcribing.get()
+                            || StatusLine::new(label, "").finishing,
+                    );
+                    // Stopped, before the daemon writes how far the final
+                    // text is.
+                    let label = if label.is_empty() && transcribing.get() {
+                        "Finishing"
+                    } else {
+                        label
+                    };
+                    let busy = recording.get() || transcribing.get() || !label.is_empty();
+                    let ended = (was_recording.get() && !busy).then(|| {
+                        match voxtype::osd::outcome::read() {
+                            Some(Outcome::Done) => "Done",
+                            Some(Outcome::Cancelled) => "Cancelled",
+                            Some(Outcome::Failed) => "Failed",
+                            None if finished.get() => "Done",
+                            None => "Stopped",
+                        }
+                    });
                     view.update(elapsed, words, fraction, label, ended);
                 }
             }
