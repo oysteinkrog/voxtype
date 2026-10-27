@@ -35,6 +35,7 @@ use vo::scene::{Motion, Prop, Transition};
 use vo::{
     App, Cx, FontRegistry, Input, InputMode, LogDiagnostics, Options, OverlaySpec, Placement,
 };
+use vo_core::signals::{SignalFrame, SignalsCell, WIRE_SAMPLE_RATE};
 use vo_core::spring::Spring;
 use vo_core::words::{Word, WordInfo, WordModel};
 
@@ -853,6 +854,52 @@ impl Ending {
 struct Voice {
     seq: u32,
     features: AudioFeatures,
+    /// The frame's peak level in dBFS.
+    peak_dbfs: f32,
+    /// Samples since the recording started, at the end of the frame; 0 when
+    /// the daemon does not say.
+    clock: u64,
+}
+
+/// Puts the frames that carry a sample clock on the signal bus. The batch
+/// arrived at scene time `t`; each older frame in it is dated back by its
+/// distance on the sample clock, since the bus drops a frame that lands at or
+/// before the one it has.
+fn feed_signals(signals: &SignalsCell, voice: &[Voice], t: f64) {
+    let frames: Vec<SignalFrame> = voice.iter().filter_map(Voice::signal_frame).collect();
+    let Some(newest) = frames.iter().map(|f| f.clock).reduce(f64::max) else {
+        return;
+    };
+    for frame in frames {
+        signals.push(frame, t - (newest - frame.clock));
+    }
+}
+
+impl Voice {
+    /// The frame for the scene's signal bus, as `SignalFrame::from_wire_v3`
+    /// reads it off the socket. `None` without a sample clock: the bus
+    /// places frames by audio time.
+    fn signal_frame(&self) -> Option<SignalFrame> {
+        if self.clock == 0 {
+            return None;
+        }
+        let f = &self.features;
+        let mut mel = [0.0; 24];
+        for (m, &b) in mel.iter_mut().zip(&f.mel) {
+            *m = b as f32 / 255.0;
+        }
+        Some(SignalFrame {
+            clock: self.clock as f64 / WIRE_SAMPLE_RATE,
+            rms_dbfs: f.rms_dbfs,
+            peak_dbfs: self.peak_dbfs,
+            f0_hz: f.f0_hz,
+            voiced: f.voiced,
+            centroid_hz: f.centroid_hz,
+            flatness: f.flatness,
+            onset: f.onset,
+            mel,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -873,6 +920,9 @@ enum Msg {
 /// The popup for one dictation. It closes itself when the daemon goes idle.
 struct Popup {
     look: Look,
+    /// The voice features on the scene's signal bus, for `Bands::Signals`,
+    /// `Element::bind` and the shaders' `sig_*` functions.
+    signals: SignalsCell,
     /// Where this dictation's messages are recorded (`--record`).
     recorder: Option<vo::record::Recorder>,
     measure: vo::ShapedLayout,
@@ -950,6 +1000,7 @@ impl Popup {
     fn new(look: Look, fonts: &FontRegistry) -> Popup {
         Popup {
             look,
+            signals: SignalsCell::default(),
             recorder: None,
             measure: vo::ShapedLayout::new(fonts.clone()),
             levels: VecDeque::new(),
@@ -1057,8 +1108,10 @@ impl Popup {
         status.shows_progress() && !self.ended()
     }
 
-    /// Keeps the voice features of the frames on screen.
-    fn voice(&mut self, voice: Vec<Voice>) {
+    /// Keeps the voice features of the frames on screen, and puts them on the
+    /// signal bus as arrived at `t`.
+    fn voice(&mut self, voice: Vec<Voice>, t: f64) {
+        feed_signals(&self.signals, &voice, t);
         let window = (self.look.window * FRAME_HZ as f64).ceil() as usize + 12;
         self.voice.extend(voice);
         while self.voice.len() > window {
@@ -1237,7 +1290,7 @@ impl App for Popup {
                 self.audio(frames, t);
                 self.arm_check(cx);
             }
-            Msg::Voice(voice) => self.voice(voice),
+            Msg::Voice(voice) => self.voice(voice, t),
             Msg::Files(files) => {
                 let preview_changed = files.preview != self.files.preview;
                 let live_changed = files.live != self.files.live;
@@ -1326,12 +1379,13 @@ impl App for Popup {
         let look = self.look_view(tokens);
         // The shift and the taller panel come in the same frame, on a
         // surface that keeps its size, so the reading line never moves.
-        match self.look.reading_shift(self.lines) {
+        let root = match self.look.reading_shift(self.lines) {
             Some(shift) => Element::column("reading")
                 .pad_edges(shift, 0.0, 0.0, 0.0)
                 .child(look),
             None => look,
-        }
+        };
+        root.signals(self.signals.clone())
     }
 }
 
@@ -1772,6 +1826,8 @@ fn read_audio(shared: Shared, socket: PathBuf, reconnect: Duration) {
                         r.features.map(|features| Voice {
                             seq: r.frame.seq,
                             features,
+                            peak_dbfs: r.frame.peak_dbfs,
+                            clock: r.sample_clock,
                         })
                     })
                     .collect();
@@ -2309,6 +2365,81 @@ fn cut_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame put on the signal bus is the frame vo reads off the wire.
+    #[test]
+    fn voice_frames_match_the_wire_reading() {
+        use voxtype::audio::levels::RichFrame;
+        let mut mel = [0u8; 24];
+        mel[3] = 200;
+        mel[23] = 17;
+        let features = AudioFeatures {
+            rms_dbfs: -21.5,
+            f0_hz: 140.0,
+            voiced: true,
+            centroid_hz: 900.0,
+            flatness: 0.2,
+            mel,
+            onset: 0.7,
+        };
+        let frame = AudioFrame {
+            seq: 5,
+            min: -0.1,
+            max: 0.1,
+            peak_dbfs: -12.0,
+        };
+        let rich = RichFrame {
+            frame,
+            features: Some(features),
+            sample_clock: 24_000,
+        };
+        let voice = Voice {
+            seq: 5,
+            features,
+            peak_dbfs: frame.peak_dbfs,
+            clock: rich.sample_clock,
+        };
+        let wire = SignalFrame::from_wire_v3(&rich.to_bytes_v3()).unwrap();
+        assert_eq!(voice.signal_frame(), Some(wire));
+        assert_eq!(wire.clock, 1.5);
+        // Without a sample clock the bus cannot place the frame.
+        assert_eq!(Voice { clock: 0, ..voice }.signal_frame(), None);
+    }
+
+    /// Frames pushed as they arrive reach the bus the scene reads; frames
+    /// without a clock are left out.
+    #[test]
+    fn voice_feeds_the_signal_bus() {
+        let signals = SignalsCell::default();
+        let voice = |n: u64| Voice {
+            seq: n as u32,
+            features: AudioFeatures {
+                rms_dbfs: -20.0,
+                ..AudioFeatures::default()
+            },
+            peak_dbfs: -10.0,
+            clock: 160 * (n + 1),
+        };
+        let mut batch: Vec<Voice> = (0..10).map(voice).collect();
+        batch.push(Voice {
+            clock: 0,
+            ..voice(10)
+        });
+        feed_signals(&signals, &batch, 2.0);
+        let bus = signals.get();
+        assert_eq!(bus.len(), 10, "one batch keeps all its frames");
+        let at: Vec<f64> = bus.frames().map(|(at, _)| at).collect();
+        for pair in at.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - 0.01).abs() < 1e-9,
+                "10 ms apart: {at:?}"
+            );
+        }
+        // The next batch carries on after the first.
+        let next: Vec<Voice> = (10..20).map(voice).collect();
+        feed_signals(&signals, &next, 2.1);
+        assert_eq!(signals.get().len(), 20);
+    }
 
     /// Lines of `words` wrapped greedily at `width` characters.
     fn wrapped(words: &[Word], width: usize) -> Vec<String> {

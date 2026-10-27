@@ -42,6 +42,11 @@ pub(super) struct VoiceRec {
     mel: Vec<u8>,
     #[serde(default)]
     onset: f32,
+    #[serde(default)]
+    peak_dbfs: f32,
+    /// Samples since the stream began, 0 in recordings made before it was kept.
+    #[serde(default)]
+    clock: u64,
 }
 
 /// Fields added later read as their defaults, so old recordings still play.
@@ -78,6 +83,8 @@ impl Recorded {
                         flatness: v.features.flatness,
                         mel: v.features.mel.to_vec(),
                         onset: v.features.onset,
+                        peak_dbfs: v.peak_dbfs,
+                        clock: v.clock,
                     })
                     .collect(),
             ),
@@ -129,6 +136,8 @@ impl Recorded {
                                 onset: v.onset,
                                 ..AudioFeatures::default()
                             },
+                            peak_dbfs: v.peak_dbfs,
+                            clock: v.clock,
                         }
                     })
                     .collect(),
@@ -279,6 +288,8 @@ mod tests {
                 mel,
                 onset: 0.7,
             },
+            peak_dbfs: -6.0,
+            clock: 24_000,
         }];
         let files = Files {
             recording: true,
