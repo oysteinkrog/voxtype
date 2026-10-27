@@ -116,23 +116,6 @@ const MORPH_SECS: f64 = 0.42;
 const CONTENT_DELAY: f64 = 0.12;
 const CONTENT_FADE: f64 = 0.18;
 const TICK_HZ: f64 = 60.0;
-/// Word bulge (MO-74): each new word pushes the capsule's right edge out
-/// this far, quickly, and it relaxes.
-const BULGE_PX: f32 = 2.0;
-const BULGE_RISE: f64 = 0.05;
-const BULGE_SECS: f64 = 0.2;
-
-/// How far the right edge is out `s` seconds after a word came.
-fn bulge(s: f64) -> f32 {
-    if !(0.0..BULGE_SECS).contains(&s) {
-        0.0
-    } else if s < BULGE_RISE {
-        BULGE_PX * ease_out(s / BULGE_RISE)
-    } else {
-        let k = (s - BULGE_RISE) / (BULGE_SECS - BULGE_RISE);
-        BULGE_PX * (1.0 - ease_out(k))
-    }
-}
 
 #[derive(Clone, Copy)]
 struct Fonts {
@@ -325,8 +308,6 @@ struct Scene {
     caret: Option<(Point, f64)>,
     /// Card rules, relative to the capsule's top.
     rules: Vec<f32>,
-    /// When the recent words came, for the bulge.
-    words_at: Vec<f64>,
 }
 
 impl Scene {
@@ -341,23 +322,8 @@ impl Scene {
         ease_out((t - self.content_at) / CONTENT_FADE)
     }
 
-    /// How far the right edge bulges at `t`.
-    fn bulge(&self, t: f64) -> f32 {
-        if self.mode != Mode::Listening {
-            return 0.0;
-        }
-        self.words_at
-            .iter()
-            .map(|&at| bulge(t - at))
-            .fold(0.0, f32::max)
-    }
-
     fn until(&self, now: f64) -> f64 {
-        let words = self
-            .words_at
-            .iter()
-            .fold(0.0, |a: f64, &b| a.max(b + BULGE_SECS));
-        let morph = (self.shape.at + MORPH_SECS + 0.2).max(words);
+        let morph = self.shape.at + MORPH_SECS + 0.2;
         match self.mode {
             // The dot pulses and the bars scroll.
             Mode::Loading | Mode::Listening => (now + 0.25).max(morph),
@@ -384,9 +350,7 @@ impl Scene {
     fn draw(&self, t: f64, _rect: Rect, p: &mut Painter) {
         let g = self.shape.at(t);
         let o = self.origin(g);
-        // A new word pushes the right edge out a little; the left edge and
-        // the content stay put.
-        let body = RRect::new(Rect::new(o.x, o.y, g.w + self.bulge(t), g.h), g.r);
+        let body = RRect::new(Rect::new(o.x, o.y, g.w, g.h), g.r);
         // The blue light round the edge and a soft shadow under it.
         p.shape(ShapeInstance::rrect(
             body,
@@ -892,16 +856,6 @@ impl Popup {
             },
             caret,
             rules,
-            words_at: if !self.motion("word-bulge") || self.still() {
-                Vec::new()
-            } else {
-                self.tally
-                    .arrived
-                    .iter()
-                    .map(|a| a.1)
-                    .filter(|&at| t - at < BULGE_SECS)
-                    .collect()
-            },
         };
         let until = scene.until(t);
         let canvas = at(
@@ -950,38 +904,6 @@ impl Popup {
                 )
                 .opacity(opacity),
             );
-            // The pace under the clock, its digits leaning as you speed up
-            // and standing up when you pause (MO-66).
-            let small = TextStyle::new(f.medium, 9.5, 12.0).tracking(0.3);
-            let (wpm, lean) = self.tally_pace();
-            let cell = self.measure.layout("0", &small, None).size.w;
-            let pace_on = self.motion("lean-pace");
-            panel = if !pace_on {
-                panel
-            } else {
-                panel.child(
-                    at(
-                        Element::row("pace")
-                            .align_items(AlignItems::CENTER)
-                            .child(tally::lean_digits(
-                                "wpm",
-                                &wpm.to_string(),
-                                small,
-                                hex(DIM),
-                                cell,
-                                lean,
-                            ))
-                            .child(
-                                Element::label("unit", " wpm")
-                                    .text_style(small)
-                                    .color(hex(HINT)),
-                            ),
-                        ox + cx,
-                        oy + cy + 10.0,
-                    )
-                    .opacity(opacity),
-                )
-            };
         }
         panel = panel.child(self.island_words(card, ox + text_x, oy + text_y, text_w, lines, opacity));
         // While finishing the status is larger and has no dot, as in 03-finish.

@@ -351,7 +351,13 @@ impl Popup {
             .child(self.swissfi_cast(h))
             .child(self.swissfi_header())
             .child(self.swissfi_ticks(mode, mode_at))
-            .child(self.swissfi_text(mode))
+            .child(self.with_hearing(
+                self.swissfi_text(mode),
+                &l.text_style(),
+                l.text_width(),
+                hex(PAPER),
+                hex(ORANGE),
+            ))
             .child(self.swissfi_rule(inner))
             .child(self.swissfi_status(mode, mode_at))
     }
@@ -370,7 +376,7 @@ impl Popup {
             Transition::fade()
         };
         at(
-            Element::stroke_path("frame", border, view, StrokeStyle::solid(1.0, hex(EDGE))),
+            Element::stroke_path("frame", border, view, StrokeStyle::solid(self.exhale_width(1.0), hex(EDGE))),
             0.0,
             0.0,
         )
@@ -396,7 +402,13 @@ impl Popup {
                 .child(digits)
                 .child(caption("caption", name, 6.6, 0.5))
         };
-        let clock = digit_roll("clock", &self.clock, value, hex(PAPER), roll);
+        let clock = digit_roll(
+            "clock",
+            &self.clock,
+            value,
+            self.exhale_color(hex(PAPER), hex(PAPER).fade(0.4)),
+            roll,
+        );
         let words = digit_roll("count", &self.tally_count(), value, hex(PAPER), roll);
         // The pace leans forward as you speak faster and stands up when you
         // pause (MO-66).
@@ -479,7 +491,10 @@ impl Popup {
         let l = &self.look;
         let ticks = Ticks {
             w: l.width,
-            levels: self.kit_levels(),
+            levels: Levels {
+                levels: self.exhale_levels(&self.kit_levels().levels),
+                newest_at: self.newest_at,
+            },
             shown_at: self.shown_at,
             mode,
             mode_at,

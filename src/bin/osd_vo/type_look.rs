@@ -200,7 +200,12 @@ impl Popup {
             Transition::fade()
         };
         at(
-            Element::stroke_path("frame", border, view, StrokeStyle::solid(BORDER, l.border)),
+            Element::stroke_path(
+                "frame",
+                border,
+                view,
+                StrokeStyle::solid(self.exhale_width(BORDER), l.border),
+            ),
             0.0,
             0.0,
         )
@@ -252,7 +257,13 @@ impl Popup {
                 .child(caption("caption", name, l.caption_small_px, 1.5))
         };
         let roll = Spring::critical_to_98(0.28);
-        let clock = digit_roll("clock", &self.clock, value, l.foreground, roll);
+        let clock = digit_roll(
+            "clock",
+            &self.clock,
+            value,
+            self.exhale_color(l.foreground, l.inactive),
+            roll,
+        );
         let words = digit_roll("count", &self.tally_count(), value, l.foreground, roll);
         // The pace leans forward as you speak faster and stands up when you
         // pause (MO-66).
@@ -478,6 +489,13 @@ impl Popup {
         for line in self.doubt_lines() {
             text = text.child(line);
         }
+        let text = self.with_hearing(
+            text,
+            &l.text_style(),
+            l.text_width(),
+            l.foreground,
+            l.accent,
+        );
         self.text_area(text)
     }
 

@@ -101,6 +101,8 @@ mod station;
 mod synthwave;
 #[path = "osd_vo/mecha.rs"]
 mod mecha;
+#[path = "osd_vo/hearing.rs"]
+mod hearing;
 #[path = "osd_vo/glyph_paths.rs"]
 mod glyph_paths;
 #[path = "osd_vo/lifecycle.rs"]
@@ -1092,6 +1094,8 @@ struct Popup {
     cyber: cyberpunk::State,
     /// What only the synthwave look keeps.
     synth: synthwave::State,
+    /// What the popup heard before the words came (`osd_vo/hearing.rs`).
+    hearing: hearing::State,
     /// The end of the dictation: the delivery and its hand-off.
     life: lifecycle::State,
 }
@@ -1141,6 +1145,7 @@ impl Popup {
             jarvis: jarvis::Extra::default(),
             cyber: cyberpunk::State::default(),
             synth: synthwave::State::default(),
+            hearing: hearing::State::default(),
             life: lifecycle::State::default(),
         }
     }
@@ -1462,6 +1467,7 @@ impl App for Popup {
         self.sync_jarvis(t);
         self.sync_cyber(t);
         self.sync_synthwave(t);
+        self.sync_hearing();
         self.arm_tick(cx);
         self.arm_scope_tick(cx);
         self.arm_captions_tick(cx);
@@ -1582,7 +1588,8 @@ impl Popup {
             )
             .radius(RADIUS)
             .fill(l.background)
-            .border(l.border, BORDER)
+            .border(l.border, self.exhale_width(BORDER))
+            .motion(Prop::StrokeWidth, self.exhale_snap())
             .child(self.header())
             .child(self.waveform(&status))
             .child(self.transcript())
@@ -1606,9 +1613,16 @@ impl Popup {
             Element::column(key)
                 .gap(2.0)
                 .child(
-                    Element::label("value", value)
-                        .text_style(l.mono(l.value_px))
-                        .color(l.foreground),
+                    self.exhale_motion(
+                        Element::label("value", value)
+                            .text_style(l.mono(l.value_px))
+                            .color(if key == "time" {
+                                self.exhale_color(l.foreground, l.inactive)
+                            } else {
+                                l.foreground
+                            }),
+                        &[Prop::TextColor],
+                    ),
                 )
                 .child(caption("caption", name, l.caption_small_px, 1.5))
         };
@@ -1676,7 +1690,7 @@ impl Popup {
             .map(|(p, c, a)| (p, Color::rgba(c.r, c.g, c.b, a)))
             .collect();
         let wave = Wave {
-            levels: self.wave.clone(),
+            levels: self.exhale_levels(&self.wave),
             newest_at: self.newest_at,
             rate: FRAME_HZ as f32,
             window: l.window as f32,
@@ -1712,6 +1726,13 @@ impl Popup {
         let text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
             .child(words);
+        let text = self.with_hearing(
+            text,
+            &l.text_style(),
+            l.text_width(),
+            l.foreground,
+            l.accent,
+        );
         self.text_area(text)
     }
 
