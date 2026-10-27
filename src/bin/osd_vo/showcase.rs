@@ -113,7 +113,7 @@ struct HoopTimes {
 
 impl Source3d for Hoop {
     fn meshes(&self) -> Vec<Mesh> {
-        vec![Mesh::torus(1.0, 0.006, 192, 8)]
+        vec![Mesh::torus(1.0, 0.004, 192, 8)]
     }
 
     fn frame(&self, t: f64, size: Size) -> Frame3d {
@@ -154,11 +154,13 @@ impl Source3d for Hoop {
             },
             meshes: vec![MeshDraw {
                 mesh: MeshId(0),
-                model: Mat4::uniform_scale(0.6 + 0.4 * open),
+                // A little inside the particle ring, and faint: an accent
+                // under the ring, not a second outline.
+                model: Mat4::uniform_scale(HOOP_SCALE * (0.6 + 0.4 * open)),
                 material: Material {
-                    color: c(hue).fade(open),
-                    emissive: 0.25 + 1.2 * flare,
-                    specular: 1.2,
+                    color: c(hue).fade(open * (0.4 + 0.2 * flare)),
+                    emissive: 0.1 + 0.5 * flare,
+                    specular: 0.6,
                     shininess: 80.0,
                 },
             }],
@@ -175,6 +177,8 @@ impl Source3d for Hoop {
     }
 }
 
+/// The hoop's radius as a share of the particle ring's.
+const HOOP_SCALE: f32 = 0.9;
 /// Room round the hoop in its box, in logical pixels.
 const HOOP_ROOM: f32 = 6.0;
 
@@ -348,7 +352,7 @@ impl EmitterSource for VoiceRing {
 /// Grid pitch of the dot header, in logical pixels.
 const DOT_PITCH: f32 = 2.2;
 /// Columns between the word count and the clock.
-const DOT_GAP: i32 = 7;
+const DOT_GAP: i32 = 14;
 /// Ids per dot text in the shared field.
 const DOT_SPAN: u32 = 4096;
 /// Size of the dot check in cells.
@@ -404,15 +408,21 @@ impl DotHeader {
         }
     }
 
-    /// Sends a copy of every clock dot to the left, where they form a check.
+    /// Forms a check in the icon slot from dots that gather in from a
+    /// little way round it, so nothing crosses the title or the clock.
     fn check(&mut self, t: f64) {
-        let from: Vec<DotLook> = self
-            .clock
-            .ids()
-            .filter_map(|id| self.field.look(t, id))
-            .collect();
         let cells = check_cells(CHECK_CELLS.0, CHECK_CELLS.1, 2);
         let top = ((self.rows - CHECK_CELLS.1) / 2) as f32;
+        let (cx, cy) = (CHECK_CELLS.0 as f32 / 2.0, top + CHECK_CELLS.1 as f32 / 2.0);
+        let from: Vec<DotLook> = cells
+            .iter()
+            .map(|&(x, y)| {
+                let (dx, dy) = (x as f32 - cx, y as f32 + top - cy);
+                let mut l = DotLook::new(cx + 2.5 * dx, cy + 2.5 * dy, 0.5, c(EMBER));
+                l.bright = 0.0;
+                l
+            })
+            .collect();
         let look = DotLook::new(0.0, 0.0, 0.75, c(EMBER));
         assemble(
             &mut self.field,
@@ -441,9 +451,11 @@ impl Extra {
         let final_seen = self.final_at.is_some();
         let h = self.dots.get_or_insert_with(|| DotHeader::new(t, cols));
         let before = (h.clock.text(), h.count.text(), h.slate, h.checked);
-        h.clock.set(&mut h.field, t, clock, Change::Morph);
+        // Digits change in one step, so the clock and the count read at
+        // every frame.
+        h.clock.set(&mut h.field, t, clock, Change::Cut);
         h.count
-            .set(&mut h.field, t, &count_text(words), Change::Morph);
+            .set(&mut h.field, t, &count_text(words), Change::Cut);
         let finishing = phase == Phase::Finishing;
         if finishing != h.slate {
             h.slate = finishing;
