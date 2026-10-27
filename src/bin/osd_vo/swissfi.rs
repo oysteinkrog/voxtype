@@ -587,7 +587,7 @@ impl Popup {
                 .margin_edges(7.0, 2.0, 0.0, 0.0),
         )
         .child(
-            Element::label("mark", "//")
+            Element::label("slashes", "//")
                 .text_style(style)
                 .color(hex(MUTED)),
         )
