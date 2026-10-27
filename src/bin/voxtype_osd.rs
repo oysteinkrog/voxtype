@@ -255,7 +255,10 @@ fn load_osd_config(explicit: Option<&Path>) -> OsdConfig {
 
 /// Whether the vo frontend draws `theme`.
 fn vo_draws(theme: OsdTheme) -> bool {
-    matches!(theme, OsdTheme::Swiss | OsdTheme::Showcase | OsdTheme::Type)
+    matches!(
+        theme,
+        OsdTheme::Swiss | OsdTheme::Showcase | OsdTheme::Type | OsdTheme::Mecha
+    )
 }
 
 /// The theme the frontend will draw, by the frontends' own precedence:

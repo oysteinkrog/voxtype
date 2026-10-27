@@ -53,6 +53,8 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/mecha.rs"]
+mod mecha;
 
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;
@@ -425,7 +427,18 @@ impl Look {
 
     /// Width of the transcript: the panel less padding and border.
     fn text_width(&self) -> f32 {
+        if self.theme == OsdTheme::Mecha {
+            return mecha::text_width(self);
+        }
         self.width - swiss::PANEL_INSET_PX as f32
+    }
+
+    /// Transcript lines the look has room for.
+    fn max_lines(&self) -> u32 {
+        if self.theme == OsdTheme::Mecha {
+            return mecha::MAX_LINES;
+        }
+        swiss::MAX_LINES as u32
     }
 
     fn mono_line(&self, px: f32) -> f32 {
@@ -438,6 +451,9 @@ impl Look {
     }
 
     fn text_style(&self) -> TextStyle {
+        if self.theme == OsdTheme::Mecha {
+            return mecha::text_style(self);
+        }
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
 
@@ -469,6 +485,9 @@ impl Look {
     fn surface(&self) -> Size {
         if self.theme == OsdTheme::Showcase {
             return Popup::showcase_surface(self);
+        }
+        if self.theme == OsdTheme::Mecha {
+            return mecha::surface(self);
         }
         Size::new(
             self.width.ceil(),
@@ -707,13 +726,13 @@ impl Popup {
         // Drop words from the front until the rest fits.
         let mut start = words.len().saturating_sub(120);
         let mut shown = tail(start);
-        while lines_of(&shown) > swiss::MAX_LINES as u32 && start + 1 < words.len() {
+        while lines_of(&shown) > self.look.max_lines() && start + 1 < words.len() {
             start += 1;
             shown = tail(start);
         }
         self.lines = self
             .lines
-            .max(lines_of(&shown).clamp(1, swiss::MAX_LINES as u32));
+            .max(lines_of(&shown).clamp(1, self.look.max_lines()));
         self.shown = shown;
     }
 
@@ -794,6 +813,9 @@ impl App for Popup {
         }
         if self.look.theme == OsdTheme::Type {
             return self.type_view();
+        }
+        if self.look.theme == OsdTheme::Mecha {
+            return self.mecha_view();
         }
         if self.closing {
             return root;
@@ -994,7 +1016,10 @@ impl Popup {
 /// Swiss: nothing animates unless a view asks for it, as in GTK. Showcase
 /// and type: everything springs.
 fn default_motion(look: &Look) -> Motion {
-    if matches!(look.theme, OsdTheme::Showcase | OsdTheme::Type) {
+    if matches!(
+        look.theme,
+        OsdTheme::Showcase | OsdTheme::Type | OsdTheme::Mecha
+    ) {
         Motion::Spring(Spring::SOFT)
     } else {
         Motion::Snap

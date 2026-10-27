@@ -555,7 +555,7 @@ fn build_window(
             }
         }
         // Only the vo frontend draws showcase; here it gets the swiss look.
-        OsdTheme::Swiss | OsdTheme::Showcase | OsdTheme::Type => {
+        OsdTheme::Swiss | OsdTheme::Showcase | OsdTheme::Type | OsdTheme::Mecha => {
             let theme = plasma::load();
             install_swiss_css(&theme, cfg.opacity, cfg.preview_font_pt);
             let view = SwissView::build(cfg, &theme, stop_hint, &preview, state.clone());

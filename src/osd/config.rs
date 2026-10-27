@@ -86,6 +86,11 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// An anime mecha cockpit: an orange angular frame with hexagon plates,
+    /// a Japanese and English title, hazard stripes, a big mirrored bar
+    /// waveform, a level meter and the transcript in heavy condensed type.
+    /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
+    Mecha,
 }
 
 impl OsdTheme {
@@ -95,6 +100,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "mecha" => Some(OsdTheme::Mecha),
             _ => None,
         }
     }
