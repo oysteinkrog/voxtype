@@ -13,7 +13,7 @@
 use super::*;
 
 use vo::scene::taffy;
-use vo::scene::taffy::prelude::{auto, length};
+use vo::scene::taffy::prelude::{auto, length, JustifyContent};
 
 /// Space round the grid and between cells, in logical pixels.
 const PAD: f32 = 24.0;
@@ -33,10 +33,13 @@ pub(crate) fn source(theme: OsdTheme) -> &'static str {
         OsdTheme::Default | OsdTheme::Swiss => "concept 12",
         OsdTheme::Showcase => "families 03 09 12 17 21 22",
         OsdTheme::Type => "concept 12, family 12",
+        OsdTheme::Jarvis => "concept 02",
         OsdTheme::Cyberpunk => "concept 11",
         OsdTheme::Synthwave => "concept 04",
         OsdTheme::Mecha => "concept 23",
         OsdTheme::Island => "concept 03, family 03",
+        // A look added later shows no source until it gets a row here.
+        #[allow(unreachable_patterns)]
         _ => "",
     }
 }
@@ -263,6 +266,11 @@ impl App for Wall {
                 PAD + r as f32 * (cell_h + LABEL_H + GAP),
             ));
         }
-        wall
+        // Centred on the output: the wall covers it, but lays out to its
+        // own size.
+        Element::column("screen")
+            .align_items(AlignItems::CENTER)
+            .justify(JustifyContent::CENTER)
+            .child(wall)
     }
 }

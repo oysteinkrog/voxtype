@@ -69,6 +69,22 @@ fn ease_out(k: f64) -> f64 {
     1.0 - (1.0 - k).powi(3)
 }
 
+/// The y of the newest text line's centre from the surface top, with
+/// `lines` text lines, for the reading-line placement. The card sits a glow
+/// margin in from the surface's top and grows downward.
+pub(crate) fn newest_line_centre(look: &Look, lines: u32) -> Option<f32> {
+    Some(
+        sc::MARGIN_PX
+            + BORDER
+            + PAD_TOP
+            + Popup::header_h(look)
+            + 2.0 * RIBBON_MARGIN
+            + sc::RIBBON_PX
+            + STRIP_PAD_Y
+            + (lines as f32 - 0.5) * look.text_line,
+    )
+}
+
 /// State only the showcase look keeps.
 #[derive(Default)]
 pub struct Extra {

@@ -46,6 +46,20 @@ const WAVE_DROP: f32 = 2.0;
 /// The underline's colour: amber, apart from the theme's accent.
 const DOUBT_COLOR: u32 = 0xf5a524;
 
+/// The y of the newest text line's centre from the surface top, with
+/// `lines` text lines, for the reading-line placement. The panel grows
+/// downward from the surface's top.
+pub(crate) fn newest_line_centre(look: &Look, lines: u32) -> Option<f32> {
+    Some(
+        BORDER
+            + PAD_TOP
+            + Popup::type_header_height(look)
+            + 2.0 * WAVE_MARGIN
+            + swiss::WAVE_HEIGHT_PX as f32
+            + (lines as f32 - 0.5) * look.text_line,
+    )
+}
+
 /// What happened to the dictation, for the status icon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IconEvent {
@@ -95,6 +109,29 @@ fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
 }
 
 impl Popup {
+    /// The header's height: the larger rolling digits over their captions,
+    /// the title or the status icon, whichever is tallest.
+    fn type_header_height(look: &Look) -> f32 {
+        let stat = look.mono_line(look.value_px * STAT_SCALE)
+            + 2.0
+            + look.mono_line(look.caption_small_px);
+        stat.max(look.mono_line(look.caption_px)).max(ICON_BOX)
+    }
+
+    /// The panel's height with `lines` text lines: the swiss panel with this
+    /// look's taller header.
+    pub(crate) fn type_panel_height(look: &Look, lines: u32) -> f32 {
+        look.panel_height(lines) - look.header_height() + Self::type_header_height(look)
+    }
+
+    /// The surface: room for the panel at its tallest.
+    pub(crate) fn type_surface(look: &Look) -> Size {
+        Size::new(
+            look.width.ceil(),
+            Self::type_panel_height(look, swiss::MAX_LINES as u32).ceil() + 2.0,
+        )
+    }
+
     pub(crate) fn type_view(&self) -> Element<Msg> {
         let root = Element::column("root").align_items(AlignItems::CENTER);
         if self.closing {
@@ -106,7 +143,7 @@ impl Popup {
     fn type_panel(&self) -> Element<Msg> {
         let l = &self.look;
         let status = self.status();
-        let h = l.panel_height(self.lines);
+        let h = Self::type_panel_height(l, self.lines);
         // A cancelled dictation erases the frame; a finished one fades.
         let cancelled = self.extra.final_at.is_none();
         let exit = if cancelled {

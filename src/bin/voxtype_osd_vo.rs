@@ -222,7 +222,9 @@ struct Args {
     #[arg(long, value_name = "SCRIPT", default_value = "demo", requires = "wall")]
     wall_script: String,
 
-    /// With `--wall`: the surface size in logical pixels, `WxH`.
+    /// With `--wall`: the layout size in logical pixels, `WxH`. Live, the
+    /// wall covers the whole output; this is its size until the compositor
+    /// says, and the size of an `--offline` render.
     #[arg(
         long,
         value_name = "WxH",
@@ -497,6 +499,8 @@ impl Look {
             ),
             OsdTheme::Mecha => Some(mecha::newest_line_centre(self)),
             OsdTheme::Cyberpunk => Some(cyberpunk::newest_line_centre()),
+            OsdTheme::Showcase => showcase::newest_line_centre(self, lines),
+            OsdTheme::Type => type_look::newest_line_centre(self, lines),
             _ => None,
         }
     }
@@ -604,6 +608,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Showcase {
             return Popup::showcase_surface(self);
+        }
+        if self.theme == OsdTheme::Type {
+            return Popup::type_surface(self);
         }
         if self.theme == OsdTheme::Cyberpunk {
             return Popup::cyber_surface(self);
@@ -1785,6 +1792,7 @@ const WALL_THEMES: &[OsdTheme] = &[
     OsdTheme::Swiss,
     OsdTheme::Showcase,
     OsdTheme::Type,
+    OsdTheme::Jarvis,
     OsdTheme::Cyberpunk,
     OsdTheme::Synthwave,
     OsdTheme::Mecha,
@@ -1871,7 +1879,7 @@ fn run_wall(
     };
     let spec = OverlaySpec {
         size,
-        placement: Placement::Centered,
+        placement: Placement::Fullscreen,
         input: InputMode::None,
         app_id: "voxtype-osd-wall".into(),
         ..OverlaySpec::default()
