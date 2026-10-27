@@ -54,6 +54,10 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/kit.rs"]
+mod kit;
+#[path = "osd_vo/swissfi.rs"]
+mod swissfi;
 #[path = "osd_vo/scope.rs"]
 mod scope;
 #[path = "osd_vo/captions.rs"]
@@ -556,6 +560,9 @@ impl Look {
         if self.theme == OsdTheme::Cyberpunk {
             return cyberpunk::text_width(self);
         }
+        if self.theme == OsdTheme::Swissfi {
+            return swissfi::text_width(self);
+        }
         self.width - swiss::PANEL_INSET_PX as f32
     }
 
@@ -575,6 +582,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Mecha {
             return mecha::MAX_LINES;
+        }
+        if self.theme == OsdTheme::Swissfi {
+            return swissfi::max_lines();
         }
         swiss::MAX_LINES as u32
     }
@@ -612,6 +622,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Cyberpunk {
             return cyberpunk::text_style(self);
+        }
+        if self.theme == OsdTheme::Swissfi {
+            return swissfi::text_style(self);
         }
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
@@ -659,6 +672,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Showcase {
             return Popup::showcase_surface(self);
+        }
+        if self.theme == OsdTheme::Swissfi {
+            return swissfi::surface(self);
         }
         if self.theme == OsdTheme::Type {
             return Popup::type_surface(self);
@@ -798,6 +814,8 @@ struct Popup {
     linger_armed: bool,
     /// What only the showcase look keeps.
     extra: showcase::Extra,
+    /// What the looks after the mock-ups (kit.rs) keep.
+    fam: kit::State,
     /// What only the scope look keeps.
     scope: scope::State,
     /// What only the captions look keeps.
@@ -843,6 +861,7 @@ impl Popup {
             ended_at: None,
             linger_armed: false,
             extra: showcase::Extra::default(),
+            fam: kit::State::default(),
             scope: scope::State::default(),
             captions: captions::State::default(),
             karaoke: karaoke::State::default(),
@@ -1153,6 +1172,7 @@ impl App for Popup {
             }
         }
         self.sync_showcase(t);
+        self.kit_sync(t);
         self.sync_scope(t);
         self.sync_captions(t);
         self.sync_karaoke(t);
@@ -1217,6 +1237,9 @@ impl Popup {
         }
         if self.look.theme == OsdTheme::Type {
             return self.type_view();
+        }
+        if self.look.theme == OsdTheme::Swissfi {
+            return self.swissfi_view();
         }
         if self.look.theme == OsdTheme::Jarvis {
             return self.jarvis_view();
@@ -1430,6 +1453,7 @@ fn default_motion(look: &Look) -> Motion {
         look.theme,
         OsdTheme::Showcase
             | OsdTheme::Type
+            | OsdTheme::Swissfi
             | OsdTheme::Scope
             | OsdTheme::Captions
             | OsdTheme::Karaoke

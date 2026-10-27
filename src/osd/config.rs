@@ -110,6 +110,11 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// Swiss type meets sci-fi: off-black and off-white with one orange
+    /// accent, huge grotesk words, a hairline waveform of ticks with an
+    /// orange centre, and small mono numerals that roll. Drawn by the vo
+    /// frontend only; the gtk4 frontend draws `swiss` for it.
+    Swissfi,
     /// A green oscilloscope instrument: a vector trace over a graticule, a
     /// readout column with level, time and words per minute, and the words
     /// in a monospaced readout panel with a block caret. Drawn by the vo
@@ -162,6 +167,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "swissfi" => Some(OsdTheme::Swissfi),
             "scope" => Some(OsdTheme::Scope),
             "captions" => Some(OsdTheme::Captions),
             "karaoke" => Some(OsdTheme::Karaoke),
