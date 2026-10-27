@@ -143,8 +143,10 @@ rubato = "0.16"
 
 # OSD on the vo GPU overlay framework (gated on `osd-vo`). Pinned to a commit
 # of the framework repo; nothing in the default build pulls it in.
-vo = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "01518a12365621b7d005fe768beb603a70395fbe", optional = true }
-vo-core = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "01518a12365621b7d005fe768beb603a70395fbe", optional = true }
+vo = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "42fdeb139dbe6363571f9e7457407f125db491ff", optional = true }
+vo-core = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "42fdeb139dbe6363571f9e7457407f125db491ff", optional = true }
+vo-dots = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "42fdeb139dbe6363571f9e7457407f125db491ff", optional = true }
+vo-3d = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "42fdeb139dbe6363571f9e7457407f125db491ff", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tao = "0.32"
@@ -195,7 +197,7 @@ osd-native = [
 osd-gtk4 = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:cairo-rs", "dep:glib"]
 # The Swiss popup on the vo GPU overlay framework. Opt-in; pick it with
 # `[osd] frontend = "vo"`.
-osd-vo = ["dep:vo", "dep:vo-core"]
+osd-vo = ["dep:vo", "dep:vo-core", "dep:vo-dots", "dep:vo-3d"]
 gpu-vulkan = ["whisper-rs/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]

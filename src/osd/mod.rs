@@ -14,6 +14,7 @@
 //! - [`theme`] — Omarchy theme parsing + change watcher.
 //! - [`plasma`] — KDE Plasma colors and fonts for the `swiss` gtk4 theme.
 //! - [`swiss`] — the `swiss` look shared by the gtk4 and vo frontends.
+//! - [`showcase`] — palette and geometry of the vo frontend's `showcase` look.
 //! - [`gtk_env`] — environment workarounds for GTK4 bugs (GTK frontend only).
 
 pub mod config;
@@ -21,6 +22,7 @@ pub mod gtk_env;
 pub mod ipc;
 pub mod plasma;
 pub mod recipe;
+pub mod showcase;
 pub mod style;
 pub mod supervisor;
 pub mod swiss;

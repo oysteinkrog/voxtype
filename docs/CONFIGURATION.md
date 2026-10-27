@@ -3944,7 +3944,7 @@ cargo build --release --features osd-vo
 It reads the same `[osd]` settings as the `swiss` theme (`width_px`,
 `position`, `top_margin`, `margin_px`, `preview_font_pt`, `opacity`,
 `waveform_gain`, `waveform_window_secs`) and the same Plasma colors and
-fonts, and always draws the `swiss` look. Differences from the GTK4 popup:
+fonts, and draws the `swiss` look. Differences from the GTK4 popup:
 
 - Between dictations it holds no window and no GPU device, so it uses
   little memory while idle. Each dictation opens a new overlay, which draws
@@ -3954,10 +3954,30 @@ fonts, and always draws the `swiss` look. Differences from the GTK4 popup:
   once, as in the GTK4 popup.
 - The microphone icon is drawn from shapes, not taken from the icon theme.
 
+It also draws a second look, `theme = "showcase"`, which only this frontend
+has (the GTK4 popup draws `swiss` for it). It keeps the swiss popup's layout
+and behaviour and adds a lot on top: a glass panel, a glowing ribbon
+waveform, a light that runs round the panel's rim while you speak, a tilted
+ring of particles and a 3D hoop that follow your voice, out-of-focus orbs
+around the panel, a dot-matrix clock, words that form from particles, and a
+check mark made of dots when the final text lands. The transcript stays on a
+calm, solid strip so it reads as easily as in `swiss`. It uses
+more GPU time than `swiss` and runs frames all the time while you speak, so
+it suits a desktop more than a laptop on battery. Its colors are fixed and
+do not follow the Plasma scheme.
+
+```toml
+[osd]
+frontend = "vo"
+theme = "showcase"
+```
+
 If `voxtype-osd-vo` is not installed, the launcher falls back to the GTK4
-popup. Options: `--gpu-first-frame` (draw only on the GPU),
+popup. Options: `--theme swiss|showcase` (also `VOXTYPE_OSD_THEME`),
+`--gpu-first-frame` (draw only on the GPU),
 `--diag` (print startup timing and memory to stderr), and
-`--offline DIR` (render a scripted dictation to PNG frames and exit).
+`--offline DIR` (render a scripted dictation to PNG frames and exit;
+add `--cancel` for a dictation that is cancelled).
 
 ### Quickshell OSD customization
 

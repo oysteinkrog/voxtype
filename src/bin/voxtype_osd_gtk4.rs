@@ -187,7 +187,8 @@ struct Args {
 }
 
 fn parse_theme(s: &str) -> Result<OsdTheme, String> {
-    OsdTheme::parse_str(s).ok_or_else(|| format!("unknown theme '{s}' (expected default or swiss)"))
+    OsdTheme::parse_str(s)
+        .ok_or_else(|| format!("unknown theme '{s}' (expected default, swiss or showcase)"))
 }
 
 /// State shared between the IPC worker and the GTK redraw timer.
@@ -553,7 +554,8 @@ fn build_window(
                 status_label,
             }
         }
-        OsdTheme::Swiss => {
+        // Only the vo frontend draws showcase; here it gets the swiss look.
+        OsdTheme::Swiss | OsdTheme::Showcase => {
             let theme = plasma::load();
             install_swiss_css(&theme, cfg.opacity, cfg.preview_font_pt);
             let view = SwissView::build(cfg, &theme, stop_hint, &preview, state.clone());

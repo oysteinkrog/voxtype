@@ -41,13 +41,16 @@ use vo_core::words::{Word, WordModel};
 
 use voxtype::audio::levels::{AudioFrame, FRAME_BYTES, FRAME_HZ};
 use voxtype::config::{Config as VoxtypeConfig, HotkeyConfig};
-use voxtype::osd::config::{OsdConfig, OsdPosition};
+use voxtype::osd::config::{OsdConfig, OsdPosition, OsdTheme};
 use voxtype::osd::ipc::resolve_socket_path;
 use voxtype::osd::plasma::{self, PlasmaTheme};
 use voxtype::osd::swiss::{
     self, smooth_levels, stop_hint, tick_level, wave_hues, wave_stops, StatusLine,
 };
 use voxtype::osd::visual::Color as OsdColor;
+
+#[path = "osd_vo/showcase.rs"]
+mod showcase;
 
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;
@@ -133,9 +136,10 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_WORD_FADE")]
     word_fade: bool,
 
-    /// Accepted for compatibility with the GTK4 frontend's flags and ignored:
-    /// this frontend always draws the swiss look.
-    #[arg(long, env = "VOXTYPE_OSD_THEME", hide = true)]
+    /// Look to draw: `swiss` (default here) or `showcase`, a rich look that
+    /// shows off the GPU renderer. Also `[osd] theme`. Other themes draw
+    /// swiss.
+    #[arg(long, env = "VOXTYPE_OSD_THEME")]
     theme: Option<String>,
 
     /// Accepted for compatibility with the GTK4 frontend's flags and ignored.
@@ -167,6 +171,11 @@ struct Args {
     /// Frames per second for `--offline`.
     #[arg(long, default_value = "30")]
     fps: f64,
+
+    /// With `--offline`: script a dictation that is cancelled at the pause,
+    /// so the popup closes without a final text.
+    #[arg(long, requires = "offline")]
+    cancel: bool,
 }
 
 /// Silence on the audio socket longer than this, with no recording and no
@@ -290,6 +299,8 @@ struct Look {
     stop_hint: String,
     /// New words fade in; otherwise they appear at once, as in GTK.
     word_fade: bool,
+    /// `Swiss` or `Showcase`; anything else draws swiss.
+    theme: OsdTheme,
 }
 
 impl Look {
@@ -318,6 +329,7 @@ impl Look {
             hues: (color(l), color(c), color(r)),
             stop_hint,
             word_fade: cfg.word_fade,
+            theme: cfg.theme,
         }
     }
 
@@ -365,6 +377,9 @@ impl Look {
     /// inside it, so the surface never resizes; the rest is transparent and
     /// click-through.
     fn surface(&self) -> Size {
+        if self.theme == OsdTheme::Showcase {
+            return Popup::showcase_surface(self);
+        }
         Size::new(
             self.width.ceil(),
             self.panel_height(swiss::MAX_LINES as u32).ceil() + 2.0,
@@ -397,6 +412,8 @@ enum Msg {
     Files(Files),
     /// Time to see whether the daemon went idle.
     Check,
+    /// An ambient frame of the showcase look.
+    Tick,
 }
 
 /// The popup for one dictation. It closes itself when the daemon goes idle.
@@ -427,6 +444,8 @@ struct Popup {
     lines: u32,
     check: Option<vo::TimerId>,
     closing: bool,
+    /// What only the showcase look keeps.
+    extra: showcase::Extra,
 }
 
 impl Popup {
@@ -450,6 +469,7 @@ impl Popup {
             lines: 1,
             check: None,
             closing: false,
+            extra: showcase::Extra::default(),
         }
     }
 
@@ -569,6 +589,9 @@ impl App for Popup {
 
     fn init(&mut self, cx: &mut Cx<Msg>) {
         self.shown_at = cx.t();
+        self.extra.now = cx.t();
+        self.sync_showcase(cx.t());
+        self.arm_tick(cx);
     }
 
     fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
@@ -576,6 +599,10 @@ impl App for Popup {
             return;
         }
         let t = cx.t();
+        self.extra.now = t;
+        // An ambient frame never closes the popup; only the daemon's
+        // messages and the idle check do.
+        let tick = matches!(msg, Msg::Tick);
         match msg {
             Msg::Audio(frames) => {
                 self.audio(frames, t);
@@ -583,6 +610,7 @@ impl App for Popup {
             }
             Msg::Files(files) => {
                 let preview_changed = files.preview != self.files.preview;
+                self.extra.files(&self.files, &files, t);
                 self.files = files;
                 if preview_changed {
                     let preview = self.files.preview.clone();
@@ -591,8 +619,11 @@ impl App for Popup {
                 self.arm_check(cx);
             }
             Msg::Check => self.check = None,
+            Msg::Tick => self.extra.tick = None,
         }
-        if self.idle(t) {
+        self.sync_showcase(t);
+        self.arm_tick(cx);
+        if !tick && self.idle(t) {
             tracing::info!(
                 recording = self.files.recording,
                 status = self.files.finishing,
@@ -607,6 +638,9 @@ impl App for Popup {
 
     fn view(&self, _: &vo::Tokens) -> Element<Msg> {
         let root = Element::column("root").align_items(AlignItems::CENTER);
+        if self.look.theme == OsdTheme::Showcase {
+            return self.showcase_view();
+        }
         if self.closing {
             return root;
         }
@@ -790,6 +824,21 @@ impl Popup {
         }
         row
     }
+}
+
+/// Swiss: nothing animates unless a view asks for it, as in GTK. Showcase:
+/// everything springs.
+fn default_motion(look: &Look) -> Motion {
+    if look.theme == OsdTheme::Showcase {
+        Motion::Spring(Spring::SOFT)
+    } else {
+        Motion::Snap
+    }
+}
+
+/// The showcase draws 3D elements, which need the 3D painter in the renderer.
+fn renderer_setup(look: &Look) -> Option<vo::RendererSetup> {
+    (look.theme == OsdTheme::Showcase).then(|| Arc::new(vo_3d::install) as vo::RendererSetup)
 }
 
 /// Load `[osd]` and `[hotkey]` from the voxtype config, with defaults for
@@ -1000,12 +1049,15 @@ fn main() -> anyhow::Result<()> {
         cfg.waveform_gain = g;
     }
     cfg.word_fade |= args.word_fade;
+    if let Some(t) = args.theme.as_deref().and_then(OsdTheme::parse_str) {
+        cfg.theme = t;
+    }
     let theme = plasma::load();
     let fonts = load_fonts(&theme)?;
     let look = Look::new(&cfg, &theme, stop_hint(&hotkey), &fonts);
 
     if let Some(dir) = &args.offline {
-        return offline(look, fonts, dir, args.fps);
+        return offline(look, fonts, dir, args.fps, args.cancel);
     }
 
     let shared: Shared = Arc::new((Mutex::new(Sink::default()), Condvar::new()));
@@ -1068,8 +1120,8 @@ fn main() -> anyhow::Result<()> {
             diagnostics: args
                 .diag
                 .then(|| Box::new(LogDiagnostics::new(Some(heap))) as Box<dyn vo::Diagnostics>),
-            // Nothing animates unless a view asks for it, as in GTK.
-            default_motion: Motion::Snap,
+            default_motion: default_motion(&look),
+            renderer_setup: renderer_setup(&look),
             ..Options::default()
         };
         let result = vo::run_overlay_with(Popup::new(look.clone(), &fonts), spec.clone(), options);
@@ -1094,12 +1146,15 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// A scripted dictation: model loading, words arriving, a pause, the stop,
-/// the final text and the close.
-fn scenario(look: &Look) -> vo::Scenario<Msg> {
+/// A scripted dictation: model loading, words arriving, a revised word, a
+/// pause, the stop, the final text and the close. With `cancel` the
+/// recording is cancelled at the pause: no final text, the popup closes.
+fn scenario(look: &Look, cancel: bool) -> vo::Scenario<Msg> {
     let mut inputs: Vec<(f64, Input<Msg>)> = Vec::new();
     let msg = |m: Msg| Input::Msg(m);
-    let (start, stop, done) = (0.2, 6.6, 8.6);
+    // Words are timed for the whole sentence, so a cancel cuts it off.
+    let (start, full_stop) = (0.2, 6.6);
+    let (stop, done) = if cancel { (3.4, 3.4) } else { (full_stop, 8.6) };
     let pause = (3.4, 4.4);
     // Audio: two frames every 20 ms while recording, then the silence pump.
     let mut seq = 0u32;
@@ -1129,7 +1184,7 @@ fn scenario(look: &Look) -> vo::Scenario<Msg> {
     }
     let mut pump = 0u32;
     let mut t = stop + 0.03;
-    while t < done {
+    while t < done && !cancel {
         let silent = AudioFrame {
             seq: pump,
             min: 0.0,
@@ -1146,7 +1201,7 @@ fn scenario(look: &Look) -> vo::Scenario<Msg> {
                     them then press the key again to stop and let the final pass fix the casing and \
                     the punctuation before the text is typed into the editor";
     let words: Vec<&str> = sentence.split(' ').collect();
-    let speaking_time = (stop - start - 0.5) - (pause.1 - pause.0);
+    let speaking_time = (full_stop - start - 0.5) - (pause.1 - pause.0);
     let per_word = speaking_time / words.len() as f64;
     let mut files = Files {
         recording: true,
@@ -1171,7 +1226,14 @@ fn scenario(look: &Look) -> vo::Scenario<Msg> {
         if (pause.0..pause.1).contains(&t) {
             t = pause.1;
         }
+        if t >= stop {
+            break;
+        }
         let mut text = words[..=i].join(" ");
+        // A word heard wrong at first, fixed when the next one comes.
+        if words[i] == "swiss" {
+            text = format!("{} swish", words[..i].join(" "));
+        }
         // A word still being spoken shows its start first.
         if words[i] == "configuration" {
             files.preview = format!("{} confi", words[..i].join(" "));
@@ -1185,8 +1247,18 @@ fn scenario(look: &Look) -> vo::Scenario<Msg> {
         at(t, &files, &mut inputs);
         t += per_word;
     }
-    // Stop: the final text is made, then pasted.
     files.recording = false;
+    if cancel {
+        at(stop, &files, &mut inputs);
+        inputs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        return vo::Scenario {
+            size: look.surface(),
+            scale: 1.0,
+            duration: stop + 1.0,
+            inputs,
+        };
+    }
+    // Stop: the final text is made, then pasted.
     files.finishing = true;
     for (k, f) in [0.1, 0.35, 0.6, 0.85, 1.0].iter().enumerate() {
         files.fraction = Some(*f);
@@ -1213,11 +1285,18 @@ fn scenario(look: &Look) -> vo::Scenario<Msg> {
     }
 }
 
-fn offline(look: Look, fonts: FontRegistry, dir: &Path, fps: f64) -> anyhow::Result<()> {
-    let scenario = scenario(&look);
+fn offline(
+    look: Look,
+    fonts: FontRegistry,
+    dir: &Path,
+    fps: f64,
+    cancel: bool,
+) -> anyhow::Result<()> {
+    let scenario = scenario(&look, cancel);
     let options = Options {
         fonts: fonts.clone(),
-        default_motion: Motion::Snap,
+        default_motion: default_motion(&look),
+        renderer_setup: renderer_setup(&look),
         ..Options::default()
     };
     let n = vo::render_offline_with(Popup::new(look, &fonts), &scenario, fps, dir, options)

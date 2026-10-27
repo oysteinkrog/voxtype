@@ -83,12 +83,12 @@ fn main() -> ExitCode {
         })
         .unwrap_or_else(|| load_osd_config(config_path.as_deref()).frontend);
 
-    // The vo popup draws only the swiss look; any other theme gets the GTK4
-    // popup, which draws them all.
+    // The vo popup draws the swiss and showcase looks; the default theme
+    // gets the GTK4 popup.
     let preferred = if preferred == OsdFrontend::Vo
-        && resolve_theme(&rest, config_path.as_deref()) != OsdTheme::Swiss
+        && !vo_draws(resolve_theme(&rest, config_path.as_deref()))
     {
-        tracing::info!("the vo frontend draws only the swiss theme; using gtk4");
+        tracing::info!("the vo frontend draws only the swiss and showcase themes; using gtk4");
         OsdFrontend::Gtk4
     } else {
         preferred
@@ -253,6 +253,11 @@ fn load_osd_config(explicit: Option<&Path>) -> OsdConfig {
         .unwrap_or_default()
 }
 
+/// Whether the vo frontend draws `theme`.
+fn vo_draws(theme: OsdTheme) -> bool {
+    matches!(theme, OsdTheme::Swiss | OsdTheme::Showcase)
+}
+
 /// The theme the frontend will draw, by the frontends' own precedence:
 /// `--theme`, then `VOXTYPE_OSD_THEME`, then `[osd] theme`.
 fn resolve_theme(args: &[String], config: Option<&Path>) -> OsdTheme {
@@ -339,6 +344,13 @@ mod tests {
             resolve_theme(&args(&["--width-px", "400", "--theme=swiss"]), none),
             OsdTheme::Swiss
         );
+    }
+
+    #[test]
+    fn vo_keeps_swiss_and_showcase() {
+        assert!(vo_draws(OsdTheme::Swiss));
+        assert!(vo_draws(OsdTheme::Showcase));
+        assert!(!vo_draws(OsdTheme::Default));
     }
 
     #[test]

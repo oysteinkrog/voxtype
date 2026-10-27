@@ -76,6 +76,11 @@ pub enum OsdTheme {
     /// large transcript text and a status line. Colors and font come from
     /// the KDE Plasma color scheme (`~/.config/kdeglobals`).
     Swiss,
+    /// A rich look that shows off the vo GPU overlay: glowing ribbon
+    /// waveform, rim light, a tilted ring of dots and drifting orbs around
+    /// the swiss popup's layout. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Showcase,
 }
 
 impl OsdTheme {
@@ -83,6 +88,7 @@ impl OsdTheme {
         match s.trim().to_ascii_lowercase().as_str() {
             "default" => Some(OsdTheme::Default),
             "swiss" => Some(OsdTheme::Swiss),
+            "showcase" => Some(OsdTheme::Showcase),
             _ => None,
         }
     }
