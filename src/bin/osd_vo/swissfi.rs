@@ -497,7 +497,7 @@ impl Popup {
                     .kit_target()
                     .map(|a| format!("into {a}"))
                     .unwrap_or_default();
-                ("Pasted".to_string(), detail, hex(GREEN))
+                (self.delivery_word().to_string(), detail, hex(GREEN))
             }
             Mode::Cancelled => (
                 "Cancelled".to_string(),

@@ -809,9 +809,9 @@ impl Popup {
                     .map(|t| t.app.clone());
                 match app {
                     Some(app) if !app.is_empty() => {
-                        ("Pasted".to_string(), format!("  ·  into {app}"), hex(GREEN))
+                        (self.delivery_word().to_string(), format!("  ·  into {app}"), hex(GREEN))
                     }
-                    _ => ("Pasted".to_string(), String::new(), hex(GREEN)),
+                    _ => (self.delivery_word().to_string(), String::new(), hex(GREEN)),
                 }
             }
             Mode::Cancelled => ("Cancelled".to_string(), String::new(), hex(DIM)),

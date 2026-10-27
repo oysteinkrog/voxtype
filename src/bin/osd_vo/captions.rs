@@ -485,7 +485,9 @@ impl Popup {
                     .map(|t| t.app.clone())
                     .filter(|a| !a.is_empty());
                 (
-                    app.map_or("Pasted".to_string(), |a| format!("Pasted into {a}")),
+                    app.map_or(self.delivery_word().to_string(), |a| {
+                        format!("{} into {a}", self.delivery_word())
+                    }),
                     hex(GREEN),
                 )
             }

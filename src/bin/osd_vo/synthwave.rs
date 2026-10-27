@@ -337,7 +337,7 @@ impl Popup {
             Some(Ending::Done) | None => {}
         }
         if self.extra.final_at.is_some() {
-            "PASTED"
+            self.delivery_word_caps()
         } else if self.ending().is_some() {
             "DONE"
         } else if status.loading {
@@ -906,7 +906,7 @@ impl Popup {
         let style = TextStyle::new(f.status, px, line);
         let blue = hex(BLUE);
         let state = if self.extra.final_at.is_some() && !self.cancelled() {
-            "Pasted".to_string()
+            self.delivery_word().to_string()
         } else {
             status.state.clone()
         };

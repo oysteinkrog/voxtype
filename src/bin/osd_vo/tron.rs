@@ -567,7 +567,7 @@ impl Popup {
         let (state, detail) = if done {
             match app {
                 Some(app) => (
-                    "Pasted".to_string(),
+                    self.delivery_word().to_string(),
                     format!("into {app} · {} words", self.word_count),
                 ),
                 None => ("Done".to_string(), format!("{} words", self.word_count)),

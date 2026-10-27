@@ -369,8 +369,8 @@ impl Popup {
         let status = self.status();
         let text = match mode {
             Mode::Done => match self.kit_target() {
-                Some(app) => format!("Pasted · {app}"),
-                None => "Pasted".to_string(),
+                Some(app) => format!("{} · {app}", self.delivery_word()),
+                None => self.delivery_word().to_string(),
             },
             Mode::Cancelled => "Cancelled · nothing was typed".to_string(),
             _ => format!("{}{}", status.state, status.detail.replace("  ·  ", " · ")),

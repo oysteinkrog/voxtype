@@ -627,7 +627,7 @@ impl Popup {
         let mark = Mark { mode, mode_at };
         let until = mark.until();
         let state = match mode {
-            Mode::Done => "Pasted".to_string(),
+            Mode::Done => self.delivery_word().to_string(),
             Mode::Cancelled => "Cancelled".to_string(),
             _ => status.state.clone(),
         };

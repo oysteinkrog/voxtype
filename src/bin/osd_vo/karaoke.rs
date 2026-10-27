@@ -531,8 +531,8 @@ impl Popup {
                     .map(|t| t.app.clone())
                     .filter(|a| !a.is_empty());
                 let s = match app {
-                    Some(app) => format!("Pasted into {app}"),
-                    None => "Pasted".to_string(),
+                    Some(app) => format!("{} into {app}", self.delivery_word()),
+                    None => self.delivery_word().to_string(),
                 };
                 (s, String::new(), hex(GREEN))
             }

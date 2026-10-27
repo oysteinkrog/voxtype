@@ -660,7 +660,10 @@ impl Popup {
                     .and_then(|d| d.target.as_ref())
                     .map(|t| t.app.clone())
                     .filter(|a| !a.is_empty());
-                app.map_or("PASTED".to_string(), |a| format!("PASTED  ·  into {a}"))
+                {
+                    let word = self.delivery_word().to_uppercase();
+                    app.map_or(word.clone(), |a| format!("{word}  ·  into {a}"))
+                }
             }
             Mode::Cancelled => "CANCELLED".to_string(),
             _ => format!("{}{}", status.state, status.detail),

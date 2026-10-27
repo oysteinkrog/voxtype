@@ -177,6 +177,22 @@ impl Popup {
         }
     }
 
+    /// The word a look's status shows for a finished dictation: what the daemon
+    /// reported (Typed, Pasted or Copied), or Done before or without a report.
+    pub(crate) fn delivery_word(&self) -> &'static str {
+        self.delivered().map_or("Done", |d| d.via.label())
+    }
+
+    /// [`Popup::delivery_word`] in capitals.
+    pub(crate) fn delivery_word_caps(&self) -> &'static str {
+        match self.delivered().map(|d| d.via) {
+            Some(Via::Typed) => "TYPED",
+            Some(Via::Pasted) => "PASTED",
+            Some(Via::Copied) => "COPIED",
+            None => "DONE",
+        }
+    }
+
     /// The delivery, while the dictation that made it has ended.
     pub(crate) fn delivered(&self) -> Option<&Delivered> {
         self.life.delivered.as_ref().filter(|_| self.ended())
