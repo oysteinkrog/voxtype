@@ -410,12 +410,11 @@ impl Popup {
             .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
         let mut text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
-            .margin_edges(0.0, 0.0, TEXT_MARGIN_BOTTOM, 0.0)
             .child(words);
         for line in self.doubt_lines() {
             text = text.child(line);
         }
-        self.with_margin_ellipsis(text)
+        self.text_area(text)
     }
 
     fn type_status(&self, status: &StatusLine) -> Element<Msg> {

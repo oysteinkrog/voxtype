@@ -1599,34 +1599,52 @@ impl Popup {
         }
         let text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
-            .margin_edges(0.0, 0.0, TEXT_MARGIN_BOTTOM, 0.0)
             .child(words);
-        self.with_margin_ellipsis(text)
+        self.text_area(text)
     }
 
-    /// Adds the "…" that hangs left of the first line once earlier lines are
-    /// cut, for the looks whose [`Look::margin_ellipsis`] is on.
-    fn with_margin_ellipsis(&self, text: Element<Msg>) -> Element<Msg> {
+    /// The text area. For the looks whose [`Look::margin_ellipsis`] is on,
+    /// it sits in a layer clipped to its own box, widened on the left for the
+    /// "…" that hangs there once earlier lines are cut, so a line that leaves
+    /// while the text scrolls slides behind the edge instead of crossing the
+    /// wave or the status row.
+    fn text_area(&self, text: Element<Msg>) -> Element<Msg> {
+        use vo::scene::taffy::{LengthPercentage, LengthPercentageAuto};
         let l = &self.look;
-        if !l.margin_ellipsis() || self.cut == 0 || self.shown.is_empty() {
-            return text;
+        if !l.margin_ellipsis() {
+            return text.margin_edges(0.0, 0.0, TEXT_MARGIN_BOTTOM, 0.0);
         }
         let style = l.text_style();
-        let w = self.measure.layout("…", &style, None).size.w;
-        text.child(
-            Element::label("ellipsis", "…")
-                .text_style(style)
-                .color(l.foreground)
-                .layout(|s| {
-                    s.position = vo::scene::taffy::Position::Absolute;
-                    s.inset = vo::scene::taffy::Rect {
-                        left: vo::scene::taffy::LengthPercentageAuto::length(-w),
-                        top: vo::scene::taffy::LengthPercentageAuto::length(0.0),
-                        right: vo::scene::taffy::LengthPercentageAuto::auto(),
-                        bottom: vo::scene::taffy::LengthPercentageAuto::auto(),
-                    };
-                }),
-        )
+        let w = self.measure.layout("…", &style, None).size.w.ceil();
+        let mut text = text;
+        if self.cut > 0 && !self.shown.is_empty() {
+            text = text.child(
+                Element::label("ellipsis", "…")
+                    .text_style(style)
+                    .color(l.inactive)
+                    .layout(|s| {
+                        s.position = vo::scene::taffy::Position::Absolute;
+                        s.inset = vo::scene::taffy::Rect {
+                            left: LengthPercentageAuto::length(-w),
+                            top: LengthPercentageAuto::length(0.0),
+                            right: LengthPercentageAuto::auto(),
+                            bottom: LengthPercentageAuto::auto(),
+                        };
+                    }),
+            );
+        }
+        // The clip reaches into the gap above the status row, so descenders
+        // and rising words on the last line are not cut; the negative margin
+        // keeps the layout as it was.
+        let below = TEXT_MARGIN_BOTTOM + STATUS_MARGIN_TOP - 4.0;
+        Element::layer("textclip")
+            .clip()
+            .margin_edges(0.0, 0.0, TEXT_MARGIN_BOTTOM - below, -w)
+            .layout(|s| {
+                s.padding.left = LengthPercentage::length(w);
+                s.padding.bottom = LengthPercentage::length(below);
+            })
+            .child(text)
     }
 
     fn status_row(&self, status: &StatusLine) -> Element<Msg> {
