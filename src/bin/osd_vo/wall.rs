@@ -21,6 +21,9 @@ const GAP: f32 = 16.0;
 /// Room under each cell for its label.
 const LABEL_H: f32 = 22.0;
 const LABEL_PX: f32 = 11.0;
+/// Largest scale a look is drawn at: small looks grow to fill their cell,
+/// up to this.
+const MAX_SCALE: f32 = 1.5;
 /// Pause between one scripted dictation and the next, in seconds.
 const SCRIPT_GAP: f64 = 0.8;
 
@@ -182,6 +185,19 @@ impl App for Wall {
                     p.update(Msg::Files(files.clone()), cx);
                 }
             }
+            Msg::Tick => {
+                // A cell re-arms its ambient tick whenever any Tick arrives,
+                // so cancel the ones still pending first, or they pile up
+                // with every tick of every cell.
+                for p in &mut self.cells {
+                    if let Some(id) = p.extra.tick.take() {
+                        cx.cancel(id);
+                    }
+                }
+                for p in &mut self.cells {
+                    p.update(Msg::Tick, cx);
+                }
+            }
             m => {
                 for p in &mut self.cells {
                     p.update(m.clone(), cx);
@@ -204,7 +220,7 @@ impl App for Wall {
         for (i, (p, look)) in self.cells.iter().zip(&self.looks).enumerate() {
             let (c, r) = (i % cols, i / cols);
             let native = look.surface();
-            let s = (cell_w / native.w).min(cell_h / native.h).min(1.0);
+            let s = (cell_w / native.w).min(cell_h / native.h).min(MAX_SCALE);
             // The look at its native size, scaled about its centre into the
             // middle of the cell.
             let theme = at(
