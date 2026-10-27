@@ -1183,4 +1183,24 @@ mod tests {
         assert_eq!(hud.level_at(1.0, 0.1), 1.0);
         assert_eq!(hud.level_at(1.0, 5.0), 0.0);
     }
+
+    #[test]
+    fn the_surface_margin_leaves_room_for_the_bloom_round_the_hud() {
+        let cfg = OsdConfig {
+            theme: OsdTheme::Jarvis,
+            width_px: 600,
+            ..OsdConfig::default()
+        };
+        let theme = PlasmaTheme::default();
+        let fonts = load_fonts(&theme).unwrap();
+        let look = Look::new(&cfg, &theme, String::new(), &fonts);
+        let popup = Popup::new(look, &fonts);
+        let reach = popup.view(&vo::Tokens::default()).effect_reach(0.0);
+        // The frame's glow comes within a few pixels of the surface edge,
+        // and the HUD's bloom spreads it about 18 more.
+        let bloom = vo::scene::reach::bloom_reach(6.0);
+        for side in [reach.left, reach.top, reach.right, reach.bottom] {
+            assert!(side >= bloom, "{reach:?}");
+        }
+    }
 }
