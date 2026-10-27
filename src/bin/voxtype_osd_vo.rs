@@ -99,6 +99,8 @@ mod station;
 mod synthwave;
 #[path = "osd_vo/mecha.rs"]
 mod mecha;
+#[path = "osd_vo/glyph_paths.rs"]
+mod glyph_paths;
 #[path = "osd_vo/lifecycle.rs"]
 mod lifecycle;
 

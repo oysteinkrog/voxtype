@@ -187,6 +187,9 @@ impl Popup {
             )],
         });
         let view = Rect::new(0.0, 0.0, l.width, h);
+        if let Some(broken) = self.paths_broken_frame(&border.contours[0], l.width, h, BORDER) {
+            return broken;
+        }
         let exit = if cancelled {
             // Erased from where it started.
             Transition::NONE.trim(1.0, 1.0)
@@ -406,7 +409,7 @@ impl Popup {
             .color(l.foreground)
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(Transition::fade().opacity(0.0).offset(0.0, WORD_RISE))
+            .word_enter(self.paths_word_enter(Transition::fade().opacity(0.0).offset(0.0, WORD_RISE)))
             .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
         let words = self.handoff_or(
             words,
@@ -418,6 +421,9 @@ impl Popup {
         let mut text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
             .child(words);
+        for overlay in self.paths_overlays() {
+            text = text.child(overlay);
+        }
         for line in self.doubt_lines() {
             text = text.child(line);
         }
