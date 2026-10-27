@@ -110,6 +110,11 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// An amber hologram panel: thin geometric frames that draw on, vertical
+    /// micro-labels, a fine-line waveform and the transcript in a condensed
+    /// face. Drawn by the vo frontend only; the gtk4 frontend draws `swiss`
+    /// for it.
+    Amber,
     /// A radial spectrum: bars round a microphone in a blue to violet ring
     /// over a soft bloom, and the transcript in a wide card below. Drawn by
     /// the vo frontend only; the gtk4 frontend draws `swiss` for it.
@@ -197,6 +202,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "amber" => Some(OsdTheme::Amber),
             "radial" => Some(OsdTheme::Radial),
             "tron" => Some(OsdTheme::Tron),
             "phosphor" => Some(OsdTheme::Phosphor),
