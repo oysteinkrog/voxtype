@@ -18,7 +18,6 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::VecDeque;
-use std::io::Read;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -39,7 +38,8 @@ use vo::{
 use vo_core::spring::Spring;
 use vo_core::words::{Word, WordInfo, WordModel};
 
-use voxtype::audio::levels::{AudioFrame, FRAME_BYTES, FRAME_HZ};
+use voxtype::audio::features::AudioFeatures;
+use voxtype::audio::levels::{AudioFrame, AudioReader, FRAME_HZ};
 use voxtype::config::{Config as VoxtypeConfig, HotkeyConfig};
 use voxtype::osd::config::{OsdConfig, OsdPosition, OsdTheme};
 use voxtype::osd::ipc::resolve_socket_path;
@@ -568,10 +568,19 @@ struct Files {
     live: Option<voxtype::osd::live::LiveDoc>,
 }
 
+/// One frame's voice features, by its sequence number.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Voice {
+    seq: u32,
+    features: AudioFeatures,
+}
+
 #[derive(Clone, Debug)]
 enum Msg {
     /// Frames read from the socket in one go.
     Audio(Vec<AudioFrame>),
+    /// The voice features of those frames, when the daemon sends them.
+    Voice(Vec<Voice>),
     Files(Files),
     /// Time to see whether the daemon went idle.
     Check,
@@ -587,6 +596,9 @@ struct Popup {
     measure: vo::ShapedLayout,
     /// Raw levels, oldest first, at most the waveform window plus a little.
     levels: VecDeque<f64>,
+    /// Voice features of the frames in `levels`, oldest first: loudness,
+    /// pitch, brightness, noisiness and mel bands, for effects.
+    voice: VecDeque<Voice>,
     last_seq: Option<u32>,
     /// `display(i) = anchor + PLAYOUT_DELAY + i / FRAME_HZ` for the i-th
     /// frame since the waveform started.
@@ -628,6 +640,7 @@ impl Popup {
             look,
             measure: vo::ShapedLayout::new(fonts.clone()),
             levels: VecDeque::new(),
+            voice: VecDeque::new(),
             last_seq: None,
             anchor: 0.0,
             received: 0,
@@ -682,6 +695,21 @@ impl Popup {
         status.shows_progress() && !self.ended()
     }
 
+    /// Keeps the voice features of the frames on screen.
+    fn voice(&mut self, voice: Vec<Voice>) {
+        let window = (self.look.window * FRAME_HZ as f64).ceil() as usize + 12;
+        self.voice.extend(voice);
+        while self.voice.len() > window {
+            self.voice.pop_front();
+        }
+    }
+
+    /// The newest frame's voice features, if the daemon sends them.
+    #[allow(dead_code)]
+    fn latest_voice(&self) -> Option<&AudioFeatures> {
+        self.voice.back().map(|v| &v.features)
+    }
+
     fn audio(&mut self, frames: Vec<AudioFrame>, t: f64) {
         self.last_audio = Some(t);
         let window = (self.look.window * FRAME_HZ as f64).ceil() as usize + 12;
@@ -698,6 +726,7 @@ impl Popup {
                 }
                 // A new recording or a reconnect: start the waveform again.
                 self.levels.clear();
+                self.voice.clear();
                 self.received = 0;
             }
             self.last_seq = Some(f.seq);
@@ -839,6 +868,7 @@ impl App for Popup {
                 self.audio(frames, t);
                 self.arm_check(cx);
             }
+            Msg::Voice(voice) => self.voice(voice),
             Msg::Files(files) => {
                 let preview_changed = files.preview != self.files.preview;
                 let live_changed = files.live != self.files.live;
@@ -1177,6 +1207,7 @@ fn placement(cfg: &OsdConfig) -> Placement {
 struct Sink {
     proxy: Option<vo::Proxy<Msg>>,
     audio: Vec<Vec<AudioFrame>>,
+    voice: Vec<Vec<Voice>>,
     files: Files,
 }
 
@@ -1195,6 +1226,20 @@ impl Sink {
         self.audio.push(frames);
         if self.audio.len() > HELD_AUDIO {
             self.audio.remove(0);
+        }
+    }
+
+    /// Like `audio`, for the voice features.
+    fn voice(&mut self, voice: Vec<Voice>) {
+        if let Some(p) = &self.proxy {
+            if p.send(Msg::Voice(voice.clone())) {
+                return;
+            }
+            self.proxy = None;
+        }
+        self.voice.push(voice);
+        if self.voice.len() > HELD_AUDIO {
+            self.voice.remove(0);
         }
     }
 
@@ -1220,32 +1265,34 @@ impl Sink {
 type Shared = Arc<(Mutex<Sink>, Condvar)>;
 
 /// Reads frames from the daemon's audio socket and hands each read on as one
-/// batch. Reconnects when the daemon goes away.
+/// batch, with the voice features when the daemon sends version 2 frames.
+/// Reconnects when the daemon goes away.
 fn read_audio(shared: Shared, socket: PathBuf, reconnect: Duration) {
-    let mut buf = vec![0u8; FRAME_BYTES * 64];
     loop {
-        if let Ok(mut stream) = UnixStream::connect(&socket) {
-            tracing::info!("connected to {}", socket.display());
-            let mut have = 0usize;
-            loop {
-                match stream.read(&mut buf[have..]) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => have += n,
-                }
-                let whole = have / FRAME_BYTES * FRAME_BYTES;
-                if whole == 0 {
-                    continue;
-                }
-                let frames: Vec<AudioFrame> = buf[..whole]
-                    .as_chunks::<FRAME_BYTES>()
-                    .0
+        if let Ok(mut reader) = UnixStream::connect(&socket).and_then(AudioReader::new) {
+            tracing::info!(
+                version = reader.version(),
+                "connected to {}",
+                socket.display()
+            );
+            while let Ok(rich) = reader.read() {
+                let voice: Vec<Voice> = rich
                     .iter()
-                    .map(AudioFrame::from_bytes)
+                    .filter_map(|r| {
+                        r.features.map(|features| Voice {
+                            seq: r.frame.seq,
+                            features,
+                        })
+                    })
                     .collect();
-                buf.copy_within(whole..have, 0);
-                have -= whole;
+                let frames = rich.into_iter().map(|r| r.frame).collect();
                 let (lock, cv) = &*shared;
-                lock.lock().unwrap().audio(frames);
+                let mut sink = lock.lock().unwrap();
+                sink.audio(frames);
+                if !voice.is_empty() {
+                    sink.voice(voice);
+                }
+                drop(sink);
                 cv.notify_one();
             }
             tracing::info!("audio socket closed");
@@ -1372,6 +1419,9 @@ fn main() -> anyhow::Result<()> {
             // says "recording" must not let the popup close at once.
             for frames in sink.audio.drain(..) {
                 proxy.send(Msg::Audio(frames));
+            }
+            for voice in sink.voice.drain(..) {
+                proxy.send(Msg::Voice(voice));
             }
             proxy.send(Msg::Files(sink.files.clone()));
             sink.proxy = Some(proxy);
