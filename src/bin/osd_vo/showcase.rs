@@ -796,8 +796,10 @@ impl Popup {
             words = words.word_change(Transition::fade().opacity(0.5));
         }
         // While listening, each new word forms from particles; a revision
-        // scatters and re-forms only the glyphs that changed.
-        if phase.ambient() {
+        // scatters and re-forms only the glyphs that changed. Not in the
+        // theme wall: word ids repeat from cell to cell, and the wall keeps
+        // word particles for the look built on them.
+        if phase.ambient() && !self.in_wall {
             words = words.word_particles(WordParticles {
                 color: c(mix(TEAL, ICE, 0.5)).fade(0.7),
                 size: 0.6,

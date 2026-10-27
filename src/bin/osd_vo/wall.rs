@@ -33,6 +33,9 @@ pub(crate) fn source(theme: OsdTheme) -> &'static str {
         OsdTheme::Default | OsdTheme::Swiss => "concept 12",
         OsdTheme::Showcase => "families 03 09 12 17 21 22",
         OsdTheme::Type => "concept 12, family 12",
+        OsdTheme::Cyberpunk => "concept 11",
+        OsdTheme::Synthwave => "concept 04",
+        OsdTheme::Mecha => "concept 23",
         _ => "",
     }
 }

@@ -1658,7 +1658,14 @@ fn offline(
 }
 
 /// The looks the vo frontend draws itself.
-const WALL_THEMES: &[OsdTheme] = &[OsdTheme::Swiss, OsdTheme::Showcase, OsdTheme::Type];
+const WALL_THEMES: &[OsdTheme] = &[
+    OsdTheme::Swiss,
+    OsdTheme::Showcase,
+    OsdTheme::Type,
+    OsdTheme::Cyberpunk,
+    OsdTheme::Synthwave,
+    OsdTheme::Mecha,
+];
 
 /// `voxtype-osd-vo --wall`: see `osd_vo/wall.rs`.
 fn run_wall(
