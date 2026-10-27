@@ -534,6 +534,7 @@ impl Look {
             OsdTheme::Cyberpunk => Some(cyberpunk::newest_line_centre()),
             OsdTheme::Showcase => showcase::newest_line_centre(self, lines),
             OsdTheme::Type => type_look::newest_line_centre(self, lines),
+            OsdTheme::Jarvis => Some(jarvis::newest_line_centre(self, lines)),
             _ => None,
         }
     }

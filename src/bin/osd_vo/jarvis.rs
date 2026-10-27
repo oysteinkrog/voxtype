@@ -18,9 +18,10 @@ use super::*;
 
 use std::sync::OnceLock;
 
+use vo::scene::ambient::{Loop, LoopProp};
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
-use vo::scene::geom::{Affine, Point};
+use vo::scene::geom::Point;
 use vo::scene::path::{icons, make, Contour, Morph, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
 use vo::scene::taffy;
@@ -46,7 +47,8 @@ const PILL_END: f32 = 20.0;
 
 /// Seconds for an outline to trace itself on.
 const OPEN_SECS: f64 = 0.45;
-/// Time constant of the rings coming to rest after the recording stops.
+/// After the recording stops, the ring keeps drawing this many times 0.6 s
+/// while the bars die down.
 const REST_SECS: f64 = 0.6;
 /// Seconds of level history round each half of the bar ring.
 const HISTORY_SECS: f32 = 0.6;
@@ -152,15 +154,14 @@ pub struct Extra {
     words: Vec<Word>,
     /// The newest lines of the transcript, each with its width.
     lines: Vec<(Vec<Word>, f32)>,
-    /// Lines the frame has room for. Grows, never shrinks.
-    rows: u32,
 }
 
 /// Words laid out at most, from a start that only moves in steps of half
 /// this, so the line breaks stay put while words arrive.
 const LAYOUT_WORDS: usize = 120;
 
-/// What the ring canvas draws, fixed for one view.
+/// What the ring canvases draw, fixed for one view.
+#[derive(Clone)]
 struct Hud {
     k: f32,
     centre: Point,
@@ -168,9 +169,6 @@ struct Hud {
     /// When the rings start to come to rest.
     rest_at: Option<f64>,
     final_at: Option<f64>,
-    /// When the dictation ended without a final text: the HUD dims a moment
-    /// later.
-    cancelled_at: Option<f64>,
     loading: bool,
     /// The level for the meter, 0 to 1.
     level: f32,
@@ -180,19 +178,6 @@ struct Hud {
 }
 
 impl Hud {
-    /// Seconds of turning so far: the clock while listening, then easing to
-    /// a stop.
-    fn turned(&self, t: f64) -> f32 {
-        let e = (t - self.shown_at).max(0.0);
-        match self.rest_at {
-            Some(r) if t > r => {
-                let r = (r - self.shown_at).max(0.0);
-                (r + REST_SECS * (1.0 - (-(e - r) / REST_SECS).exp())) as f32
-            }
-            _ => e as f32,
-        }
-    }
-
     /// How far an outline that starts tracing `delay` seconds after the open
     /// has got, 0 to 1.
     fn open(&self, t: f64, delay: f64) -> f32 {
@@ -237,22 +222,11 @@ impl Hud {
         Contour::polyline(&[self.polar(r0, deg), self.polar(r1, deg)], false)
     }
 
+    /// The parts of the ring that do not turn: the disc, the outer arcs,
+    /// the thin rings, the meters, the bars, the mic ring and the done rings.
     fn draw(&self, t: f64, p: &mut Painter) {
-        let dim = self
-            .cancelled_at
-            .map_or(1.0, |c| 1.0 - 0.65 * ease_out((t - c - 0.1) / 0.3));
-        if dim < 1.0 {
-            p.layer(Affine::IDENTITY, dim, |p| self.draw_lit(t, p));
-        } else {
-            self.draw_lit(t, p);
-        }
-    }
-
-    fn draw_lit(&self, t: f64, p: &mut Painter) {
         let k = self.k;
-        let turned = self.turned(t);
         let done = self.final_at.map(|f| ease_out((t - f) / CLOSE_SECS));
-        let resting = self.rest_at.map_or(0.0, |r| ease_out((t - r) / 0.4) as f32);
         // The dark disc behind the ring.
         let o = self.open(t, 0.0);
         p.shape(ShapeInstance::circle(
@@ -284,36 +258,14 @@ impl Hud {
             );
         }
 
-        // The tick ring turns backwards through two fixed windows.
+        // The bright ticks at 12 and 6 o'clock, and the thin full rings.
         let o = self.open(t, 0.05);
-        let tick_turn = -3.0 * turned;
-        let window = |deg: f32| {
-            let d = deg.rem_euclid(360.0);
-            let inside = |a: f32, b: f32| ((d - a).min(b - d) / 6.0).clamp(0.0, 1.0);
-            inside(220.0, 320.0).max(inside(40.0, 140.0))
-        };
-        for i in 0..120 {
-            let deg = i as f32 * 3.0 + tick_turn;
-            let w = window(deg);
-            if w <= 0.0 {
-                continue;
-            }
-            let long = i % 5 == 0;
-            let r0 = if long { 204.0 } else { 208.0 };
-            let a = w * o * if long { 0.85 } else { 0.55 };
-            p.stroke(
-                &self.spoke(r0, 215.0, deg),
-                &StrokeStyle::solid(1.1 * k, hex(MID, a)),
-            );
-        }
         for deg in [-90.0, 90.0] {
             p.stroke(
                 &trace(self.spoke(199.0, 219.0, deg), o),
                 &glow(3.0, CYAN, 1.0),
             );
         }
-
-        // Thin full rings.
         let o = self.open(t, 0.1);
         p.stroke(
             &trace(make::ring(self.centre, 188.0 * k), o),
@@ -323,36 +275,6 @@ impl Hud {
             &trace(make::ring(self.centre, 165.0 * k), o),
             &StrokeStyle::solid(1.0 * k, hex(DIM, 0.8)),
         );
-
-        // Bright segments, each turning at its own speed.
-        let o = self.open(t, 0.15);
-        let segments: [(f32, f32, f32, f32, f32, u32); 5] = [
-            (180.0, -73.0, -36.0, 5.0, 12.0, CYAN),
-            (165.0, 102.0, 162.0, 3.0, -8.0, CYAN),
-            (190.0, 29.0, 45.0, 6.0, 12.0, CYAN),
-            (188.0, -118.0, -90.0, 2.0, 5.0, BRIGHT),
-            (170.0, -8.0, 14.0, 2.0, -8.0, CYAN),
-        ];
-        for (r, a, b, w, speed, c) in segments {
-            let turn = speed * turned;
-            let alpha = 1.0 - 0.35 * resting;
-            p.stroke(
-                &trace(self.arc(r, a + turn, b + turn), o),
-                &StrokeStyle::solid(w * k, hex(c, alpha)).glow(5.0 * k),
-            );
-        }
-
-        // Dotted ring.
-        let o = self.open(t, 0.2);
-        let dot_turn = 6.0 * turned;
-        for i in 0..90 {
-            let at = self.polar(142.0, i as f32 * 4.0 + dot_turn);
-            p.shape(ShapeInstance::circle(
-                at,
-                0.9 * k,
-                Paint::solid(hex(MID, 0.7 * o)),
-            ));
-        }
 
         // The level meter on the left, lit from the bottom up, and its quiet
         // twin on the right.
@@ -436,6 +358,103 @@ impl Hud {
                 );
             }
         }
+    }
+
+    /// One of the parts that turn, drawn unturned round `self.centre`; the
+    /// element it sits in turns it.
+    fn draw_part(&self, part: Part, t: f64, p: &mut Painter) {
+        let k = self.k;
+        let trace = |c: Contour, o: f32| -> Contour {
+            let len = c.length();
+            c.trim(0.0, len * o)
+        };
+        match part {
+            Part::Ticks => {
+                // Ticks on the top and bottom arcs, every fifth one longer,
+                // fading out at the ends of each arc.
+                let o = self.open(t, 0.05);
+                for i in 0..120 {
+                    let deg = i as f32 * 3.0;
+                    let d = deg.rem_euclid(360.0);
+                    let inside = |a: f32, b: f32| ((d - a).min(b - d) / 6.0).clamp(0.0, 1.0);
+                    let w = inside(220.0, 320.0).max(inside(40.0, 140.0));
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let long = i % 5 == 0;
+                    let r0 = if long { 204.0 } else { 208.0 };
+                    let a = w * o * if long { 0.85 } else { 0.55 };
+                    p.stroke(
+                        &self.spoke(r0, 215.0, deg),
+                        &StrokeStyle::solid(1.1 * k, hex(MID, a)),
+                    );
+                }
+            }
+            Part::Segments(speed) => {
+                let o = self.open(t, 0.15);
+                for (r, a, b, w, s, c) in SEGMENTS {
+                    if s == speed {
+                        p.stroke(
+                            &trace(self.arc(r, a, b), o),
+                            &StrokeStyle::solid(w * k, hex(c, 1.0)).glow(5.0 * k),
+                        );
+                    }
+                }
+            }
+            Part::Dots => {
+                let o = self.open(t, 0.2);
+                for i in 0..90 {
+                    let at = self.polar(142.0, i as f32 * 4.0);
+                    p.shape(ShapeInstance::circle(
+                        at,
+                        0.9 * k,
+                        Paint::solid(hex(MID, 0.7 * o)),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// A part of the ring that turns as one piece.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Part {
+    /// The tick ring, turning backwards.
+    Ticks,
+    /// The bright segments that turn at this many degrees a second.
+    Segments(i32),
+    /// The dotted ring.
+    Dots,
+}
+
+/// The parts that turn and their speeds in degrees a second; clockwise is
+/// positive.
+const SPINNERS: [(Part, f64); 5] = [
+    (Part::Ticks, -3.0),
+    (Part::Segments(12), 12.0),
+    (Part::Segments(-8), -8.0),
+    (Part::Segments(5), 5.0),
+    (Part::Dots, 6.0),
+];
+
+/// Bright segments: radius, from and to in degrees, width, the speed of the
+/// part they turn with, colour.
+const SEGMENTS: [(f32, f32, f32, f32, i32, u32); 5] = [
+    (180.0, -73.0, -36.0, 5.0, 12, CYAN),
+    (165.0, 102.0, 162.0, 3.0, -8, CYAN),
+    (190.0, 29.0, 45.0, 6.0, 12, CYAN),
+    (188.0, -118.0, -90.0, 2.0, 5, BRIGHT),
+    (170.0, -8.0, 14.0, 2.0, -8, CYAN),
+];
+
+/// A steady turn at `deg_per_s`, as an ambient loop on rotation. It comes to
+/// rest by itself when the view stops declaring it, and holds still under
+/// reduced motion.
+fn spin(deg_per_s: f64) -> Loop {
+    let turn = Loop::spin(360.0 / deg_per_s.abs());
+    Loop {
+        amp: turn.amp.copysign(deg_per_s),
+        ..turn
     }
 }
 
@@ -567,6 +586,15 @@ pub(crate) fn text_style(look: &Look) -> TextStyle {
     TextStyle::new(fonts(look).text, TEXT_PX * k, LINE * k)
 }
 
+/// The centre of the newest text line below the surface's top with `lines`
+/// lines: the frame grows downward from under the ring, so it moves down a
+/// line pitch per line. The reading-line anchor shifts the whole HUD to
+/// make up for it, so on screen the HUD rises instead.
+pub(crate) fn newest_line_centre(look: &Look, lines: u32) -> f32 {
+    let g = Geo::new(look);
+    g.frame_top + (FRAME_PAD_TOP + (lines.max(1) as f32 - 0.5) * LINE) * g.k
+}
+
 /// Width the transcript wraps at: the frame less its side meters and some air.
 pub(crate) fn text_width(look: &Look) -> f32 {
     look.width - 2.0 * 64.0 * look.width / CONCEPT_W
@@ -598,7 +626,6 @@ impl Popup {
             let mut lines = self.jarvis_lines(&words[start.min(words.len())..]);
             let keep = lines.len().saturating_sub(swiss::MAX_LINES as usize);
             lines.drain(..keep);
-            self.jarvis.rows = self.jarvis.rows.max(lines.len() as u32).max(1);
             self.jarvis.lines = lines;
             self.jarvis.words = words;
         }
@@ -652,7 +679,6 @@ impl Popup {
             shown_at: self.shown_at,
             rest_at,
             final_at: self.extra.final_at,
-            cancelled_at: self.jarvis.ended_at,
             loading: status.loading,
             level: self.held_level(),
             wave: self.wave.clone(),
@@ -660,15 +686,49 @@ impl Popup {
             rate: FRAME_HZ as f32,
         };
         let until = self.jarvis_until();
+        // The turning parts each sit in a square round the ring centre and
+        // turn on an ambient loop while listening. Once the recording stops
+        // the view leaves the loops out and they come to rest; under reduced
+        // motion they hold still.
+        let live = rest_at.is_none();
+        let half = 222.0 * g.k;
+        let local = Hud {
+            centre: Point::new(half, half),
+            ..hud.clone()
+        };
+        let mut layer = at(Element::layer("ring-layer"), 0.0, 0.0)
+            .size(size.w, size.h)
+            // A stop with no final pass dims the HUD.
+            .opacity(if self.jarvis.ended_at.is_some() {
+                0.35
+            } else {
+                1.0
+            });
+        for (i, (part, speed)) in SPINNERS.into_iter().enumerate() {
+            let local = local.clone();
+            let mut e = at(
+                Element::canvas(format!("spin{i}"), self.shown_at + 1.0, move |t, _, p| {
+                    local.draw_part(part, t, p)
+                }),
+                g.cx - half,
+                g.cy - half,
+            )
+            .size(2.0 * half, 2.0 * half);
+            if live {
+                e = e.ambient(LoopProp::Rotation, spin(speed));
+            }
+            if matches!(part, Part::Segments(_)) && !live {
+                e = e.opacity(0.65);
+            }
+            layer = layer.child(e);
+        }
         let ring = at(
             Element::canvas("ring", until, move |t, _, p| hud.draw(t, p)),
             0.0,
             0.0,
         )
         .size(size.w, size.h);
-        let mut layer = at(Element::layer("ring-layer"), 0.0, 0.0)
-            .size(size.w, size.h)
-            .child(ring);
+        layer = layer.child(ring);
         if self.shows_progress(status) && self.extra.final_at.is_none() {
             layer = layer.child(self.jarvis_progress(g));
         }
@@ -886,7 +946,7 @@ impl Popup {
     /// The chamfered frame with the centred transcript.
     fn jarvis_frame(&self, g: &Geo, status: &StatusLine) -> Element<Msg> {
         let k = g.k;
-        let rows = self.jarvis.rows.max(1);
+        let rows = self.lines.max(1);
         let h = g.frame_h(rows);
         let shown_at = self.shown_at;
         let frame = at(
@@ -907,7 +967,9 @@ impl Popup {
             .margin_edges(FRAME_PAD_TOP * k, 0.0, 0.0, 0.0);
         // Each line is keyed by its first word, so when the top line leaves
         // the others keep their nodes and move up.
-        for (words, width) in &self.jarvis.lines {
+        // The popup counts the lines it has room for; show that many.
+        let skip = self.jarvis.lines.len().saturating_sub(rows as usize);
+        for (words, width) in self.jarvis.lines.iter().skip(skip) {
             let key = words.first().map_or(0, |w| w.id);
             let w = width.ceil() + 2.0;
             let line = Element::layer(format!("line{key}"))
@@ -1037,7 +1099,7 @@ impl Popup {
             .child(self.jarvis_pill_icon(k, status))
             .child(label)
             .child(detail_el);
-        let top = g.frame_top + g.frame_h(self.jarvis.rows.max(1)) + PILL_GAP * k;
+        let top = g.frame_top + g.frame_h(self.lines.max(1)) + PILL_GAP * k;
         at(Element::column("pill-box"), 0.0, top)
             .width(g.w + 2.0 * MARGIN)
             .align_items(AlignItems::CENTER)
@@ -1096,24 +1158,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_rings_turn_while_listening_and_come_to_rest_after_the_stop() {
-        let hud = Hud {
-            k: 1.0,
-            centre: Point::new(0.0, 0.0),
-            shown_at: 1.0,
-            rest_at: Some(3.0),
-            final_at: None,
-            cancelled_at: None,
-            loading: false,
-            level: 0.0,
-            wave: Arc::from([]),
-            newest_at: 0.0,
-            rate: 100.0,
-        };
-        assert_eq!(hud.turned(2.0), 1.0);
-        let late = hud.turned(30.0);
-        assert!((late - (2.0 + REST_SECS as f32)).abs() < 1e-3);
-        assert!(hud.turned(3.5) < 2.5);
+    fn a_spin_turns_once_per_period_in_its_own_direction() {
+        let back = spin(-8.0);
+        assert!((back.period - 45.0).abs() < 1e-9);
+        assert!(back.amp < 0.0);
+        assert!((spin(12.0).amp - std::f64::consts::TAU).abs() < 1e-9);
     }
 
     #[test]
@@ -1124,7 +1173,6 @@ mod tests {
             shown_at: 0.0,
             rest_at: None,
             final_at: None,
-            cancelled_at: None,
             loading: false,
             level: 0.0,
             wave: Arc::from([0.0, 0.0, 1.0, 0.5]),
