@@ -1313,6 +1313,13 @@ impl App for Popup {
         }
     }
 
+    fn surfaces(&self, _: &vo::Tokens) -> Vec<vo::SurfaceView<Msg>> {
+        if self.look.theme == OsdTheme::Captions {
+            return self.captions_surfaces();
+        }
+        Vec::new()
+    }
+
     fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
         let look = self.look_view(tokens);
         // The shift and the taller panel come in the same frame, on a

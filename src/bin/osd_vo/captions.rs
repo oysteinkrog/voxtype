@@ -6,9 +6,10 @@
 //! engine is unsure of gets a thin blue underline, and a short progress line
 //! with a small status shows under the text while the final pass runs.
 //!
-//! The mock-up also lights the whole screen edge while recording. That
-//! needs a surface the size of the output, which the overlay host does not
-//! offer yet, so the look keeps to the subtitle band.
+//! The mock-up also lights the whole screen edge while recording. That is
+//! a second surface, fullscreen and click-through, under the band: a thin
+//! blue line round the output whose glow follows the voice. It fades out
+//! when the mic stops and the surface closes.
 //!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
@@ -32,6 +33,8 @@ const HINT: u32 = 0x9aa3bb;
 const BLUE: u32 = 0x3b82ff;
 const GREEN: u32 = 0x46d98a;
 const BACKDROP: u32 = 0x04071a;
+/// The screen-edge light, between the mock-up's blue and violet sides.
+const EDGE: u32 = 0x5a6bff;
 
 fn hex(c: u32) -> Color {
     Color::hex(c, 1.0)
@@ -331,6 +334,40 @@ impl Popup {
             return root;
         }
         root.child(self.captions_panel(size, 0.0, 0.0))
+    }
+
+    /// The screen-edge glow while the mic is live: a fullscreen,
+    /// click-through surface under the band. Empty once the mic stops, so
+    /// the surface fades out and closes.
+    pub(crate) fn captions_surfaces(&self) -> Vec<vo::SurfaceView<Msg>> {
+        if self.closing || self.captions.mode != Some(Mode::Listening) {
+            return Vec::new();
+        }
+        // The loudest of the last 0.15 s, so the glow breathes with the
+        // syllables rather than flickering with each frame.
+        let n = self.wave.len();
+        let level = self.wave[n.saturating_sub(15)..]
+            .iter()
+            .fold(0.0f32, |a, &b| a.max(b))
+            .clamp(0.0, 1.0);
+        let spec = OverlaySpec {
+            // A guess until the compositor gives the output's size.
+            size: Size::new(1920.0, 1080.0),
+            placement: Placement::Fullscreen,
+            input: InputMode::None,
+            layer: vo::Stack::Top,
+            app_id: "voxtype-osd-edge".into(),
+            ..OverlaySpec::default()
+        };
+        let edge = Element::panel("edge")
+            .grow(1.0)
+            .stroke(hex(EDGE).fade(0.35 + 0.35 * level), 1.5)
+            .glow(hex(EDGE).fade(0.7), 18.0 + 30.0 * level, 0.2 + 0.5 * level)
+            .motion(Prop::Opacity, Spring::critical_to_98(0.3));
+        let root = Element::panel("edge-root")
+            .presence(Transition::fade(), Transition::fade())
+            .child(edge);
+        vec![vo::SurfaceView::new("edge", spec, root)]
     }
 
     fn captions_panel(&self, size: Size, x: f32, y: f32) -> Element<Msg> {
