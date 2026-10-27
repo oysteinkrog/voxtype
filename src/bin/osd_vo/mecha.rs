@@ -36,8 +36,8 @@ pub(crate) const MAX_LINES: u32 = 3;
 // Transcript box, in concept units.
 const TEXT_X: f32 = 140.0;
 const TEXT_Y: f32 = 312.0;
-const TEXT_W: f32 = 760.0;
-const TEXT_PX: f32 = 62.0;
+const TEXT_W: f32 = 800.0;
+const TEXT_PX: f32 = 56.0;
 const TEXT_LINE: f32 = 65.0;
 
 // Waveform box.
@@ -46,15 +46,15 @@ const WAVE_X1: f32 = 896.0;
 const WAVE_CY: f32 = 206.0;
 const WAVE_HALF: f32 = 86.0;
 const BAR_PITCH: f32 = 6.4;
-const BAR_W: f32 = 3.8;
+const BAR_W: f32 = 4.4;
 
 const ORANGE: u32 = 0xff7417;
 const DEEP: u32 = 0xff4a00;
-const YELLOW: u32 = 0xffc23a;
+const YELLOW: u32 = 0xffb81c;
 const TEXT: u32 = 0xff8a24;
 const HINT: u32 = 0xffc9a0;
 const FILL: u32 = 0x090504;
-const PANEL: u32 = 0x0e0806;
+const PANEL: u32 = 0x070403;
 const RED: u32 = 0xff2a1e;
 
 /// The fonts of the look.
@@ -470,17 +470,17 @@ impl Snap {
         } else {
             1.0
         };
-        let line = |w: f32| StrokeStyle::solid(w, accent).glow(4.0 * flash);
+        let line = |w: f32| StrokeStyle::solid(w, accent).glow(1.6 * flash);
         let fill_k = ease_out(ramp(u, 0.12, 0.40));
 
         // The body: fill, then the outline drawing itself on.
         let outer = ring(&OUTER);
         p.fill([&poly(&OUTER)], &StrokeStyle::solid(1.0, hex(FILL).fade(0.94 * fill_k)));
         let k = ease_out(ramp(u, 0.0, 0.36));
-        p.stroke(&outer.trim(0.0, k * outer.length()), &line(2.5));
+        p.stroke(&outer.trim(0.0, k * outer.length()), &line(3.2));
 
         // The wave panel's grid, crosshairs and chevrons.
-        let dim = accent.fade(0.16 * fill_k);
+        let dim = accent.fade(0.09 * fill_k);
         for x in [245.0, 478.0, 712.0] {
             p.stroke(&poly(&[(x, 120.0), (x, 292.0)]), &StrokeStyle::solid(1.0, dim));
         }
@@ -503,7 +503,7 @@ impl Snap {
         let panel = ring(&TEXT_PANEL);
         p.fill([&poly(&TEXT_PANEL)], &StrokeStyle::solid(1.0, hex(PANEL).fade(fill_k)));
         let k = ease_out(ramp(u, 0.06, 0.42));
-        p.stroke(&panel.trim(0.0, k * panel.length()), &line(2.0));
+        p.stroke(&panel.trim(0.0, k * panel.length()), &line(2.8));
 
         // Notches, side bars and slashes slide in from outside.
         let slide = (1.0 - ease_back(ramp(u, 0.26, 0.50))) * 24.0;
@@ -532,19 +532,9 @@ impl Snap {
         let tb = ring(&TITLE_BAR);
         p.fill([&poly(&TITLE_BAR)], &StrokeStyle::solid(1.0, hex(FILL).fade(fill_k)));
         let k = ease_out(ramp(u, 0.10, 0.40));
-        p.stroke(&tb.trim(0.0, k * tb.length()), &line(2.5));
+        p.stroke(&tb.trim(0.0, k * tb.length()), &line(3.2));
         self.plate(p, &EMBLEM, (172.0, 80.0), ramp(u, 0.18, 0.42), accent, flash);
         self.plate(p, &BADGE, (858.0, 72.0), ramp(u, 0.24, 0.48), accent, flash);
-        // The emblem's mark: three bars rising, like a level.
-        let mk = ease_out(ramp(u, 0.3, 0.6));
-        for (i, h) in [16.0, 28.0, 40.0].iter().enumerate() {
-            let x = 198.0 + i as f32 * 12.0;
-            let h = h * mk;
-            p.fill(
-                [&poly(&[(x + 6.0, 62.0 - h), (x + 14.0, 62.0 - h), (x + 8.0, 62.0), (x, 62.0)])],
-                &StrokeStyle::solid(1.0, accent),
-            );
-        }
         // The badge's rule.
         let rk = ease_out(ramp(u, 0.4, 0.6));
         p.stroke(
@@ -564,7 +554,7 @@ impl Snap {
         let pill = ring(&PILL);
         p.fill([&poly(&PILL)], &StrokeStyle::solid(1.0, hex(FILL).fade(fill_k)));
         let k = ease_out(ramp(u, 0.16, 0.46));
-        p.stroke(&pill.trim(0.0, k * pill.length()), &line(2.0));
+        p.stroke(&pill.trim(0.0, k * pill.length()), &line(2.8));
         let mh = ring(&MIC_HEX);
         p.stroke(&mh.trim(0.0, k * mh.length()), &StrokeStyle::solid(1.2, accent.fade(0.7)));
         for j in [
@@ -622,7 +612,7 @@ impl Snap {
             .then(&Affine::translate(c.0, c.1));
         p.layer(m, ease_out(ramp(k as f64, 0.0, 0.4)), |p| {
             p.fill([&poly(pts)], &StrokeStyle::solid(1.0, hex(FILL)));
-            p.stroke(&ring(pts), &StrokeStyle::solid(2.5, accent).glow(4.0 * flash));
+            p.stroke(&ring(pts), &StrokeStyle::solid(3.2, accent).glow(1.6 * flash));
         });
     }
 
@@ -701,11 +691,11 @@ impl Snap {
             }
             let xn = (x - WAVE_X0) / w;
             let taper = (std::f32::consts::PI * xn).sin().max(0.0).powf(0.7);
-            let spike = 0.45 + 0.55 * noise(j);
-            let f = (l.min(1.2).powf(0.8) * spike * taper * amp * settle).min(1.0);
+            let spike = 0.2 + 0.8 * noise(j).powf(1.4);
+            let f = (1.4 * l.min(1.2).powf(0.6) * spike * taper * amp * settle).min(1.0);
             let h = 1.4 + WAVE_HALF * f;
-            let mut core = mix(hex(DEEP), hex(YELLOW), f.powf(0.6));
-            let mut tip = mix(hex(DEEP), hex(ORANGE), 0.4 + 0.6 * f);
+            let mut core = mix(hex(DEEP), hex(YELLOW), f.powf(1.1));
+            let mut tip = mix(hex(0xc42800), hex(ORANGE), f);
             if self.phase == Phase::Finishing {
                 // Frozen and dim, brighter behind the progress.
                 let behind = self.fraction.is_some_and(|fr| xn <= fr);
@@ -715,7 +705,7 @@ impl Snap {
             }
             let r = Rect::new(x - BAR_W / 2.0, WAVE_CY - h, BAR_W, 2.0 * h);
             if f > 0.08 && !frozen {
-                p.shape(ShapeInstance::rrect(RRect::new(r, BAR_W / 2.0), Paint::glow(core, 5.0, 0.35 * f)));
+                p.shape(ShapeInstance::rrect(RRect::new(r, BAR_W / 2.0), Paint::glow(core, 3.0, 0.25 * f)));
             }
             p.shape(ShapeInstance::rrect(
                 RRect::new(Rect::new(r.x, r.y, r.w, h), BAR_W / 2.0),
@@ -730,7 +720,7 @@ impl Snap {
             let k = ((t - self.phase_at) / 1.2).fract() as f32;
             let x = WAVE_X0 + k * w;
             let r = Rect::new(x - 1.0, WAVE_CY - WAVE_HALF, 2.0, 2.0 * WAVE_HALF);
-            p.shape(ShapeInstance::rrect(RRect::new(r, 1.0), Paint::glow(hex(YELLOW), 8.0, 0.8)));
+            p.shape(ShapeInstance::rrect(RRect::new(r, 1.0), Paint::glow(hex(YELLOW), 3.0, 0.6)));
             p.shape(ShapeInstance::rrect(RRect::new(r, 1.0), Paint::solid(hex(YELLOW))));
         }
         if self.phase == Phase::Done {
@@ -738,8 +728,8 @@ impl Snap {
             let half = k * w / 2.0;
             let c = (WAVE_X0 + WAVE_X1) / 2.0;
             let r = Rect::new(c - half, WAVE_CY - 1.5, 2.0 * half, 3.0);
-            p.shape(ShapeInstance::rrect(RRect::new(r, 1.5), Paint::glow(hex(YELLOW), 8.0, 0.9)));
-            p.shape(ShapeInstance::rrect(RRect::new(r, 1.5), Paint::solid(hex(YELLOW))));
+            p.shape(ShapeInstance::rrect(RRect::new(r, 1.5), Paint::glow(hex(DEEP), 5.0, 0.8)));
+            p.shape(ShapeInstance::rrect(RRect::new(r, 1.5), Paint::solid(hex(0xff9a30))));
         }
     }
 
@@ -753,7 +743,7 @@ impl Snap {
         } else if self.phase.ended() || self.phase == Phase::Loading {
             0
         } else {
-            (self.level(t) * 11.0).round() as i32
+            (14.0 * self.level(t).min(1.2).powf(0.6)).round() as i32
         }
         .min(10);
         for i in 0..10 {
@@ -786,7 +776,7 @@ impl Snap {
         if k <= 0.0 {
             return;
         }
-        let size = 30.0 * (0.6 + 0.4 * ease_back(k));
+        let size = 36.0 * (0.6 + 0.4 * ease_back(k));
         let c = (335.0, 575.0);
         let m = Affine::translate(-12.0, -12.0)
             .then(&Affine::scale(size / 24.0))
@@ -794,7 +784,7 @@ impl Snap {
         let color = if self.phase == Phase::Loading { accent.fade(0.5) } else { accent };
         let o = icon_outline(self.icon);
         p.layer(m, ease_out(k), |p| {
-            p.outline(&o, &StrokeStyle::solid(2.4, color).glow(2.0));
+            p.outline(&o, &StrokeStyle::solid(2.8, color).glow(1.5));
         });
     }
 }
@@ -807,8 +797,8 @@ fn draw_strikes(t: f64, at: f64, widths: &[f32], rect: Rect, p: &mut Painter) {
         let k = ease_out(ramp(t, at + 0.04 * i as f64, at + 0.04 * i as f64 + 0.15));
         let y = rect.y + (i as f32 + 0.58) * TEXT_LINE * s;
         let x0 = rect.x - 6.0 * s;
-        let r = Rect::new(x0, y - 2.5 * s, (w + 12.0 * s) * k, 5.0 * s);
-        p.shape(ShapeInstance::rrect(RRect::new(r, 0.0), Paint::glow(hex(RED), 4.0 * s, 0.6)));
+        let r = Rect::new(x0, y - 2.0 * s, (w + 12.0 * s) * k, 4.0 * s);
+        p.shape(ShapeInstance::rrect(RRect::new(r, 0.0), Paint::glow(hex(RED), 1.5 * s, 0.4)));
         p.shape(ShapeInstance::rrect(RRect::new(r, 0.0), Paint::solid(hex(RED))));
     }
 }
@@ -894,11 +884,11 @@ impl Popup {
             lb
         };
         let mut labels = vec![
-            label("VX", f.text, 52.0, 102.0, 10.0, ORANGE, 0.30),
-            label("VOICE UNIT 01", f.label, 11.0, 104.0, 70.0, ORANGE, 0.36),
-            label("SPEECH TO TEXT", f.small, 9.0, 104.0, 92.0, ORANGE, 0.42),
-            label("ALL CHANNELS OPEN", f.small, 9.0, 104.0, 104.0, ORANGE, 0.46),
-            label("UNIT READY.", f.small, 9.0, 104.0, 116.0, ORANGE, 0.50),
+            centred(label("VX", f.text, 66.0, 172.0, -2.0, ORANGE, 0.30)),
+            centred(label("VOICE UNIT 01", f.label, 12.5, 172.0, 66.0, ORANGE, 0.36)),
+            label("SPEECH TO TEXT", f.small, 9.0, 112.0, 88.0, ORANGE, 0.42),
+            label("ALL CHANNELS OPEN", f.small, 9.0, 112.0, 99.0, ORANGE, 0.46),
+            label("UNIT READY.", f.small, 9.0, 112.0, 110.0, ORANGE, 0.50),
             Label {
                 track: 26.0,
                 per_char: 0.02,
@@ -913,6 +903,9 @@ impl Popup {
             label("CONTINUOUS OPERATION", f.small, 9.5, 124.0, 585.0, ORANGE, 0.52),
             label("VOX-01", f.label, 18.0, 814.0, 556.0, ORANGE, 0.50),
         ];
+        if phase == Phase::Loading && self.shown.is_empty() {
+            labels.push(label("AWAITING VOICE INPUT", f.text, 24.0, TEXT_X, TEXT_Y, 0x9a4a14, 0.5));
+        }
         let count = format!("{:03} WORDS", self.word_count);
         labels.push(Label {
             per_char: 0.0,
@@ -937,9 +930,9 @@ impl Popup {
             centred(Label {
                 per_char: 0.04,
                 cursor: false,
-                ..label(kanji, f.cjk, 21.0, 858.0, 22.0, ORANGE, badge_at)
+                ..label(kanji, f.cjk, 24.0, 858.0, 18.0, ORANGE, badge_at)
             }),
-            centred(label(english, f.label, 13.0, 858.0, 54.0, ORANGE, badge_at + 0.05)),
+            centred(label(english, f.label, 14.0, 858.0, 52.0, ORANGE, badge_at + 0.05)),
         ];
         if phase == Phase::Cancelled {
             for b in &mut badge {
@@ -950,21 +943,27 @@ impl Popup {
         // The status line.
         let (state, detail) = match phase {
             Phase::Cancelled => ("Cancelled".to_string(), String::new()),
-            Phase::Done => ("Done".to_string(), "text typed".to_string()),
+            Phase::Done => {
+                let app = self.files.live.as_ref().and_then(|d| d.target.as_ref());
+                match app {
+                    Some(a) => (format!("Typed into {}", a.app), String::new()),
+                    None => ("Done".to_string(), "text typed".to_string()),
+                }
+            }
             _ => (
                 status.state.clone(),
                 status.detail.trim_start_matches([' ', '·']).trim().to_string(),
             ),
         };
         let status_at = if phase == Phase::Listening { 0.44 } else { phase_at - self.shown_at };
-        let state_l = label(&state, f.label, 18.0, 382.0, 563.0, ORANGE, status_at);
+        let state_l = label(&state, f.label, 20.0, 382.0, 561.0, ORANGE, status_at);
         let mut status_labels = vec![];
         let mut x = 382.0 + state_l.width();
         status_labels.push(state_l);
         if !detail.is_empty() {
-            status_labels.push(label("·", f.label, 18.0, x + 10.0, 563.0, ORANGE, status_at + 0.1));
-            x += 30.0;
-            status_labels.push(label(&detail, f.label, 15.0, x, 566.0, HINT, status_at + 0.12));
+            status_labels.push(label("·", f.label, 20.0, x + 12.0, 561.0, ORANGE, status_at + 0.1));
+            x += 34.0;
+            status_labels.push(label(&detail, f.label, 16.0, x, 564.0, HINT, status_at + 0.12));
         }
         let icon = match phase {
             Phase::Loading | Phase::Listening => Icon::Mic,
@@ -1006,7 +1005,7 @@ impl Popup {
         let words = Element::live_text("words", &self.shown)
             .text_style(text_style(l))
             .color(text_color)
-            .text_halo(hex(DEEP).fade(0.45), 6.0 * s)
+            .text_halo(hex(DEEP).fade(0.25), 2.0 * s)
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(Transition::fade().offset(10.0 * s, 0.0))
