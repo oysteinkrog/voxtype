@@ -4000,6 +4000,27 @@ more GPU time than `swiss` and runs frames all the time while you speak, so
 it suits a desktop more than a laptop on battery. Its colors are fixed and
 do not follow the Plasma scheme.
 
+Four more looks follow design mock-ups. Their colors are fixed and do not
+follow the Plasma scheme:
+
+- `theme = "swissfi"`: off-black and off-white with one orange accent,
+  large words, a mirrored waveform of thin ticks with an orange centre, and
+  a clock and word count in small mono digits that roll.
+- `theme = "dotmatrix"`: white dots on black. The waveform is a grid of
+  dots that lights with each syllable, the status is set in a dot-matrix
+  font, and a red dot shows while recording. It needs the Doto font (OFL,
+  from Google Fonts); without it fontconfig picks another font.
+- `theme = "palette"`: a dark card like a command palette, with chips for
+  the engine, the output and the latency, a blue to violet bar waveform, a
+  caret after the last word, and a soft wavy underline under words the
+  engine is unsure of.
+- `theme = "mission"`: a mission-control panel with tiles for the model,
+  GPU memory, latency, microphone and elapsed time, a transcript tile with
+  orange corner brackets and a waveform strip with a level meter. It is
+  wider than the other looks: 760 px at the default `width_px = 600`. GPU
+  memory comes from the amdgpu driver or `nvidia-smi`, read at most every
+  3 s while the popup shows; without either the tile reads "n/a".
+
 ```toml
 [osd]
 frontend = "vo"
@@ -4007,7 +4028,8 @@ theme = "type"    # or "showcase"
 ```
 
 If `voxtype-osd-vo` is not installed, the launcher falls back to the GTK4
-popup. Options: `--theme swiss|showcase|type` (also `VOXTYPE_OSD_THEME`),
+popup. Options: `--theme swiss|showcase|type|swissfi|dotmatrix|palette|mission`
+(also `VOXTYPE_OSD_THEME`),
 `--gpu-first-frame` (draw only on the GPU),
 `--diag` (print startup timing and memory to stderr), and
 `--offline DIR` (render a scripted dictation to PNG frames and exit;
