@@ -18,6 +18,7 @@ use super::*;
 
 use std::sync::OnceLock;
 
+use std::f32::consts::TAU;
 use vo::scene::ambient::{Loop, LoopProp};
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
@@ -26,6 +27,7 @@ use vo::scene::path::{icons, make, Contour, Morph, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
+use vo::scene::{Bands, Spectrum, Ticks};
 
 /// Width of the text frame in the concept, in concept pixels.
 const CONCEPT_W: f32 = 677.0;
@@ -169,7 +171,6 @@ struct Hud {
     /// When the rings start to come to rest.
     rest_at: Option<f64>,
     final_at: Option<f64>,
-    loading: bool,
     /// The level for the meter, 0 to 1.
     level: f32,
     wave: Arc<[f32]>,
@@ -223,10 +224,9 @@ impl Hud {
     }
 
     /// The parts of the ring that do not turn: the disc, the outer arcs,
-    /// the thin rings, the meters, the bars, the mic ring and the done rings.
+    /// the thin rings, the meters, the mic ring and the done rings.
     fn draw(&self, t: f64, p: &mut Painter) {
         let k = self.k;
-        let done = self.final_at.map(|f| ease_out((t - f) / CLOSE_SECS));
         // The dark disc behind the ring.
         let o = self.open(t, 0.0);
         p.shape(ShapeInstance::circle(
@@ -296,51 +296,6 @@ impl Hud {
             );
         }
 
-        // Radial bars: the last moments of the level round the ring, the
-        // newest at the top. A smooth spectral shape drifts round the ring
-        // and each bar has a little grain of its own, so the ring reads as
-        // a spectrum rather than two mirrored waveforms.
-        let o = self.open(t, 0.25);
-        let fade = self
-            .rest_at
-            .map_or(1.0, |r| (-((t - r).max(0.0)) / 0.15).exp() as f32);
-        let bars_alpha = o * done.map_or(1.0, |d| 1.0 - d);
-        if bars_alpha > 0.0 {
-            let sweep = (t * 360.0) as f32;
-            let tf = t as f32;
-            for side in [1.0f32, -1.0] {
-                for j in 0..HALF_BARS {
-                    let deg = -90.0 + side * (j as f32 + 0.5) * 180.0 / HALF_BARS as f32;
-                    let a = deg.to_radians();
-                    let age = j as f32 / HALF_BARS as f32 * HISTORY_SECS;
-                    let seed = (j as f32 * 12.9898 + side * 78.233).sin() * 43758.547;
-                    let grain = 0.55 + 0.45 * seed.fract().abs();
-                    let shape = 0.55
-                        + 0.45
-                            * (0.5 + 0.5 * (2.0 * a + 0.9 * tf).sin())
-                            * (0.5 + 0.5 * (5.0 * a - 1.7 * tf + side).sin());
-                    let v = self.level_at(t, age) * fade;
-                    let len = 3.0 + 92.0 * (v * 1.5 * shape * grain).min(1.0);
-                    let mut alpha = 0.3 + 0.7 * (len / 40.0).min(1.0);
-                    if self.loading {
-                        // A bright sweep runs round the bars.
-                        let d = ((deg - sweep + 90.0).rem_euclid(360.0) - 180.0).abs();
-                        alpha = alpha.max((-(180.0 - d).powi(2) / 400.0).exp());
-                    }
-                    let c = if self.rest_at.is_some() {
-                        alpha *= 0.4;
-                        SLATE
-                    } else {
-                        CYAN
-                    };
-                    p.stroke(
-                        &self.spoke(62.0, 62.0 + len, deg),
-                        &StrokeStyle::solid(1.8 * k, hex(c, alpha * bars_alpha)).glow(0.8 * k),
-                    );
-                }
-            }
-        }
-
         // The ring round the microphone.
         let o = self.open(t, 0.1);
         p.stroke(
@@ -360,85 +315,53 @@ impl Hud {
         }
     }
 
-    /// One of the parts that turn, drawn unturned round `self.centre`; the
-    /// element it sits in turns it.
-    fn draw_part(&self, part: Part, t: f64, p: &mut Painter) {
-        let k = self.k;
-        let trace = |c: Contour, o: f32| -> Contour {
-            let len = c.length();
-            c.trim(0.0, len * o)
-        };
-        match part {
-            Part::Ticks => {
-                // Ticks on the top and bottom arcs, every fifth one longer,
-                // fading out at the ends of each arc.
-                let o = self.open(t, 0.05);
-                for i in 0..120 {
-                    let deg = i as f32 * 3.0;
-                    let d = deg.rem_euclid(360.0);
-                    let inside = |a: f32, b: f32| ((d - a).min(b - d) / 6.0).clamp(0.0, 1.0);
-                    let w = inside(220.0, 320.0).max(inside(40.0, 140.0));
-                    if w <= 0.0 {
-                        continue;
-                    }
-                    let long = i % 5 == 0;
-                    let r0 = if long { 204.0 } else { 208.0 };
-                    let a = w * o * if long { 0.85 } else { 0.55 };
-                    p.stroke(
-                        &self.spoke(r0, 215.0, deg),
-                        &StrokeStyle::solid(1.1 * k, hex(MID, a)),
-                    );
-                }
-            }
-            Part::Segments(speed) => {
-                let o = self.open(t, 0.15);
-                for (r, a, b, w, s, c) in SEGMENTS {
-                    if s == speed {
-                        p.stroke(
-                            &trace(self.arc(r, a, b), o),
-                            &StrokeStyle::solid(w * k, hex(c, 1.0)).glow(5.0 * k),
-                        );
-                    }
-                }
-            }
-            Part::Dots => {
-                let o = self.open(t, 0.2);
-                for i in 0..90 {
-                    let at = self.polar(142.0, i as f32 * 4.0);
-                    p.shape(ShapeInstance::circle(
-                        at,
-                        0.9 * k,
-                        Paint::solid(hex(MID, 0.7 * o)),
-                    ));
-                }
+    /// The bright segments that turn at `speed` degrees a second, drawn
+    /// unturned round `self.centre`; the element they sit in turns them.
+    fn draw_segments(&self, speed: i32, t: f64, p: &mut Painter) {
+        let o = self.open(t, 0.15);
+        for (r, a, b, w, s, c) in SEGMENTS {
+            if s == speed {
+                let arc = self.arc(r, a, b);
+                let len = arc.length();
+                p.stroke(
+                    &arc.trim(0.0, len * o),
+                    &StrokeStyle::solid(w * self.k, hex(c, 1.0)).glow(5.0 * self.k),
+                );
             }
         }
     }
+
+    /// The bar energies for the spectrum ring, newest first: the last
+    /// moments of the level, shaped by a smooth spectrum that drifts round
+    /// the ring and a little grain per bar, so the ring reads as a spectrum
+    /// rather than two mirrored waveforms.
+    fn bar_energies(&self, t: f64) -> Arc<[f32]> {
+        let fade = self
+            .rest_at
+            .map_or(1.0, |r| (-((t - r).max(0.0)) / 0.15).exp() as f32);
+        let tf = t as f32;
+        (0..HALF_BARS)
+            .map(|j| {
+                let a = (-90.0 + (j as f32 + 0.5) * 180.0 / HALF_BARS as f32).to_radians();
+                let age = j as f32 / HALF_BARS as f32 * HISTORY_SECS;
+                let seed = (j as f32 * 12.9898 + 78.233).sin() * 43758.547;
+                let grain = 0.55 + 0.45 * seed.fract().abs();
+                let shape = 0.55
+                    + 0.45
+                        * (0.5 + 0.5 * (2.0 * a + 0.9 * tf).sin())
+                        * (0.5 + 0.5 * (5.0 * a - 1.7 * tf).sin());
+                (self.level_at(t, age) * fade * 1.5 * shape * grain).min(1.0)
+            })
+            .collect()
+    }
 }
 
-/// A part of the ring that turns as one piece.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Part {
-    /// The tick ring, turning backwards.
-    Ticks,
-    /// The bright segments that turn at this many degrees a second.
-    Segments(i32),
-    /// The dotted ring.
-    Dots,
-}
-
-/// The parts that turn and their speeds in degrees a second; clockwise is
-/// positive.
-const SPINNERS: [(Part, f64); 5] = [
-    (Part::Ticks, -3.0),
-    (Part::Segments(12), 12.0),
-    (Part::Segments(-8), -8.0),
-    (Part::Segments(5), 5.0),
-    (Part::Dots, 6.0),
-];
+/// The segment groups that turn and their speeds in degrees a second;
+/// clockwise is positive.
+const SEGMENT_SPEEDS: [i32; 3] = [12, -8, 5];
 
 /// Bright segments: radius, from and to in degrees, width, the speed of the
-/// part they turn with, colour.
+/// group they turn with, colour.
 const SEGMENTS: [(f32, f32, f32, f32, i32, u32); 5] = [
     (180.0, -73.0, -36.0, 5.0, 12, CYAN),
     (165.0, 102.0, 162.0, 3.0, -8, CYAN),
@@ -446,6 +369,10 @@ const SEGMENTS: [(f32, f32, f32, f32, i32, u32); 5] = [
     (188.0, -118.0, -90.0, 2.0, 5, BRIGHT),
     (170.0, -8.0, 14.0, 2.0, -8, CYAN),
 ];
+
+/// The tick ring's turn and the dotted ring's, degrees a second.
+const TICKS_SPEED: f64 = -3.0;
+const DOTS_SPEED: f64 = 6.0;
 
 /// A steady turn at `deg_per_s`, as an ambient loop on rotation. It comes to
 /// rest by itself when the view stops declaring it, and holds still under
@@ -679,7 +606,6 @@ impl Popup {
             shown_at: self.shown_at,
             rest_at,
             final_at: self.extra.final_at,
-            loading: status.loading,
             level: self.held_level(),
             wave: self.wave.clone(),
             newest_at: self.newest_at,
@@ -704,22 +630,77 @@ impl Popup {
             } else {
                 1.0
             });
-        for (i, (part, speed)) in SPINNERS.into_iter().enumerate() {
-            let local = local.clone();
-            let mut e = at(
-                Element::canvas(format!("spin{i}"), self.shown_at + 1.0, move |t, _, p| {
-                    local.draw_part(part, t, p)
-                }),
-                g.cx - half,
-                g.cy - half,
-            )
-            .size(2.0 * half, 2.0 * half);
+        let square = |e: Element<Msg>| at(e, g.cx - half, g.cy - half).size(2.0 * half, 2.0 * half);
+        let turn = |e: Element<Msg>, speed: f64| {
             if live {
-                e = e.ambient(LoopProp::Rotation, spin(speed));
+                e.ambient(LoopProp::Rotation, spin(speed))
+            } else {
+                e
             }
-            if matches!(part, Part::Segments(_)) && !live {
+        };
+        let draw_on = Transition::NONE.trim(0.0, 0.0);
+        // The tick rings on the top and bottom arcs, every fifth tick longer.
+        for (i, start) in [220.0f32, 40.0].into_iter().enumerate() {
+            let ticks = Ticks::new(34, 7.0 * g.k, 1.1 * g.k, hex(MID, 0.55))
+                .major(5, 11.0 * g.k, 1.1 * g.k, hex(MID, 0.85))
+                .align(-1.0);
+            let e = Element::polar(
+                format!("ticks{i}"),
+                2.0 * half,
+                2.0 * half,
+                215.0 * g.k,
+                start.to_radians(),
+                100f32.to_radians(),
+            )
+            .ticks(ticks)
+            .trim(0.0, 1.0)
+            .presence(draw_on, Transition::fade());
+            layer = layer.child(turn(square(e), TICKS_SPEED));
+        }
+        // The dotted ring: dot-long ticks.
+        let dots = Element::polar("dots", 2.0 * half, 2.0 * half, 142.0 * g.k, 0.0, TAU)
+            .ticks(Ticks::new(90, 0.01, 1.8 * g.k, hex(MID, 0.7)))
+            .trim(0.0, 1.0)
+            .presence(draw_on, Transition::fade());
+        layer = layer.child(turn(square(dots), DOTS_SPEED));
+        for speed in SEGMENT_SPEEDS {
+            let local = local.clone();
+            let mut e = square(Element::canvas(
+                format!("spin{speed}"),
+                self.shown_at + 1.0,
+                move |t, _, p| local.draw_segments(speed, t, p),
+            ));
+            e = turn(e, speed as f64);
+            if !live {
                 e = e.opacity(0.65);
             }
+            layer = layer.child(e);
+        }
+        // The spectrum: the last moments of the level round the ring, the
+        // newest at the top on both sides. It leaves when the check lands.
+        if self.extra.final_at.is_none() {
+            let resting = rest_at.is_some();
+            let (low, high) = if resting {
+                (hex(SLATE, 0.12), hex(SLATE, 0.4))
+            } else {
+                (hex(CYAN, 0.45), hex(BRIGHT, 1.0))
+            };
+            let r = 160.0 * g.k;
+            let spectrum = Spectrum::new(low, high)
+                .bands(Bands::Fixed(hud.bar_energies(self.extra.now)))
+                .count(2 * HALF_BARS as u32)
+                .mirror()
+                .ring(62.0 / 160.0, 0.95)
+                .rest(3.0 * g.k)
+                .width(0.43)
+                .glow(0.8 * g.k, 1.0);
+            let e = at(
+                Element::spectrum_ring("spectrum", spectrum),
+                g.cx - r,
+                g.cy - r,
+            )
+            .size(2.0 * r, 2.0 * r)
+            .presence(Transition::fade(), Transition::fade());
             layer = layer.child(e);
         }
         let ring = at(
@@ -1173,7 +1154,6 @@ mod tests {
             shown_at: 0.0,
             rest_at: None,
             final_at: None,
-            loading: false,
             level: 0.0,
             wave: Arc::from([0.0, 0.0, 1.0, 0.5]),
             newest_at: 1.0,
