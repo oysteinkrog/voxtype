@@ -17,7 +17,6 @@ use super::*;
 use std::sync::OnceLock;
 
 use vo::scene::display::{BlendMode, Paint, ShapeInstance};
-use vo::scene::{Loop, LoopProp};
 use vo::scene::geom::{Point, RRect};
 use vo::scene::path::{icons, make, Contour, Morph, Outline, StrokeStyle};
 use vo::scene::taffy;
@@ -72,10 +71,6 @@ const POWER_DOWN_SECS: f64 = 0.45;
 /// Seconds the daemon must stay idle without a final pass before the look
 /// calls it a cancel, so a stop whose status comes late does not flash one.
 const CANCEL_CONFIRM: f64 = 0.08;
-/// How far the lit tube's brightness wanders while it hums.
-const HUM: f32 = 0.03;
-/// Seconds per cycle of the "..." after "Loading".
-const DOTS_SECS: f64 = 1.2;
 /// When the title first tracks in, after the tube has started drawing.
 const TITLE_DELAY: f64 = 0.22;
 
@@ -168,14 +163,6 @@ fn fonts(reg: &FontRegistry) -> &'static Fonts {
 pub(crate) fn text_style(look: &Look) -> TextStyle {
     let s = look.width / DESIGN_W;
     TextStyle::new(fonts(&look.fonts).text, TEXT_PX * s, TEXT_LINE * s)
-}
-
-/// The centre of the newest transcript line, from the surface top. The card
-/// grows upward as lines are added, so the newest line stays at this spot.
-pub(crate) fn newest_line_centre(look: &Look) -> f32 {
-    let s = look.width / DESIGN_W;
-    let tall = (HEAD + FOOT + swiss::MAX_LINES as f32 * TEXT_LINE) * s;
-    MARGIN + tall - (FOOT + TEXT_LINE / 2.0) * s
 }
 
 pub(crate) fn text_width(look: &Look) -> f32 {
@@ -373,13 +360,7 @@ impl Popup {
             .child(self.sw_text())
             .child(self.sw_status(h))
             .child(at(self.sw_tube(), -MARGIN, -MARGIN));
-        // The card's bottom stays put and it grows upward: its top springs
-        // up as lines are added, on the same spring as its drawn height.
-        let tall = self.card_h(swiss::MAX_LINES as u32);
-        root.child(
-            at(card, MARGIN, MARGIN + tall - h)
-                .motion(Prop::Position, Spring::critical_to_98(GROW_SECS)),
-        )
+        root.child(at(card, MARGIN, MARGIN))
     }
 
     /// The card's height at time `t`: it springs to each new line count.
@@ -506,22 +487,11 @@ impl Popup {
             }
         })
         .size(surface.w, surface.h);
-        let layer = Element::layer("tube-light")
+        Element::layer("tube-light")
             .size(surface.w, surface.h)
             .blend(BlendMode::Add)
             .bloom(0.9, 8.0)
-            .opacity(1.0 - HUM)
-            .child(draw);
-        // Once the tube is on and until a cancel, it hums: its brightness and
-        // its bloom wander a little, as a real neon tube's do.
-        let lit = self.now() >= self.shown_at + DRAW_SECS + FLICKER_SECS;
-        if lit && !self.cancelled() {
-            layer
-                .ambient(LoopProp::Opacity, Loop::drift(HUM as f64, 0.11, 7))
-                .ambient(LoopProp::BloomStrength, Loop::drift(0.12, 0.3, 11))
-        } else {
-            layer
-        }
+            .child(draw)
     }
 
     /// The perspective grid and the bar waveform, in one bloom layer.
@@ -960,21 +930,6 @@ impl Popup {
             .gap(10.0 * s)
             .child(self.sw_icon(&status))
             .child(label);
-        // While a model loads, three dots light one by one after the label.
-        if status.loading {
-            let dots = (0..3).map(|i| {
-                Element::label(format!("dot-{i}"), ".")
-                    .text_style(style)
-                    .color(blue)
-                    .opacity(0.0)
-                    .ambient(LoopProp::Opacity, Loop::step_on(i, 3, DOTS_SECS))
-            });
-            row = row.child(
-                Element::row("loading-dots")
-                    .margin_edges(0.0, 0.0, 0.0, -8.0 * s)
-                    .children(dots),
-            );
-        }
         // Once pasted, the finishing detail ("0 s of audio left") is stale.
         let pasted = self.extra.final_at.is_some();
         if !detail.is_empty() && !self.cancelled() && !pasted {

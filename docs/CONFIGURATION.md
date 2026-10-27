@@ -3931,31 +3931,6 @@ the default theme.
 The theme can also be set with `voxtype-osd-gtk4 --theme swiss` or
 `VOXTYPE_OSD_THEME=swiss`.
 
-### Popup position: top edge or reading line
-
-With `position = "bottom-center"` or `"top-center"`, `anchor` picks what is
-placed:
-
-- `anchor = "top"` (the default): the popup's top edge sits at `top_margin`
-  of the screen height, and the popup grows downward as the text gets
-  longer.
-- `anchor = "reading-line"`: the newest text line, the one you read, sits
-  at `reading_line` of the screen height, and the popup grows upward as the
-  text gets longer. The line you read stays in one place, by default in the
-  middle of the screen.
-
-```toml
-[osd]
-anchor = "reading-line"
-reading_line = 0.5   # 0.0 is the top of the screen, 1.0 the bottom
-```
-
-A popup that would reach past the screen edge is kept on screen. Corner
-positions ignore `anchor`. Both the `gtk4` and the `vo` popups take
-`--anchor top|reading-line` and `--reading-line 0.5`, or
-`VOXTYPE_OSD_ANCHOR` and `VOXTYPE_OSD_READING_LINE`. In the `vo` popup, the
-looks other than `swiss` center the whole popup on the line for now.
-
 ### vo OSD (experimental)
 
 `frontend = "vo"` runs `voxtype-osd-vo`, which draws the `swiss` look on
@@ -3967,8 +3942,7 @@ cargo build --release --features osd-vo
 ```
 
 It reads the same `[osd]` settings as the `swiss` theme (`width_px`,
-`position`, `top_margin`, `anchor`, `reading_line`, `margin_px`,
-`preview_font_pt`, `opacity`,
+`position`, `top_margin`, `margin_px`, `preview_font_pt`, `opacity`,
 `waveform_gain`, `waveform_window_secs`) and the same Plasma colors and
 fonts, and draws the `swiss` look. Differences from the GTK4 popup:
 

@@ -41,7 +41,7 @@ use vo_core::words::{Word, WordInfo, WordModel};
 use voxtype::audio::features::AudioFeatures;
 use voxtype::audio::levels::{AudioFrame, AudioReader, FRAME_HZ};
 use voxtype::config::{Config as VoxtypeConfig, HotkeyConfig};
-use voxtype::osd::config::{OsdAnchor, OsdConfig, OsdPosition, OsdTheme};
+use voxtype::osd::config::{OsdConfig, OsdPosition, OsdTheme};
 use voxtype::osd::ipc::resolve_socket_path;
 use voxtype::osd::plasma::{self, PlasmaTheme};
 use voxtype::osd::swiss::{
@@ -53,10 +53,6 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
-#[path = "osd_vo/island.rs"]
-mod island;
-#[path = "osd_vo/jarvis.rs"]
-mod jarvis;
 #[path = "osd_vo/cyberpunk.rs"]
 mod cyberpunk;
 #[path = "osd_vo/wall.rs"]
@@ -140,18 +136,6 @@ struct Args {
     /// Margin from the screen edge in logical pixels, for corner positions.
     #[arg(long, env = "VOXTYPE_OSD_MARGIN")]
     margin_px: Option<u32>,
-
-    /// What the centered positions place: `top` puts the popup's top edge
-    /// at `top_margin` and grows it downward; `reading-line` puts the newest
-    /// text line at `--reading-line` and grows the popup upward, so the line
-    /// you read stays put. Also `[osd] anchor`.
-    #[arg(long, env = "VOXTYPE_OSD_ANCHOR", value_parser = ["top", "reading-line"])]
-    anchor: Option<String>,
-
-    /// Height of the newest text line as a fraction of the screen, with
-    /// `--anchor reading-line`. 0.5 is the middle. Also `[osd] reading_line`.
-    #[arg(long, env = "VOXTYPE_OSD_READING_LINE")]
-    reading_line: Option<f32>,
 
     /// Visual gain applied to audio samples before drawing the waveform.
     #[arg(long, env = "VOXTYPE_OSD_GAIN")]
@@ -442,9 +426,6 @@ struct Look {
     /// The icon theme's microphone as a registered path and its viewBox, or `None` to draw
     /// one from shapes.
     mic: Option<(u32, Rect)>,
-    /// With `anchor = "reading-line"`: the newest text line's height on the
-    /// output, as a fraction. `None` places the popup by its top edge.
-    reading_line: Option<f32>,
 }
 
 impl Look {
@@ -475,50 +456,11 @@ impl Look {
             word_fade: cfg.word_fade,
             theme: cfg.theme,
             mic: load_mic_icon(fonts),
-            reading_line: (cfg.anchor == OsdAnchor::ReadingLine)
-                .then(|| cfg.reading_line.clamp(0.0, 1.0)),
         }
-    }
-
-    /// The centre of the newest text line in logical pixels below the
-    /// surface's top edge, with `lines` lines of text and the look drawn
-    /// unshifted. `None` for a look that does not say; it is then placed by
-    /// its middle and never shifted.
-    fn newest_line_centre(&self, lines: u32) -> Option<f32> {
-        match self.theme {
-            OsdTheme::Synthwave => Some(synthwave::newest_line_centre(self)),
-            OsdTheme::Default | OsdTheme::Swiss => Some(
-                BORDER
-                    + PAD_TOP
-                    + self.header_height()
-                    + 2.0 * WAVE_MARGIN
-                    + swiss::WAVE_HEIGHT_PX as f32
-                    + (lines as f32 - 0.5) * self.text_line,
-            ),
-            OsdTheme::Mecha => Some(mecha::newest_line_centre(self)),
-            OsdTheme::Cyberpunk => Some(cyberpunk::newest_line_centre()),
-            _ => None,
-        }
-    }
-
-    /// With the reading-line anchor: how far down the look is drawn with
-    /// `lines` lines, so that its newest line sits where a full look's
-    /// newest line does. The look grows upward as lines are added.
-    fn reading_shift(&self, lines: u32) -> Option<f32> {
-        self.reading_line?;
-        let max = self.max_lines();
-        let full = self.newest_line_centre(max)?;
-        Some((full - self.newest_line_centre(lines.clamp(1, max))?).max(0.0))
     }
 
     /// Width of the transcript: the panel less padding and border.
     fn text_width(&self) -> f32 {
-        if self.theme == OsdTheme::Island {
-            return island::text_width(self);
-        }
-        if self.theme == OsdTheme::Jarvis {
-            return jarvis::text_width(self);
-        }
         if self.theme == OsdTheme::Synthwave {
             return synthwave::text_width(self);
         }
@@ -533,9 +475,6 @@ impl Look {
 
     /// Transcript lines the look has room for.
     fn max_lines(&self) -> u32 {
-        if self.theme == OsdTheme::Island {
-            return island::MAX_LINES;
-        }
         if self.theme == OsdTheme::Mecha {
             return mecha::MAX_LINES;
         }
@@ -552,12 +491,6 @@ impl Look {
     }
 
     fn text_style(&self) -> TextStyle {
-        if self.theme == OsdTheme::Island {
-            return island::text_style(self);
-        }
-        if self.theme == OsdTheme::Jarvis {
-            return jarvis::text_style(self);
-        }
         if self.theme == OsdTheme::Synthwave {
             return synthwave::text_style(self);
         }
@@ -596,12 +529,6 @@ impl Look {
     /// inside it, so the surface never resizes; the rest is transparent and
     /// click-through.
     fn surface(&self) -> Size {
-        if self.theme == OsdTheme::Island {
-            return Popup::island_surface(self);
-        }
-        if self.theme == OsdTheme::Jarvis {
-            return Popup::jarvis_surface(self);
-        }
         if self.theme == OsdTheme::Showcase {
             return Popup::showcase_surface(self);
         }
@@ -701,10 +628,6 @@ struct Popup {
     was_recording: bool,
     /// What only the showcase look keeps.
     extra: showcase::Extra,
-    /// What only the island look keeps.
-    island: island::State,
-    /// What only the jarvis look keeps.
-    jarvis: jarvis::Extra,
     /// What only the cyberpunk look keeps.
     cyber: cyberpunk::State,
     /// What only the synthwave look keeps.
@@ -736,8 +659,6 @@ impl Popup {
             in_wall: false,
             was_recording: false,
             extra: showcase::Extra::default(),
-            island: island::State::default(),
-            jarvis: jarvis::Extra::default(),
             cyber: cyberpunk::State::default(),
             synth: synthwave::State::default(),
         }
@@ -928,10 +849,8 @@ impl App for Popup {
         self.shown_at = cx.t();
         self.extra.now = cx.t();
         self.sync_showcase(cx.t());
-        self.sync_island(cx.t());
         self.sync_cyber(cx.t());
         self.arm_tick(cx);
-        self.arm_island_tick(cx);
         self.arm_cyber_tick(cx);
     }
 
@@ -971,12 +890,9 @@ impl App for Popup {
             Msg::Loop => {}
         }
         self.sync_showcase(t);
-        self.sync_island(t);
-        self.sync_jarvis(t);
         self.sync_cyber(t);
         self.sync_synthwave(t);
         self.arm_tick(cx);
-        self.arm_island_tick(cx);
         self.arm_cyber_tick(cx);
         if !tick && self.idle(t) {
             tracing::info!(
@@ -993,25 +909,8 @@ impl App for Popup {
         }
     }
 
-    fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
-        let look = self.look_view(tokens);
-        // The shift and the taller panel come in the same frame, on a
-        // surface that keeps its size, so the reading line never moves.
-        match self.look.reading_shift(self.lines) {
-            Some(shift) => Element::column("reading")
-                .pad_edges(shift, 0.0, 0.0, 0.0)
-                .child(look),
-            None => look,
-        }
-    }
-}
-
-impl Popup {
-    fn look_view(&self, _: &vo::Tokens) -> Element<Msg> {
+    fn view(&self, _: &vo::Tokens) -> Element<Msg> {
         let root = Element::column("root").align_items(AlignItems::CENTER);
-        if self.look.theme == OsdTheme::Island {
-            return self.island_view();
-        }
         if self.look.theme == OsdTheme::Showcase {
             return self.showcase_view();
         }
@@ -1020,9 +919,6 @@ impl Popup {
         }
         if self.look.theme == OsdTheme::Type {
             return self.type_view();
-        }
-        if self.look.theme == OsdTheme::Jarvis {
-            return self.jarvis_view();
         }
         if self.look.theme == OsdTheme::Synthwave {
             return self.synthwave_view();
@@ -1231,12 +1127,7 @@ impl Popup {
 fn default_motion(look: &Look) -> Motion {
     if matches!(
         look.theme,
-        OsdTheme::Showcase
-            | OsdTheme::Type
-            | OsdTheme::Island
-            | OsdTheme::Jarvis
-            | OsdTheme::Mecha
-            | OsdTheme::Cyberpunk
+        OsdTheme::Showcase | OsdTheme::Type | OsdTheme::Mecha | OsdTheme::Cyberpunk
     ) {
         Motion::Spring(Spring::SOFT)
     } else {
@@ -1285,7 +1176,7 @@ fn load_fonts(theme: &PlasmaTheme) -> anyhow::Result<FontRegistry> {
     Ok(fonts)
 }
 
-fn placement(cfg: &OsdConfig, look: &Look) -> Placement {
+fn placement(cfg: &OsdConfig) -> Placement {
     use vo::Edges;
     let m = cfg.margin_px as i32;
     let corner = |edges: Edges| Placement::Anchored {
@@ -1293,16 +1184,8 @@ fn placement(cfg: &OsdConfig, look: &Look) -> Placement {
         margin: [m, m, m, m],
     };
     match cfg.position {
-        OsdPosition::BottomCenter | OsdPosition::TopCenter => match look.reading_line {
-            Some(fraction) => Placement::LineAt {
-                fraction,
-                y: look
-                    .newest_line_centre(look.max_lines())
-                    .unwrap_or(look.surface().h / 2.0),
-            },
-            None => Placement::FromTop {
-                fraction: cfg.top_margin.clamp(0.0, 1.0),
-            },
+        OsdPosition::BottomCenter | OsdPosition::TopCenter => Placement::FromTop {
+            fraction: cfg.top_margin.clamp(0.0, 1.0),
         },
         OsdPosition::TopLeft => corner(Edges {
             top: true,
@@ -1481,12 +1364,6 @@ fn main() -> anyhow::Result<()> {
         cfg.waveform_gain = g;
     }
     cfg.word_fade |= args.word_fade;
-    if let Some(a) = args.anchor.as_deref().and_then(OsdAnchor::from_name) {
-        cfg.anchor = a;
-    }
-    if let Some(r) = args.reading_line {
-        cfg.reading_line = r;
-    }
     if let Some(t) = args.theme.as_deref().and_then(OsdTheme::parse_str) {
         cfg.theme = t;
     }
@@ -1524,7 +1401,7 @@ fn main() -> anyhow::Result<()> {
 
     let spec = OverlaySpec {
         size: look.surface(),
-        placement: placement(&cfg, &look),
+        placement: placement(&cfg),
         input: InputMode::None,
         app_id: "voxtype-osd".into(),
         ..OverlaySpec::default()

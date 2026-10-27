@@ -259,17 +259,6 @@ fn panel_h(lines: f32) -> f32 {
     TEXT_TOP + lines * TEXT_LINE + STATUS_GAP + STATUS_H + STATUS_BOTTOM
 }
 
-/// The panel at its tallest. Its bottom stays here and it grows upward.
-fn tall_h() -> f32 {
-    panel_h(swiss::MAX_LINES as f32)
-}
-
-/// The centre of the newest transcript line, from the surface top. The panel
-/// grows upward as lines are added, so this does not depend on the count.
-pub(crate) fn newest_line_centre() -> f32 {
-    MARGIN_Y + tall_h() - (STATUS_GAP + STATUS_H + STATUS_BOTTOM) - TEXT_LINE / 2.0
-}
-
 /// The text a typewriter shows `since` seconds after it began to replace
 /// `old` with `new`, and whether its cursor is lit.
 fn typed(old: &str, new: &str, since: f64) -> (String, bool) {
@@ -564,9 +553,11 @@ impl Deco {
     }
 
     fn draw(&self, t: f64, rect: Rect, p: &mut Painter) {
-        let h = self.h(t);
-        let o = Point::new(rect.x + MARGIN_X, rect.y + MARGIN_Y + tall_h() - h);
-        let g = Geo { w: self.w, h };
+        let o = Point::new(rect.x + MARGIN_X, rect.y + MARGIN_Y);
+        let g = Geo {
+            w: self.w,
+            h: self.h(t),
+        };
         let red = self.red(t);
         let since = t - self.shown_at;
         let burst = self.burst(t);
@@ -1192,7 +1183,7 @@ impl Popup {
     pub(crate) fn cyber_surface(look: &Look) -> Size {
         Size::new(
             (width(look) + 2.0 * MARGIN_X).ceil(),
-            (tall_h() + 2.0 * MARGIN_Y).ceil(),
+            (panel_h(swiss::MAX_LINES as f32) + 2.0 * MARGIN_Y).ceil(),
         )
     }
 
@@ -1256,9 +1247,8 @@ impl Popup {
                 .and_then(|id| self.cyber_word_box(id))
                 .map(|b| (c.revised_at, b)),
         };
-        // The panel's top moves down by what it lacks of its full height.
-        let dy = tall_h() - deco.h(t);
-        let sy = tall_h() - STATUS_BOTTOM - STATUS_H;
+        let h = deco.h(t);
+        let sy = h - STATUS_BOTTOM - STATUS_H;
         let until = deco.until();
         let deco = at(
             Element::canvas("deco", until, move |t, rect, p| deco.draw(t, rect, p)),
@@ -1285,11 +1275,8 @@ impl Popup {
             panel = panel.glitch(0.35).chromatic(1.5).motion(Prop::Style, Motion::Snap);
         }
         let (ox, oy) = (MARGIN_X, MARGIN_Y);
-        // Everything hung from the panel's top rides on `body`, which the
-        // tick moves with the canvas's height, so it snaps rather than springs.
-        let body = at(Element::column("body"), 0.0, dy)
-            .size(size.w, size.h - dy)
-            .motion(Prop::Position, Motion::Snap)
+        panel
+            .child(deco)
             .child(self.cyber_tag(mode, ox, oy))
             .child(self.cyber_slashes(mode, w, ox, oy))
             .child(
@@ -1307,10 +1294,7 @@ impl Popup {
                 .presence(Transition::fade(), Transition::fade()),
             )
             .child(self.cyber_wave(mode, progress, ox, oy))
-            .child(self.cyber_text(mode, ox, oy));
-        panel
-            .child(deco)
-            .child(body)
+            .child(self.cyber_text(mode, ox, oy))
             .child(self.cyber_status(mode, &status, ox, oy + sy))
             .child(self.cyber_count(mode, ox + w - 84.0, oy + sy + 17.0))
     }

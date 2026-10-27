@@ -21,30 +21,6 @@ pub enum OsdPosition {
     TopRight,
 }
 
-/// How the centered anchors place the popup vertically.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum OsdAnchor {
-    /// The popup's top edge sits at `top_margin` of the monitor height, and
-    /// the popup grows downward as the text gets longer.
-    #[default]
-    Top,
-    /// The newest text line, the one being read, sits at `reading_line` of
-    /// the monitor height, and the popup grows upward as the text gets
-    /// longer, so the line being read stays put.
-    ReadingLine,
-}
-
-impl OsdAnchor {
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "top" => Some(OsdAnchor::Top),
-            "reading-line" => Some(OsdAnchor::ReadingLine),
-            _ => None,
-        }
-    }
-}
-
 /// Selects which OSD frontend the `voxtype-osd` wrapper launches.
 ///
 /// The wrapper treats this as a *preference*: if the chosen frontend's
@@ -110,17 +86,6 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
-    /// A black capsule in the style of a phone's dynamic island: it opens
-    /// as a dot, springs out to a pill with a red recording dot, a clock, a
-    /// blue to violet bar waveform and up to three lines of words, and grows
-    /// into a card when the words need more room. Drawn by the vo frontend
-    /// only; the gtk4 frontend draws `swiss` for it.
-    Island,
-    /// A holographic HUD in cyan: arcs, ticks and thin ring segments that
-    /// turn round a radial waveform with the microphone in the middle, small
-    /// level readouts, and the transcript centred in a chamfered frame. Drawn
-    /// by the vo frontend only; the gtk4 frontend draws `swiss` for it.
-    Jarvis,
     /// Retro synthwave neon: a magenta to cyan neon tube round a dark card,
     /// a chrome title that names the state, a neon bar waveform over a
     /// scrolling perspective grid, and white centred words. Drawn by the vo
@@ -146,8 +111,6 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
-            "island" => Some(OsdTheme::Island),
-            "jarvis" => Some(OsdTheme::Jarvis),
             "cyberpunk" => Some(OsdTheme::Cyberpunk),
             "synthwave" => Some(OsdTheme::Synthwave),
             "mecha" => Some(OsdTheme::Mecha),
@@ -420,14 +383,6 @@ pub struct OsdConfig {
     /// applied when `position` is `bottom-center` or `top-center` —
     /// corner anchors keep using `margin_px`.
     pub top_margin: f32,
-    /// What the centered anchors place: the popup's top edge (`top`, the
-    /// default, at `top_margin`) or its newest text line (`reading-line`,
-    /// at `reading_line`). Corner anchors ignore it.
-    pub anchor: OsdAnchor,
-    /// Height of the newest text line's centre as a fraction of the
-    /// monitor's height, when `anchor = "reading-line"`. 0.5 is the middle
-    /// of the screen.
-    pub reading_line: f32,
     /// Font size of the live preview text in points (gtk4 OSD). `None`
     /// keeps the GTK theme's size.
     pub preview_font_pt: Option<f32>,
@@ -476,8 +431,6 @@ impl Default for OsdConfig {
             position: OsdPosition::BottomCenter,
             margin_px: 24,
             top_margin: 0.85,
-            anchor: OsdAnchor::Top,
-            reading_line: 0.5,
             preview_font_pt: None,
             opacity: 0.95,
             theme: OsdTheme::Default,
