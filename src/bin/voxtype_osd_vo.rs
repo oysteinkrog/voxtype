@@ -484,6 +484,7 @@ impl Look {
     /// its middle and never shifted.
     fn newest_line_centre(&self, lines: u32) -> Option<f32> {
         match self.theme {
+            OsdTheme::Synthwave => Some(synthwave::newest_line_centre(self)),
             OsdTheme::Default | OsdTheme::Swiss => Some(
                 BORDER
                     + PAD_TOP
