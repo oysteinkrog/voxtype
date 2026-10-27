@@ -53,6 +53,8 @@ const TEXT_BOTTOM: f32 = 13.0;
 const TEXT_PX: f32 = 38.4;
 const TEXT_LINE: f32 = 44.0;
 const MAX_LINES: u32 = 5;
+/// Room left of the word count for the notch its casts land in.
+const NOTCH_ROOM: f32 = 8.0;
 /// The waveform strip.
 const WAVE_H: f32 = 71.0;
 const WAVE_HALF: f32 = 27.0;
@@ -748,12 +750,67 @@ impl Popup {
             }
         })
         .size(17.0, 17.0);
-        Element::panel("transcript")
+        // The word count and the pace at the tile's top right: each new word
+        // casts a block into the notch by the count (MO-65), and the pace
+        // digits lean with the speech rate (MO-66).
+        let digits = TextStyle::new(f.bold, 12.0, 14.0);
+        let caps = TextStyle::new(f.caps, 9.0, 12.0).tracking(1.3);
+        let count = self.tally_count();
+        let (wpm, lean) = self.tally_pace();
+        let wpm = wpm.to_string();
+        let cell = self.measure.layout("0", &digits, None).size.w;
+        let width =
+            |n: usize, unit: &str| cell * n as f32 + self.measure.layout(unit, &caps, None).size.w;
+        let count_x = inner - 46.0 - width(count.len(), " WORDS");
+        let pace_x = count_x - NOTCH_ROOM - 14.0 - width(wpm.len(), " WPM");
+        let notch = Rect::new(count_x - NOTCH_ROOM + 2.0, LABEL_Y - 1.0, 2.5, 13.0);
+        let casts = self.tally_casts(Point::new(TEXT_X, TEXT_TOP), notch, accent, false);
+        let stat = |key: &'static str, n: Element<Msg>, unit: &'static str| {
+            Element::row(key)
+                .align_items(AlignItems::END)
+                .child(n)
+                .child(
+                    Element::label("unit", unit)
+                        .text_style(caps)
+                        .color(hex(LABEL)),
+                )
+        };
+        let roll = Spring::critical_to_98(0.28);
+        let mut tile = Element::panel("transcript")
             .size(inner, h)
             .radius(5.0)
             .fill(hex(TILE).fade(0.55))
-            .border(accent.fade(0.35), 1.0)
-            .child(corners(
+            .border(accent.fade(0.35), 1.0);
+        if self.motion("count-cast") {
+            tile = tile
+                .child(at(
+                    Element::canvas("cast", casts.until(), move |t, r, p| casts.draw(t, r, p))
+                        .size(inner, h),
+                    0.0,
+                    0.0,
+                ))
+                .child(at(
+                    stat(
+                        "count",
+                        digit_roll("n", &count, digits, hex(INK), roll),
+                        " WORDS",
+                    ),
+                    count_x,
+                    LABEL_Y - 2.0,
+                ));
+        }
+        if self.motion("lean-pace") {
+            tile = tile.child(at(
+                stat(
+                    "pace",
+                    tally::lean_digits("n", &wpm, digits, hex(INK), cell, lean),
+                    " WPM",
+                ),
+                pace_x,
+                LABEL_Y - 2.0,
+            ));
+        }
+        tile.child(corners(
                 "brackets",
                 inner,
                 h,

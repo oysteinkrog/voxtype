@@ -68,6 +68,10 @@ const TICKS_DELAY: f64 = 0.15;
 const TICKS_SECS: f64 = 0.3;
 /// Seconds for the ticks to change colour or height at a change of mode.
 const SETTLE_SECS: f64 = 0.3;
+/// The word count's column at its narrowest, and the room left of it for
+/// the notch its casts land in.
+const COUNT_MIN_W: f32 = 32.0;
+const NOTCH_ROOM: f32 = 7.0;
 /// How far a new word rises, and the state label slides.
 const WORD_RISE: f32 = 8.0;
 const LABEL_SLIDE: f32 = 7.0;
@@ -344,6 +348,7 @@ impl Popup {
             .fill(hex(BODY).fade(0.97))
             .presence(Transition::fade().offset(0.0, 6.0), exit)
             .child(self.swissfi_frame(h, cancelled))
+            .child(self.swissfi_cast(h))
             .child(self.swissfi_header())
             .child(self.swissfi_ticks(mode, mode_at))
             .child(self.swissfi_text(mode))
@@ -392,13 +397,12 @@ impl Popup {
                 .child(caption("caption", name, 6.6, 0.5))
         };
         let clock = digit_roll("clock", &self.clock, value, hex(PAPER), roll);
-        let words = digit_roll(
-            "count",
-            &self.word_count.to_string(),
-            value,
-            hex(PAPER),
-            roll,
-        );
+        let words = digit_roll("count", &self.tally_count(), value, hex(PAPER), roll);
+        // The pace leans forward as you speak faster and stands up when you
+        // pause (MO-66).
+        let (wpm, lean) = self.tally_pace();
+        let cell = self.measure.layout("0", &value, None).size.w;
+        let pace = tally::lean_digits("pace", &wpm.to_string(), value, hex(PAPER), cell, lean);
         let mic = Arc::new(Outline::new(&icons::mic(), 0.05));
         let mic = Element::stroke_path(
             "mic",
@@ -407,7 +411,8 @@ impl Popup {
             StrokeStyle::solid(2.0, hex(ORANGE)),
         )
         .size(17.0, 17.0);
-        Element::row("header")
+        let cast = self.motion("count-cast");
+        let mut row = Element::row("header")
             .height(HEADER_H)
             .align_items(AlignItems::START)
             .pad_edges(4.0, 0.0, 0.0, 0.0)
@@ -417,15 +422,57 @@ impl Popup {
                     .margin_edges(3.0, 0.0, 0.0, 13.0)
                     .presence(Transition::fade().wipe(1.0), Transition::fade()),
             )
-            .child(Element::row("spacer").grow(1.0))
-            .child(stat("time", clock, "DURATION"))
+            .child(Element::row("spacer").grow(1.0));
+        if self.motion("lean-pace") {
+            row = row.child(stat("pace", pace, "WPM").min_width(24.0)).child(
+                Element::shape("pace-rule", ShapeKind::RRect)
+                    .size(1.0, 24.0)
+                    .fill(hex(EDGE))
+                    .margin_edges(0.0, 23.0, 0.0, 22.0),
+            );
+        }
+        row.child(stat("time", clock, "DURATION"))
             .child(
                 Element::shape("rule", ShapeKind::RRect)
                     .size(1.0, 24.0)
                     .fill(hex(EDGE))
                     .margin_edges(0.0, 23.0, 0.0, 22.0),
             )
-            .child(stat("words", words, "WORDS").min_width(32.0))
+            .child(
+                stat("words", words, "WORDS")
+                    .min_width(COUNT_MIN_W)
+                    .margin_edges(0.0, 0.0, 0.0, if cast { NOTCH_ROOM } else { 0.0 }),
+            )
+    }
+
+    /// The word's cast and the notch by the word count (MO-65), under
+    /// everything else in the panel.
+    fn swissfi_cast(&self, h: f32) -> Element<Msg> {
+        let l = &self.look;
+        if !self.motion("count-cast") {
+            return at(Element::layer("cast"), 0.0, 0.0);
+        }
+        let f = fonts(&l.fonts);
+        let value = TextStyle::new(f.mono, 11.0, 14.0).tracking(0.4);
+        let caption = TextStyle::new(f.mono, 6.6, 9.0).tracking(0.5);
+        let digits = self.tally_count().len().max(1) as f32;
+        let col = (self.measure.layout("0", &value, None).size.w * digits)
+            .max(self.measure.layout("WORDS", &caption, None).size.w)
+            .max(COUNT_MIN_W);
+        let notch = Rect::new(
+            l.width - PAD_X - col - NOTCH_ROOM + 2.0,
+            PAD_TOP + 5.0,
+            2.5,
+            12.0,
+        );
+        let origin = Point::new(PAD_X + TEXT_INSET, PAD_TOP + HEADER_H + WAVE_H + TEXT_TOP);
+        let casts = self.tally_casts(origin, notch, hex(ORANGE), false);
+        at(
+            Element::canvas("cast", casts.until(), move |t, r, p| casts.draw(t, r, p)),
+            0.0,
+            0.0,
+        )
+        .size(l.width, h)
     }
 
     fn swissfi_ticks(&self, mode: Mode, mode_at: f64) -> Element<Msg> {

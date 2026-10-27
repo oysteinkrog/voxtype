@@ -71,6 +71,8 @@ mod palette;
 mod dotmatrix;
 #[path = "osd_vo/kit.rs"]
 mod kit;
+#[path = "osd_vo/tally.rs"]
+mod tally;
 #[path = "osd_vo/swissfi.rs"]
 mod swissfi;
 #[path = "osd_vo/scope.rs"]
@@ -1074,6 +1076,8 @@ struct Popup {
     phos: phosphor::State,
     /// What the looks after the mock-ups (kit.rs) keep.
     fam: kit::State,
+    /// New words, revisions and the pace (tally.rs).
+    tally: tally::State,
     /// What only the scope look keeps.
     scope: scope::State,
     /// What only the captions look keeps.
@@ -1129,6 +1133,7 @@ impl Popup {
             tron: tron::State::default(),
             phos: phosphor::State::default(),
             fam: kit::State::default(),
+            tally: tally::State::default(),
             scope: scope::State::default(),
             captions: captions::State::default(),
             karaoke: karaoke::State::default(),
@@ -1449,6 +1454,7 @@ impl App for Popup {
         self.sync_tron(t);
         self.sync_phosphor(t);
         self.kit_sync(t);
+        self.sync_tally(t);
         self.sync_scope(t);
         self.sync_captions(t);
         self.sync_karaoke(t);

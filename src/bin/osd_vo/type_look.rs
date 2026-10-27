@@ -29,6 +29,8 @@ const WORD_RISE: f32 = 8.0;
 const LABEL_SLIDE: f32 = 7.0;
 /// The digit size of the clock and the word count, against the swiss values.
 const STAT_SCALE: f32 = 1.3;
+/// Room left of the word count for the notch its casts land in (MO-65).
+const NOTCH_ROOM: f32 = 7.0;
 /// The status icon's box.
 const ICON_BOX: f32 = 18.0;
 /// The icon's done step (ring closes, then the check) plays this much
@@ -163,6 +165,7 @@ impl Popup {
             .fill(l.background)
             .presence(Transition::fade().offset(0.0, 6.0), exit)
             .child(self.type_frame(h, cancelled))
+            .child(self.type_cast(h))
             .child(self.type_header())
             .child(self.waveform(&status))
             .child(self.type_text())
@@ -250,30 +253,78 @@ impl Popup {
         };
         let roll = Spring::critical_to_98(0.28);
         let clock = digit_roll("clock", &self.clock, value, l.foreground, roll);
-        let words = digit_roll(
-            "count",
-            &self.word_count.to_string(),
-            value,
-            l.foreground,
-            roll,
-        );
-        Element::row("header")
+        let words = digit_roll("count", &self.tally_count(), value, l.foreground, roll);
+        // The pace leans forward as you speak faster and stands up when you
+        // pause (MO-66).
+        let (wpm, lean) = self.tally_pace();
+        let cell = self.measure.layout("0", &value, None).size.w;
+        let pace = tally::lean_digits("pace", &wpm.to_string(), value, l.foreground, cell, lean);
+        let rule = |key: &'static str| {
+            Element::shape(key, ShapeKind::RRect)
+                .width(1.0)
+                .fill(l.border)
+                .margin_edges(0.0, 16.0, 0.0, 16.0)
+                .layout(|s| s.align_self = Some(AlignSelf::STRETCH))
+        };
+        let cast = self.motion("count-cast");
+        let mut row = Element::row("header")
             .align_items(AlignItems::START)
             .child(self.type_icon())
             .child(
                 caption("title", "VOICE DICTATION", l.caption_px, 2.0)
                     .margin_edges(0.0, 0.0, 0.0, 8.0),
             )
-            .child(Element::row("spacer").grow(1.0))
-            .child(stat("time", clock, "DURATION"))
-            .child(
-                Element::shape("rule", ShapeKind::RRect)
-                    .width(1.0)
-                    .fill(l.border)
-                    .margin_edges(0.0, 16.0, 0.0, 16.0)
-                    .layout(|s| s.align_self = Some(AlignSelf::STRETCH)),
-            )
-            .child(stat("words", words, "WORDS"))
+            .child(Element::row("spacer").grow(1.0));
+        if self.motion("lean-pace") {
+            row = row
+                .child(stat("pace", pace, "WPM"))
+                .child(rule("pace-rule"));
+        }
+        row.child(stat("time", clock, "DURATION"))
+            .child(rule("rule"))
+            .child(stat("words", words, "WORDS").margin_edges(
+                0.0,
+                0.0,
+                0.0,
+                if cast { NOTCH_ROOM } else { 0.0 },
+            ))
+    }
+
+    /// The word's cast and the notch by the word count (MO-65), under the
+    /// rest of the panel.
+    fn type_cast(&self, h: f32) -> Element<Msg> {
+        let l = &self.look;
+        if !self.motion("count-cast") {
+            return at(Element::layer("cast"), 0.0, 0.0);
+        }
+        let value = l.mono(l.value_px * STAT_SCALE);
+        let digits = self.tally_count().len().max(1) as f32;
+        let digits_w = self.measure.layout("0", &value, None).size.w * digits;
+        // The digits are right-aligned in their column, the notch just
+        // left of them.
+        let right = l.width - PAD_X - BORDER;
+        let line = l.mono_line(l.value_px * STAT_SCALE);
+        let notch = Rect::new(
+            right - digits_w - NOTCH_ROOM + 2.0,
+            PAD_TOP + BORDER + 2.0,
+            2.5,
+            line - 4.0,
+        );
+        let origin = Point::new(
+            PAD_X + BORDER,
+            PAD_TOP
+                + BORDER
+                + Self::type_header_height(l)
+                + 2.0 * WAVE_MARGIN
+                + swiss::WAVE_HEIGHT_PX as f32,
+        );
+        let casts = self.tally_casts(origin, notch, l.accent, false);
+        at(
+            Element::canvas("cast", casts.until(), move |t, r, p| casts.draw(t, r, p)),
+            0.0,
+            0.0,
+        )
+        .size(l.width, h)
     }
 
     /// The dictation ended without text: cancelled, no speech heard, or
