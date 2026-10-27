@@ -53,6 +53,8 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/synthwave.rs"]
+mod synthwave;
 #[path = "osd_vo/mecha.rs"]
 mod mecha;
 
@@ -427,6 +429,9 @@ impl Look {
 
     /// Width of the transcript: the panel less padding and border.
     fn text_width(&self) -> f32 {
+        if self.theme == OsdTheme::Synthwave {
+            return synthwave::text_width(self);
+        }
         if self.theme == OsdTheme::Mecha {
             return mecha::text_width(self);
         }
@@ -451,6 +456,9 @@ impl Look {
     }
 
     fn text_style(&self) -> TextStyle {
+        if self.theme == OsdTheme::Synthwave {
+            return synthwave::text_style(self);
+        }
         if self.theme == OsdTheme::Mecha {
             return mecha::text_style(self);
         }
@@ -485,6 +493,9 @@ impl Look {
     fn surface(&self) -> Size {
         if self.theme == OsdTheme::Showcase {
             return Popup::showcase_surface(self);
+        }
+        if self.theme == OsdTheme::Synthwave {
+            return Popup::synthwave_surface(self);
         }
         if self.theme == OsdTheme::Mecha {
             return mecha::surface(self);
@@ -559,6 +570,8 @@ struct Popup {
     was_recording: bool,
     /// What only the showcase look keeps.
     extra: showcase::Extra,
+    /// What only the synthwave look keeps.
+    synth: synthwave::State,
 }
 
 impl Popup {
@@ -584,6 +597,7 @@ impl Popup {
             closing: false,
             was_recording: false,
             extra: showcase::Extra::default(),
+            synth: synthwave::State::default(),
         }
     }
 
@@ -793,6 +807,7 @@ impl App for Popup {
             Msg::Tick => self.extra.tick = None,
         }
         self.sync_showcase(t);
+        self.sync_synthwave(t);
         self.arm_tick(cx);
         if !tick && self.idle(t) {
             tracing::info!(
@@ -814,6 +829,9 @@ impl App for Popup {
         }
         if self.look.theme == OsdTheme::Type {
             return self.type_view();
+        }
+        if self.look.theme == OsdTheme::Synthwave {
+            return self.synthwave_view();
         }
         if self.look.theme == OsdTheme::Mecha {
             return self.mecha_view();
@@ -1385,10 +1403,12 @@ fn scenario(look: &Look, cancel: bool) -> vo::Scenario<Msg> {
         t += 0.033;
     }
     // Text and status, as the file poller would see them.
-    let sentence = "open the configuration file and set the popup theme to swiss so the dictation \
+    // VOXTYPE_OSD_VO_SENTENCE replaces the sentence, to match a mock-up's text.
+    let custom = std::env::var("VOXTYPE_OSD_VO_SENTENCE").ok();
+    let sentence = custom.as_deref().unwrap_or("open the configuration file and set the popup theme to swiss so the dictation \
                     window shows the live words in the middle of the screen with the waveform above \
                     them then press the key again to stop and let the final pass fix the casing and \
-                    the punctuation before the text is typed into the editor";
+                    the punctuation before the text is typed into the editor");
     let words: Vec<&str> = sentence.split(' ').collect();
     let speaking_time = (full_stop - start - 0.5) - (pause.1 - pause.0);
     let per_word = speaking_time / words.len() as f64;
@@ -1483,7 +1503,8 @@ fn scenario(look: &Look, cancel: bool) -> vo::Scenario<Msg> {
     let mut fin: String = sentence
         .replace(" so the", ", so the")
         .replace(" then press", ". Then press");
-    fin.replace_range(0..1, "O");
+    let first = fin[..1].to_uppercase();
+    fin.replace_range(0..1, &first);
     fin.push('.');
     files.preview = fin;
     at(done - 0.4, &files, &mut inputs);

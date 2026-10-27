@@ -86,6 +86,11 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// Retro synthwave neon: a magenta to cyan neon tube round a dark card,
+    /// a chrome title that names the state, a neon bar waveform over a
+    /// scrolling perspective grid, and white centred words. Drawn by the vo
+    /// frontend only; the gtk4 frontend draws `swiss` for it.
+    Synthwave,
     /// An anime mecha cockpit: an orange angular frame with hexagon plates,
     /// a Japanese and English title, hazard stripes, a big mirrored bar
     /// waveform, a level meter and the transcript in heavy condensed type.
@@ -100,6 +105,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "synthwave" => Some(OsdTheme::Synthwave),
             "mecha" => Some(OsdTheme::Mecha),
             _ => None,
         }

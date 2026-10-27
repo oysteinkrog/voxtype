@@ -257,7 +257,11 @@ fn load_osd_config(explicit: Option<&Path>) -> OsdConfig {
 fn vo_draws(theme: OsdTheme) -> bool {
     matches!(
         theme,
-        OsdTheme::Swiss | OsdTheme::Showcase | OsdTheme::Type | OsdTheme::Mecha
+        OsdTheme::Swiss
+            | OsdTheme::Showcase
+            | OsdTheme::Type
+            | OsdTheme::Synthwave
+            | OsdTheme::Mecha
     )
 }
 
