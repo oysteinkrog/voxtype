@@ -817,16 +817,24 @@ enum Ending {
     Stopped,
     /// The user cancelled. The popup stays `CANCEL_LINGER_SECS`.
     Cancelled,
+    /// No speech was heard. The popup stays `CANCEL_LINGER_SECS`.
+    Empty,
     /// Something failed. The popup stays `CANCEL_LINGER_SECS`.
     Failed,
 }
 
 impl Ending {
+    /// The popup stays `CANCEL_LINGER_SECS` so the look can show it.
+    fn lingers(self) -> bool {
+        matches!(self, Ending::Cancelled | Ending::Empty | Ending::Failed)
+    }
+
     fn label(self) -> &'static str {
         match self {
             Ending::Done => "Done",
             Ending::Stopped => "Stopped",
             Ending::Cancelled => "Cancelled",
+            Ending::Empty => "No speech",
             Ending::Failed => "Failed",
         }
     }
@@ -1004,6 +1012,7 @@ impl Popup {
         Some(match self.files.outcome {
             Some(Outcome::Done) => Ending::Done,
             Some(Outcome::Cancelled) => Ending::Cancelled,
+            Some(Outcome::Empty) => Ending::Empty,
             Some(Outcome::Failed) => Ending::Failed,
             None if self.was_finishing || self.extra.finish_at.is_some() => Ending::Done,
             // The outcome may be on its way: a cancel is written just after
@@ -1173,7 +1182,7 @@ impl Popup {
             return true;
         }
         // A cancel or a failure stays a moment, so the look can show it.
-        let lingering = matches!(self.ending(), Some(Ending::Cancelled | Ending::Failed))
+        let lingering = self.ending().is_some_and(Ending::lingers)
             && self.ended_for(t).is_some_and(|d| d < CANCEL_LINGER_SECS);
         let stalled = self.last_audio.is_none_or(|a| t - a > IDLE_TIMEOUT_SECS);
         stalled
@@ -1262,7 +1271,7 @@ impl App for Popup {
                 self.ended_at = Some(t);
                 tracing::info!(?ending, "the dictation ended");
             }
-            if matches!(ending, Ending::Cancelled | Ending::Failed) && !self.linger_armed {
+            if ending.lingers() && !self.linger_armed {
                 // The idle check runs again when the linger ends.
                 self.linger_armed = true;
                 let left = CANCEL_LINGER_SECS - self.ended_for(t).unwrap_or(0.0);

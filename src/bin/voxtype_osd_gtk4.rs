@@ -784,6 +784,7 @@ fn build_window(
                         match voxtype::osd::outcome::read() {
                             Some(Outcome::Done) => "Done",
                             Some(Outcome::Cancelled) => "Cancelled",
+                            Some(Outcome::Empty) => "No speech",
                             Some(Outcome::Failed) => "Failed",
                             None if finished.get() => "Done",
                             None => "Stopped",
