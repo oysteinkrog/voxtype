@@ -40,6 +40,7 @@ pub(crate) fn source(theme: OsdTheme) -> &'static str {
         OsdTheme::Island => "concept 03, family 03",
         // A look added later shows no source until it gets a row here.
         #[allow(unreachable_patterns)]
+        OsdTheme::Karaoke => "concept 14",
         _ => "",
     }
 }

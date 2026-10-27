@@ -110,6 +110,12 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// A teleprompter in a dark navy glass card: large centred words, older
+    /// lines that roll up, shrink and fade, the newest word lit in a cyan to
+    /// violet gradient with an underline that hops from word to word, and a
+    /// thin mirrored waveform. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Karaoke,
     /// A black capsule in the style of a phone's dynamic island: it opens
     /// as a dot, springs out to a pill with a red recording dot, a clock, a
     /// blue to violet bar waveform and up to three lines of words, and grows
@@ -146,6 +152,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "karaoke" => Some(OsdTheme::Karaoke),
             "island" => Some(OsdTheme::Island),
             "jarvis" => Some(OsdTheme::Jarvis),
             "cyberpunk" => Some(OsdTheme::Cyberpunk),
