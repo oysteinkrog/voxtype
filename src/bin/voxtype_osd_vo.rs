@@ -54,6 +54,8 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/radial.rs"]
+mod radial;
 #[path = "osd_vo/tron.rs"]
 mod tron;
 #[path = "osd_vo/phosphor.rs"]
@@ -546,6 +548,9 @@ impl Look {
 
     /// Width of the transcript: the panel less padding and border.
     fn text_width(&self) -> f32 {
+        if self.theme == OsdTheme::Radial {
+            return radial::text_width(self);
+        }
         if self.theme == OsdTheme::Tron {
             return tron::text_width(self);
         }
@@ -633,6 +638,9 @@ impl Look {
     }
 
     fn text_style(&self) -> TextStyle {
+        if self.theme == OsdTheme::Radial {
+            return radial::text_style(self);
+        }
         if self.theme == OsdTheme::Tron {
             return tron::text_style(self);
         }
@@ -704,6 +712,9 @@ impl Look {
     /// inside it, so the surface never resizes; the rest is transparent and
     /// click-through.
     fn surface(&self) -> Size {
+        if self.theme == OsdTheme::Radial {
+            return Popup::radial_surface(self);
+        }
         if self.theme == OsdTheme::Tron {
             return Popup::tron_surface(self);
         }
@@ -878,6 +889,8 @@ struct Popup {
     linger_armed: bool,
     /// What only the showcase look keeps.
     extra: showcase::Extra,
+    /// What only the radial look keeps.
+    radial: radial::State,
     /// What only the tron look keeps.
     tron: tron::State,
     /// What only the phosphor look keeps.
@@ -929,6 +942,7 @@ impl Popup {
             ended_at: None,
             linger_armed: false,
             extra: showcase::Extra::default(),
+            radial: radial::State::default(),
             tron: tron::State::default(),
             phos: phosphor::State::default(),
             fam: kit::State::default(),
@@ -1242,6 +1256,7 @@ impl App for Popup {
             }
         }
         self.sync_showcase(t);
+        self.sync_radial(t);
         self.sync_tron(t);
         self.sync_phosphor(t);
         self.kit_sync(t);
@@ -1289,6 +1304,9 @@ impl App for Popup {
 impl Popup {
     fn look_view(&self, _: &vo::Tokens) -> Element<Msg> {
         let root = Element::column("root").align_items(AlignItems::CENTER);
+        if self.look.theme == OsdTheme::Radial {
+            return self.radial_view();
+        }
         if self.look.theme == OsdTheme::Tron {
             return self.tron_view();
         }
@@ -1540,6 +1558,7 @@ fn default_motion(look: &Look) -> Motion {
         look.theme,
         OsdTheme::Showcase
             | OsdTheme::Type
+            | OsdTheme::Radial
             | OsdTheme::Tron
             | OsdTheme::Phosphor
             | OsdTheme::Mission

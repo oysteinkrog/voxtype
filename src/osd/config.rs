@@ -110,6 +110,10 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// A radial spectrum: bars round a microphone in a blue to violet ring
+    /// over a soft bloom, and the transcript in a wide card below. Drawn by
+    /// the vo frontend only; the gtk4 frontend draws `swiss` for it.
+    Radial,
     /// Tron light lines: a black glass panel traced by cyan light lines that
     /// run round its border, the waveform as one luminous line, and the
     /// transcript in a thin geometric face. Drawn by the vo frontend only;
@@ -193,6 +197,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "radial" => Some(OsdTheme::Radial),
             "tron" => Some(OsdTheme::Tron),
             "phosphor" => Some(OsdTheme::Phosphor),
             "mission" => Some(OsdTheme::Mission),
