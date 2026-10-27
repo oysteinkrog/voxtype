@@ -870,18 +870,10 @@ struct Voice {
     clock: u64,
 }
 
-/// Puts the frames that carry a sample clock on the signal bus. The batch
-/// arrived at scene time `t`; each older frame in it is dated back by its
-/// distance on the sample clock, since the bus drops a frame that lands at or
-/// before the one it has.
+/// Puts the frames that carry a sample clock on the signal bus, as one batch
+/// that arrived at scene time `t`. The frames come in clock order.
 fn feed_signals(signals: &SignalsCell, voice: &[Voice], t: f64) {
-    let frames: Vec<SignalFrame> = voice.iter().filter_map(Voice::signal_frame).collect();
-    let Some(newest) = frames.iter().map(|f| f.clock).reduce(f64::max) else {
-        return;
-    };
-    for frame in frames {
-        signals.push(frame, t - (newest - frame.clock));
-    }
+    signals.push_batch(voice.iter().filter_map(Voice::signal_frame), t);
 }
 
 impl Voice {
