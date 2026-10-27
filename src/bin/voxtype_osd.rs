@@ -260,6 +260,7 @@ fn vo_draws(theme: OsdTheme) -> bool {
         OsdTheme::Swiss
             | OsdTheme::Showcase
             | OsdTheme::Type
+            | OsdTheme::Phosphor
             | OsdTheme::Mission
             | OsdTheme::Palette
             | OsdTheme::Dotmatrix

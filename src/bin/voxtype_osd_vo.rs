@@ -54,6 +54,8 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/phosphor.rs"]
+mod phosphor;
 #[path = "osd_vo/mission.rs"]
 mod mission;
 #[path = "osd_vo/palette.rs"]
@@ -542,6 +544,9 @@ impl Look {
 
     /// Width of the transcript: the panel less padding and border.
     fn text_width(&self) -> f32 {
+        if self.theme == OsdTheme::Phosphor {
+            return phosphor::text_width(self);
+        }
         if self.theme == OsdTheme::Scope {
             return scope::text_width(self);
         }
@@ -623,6 +628,9 @@ impl Look {
     }
 
     fn text_style(&self) -> TextStyle {
+        if self.theme == OsdTheme::Phosphor {
+            return phosphor::text_style(self);
+        }
         if self.theme == OsdTheme::Scope {
             return scope::text_style(self);
         }
@@ -688,6 +696,9 @@ impl Look {
     /// inside it, so the surface never resizes; the rest is transparent and
     /// click-through.
     fn surface(&self) -> Size {
+        if self.theme == OsdTheme::Phosphor {
+            return Popup::phosphor_surface(self);
+        }
         if self.theme == OsdTheme::Scope {
             return Popup::scope_surface(self);
         }
@@ -856,6 +867,8 @@ struct Popup {
     linger_armed: bool,
     /// What only the showcase look keeps.
     extra: showcase::Extra,
+    /// What only the phosphor look keeps.
+    phos: phosphor::State,
     /// What the looks after the mock-ups (kit.rs) keep.
     fam: kit::State,
     /// What only the scope look keeps.
@@ -903,6 +916,7 @@ impl Popup {
             ended_at: None,
             linger_armed: false,
             extra: showcase::Extra::default(),
+            phos: phosphor::State::default(),
             fam: kit::State::default(),
             scope: scope::State::default(),
             captions: captions::State::default(),
@@ -1214,6 +1228,7 @@ impl App for Popup {
             }
         }
         self.sync_showcase(t);
+        self.sync_phosphor(t);
         self.kit_sync(t);
         self.sync_scope(t);
         self.sync_captions(t);
@@ -1259,6 +1274,9 @@ impl App for Popup {
 impl Popup {
     fn look_view(&self, _: &vo::Tokens) -> Element<Msg> {
         let root = Element::column("root").align_items(AlignItems::CENTER);
+        if self.look.theme == OsdTheme::Phosphor {
+            return self.phosphor_view();
+        }
         if self.look.theme == OsdTheme::Island {
             return self.island_view();
         }
@@ -1504,6 +1522,7 @@ fn default_motion(look: &Look) -> Motion {
         look.theme,
         OsdTheme::Showcase
             | OsdTheme::Type
+            | OsdTheme::Phosphor
             | OsdTheme::Mission
             | OsdTheme::Palette
             | OsdTheme::Dotmatrix

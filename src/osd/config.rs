@@ -110,6 +110,11 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// A green CRT terminal: a bowed screen with scanlines, a block meter,
+    /// the transcript in a monospaced face typed in behind a block caret, and
+    /// an italic status line. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Phosphor,
     /// A mission-control telemetry panel: tiles for the model, VRAM,
     /// latency, microphone and elapsed time, a large transcript tile with
     /// corner brackets, a waveform strip with a LIVE meter, orange and white
@@ -183,6 +188,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "phosphor" => Some(OsdTheme::Phosphor),
             "mission" => Some(OsdTheme::Mission),
             "palette" => Some(OsdTheme::Palette),
             "dotmatrix" => Some(OsdTheme::Dotmatrix),
