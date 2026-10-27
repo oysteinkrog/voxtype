@@ -110,6 +110,11 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// A command palette: a crisp dark card with chips for the engine, the
+    /// output and the latency, the transcript as input text with a caret,
+    /// unsure words softly underlined and key badges in the status. Drawn by
+    /// the vo frontend only; the gtk4 frontend draws `swiss` for it.
+    Palette,
     /// A dot-matrix look: white dots on black, a waveform built from dots,
     /// the status in a dot-matrix face, the transcript in a clean grotesk and
     /// one red dot while recording. Drawn by the vo frontend only; the gtk4
@@ -172,6 +177,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "palette" => Some(OsdTheme::Palette),
             "dotmatrix" => Some(OsdTheme::Dotmatrix),
             "swissfi" => Some(OsdTheme::Swissfi),
             "scope" => Some(OsdTheme::Scope),

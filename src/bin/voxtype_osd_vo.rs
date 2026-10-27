@@ -54,6 +54,8 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/palette.rs"]
+mod palette;
 #[path = "osd_vo/dotmatrix.rs"]
 mod dotmatrix;
 #[path = "osd_vo/kit.rs"]
@@ -568,6 +570,9 @@ impl Look {
         if self.theme == OsdTheme::Dotmatrix {
             return dotmatrix::text_width(self);
         }
+        if self.theme == OsdTheme::Palette {
+            return palette::text_width(self);
+        }
         self.width - swiss::PANEL_INSET_PX as f32
     }
 
@@ -593,6 +598,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Dotmatrix {
             return dotmatrix::max_lines();
+        }
+        if self.theme == OsdTheme::Palette {
+            return palette::max_lines();
         }
         swiss::MAX_LINES as u32
     }
@@ -636,6 +644,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Dotmatrix {
             return dotmatrix::text_style(self);
+        }
+        if self.theme == OsdTheme::Palette {
+            return palette::text_style(self);
         }
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
@@ -683,6 +694,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Showcase {
             return Popup::showcase_surface(self);
+        }
+        if self.theme == OsdTheme::Palette {
+            return palette::surface(self);
         }
         if self.theme == OsdTheme::Dotmatrix {
             return dotmatrix::surface(self);
@@ -1252,6 +1266,9 @@ impl Popup {
         if self.look.theme == OsdTheme::Type {
             return self.type_view();
         }
+        if self.look.theme == OsdTheme::Palette {
+            return self.palette_view();
+        }
         if self.look.theme == OsdTheme::Dotmatrix {
             return self.dotmatrix_view();
         }
@@ -1470,6 +1487,7 @@ fn default_motion(look: &Look) -> Motion {
         look.theme,
         OsdTheme::Showcase
             | OsdTheme::Type
+            | OsdTheme::Palette
             | OsdTheme::Dotmatrix
             | OsdTheme::Swissfi
             | OsdTheme::Scope
