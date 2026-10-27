@@ -23,6 +23,7 @@ use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::path::{icons, Contour, Outline, StrokeStyle};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
+use vo::scene::taffy::JustifyContent;
 use vo::scene::text::ShapedText;
 
 /// The drawing's own size, in concept units.
@@ -98,6 +99,13 @@ fn scale(look: &Look) -> f32 {
 pub(crate) fn text_style(look: &Look) -> TextStyle {
     let s = scale(look);
     TextStyle::new(fonts(&look.fonts).text, TEXT_PX * s, TEXT_LINE * s)
+}
+
+/// The centre of the newest transcript line, from the surface top. It is
+/// always the box's last line: the transcript is anchored to the bottom.
+#[allow(dead_code)]
+pub(crate) fn newest_line_centre(look: &Look) -> f32 {
+    (TEXT_Y + (MAX_LINES as f32 - 0.5) * TEXT_LINE) * scale(look)
 }
 
 pub(crate) fn text_width(look: &Look) -> f32 {
@@ -957,7 +965,9 @@ fn draw_strikes(t: f64, at: f64, widths: &[f32], rect: Rect, p: &mut Painter) {
     let s = rect.w / TEXT_W;
     for (i, w) in widths.iter().enumerate() {
         let k = ease_out(ramp(t, at + 0.04 * i as f64, at + 0.04 * i as f64 + 0.15));
-        let y = rect.y + (i as f32 + 0.58) * TEXT_LINE * s;
+        // The text sits at the bottom of its box.
+        let row = (MAX_LINES as usize - widths.len().min(MAX_LINES as usize) + i) as f32;
+        let y = rect.y + (row + 0.58) * TEXT_LINE * s;
         let x0 = rect.x - 6.0 * s;
         let r = Rect::new(x0, y - 2.0 * s, (w + 12.0 * s) * k, 4.0 * s);
         p.shape(ShapeInstance::rrect(
@@ -1247,7 +1257,10 @@ impl Popup {
             .word_enter(Transition::fade().offset(10.0 * s, 0.0))
             .word_change(Transition::fade().opacity(0.3).offset(4.0 * s, 0.0));
         let text = at(
+            // Anchored to the bottom, so the newest line always sits on the
+            // last line of the box.
             Element::column("text")
+                .justify(JustifyContent::FLEX_END)
                 .width(text_width(l))
                 .height(MAX_LINES as f32 * TEXT_LINE * s)
                 .child(words),
