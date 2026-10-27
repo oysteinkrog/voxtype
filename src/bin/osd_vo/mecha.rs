@@ -275,10 +275,46 @@ struct Stripes {
 }
 
 const STRIPES: [Stripes; 4] = [
-    Stripes { x0: 632.0, x1: 760.0, y0: 62.0, y1: 82.0, pitch: 26.0, w: 15.0, slant: 10.0, at: 0.34 },
-    Stripes { x0: 122.0, x1: 242.0, y0: 546.0, y1: 560.0, pitch: 20.0, w: 11.0, slant: -7.0, at: 0.40 },
-    Stripes { x0: 748.0, x1: 800.0, y0: 562.0, y1: 582.0, pitch: 24.0, w: 14.0, slant: 10.0, at: 0.44 },
-    Stripes { x0: 813.0, x1: 903.0, y0: 112.0, y1: 122.0, pitch: 23.0, w: 13.0, slant: -5.0, at: 0.38 },
+    Stripes {
+        x0: 632.0,
+        x1: 760.0,
+        y0: 62.0,
+        y1: 82.0,
+        pitch: 26.0,
+        w: 15.0,
+        slant: 10.0,
+        at: 0.34,
+    },
+    Stripes {
+        x0: 122.0,
+        x1: 242.0,
+        y0: 546.0,
+        y1: 560.0,
+        pitch: 20.0,
+        w: 11.0,
+        slant: -7.0,
+        at: 0.40,
+    },
+    Stripes {
+        x0: 748.0,
+        x1: 800.0,
+        y0: 562.0,
+        y1: 582.0,
+        pitch: 24.0,
+        w: 14.0,
+        slant: 10.0,
+        at: 0.44,
+    },
+    Stripes {
+        x0: 813.0,
+        x1: 903.0,
+        y0: 112.0,
+        y1: 122.0,
+        pitch: 23.0,
+        w: 13.0,
+        slant: -5.0,
+        at: 0.38,
+    },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -344,7 +380,11 @@ impl Label {
             }
             let a = ramp(t, ti, ti + 0.05);
             let dx = if self.track > 0.0 {
-                let k = ease_out(ramp(t, self.start + 0.02 * i as f64, self.start + 0.02 * i as f64 + 0.4));
+                let k = ease_out(ramp(
+                    t,
+                    self.start + 0.02 * i as f64,
+                    self.start + 0.02 * i as f64 + 0.4,
+                ));
                 self.track * (1.0 - k) * (i as f32 - (n as f32 - 1.0) / 2.0)
             } else {
                 0.0
@@ -363,7 +403,15 @@ impl Label {
             let i = (((t - self.start) / self.per_char as f64) as usize).min(n);
             let x = self.text.glyphs.get(i).map_or(self.width(), |g| g.pos.x);
             p.shape(ShapeInstance::rrect(
-                RRect::new(Rect::new(self.x + x, self.y + self.px * 0.12, self.px * 0.5, self.px * 0.9), 0.0),
+                RRect::new(
+                    Rect::new(
+                        self.x + x,
+                        self.y + self.px * 0.12,
+                        self.px * 0.5,
+                        self.px * 0.9,
+                    ),
+                    0.0,
+                ),
                 Paint::solid(mix(hex(YELLOW), hex(RED), red)),
             ));
         }
@@ -475,19 +523,37 @@ impl Snap {
 
         // The body: fill, then the outline drawing itself on.
         let outer = ring(&OUTER);
-        p.fill([&poly(&OUTER)], &StrokeStyle::solid(1.0, hex(FILL).fade(0.94 * fill_k)));
+        p.fill(
+            [&poly(&OUTER)],
+            &StrokeStyle::solid(1.0, hex(FILL).fade(0.94 * fill_k)),
+        );
         let k = ease_out(ramp(u, 0.0, 0.36));
         p.stroke(&outer.trim(0.0, k * outer.length()), &line(3.2));
 
         // The wave panel's grid, crosshairs and chevrons.
         let dim = accent.fade(0.09 * fill_k);
         for x in [245.0, 478.0, 712.0] {
-            p.stroke(&poly(&[(x, 120.0), (x, 292.0)]), &StrokeStyle::solid(1.0, dim));
+            p.stroke(
+                &poly(&[(x, 120.0), (x, 292.0)]),
+                &StrokeStyle::solid(1.0, dim),
+            );
         }
-        for (x, y) in [(290.0, 146.0), (580.0, 146.0), (290.0, 266.0), (580.0, 266.0), (866.0, 146.0)] {
+        for (x, y) in [
+            (290.0, 146.0),
+            (580.0, 146.0),
+            (290.0, 266.0),
+            (580.0, 266.0),
+            (866.0, 146.0),
+        ] {
             let c = accent.fade(0.7 * fill_k);
-            p.stroke(&poly(&[(x - 6.0, y), (x + 6.0, y)]), &StrokeStyle::solid(1.2, c));
-            p.stroke(&poly(&[(x, y - 6.0), (x, y + 6.0)]), &StrokeStyle::solid(1.2, c));
+            p.stroke(
+                &poly(&[(x - 6.0, y), (x + 6.0, y)]),
+                &StrokeStyle::solid(1.2, c),
+            );
+            p.stroke(
+                &poly(&[(x, y - 6.0), (x, y + 6.0)]),
+                &StrokeStyle::solid(1.2, c),
+            );
         }
         let chev = ease_out(ramp(u, 0.2, 0.45));
         let open = |pts: &[(f32, f32)]| {
@@ -496,12 +562,21 @@ impl Snap {
         };
         let l = open(&[(130.0, 140.0), (108.0, 206.0), (130.0, 272.0)]);
         let r = open(&[(898.0, 140.0), (920.0, 206.0), (898.0, 272.0)]);
-        p.stroke(&l.trim(0.0, chev * l.length()), &StrokeStyle::solid(1.5, accent.fade(0.8)));
-        p.stroke(&r.trim(0.0, chev * r.length()), &StrokeStyle::solid(1.5, accent.fade(0.8)));
+        p.stroke(
+            &l.trim(0.0, chev * l.length()),
+            &StrokeStyle::solid(1.5, accent.fade(0.8)),
+        );
+        p.stroke(
+            &r.trim(0.0, chev * r.length()),
+            &StrokeStyle::solid(1.5, accent.fade(0.8)),
+        );
 
         // The text panel.
         let panel = ring(&TEXT_PANEL);
-        p.fill([&poly(&TEXT_PANEL)], &StrokeStyle::solid(1.0, hex(PANEL).fade(fill_k)));
+        p.fill(
+            [&poly(&TEXT_PANEL)],
+            &StrokeStyle::solid(1.0, hex(PANEL).fade(fill_k)),
+        );
         let k = ease_out(ramp(u, 0.06, 0.42));
         p.stroke(&panel.trim(0.0, k * panel.length()), &line(2.8));
 
@@ -509,12 +584,38 @@ impl Snap {
         let slide = (1.0 - ease_back(ramp(u, 0.26, 0.50))) * 24.0;
         let a = ramp(u, 0.26, 0.34);
         let solid = |c: Color| StrokeStyle::solid(1.0, c.fade(a)).glow(3.0);
-        p.fill([&poly(&[(12.0 - slide, 190.0), (30.0 - slide, 212.0), (12.0 - slide, 234.0)])], &solid(accent));
-        p.fill([&poly(&[(972.0 + slide, 190.0), (954.0 + slide, 212.0), (972.0 + slide, 234.0)])], &solid(accent));
+        p.fill(
+            [&poly(&[
+                (12.0 - slide, 190.0),
+                (30.0 - slide, 212.0),
+                (12.0 - slide, 234.0),
+            ])],
+            &solid(accent),
+        );
+        p.fill(
+            [&poly(&[
+                (972.0 + slide, 190.0),
+                (954.0 + slide, 212.0),
+                (972.0 + slide, 234.0),
+            ])],
+            &solid(accent),
+        );
         for (y0, y1) in [(330.0, 384.0), (418.0, 470.0)] {
-            p.fill([&poly(&[(44.0 - slide, y0), (52.0 - slide, y0), (52.0 - slide, y1), (44.0 - slide, y1)])], &solid(accent));
+            p.fill(
+                [&poly(&[
+                    (44.0 - slide, y0),
+                    (52.0 - slide, y0),
+                    (52.0 - slide, y1),
+                    (44.0 - slide, y1),
+                ])],
+                &solid(accent),
+            );
         }
-        for (a0, a1) in [((896.0, 146.0), (926.0, 200.0)), ((926.0, 226.0), (896.0, 280.0)), ((900.0, 324.0), (922.0, 366.0))] {
+        for (a0, a1) in [
+            ((896.0, 146.0), (926.0, 200.0)),
+            ((926.0, 226.0), (896.0, 280.0)),
+            ((900.0, 324.0), (922.0, 366.0)),
+        ] {
             p.stroke(
                 &poly(&[(a0.0 + slide, a0.1), (a1.0 + slide, a1.1)]),
                 &StrokeStyle::solid(5.0, accent.fade(a)).glow(3.0),
@@ -530,10 +631,20 @@ impl Snap {
 
         // The plates on top: title bar, emblem and badge.
         let tb = ring(&TITLE_BAR);
-        p.fill([&poly(&TITLE_BAR)], &StrokeStyle::solid(1.0, hex(FILL).fade(fill_k)));
+        p.fill(
+            [&poly(&TITLE_BAR)],
+            &StrokeStyle::solid(1.0, hex(FILL).fade(fill_k)),
+        );
         let k = ease_out(ramp(u, 0.10, 0.40));
         p.stroke(&tb.trim(0.0, k * tb.length()), &line(3.2));
-        self.plate(p, &EMBLEM, (172.0, 80.0), ramp(u, 0.18, 0.42), accent, flash);
+        self.plate(
+            p,
+            &EMBLEM,
+            (172.0, 80.0),
+            ramp(u, 0.18, 0.42),
+            accent,
+            flash,
+        );
         self.plate(p, &BADGE, (858.0, 72.0), ramp(u, 0.24, 0.48), accent, flash);
         // The badge's rule.
         let rk = ease_out(ramp(u, 0.4, 0.6));
@@ -547,21 +658,34 @@ impl Snap {
             _ => true,
         };
         if on && u > 0.5 {
-            p.shape(ShapeInstance::circle(pt(826.0, 101.0), 3.0, Paint::solid(accent)));
+            p.shape(ShapeInstance::circle(
+                pt(826.0, 101.0),
+                3.0,
+                Paint::solid(accent),
+            ));
         }
 
         // The status band: pill, joints and the mic hexagon.
         let pill = ring(&PILL);
-        p.fill([&poly(&PILL)], &StrokeStyle::solid(1.0, hex(FILL).fade(fill_k)));
+        p.fill(
+            [&poly(&PILL)],
+            &StrokeStyle::solid(1.0, hex(FILL).fade(fill_k)),
+        );
         let k = ease_out(ramp(u, 0.16, 0.46));
         p.stroke(&pill.trim(0.0, k * pill.length()), &line(2.8));
         let mh = ring(&MIC_HEX);
-        p.stroke(&mh.trim(0.0, k * mh.length()), &StrokeStyle::solid(1.2, accent.fade(0.7)));
+        p.stroke(
+            &mh.trim(0.0, k * mh.length()),
+            &StrokeStyle::solid(1.2, accent.fade(0.7)),
+        );
         for j in [
             open(&[(110.0, 542.0), (270.0, 542.0), (290.0, 575.0)]),
             open(&[(690.0, 575.0), (710.0, 542.0), (884.0, 542.0)]),
         ] {
-            p.stroke(&j.trim(0.0, k * j.length()), &StrokeStyle::solid(1.5, accent.fade(0.85)));
+            p.stroke(
+                &j.trim(0.0, k * j.length()),
+                &StrokeStyle::solid(1.5, accent.fade(0.85)),
+            );
         }
 
         // Hazard stripes.
@@ -602,7 +726,15 @@ impl Snap {
     }
 
     /// A hexagon plate that snaps in around `c`.
-    fn plate(&self, p: &mut Painter, pts: &[(f32, f32)], c: (f32, f32), k: f32, accent: Color, flash: f32) {
+    fn plate(
+        &self,
+        p: &mut Painter,
+        pts: &[(f32, f32)],
+        c: (f32, f32),
+        k: f32,
+        accent: Color,
+        flash: f32,
+    ) {
         if k <= 0.0 {
             return;
         }
@@ -612,7 +744,10 @@ impl Snap {
             .then(&Affine::translate(c.0, c.1));
         p.layer(m, ease_out(ramp(k as f64, 0.0, 0.4)), |p| {
             p.fill([&poly(pts)], &StrokeStyle::solid(1.0, hex(FILL)));
-            p.stroke(&ring(pts), &StrokeStyle::solid(3.2, accent).glow(1.6 * flash));
+            p.stroke(
+                &ring(pts),
+                &StrokeStyle::solid(3.2, accent).glow(1.6 * flash),
+            );
         });
     }
 
@@ -624,7 +759,11 @@ impl Snap {
                 let k = ramp(u, 0.3, 0.5);
                 let mut x = WAVE_X0;
                 while x <= WAVE_X1 {
-                    p.shape(ShapeInstance::circle(pt(x, WAVE_CY), 1.3, Paint::solid(accent.fade(0.7 * k))));
+                    p.shape(ShapeInstance::circle(
+                        pt(x, WAVE_CY),
+                        1.3,
+                        Paint::solid(accent.fade(0.7 * k)),
+                    ));
                     x += 8.0;
                 }
                 let y = WAVE_CY + 34.0;
@@ -640,12 +779,13 @@ impl Snap {
                     }
                 };
                 let span = w - 40.0;
-                p.shape(
-                    ShapeInstance::rrect(
-                        RRect::new(Rect::new(WAVE_X0 + 20.0 + a * span, y, (b - a) * span, 4.0), 0.0),
-                        Paint::solid(accent.fade(k)),
+                p.shape(ShapeInstance::rrect(
+                    RRect::new(
+                        Rect::new(WAVE_X0 + 20.0 + a * span, y, (b - a) * span, 4.0),
+                        0.0,
                     ),
-                );
+                    Paint::solid(accent.fade(k)),
+                ));
                 return;
             }
             Phase::Cancelled => {
@@ -705,7 +845,10 @@ impl Snap {
             }
             let r = Rect::new(x - BAR_W / 2.0, WAVE_CY - h, BAR_W, 2.0 * h);
             if f > 0.08 && !frozen {
-                p.shape(ShapeInstance::rrect(RRect::new(r, BAR_W / 2.0), Paint::glow(core, 3.0, 0.25 * f)));
+                p.shape(ShapeInstance::rrect(
+                    RRect::new(r, BAR_W / 2.0),
+                    Paint::glow(core, 3.0, 0.25 * f),
+                ));
             }
             p.shape(ShapeInstance::rrect(
                 RRect::new(Rect::new(r.x, r.y, r.w, h), BAR_W / 2.0),
@@ -720,23 +863,38 @@ impl Snap {
             let k = ((t - self.phase_at) / 1.2).fract() as f32;
             let x = WAVE_X0 + k * w;
             let r = Rect::new(x - 1.0, WAVE_CY - WAVE_HALF, 2.0, 2.0 * WAVE_HALF);
-            p.shape(ShapeInstance::rrect(RRect::new(r, 1.0), Paint::glow(hex(YELLOW), 3.0, 0.6)));
-            p.shape(ShapeInstance::rrect(RRect::new(r, 1.0), Paint::solid(hex(YELLOW))));
+            p.shape(ShapeInstance::rrect(
+                RRect::new(r, 1.0),
+                Paint::glow(hex(YELLOW), 3.0, 0.6),
+            ));
+            p.shape(ShapeInstance::rrect(
+                RRect::new(r, 1.0),
+                Paint::solid(hex(YELLOW)),
+            ));
         }
         if self.phase == Phase::Done {
             let k = ease_out(ramp(t, self.phase_at + 0.3, self.phase_at + 0.6));
             let half = k * w / 2.0;
             let c = (WAVE_X0 + WAVE_X1) / 2.0;
             let r = Rect::new(c - half, WAVE_CY - 1.5, 2.0 * half, 3.0);
-            p.shape(ShapeInstance::rrect(RRect::new(r, 1.5), Paint::glow(hex(DEEP), 5.0, 0.8)));
-            p.shape(ShapeInstance::rrect(RRect::new(r, 1.5), Paint::solid(hex(0xff9a30))));
+            p.shape(ShapeInstance::rrect(
+                RRect::new(r, 1.5),
+                Paint::glow(hex(DEEP), 5.0, 0.8),
+            ));
+            p.shape(ShapeInstance::rrect(
+                RRect::new(r, 1.5),
+                Paint::solid(hex(0xff9a30)),
+            ));
         }
     }
 
     fn draw_meter(&self, t: f64, u: f64, accent: Color, p: &mut Painter) {
         let a = ramp(u, 0.3, 0.4);
         for x in [56.0, 96.0] {
-            p.stroke(&poly(&[(x, 156.0), (x, 278.0)]), &StrokeStyle::solid(1.2, accent.fade(0.6 * a)));
+            p.stroke(
+                &poly(&[(x, 156.0), (x, 278.0)]),
+                &StrokeStyle::solid(1.2, accent.fade(0.6 * a)),
+            );
         }
         let lit = if u < 0.62 {
             (ramp(u, 0.40, 0.60) * 10.0).floor() as i32
@@ -781,7 +939,11 @@ impl Snap {
         let m = Affine::translate(-12.0, -12.0)
             .then(&Affine::scale(size / 24.0))
             .then(&Affine::translate(c.0, c.1));
-        let color = if self.phase == Phase::Loading { accent.fade(0.5) } else { accent };
+        let color = if self.phase == Phase::Loading {
+            accent.fade(0.5)
+        } else {
+            accent
+        };
         let o = icon_outline(self.icon);
         p.layer(m, ease_out(k), |p| {
             p.outline(&o, &StrokeStyle::solid(2.8, color).glow(1.5));
@@ -798,8 +960,14 @@ fn draw_strikes(t: f64, at: f64, widths: &[f32], rect: Rect, p: &mut Painter) {
         let y = rect.y + (i as f32 + 0.58) * TEXT_LINE * s;
         let x0 = rect.x - 6.0 * s;
         let r = Rect::new(x0, y - 2.0 * s, (w + 12.0 * s) * k, 4.0 * s);
-        p.shape(ShapeInstance::rrect(RRect::new(r, 0.0), Paint::glow(hex(RED), 1.5 * s, 0.4)));
-        p.shape(ShapeInstance::rrect(RRect::new(r, 0.0), Paint::solid(hex(RED))));
+        p.shape(ShapeInstance::rrect(
+            RRect::new(r, 0.0),
+            Paint::glow(hex(RED), 1.5 * s, 0.4),
+        ));
+        p.shape(ShapeInstance::rrect(
+            RRect::new(r, 0.0),
+            Paint::solid(hex(RED)),
+        ));
     }
 }
 
@@ -816,9 +984,12 @@ fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
     })
 }
 
+/// Shaped labels by text, font and size in 1/64 units.
+type ShapedCache = HashMap<(String, u32, u32), Arc<ShapedText>>;
+
 /// Shaped labels, kept: the view is built for every audio batch.
 fn shaped(measure: &vo::ShapedLayout, text: &str, font: u32, px: f32) -> Arc<ShapedText> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, u32, u32), Arc<ShapedText>>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<ShapedCache>> = OnceLock::new();
     let key = (text.to_string(), font, (px * 64.0) as u32);
     let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
     if let Some(s) = cache.get(&key) {
@@ -867,25 +1038,34 @@ impl Popup {
         let (phase, phase_at) = self.mecha_phase(&status);
         let f = fonts(&l.fonts);
         let m = &self.measure;
-        let label = |text: &str, font: u32, px: f32, x: f32, y: f32, color: u32, start: f64| Label {
-            text: shaped(m, text, font, px),
-            font,
-            px,
-            x,
-            y,
-            color: hex(color),
-            start: self.shown_at + start,
-            per_char: 0.015,
-            track: 0.0,
-            cursor: true,
-        };
+        let label =
+            |text: &str, font: u32, px: f32, x: f32, y: f32, color: u32, start: f64| Label {
+                text: shaped(m, text, font, px),
+                font,
+                px,
+                x,
+                y,
+                color: hex(color),
+                start: self.shown_at + start,
+                per_char: 0.015,
+                track: 0.0,
+                cursor: true,
+            };
         let centred = |mut lb: Label| {
             lb.x -= lb.width() / 2.0;
             lb
         };
         let mut labels = vec![
             centred(label("VX", f.text, 66.0, 172.0, -2.0, ORANGE, 0.30)),
-            centred(label("VOICE UNIT 01", f.label, 12.5, 172.0, 66.0, ORANGE, 0.36)),
+            centred(label(
+                "VOICE UNIT 01",
+                f.label,
+                12.5,
+                172.0,
+                66.0,
+                ORANGE,
+                0.36,
+            )),
             label("SPEECH TO TEXT", f.small, 9.0, 112.0, 88.0, ORANGE, 0.42),
             label("ALL CHANNELS OPEN", f.small, 9.0, 112.0, 99.0, ORANGE, 0.46),
             label("UNIT READY.", f.small, 9.0, 112.0, 110.0, ORANGE, 0.50),
@@ -896,15 +1076,39 @@ impl Popup {
                 ..label("音声入力", f.cjk, 42.0, 300.0, 22.0, ORANGE, 0.22)
             },
             label("VOICE DICTATION", f.label, 16.0, 478.0, 33.0, ORANGE, 0.32),
-            label("REAL-TIME TRANSCRIPTION", f.small, 10.5, 478.0, 58.0, ORANGE, 0.40),
+            label(
+                "REAL-TIME TRANSCRIPTION",
+                f.small,
+                10.5,
+                478.0,
+                58.0,
+                ORANGE,
+                0.40,
+            ),
             label("MAX", f.label, 12.0, 61.0, 132.0, ORANGE, 0.42),
             label("MIN", f.label, 12.0, 62.0, 280.0, ORANGE, 0.46),
             label("作戦継続中", f.cjk, 15.0, 124.0, 562.0, 0xff5a2a, 0.48),
-            label("CONTINUOUS OPERATION", f.small, 9.5, 124.0, 585.0, ORANGE, 0.52),
+            label(
+                "CONTINUOUS OPERATION",
+                f.small,
+                9.5,
+                124.0,
+                585.0,
+                ORANGE,
+                0.52,
+            ),
             label("VOX-01", f.label, 18.0, 814.0, 556.0, ORANGE, 0.50),
         ];
         if phase == Phase::Loading && self.shown.is_empty() {
-            labels.push(label("AWAITING VOICE INPUT", f.text, 24.0, TEXT_X, TEXT_Y, 0x9a4a14, 0.5));
+            labels.push(label(
+                "AWAITING VOICE INPUT",
+                f.text,
+                24.0,
+                TEXT_X,
+                TEXT_Y,
+                0x9a4a14,
+                0.5,
+            ));
         }
         let count = format!("{:03} WORDS", self.word_count);
         labels.push(Label {
@@ -932,7 +1136,15 @@ impl Popup {
                 cursor: false,
                 ..label(kanji, f.cjk, 24.0, 858.0, 18.0, ORANGE, badge_at)
             }),
-            centred(label(english, f.label, 14.0, 858.0, 52.0, ORANGE, badge_at + 0.05)),
+            centred(label(
+                english,
+                f.label,
+                14.0,
+                858.0,
+                52.0,
+                ORANGE,
+                badge_at + 0.05,
+            )),
         ];
         if phase == Phase::Cancelled {
             for b in &mut badge {
@@ -952,18 +1164,42 @@ impl Popup {
             }
             _ => (
                 status.state.clone(),
-                status.detail.trim_start_matches([' ', '·']).trim().to_string(),
+                status
+                    .detail
+                    .trim_start_matches([' ', '·'])
+                    .trim()
+                    .to_string(),
             ),
         };
-        let status_at = if phase == Phase::Listening { 0.44 } else { phase_at - self.shown_at };
+        let status_at = if phase == Phase::Listening {
+            0.44
+        } else {
+            phase_at - self.shown_at
+        };
         let state_l = label(&state, f.label, 20.0, 382.0, 561.0, ORANGE, status_at);
         let mut status_labels = vec![];
         let mut x = 382.0 + state_l.width();
         status_labels.push(state_l);
         if !detail.is_empty() {
-            status_labels.push(label("·", f.label, 20.0, x + 12.0, 561.0, ORANGE, status_at + 0.1));
+            status_labels.push(label(
+                "·",
+                f.label,
+                20.0,
+                x + 12.0,
+                561.0,
+                ORANGE,
+                status_at + 0.1,
+            ));
             x += 34.0;
-            status_labels.push(label(&detail, f.label, 16.0, x, 564.0, HINT, status_at + 0.12));
+            status_labels.push(label(
+                &detail,
+                f.label,
+                16.0,
+                x,
+                564.0,
+                HINT,
+                status_at + 0.12,
+            ));
         }
         let icon = match phase {
             Phase::Loading | Phase::Listening => Icon::Mic,
@@ -1033,7 +1269,12 @@ impl Popup {
             // Strike lines over the words, as wide as each line.
             let style = text_style(l);
             let shaped = m.layout(
-                &self.shown.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "),
+                &self
+                    .shown
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
                 &style,
                 Some(text_width(l)),
             );
