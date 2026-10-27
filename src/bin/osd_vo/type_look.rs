@@ -2,8 +2,10 @@
 //! behaviour, with the motion in the type and the lines rather than in
 //! light. The frame draws itself on when the popup opens and is erased when
 //! a dictation is cancelled; the clock and the word count roll their digits;
-//! the icon turns from microphone to stop square to check; the state label
-//! swaps by sliding; new words rise into place.
+//! the icon turns from microphone to a stop square inside a spinner, and
+//! the spinner closes into a ring round a check; the state label swaps by
+//! sliding and changed numbers in the detail dip and settle; the rules open
+//! from their middle; new words rise into place.
 //!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
@@ -12,6 +14,7 @@ use super::*;
 
 use std::sync::OnceLock;
 
+use vo::scene::geom::Point;
 use vo::scene::path::{icons, make, Morph, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
 use vo::scene::taffy;
@@ -27,6 +30,12 @@ const WORD_RISE: f32 = 8.0;
 const LABEL_SLIDE: f32 = 7.0;
 /// The digit size of the clock and the word count, against the swiss values.
 const STAT_SCALE: f32 = 1.3;
+/// The icon's box: room for the ring round the stop square and the check.
+const ICON_BOX: f32 = 18.0;
+/// Seconds for the ring to close once the final text lands.
+const RING_SECS: f32 = 0.25;
+/// Seconds for a rule to open from its middle.
+const RULE_SECS: f64 = 0.35;
 
 /// An element placed at `(x, y)` in its parent, out of the flow.
 fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
@@ -77,9 +86,7 @@ impl Popup {
             .child(self.waveform(&status))
             .child(self.type_text())
             .child(
-                Element::shape("rule", ShapeKind::RRect)
-                    .height(1.0)
-                    .fill(l.border)
+                self.type_rule("rule", l.width - 2.0 * (PAD_X + BORDER))
                     .margin_edges(RULE_MARGIN_TOP, 0.0, 0.0, 0.0),
             )
             .child(self.type_status(&status))
@@ -113,6 +120,33 @@ impl Popup {
         .size(l.width, h)
         .motion(Prop::Trim, Spring::critical_to_98(FRAME_SECS))
         .presence(Transition::NONE.trim(0.0, 0.0), exit)
+    }
+
+    /// A hairline `w` wide that opens from its middle when it appears.
+    fn type_rule(&self, key: &'static str, w: f32) -> Element<Msg> {
+        let l = &self.look;
+        let half = |side: &'static str, to: f32| {
+            let line = Arc::new(Outline {
+                contours: vec![make::underline(w / 2.0, to, 0.5)],
+            });
+            at(
+                Element::stroke_path(
+                    side,
+                    line,
+                    Rect::new(0.0, 0.0, w, 1.0),
+                    StrokeStyle::solid(1.0, l.border),
+                ),
+                0.0,
+                0.0,
+            )
+            .size(w, 1.0)
+            .motion(Prop::Trim, Spring::critical_to_98(RULE_SECS))
+            .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade())
+        };
+        Element::column(key)
+            .size(w, 1.0)
+            .child(half("left", 0.0))
+            .child(half("right", w))
     }
 
     fn type_header(&self, status: &StatusLine) -> Element<Msg> {
@@ -158,46 +192,94 @@ impl Popup {
             .child(stat("words", words, "WORDS"))
     }
 
-    /// Microphone, then the stop square once the recording stops, then a
-    /// check drawn on when the final text lands.
+    /// Microphone while recording; a stop square inside a spinning arc
+    /// while the final text is made; then the arc closes into a ring and a
+    /// check draws on inside it.
     fn type_icon(&self, status: &StatusLine) -> Element<Msg> {
         static MIC_TO_STOP: OnceLock<Arc<Morph>> = OnceLock::new();
         static CHECK: OnceLock<Arc<Outline>> = OnceLock::new();
+        static RING: OnceLock<Arc<Outline>> = OnceLock::new();
         let l = &self.look;
-        let view = Rect::new(0.0, 0.0, 24.0, 24.0);
-        let slot = Element::column("icon").size(ICON, ICON);
-        if self.extra.final_at.is_some() {
+        let icon_view = Rect::new(0.0, 0.0, 24.0, 24.0);
+        let ring_view = Rect::new(0.0, 0.0, ICON_BOX, ICON_BOX);
+        let ring = RING.get_or_init(|| {
+            let c = ICON_BOX / 2.0;
+            Arc::new(Outline {
+                contours: vec![make::ring(Point::new(c, c), c - 1.0)],
+            })
+        });
+        let slot = Element::column("icon").size(ICON_BOX, ICON_BOX);
+        let done = self.extra.final_at.is_some();
+        let stopped = !done && (status.finishing || self.extra.finish_at.is_some());
+        let mut slot = slot;
+        if done {
             let check = CHECK.get_or_init(|| Arc::new(Outline::new(&icons::check(), 0.05)));
-            return slot.child(
+            slot = slot
+                .child(at(
+                    Element::stroke_path(
+                        "ring-closed",
+                        ring.clone(),
+                        ring_view,
+                        StrokeStyle::solid(1.2, l.accent),
+                    )
+                    .size(ICON_BOX, ICON_BOX)
+                    .motion(Prop::Trim, Spring::critical_to_98(RING_SECS as f64))
+                    .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade()),
+                    0.0,
+                    0.0,
+                ))
+                .child(at(
+                    Element::stroke_path(
+                        "check",
+                        check.clone(),
+                        icon_view,
+                        StrokeStyle::solid(2.4, l.accent),
+                    )
+                    .size(10.0, 10.0)
+                    // Slower than the ring, so the ring closes first.
+                    .motion(Prop::Trim, Spring::critical_to_98(2.0 * ICON_SECS))
+                    .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade()),
+                    (ICON_BOX - 10.0) / 2.0,
+                    (ICON_BOX - 10.0) / 2.0,
+                ));
+            return slot;
+        }
+        if stopped {
+            // The spinner: a dim track with a light head running round it.
+            slot = slot.child(at(
                 Element::stroke_path(
-                    "check",
-                    check.clone(),
-                    view,
-                    StrokeStyle::solid(2.0, l.accent),
+                    "ring-spin",
+                    ring.clone(),
+                    ring_view,
+                    StrokeStyle::solid(1.2, l.border),
                 )
-                .size(ICON, ICON)
-                .motion(Prop::Trim, Spring::critical_to_98(ICON_SECS))
-                .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade()),
-            );
+                .size(ICON_BOX, ICON_BOX)
+                .light_head(0.3, 0.8, l.accent, 0.0)
+                .presence(Transition::fade().scale(0.6), Transition::fade()),
+                0.0,
+                0.0,
+            ));
         }
         let morph = MIC_TO_STOP.get_or_init(|| {
             let mic = Outline::new(&icons::mic(), 0.05);
             let stop = Outline::new(&icons::stop(), 0.05);
             Arc::new(Morph::new(&mic, &stop, 64))
         });
-        let stopped = status.finishing || self.extra.finish_at.is_some();
-        slot.child(
+        let side = if stopped { 9.0 } else { ICON };
+        slot.child(at(
             Element::morph(
                 "mic",
                 morph.clone(),
-                view,
+                icon_view,
                 StrokeStyle::solid(1.8, l.accent),
             )
-            .size(ICON, ICON)
+            .size(side, side)
             .morph_to(if stopped { 1.0 } else { 0.0 })
             .motion(Prop::Morph, Spring::critical_to_98(ICON_SECS))
             .presence(Transition::fade(), Transition::fade().scale(0.6)),
-        )
+            (ICON_BOX - side) / 2.0,
+            (ICON_BOX - side) / 2.0,
+        ))
     }
 
     fn type_text(&self) -> Element<Msg> {
@@ -254,13 +336,7 @@ impl Popup {
             .margin_edges(STATUS_MARGIN_TOP, 0.0, 0.0, 0.0)
             .child(dot)
             .child(label)
-            .child(
-                Element::label("detail", status.detail.as_str())
-                    .text_style(style.clamp_lines(1))
-                    .color(l.inactive)
-                    .shrink(1.0)
-                    .min_width(0.0),
-            );
+            .child(self.type_detail(status, style, line));
         if status.shows_progress() {
             // A hairline that fills with the progress.
             let progress = Progress {
@@ -276,7 +352,47 @@ impl Popup {
                     .grow(1.0)
                     .margin_edges(0.0, 0.0, 0.0, 16.0),
             );
+        } else {
+            row = row.child(Element::row("spacer").grow(1.0));
         }
-        row
+        row.child(
+            Element::label("mark", "//")
+                .text_style(style)
+                .color(l.inactive)
+                .margin_edges(0.0, 0.0, 0.0, 12.0),
+        )
+    }
+
+    /// The detail after the state label as live words. A word keeps its id
+    /// while the state stays, so "4 s of audio left" turning to "3 s" dips
+    /// and settles the number alone; a new state brings new words in.
+    fn type_detail(&self, status: &StatusLine, style: TextStyle, line: f32) -> Element<Msg> {
+        let l = &self.look;
+        let base = status
+            .state
+            .bytes()
+            .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32))
+            << 6;
+        let words: Vec<Word> = status
+            .detail
+            .split_whitespace()
+            .enumerate()
+            .map(|(i, w)| Word {
+                id: base | i as u32 & 63,
+                text: w.to_string(),
+            })
+            .collect();
+        Element::live_text(format!("detail-{}", status.state), &words)
+            .text_style(style)
+            .color(l.inactive)
+            .height(line)
+            .margin_edges(0.0, 0.0, 0.0, 6.0)
+            .shrink(1.0)
+            .min_width(0.0)
+            .motion(Prop::Opacity, Spring::critical_to_98(0.12))
+            .motion(Prop::Offset, Spring::POP)
+            .word_enter(Transition::fade().offset(0.0, LABEL_SLIDE))
+            .word_change(Transition::fade().opacity(0.2).offset(0.0, -LABEL_SLIDE))
+            .presence(Transition::fade(), Transition::fade())
     }
 }
