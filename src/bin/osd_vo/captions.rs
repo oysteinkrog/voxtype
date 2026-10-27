@@ -415,7 +415,6 @@ impl Popup {
                     .motion(Prop::Offset, Spring::POP)
                     .word_enter(Transition::fade().offset(0.0, 6.0))
                     .word_change(Transition::fade().opacity(0.35).offset(0.0, -3.0))
-                    .text_halo(Color::WHITE.fade(0.12), 4.0)
             };
             // Each part gets its own measured width, so neither wraps.
             let width = |ws: &[Word]| {

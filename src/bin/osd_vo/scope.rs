@@ -640,8 +640,7 @@ impl Popup {
                         .color(colour)
                         .motion(Prop::Opacity, Spring::critical_to_98(0.08))
                         .word_enter(Transition::fade())
-                        .word_change(Transition::fade().opacity(0.3))
-                        .text_halo(hex(TEXT).fade(0.18), 3.0),
+                        .word_change(Transition::fade().opacity(0.3)),
                     o + TEXT_X,
                     o + TEXT_TOP + i as f32 * LINE,
                 )
