@@ -935,11 +935,6 @@ fn default_motion(look: &Look) -> Motion {
     }
 }
 
-/// The showcase draws 3D elements, which need the 3D painter in the renderer.
-fn renderer_setup(look: &Look) -> Option<vo::RendererSetup> {
-    (look.theme == OsdTheme::Showcase).then(|| Arc::new(vo_3d::install) as vo::RendererSetup)
-}
-
 /// Load `[osd]` and `[hotkey]` from the voxtype config, with defaults for
 /// anything missing or unreadable, as the GTK4 frontend does.
 fn load_config(explicit: Option<&Path>) -> (OsdConfig, HotkeyConfig) {
@@ -1223,7 +1218,6 @@ fn main() -> anyhow::Result<()> {
                 .diag
                 .then(|| Box::new(LogDiagnostics::new(Some(heap))) as Box<dyn vo::Diagnostics>),
             default_motion: default_motion(&look),
-            renderer_setup: renderer_setup(&look),
             ..Options::default()
         };
         let result = vo::run_overlay_with(Popup::new(look.clone(), &fonts), spec.clone(), options);
@@ -1398,7 +1392,6 @@ fn offline(
     let options = Options {
         fonts: fonts.clone(),
         default_motion: default_motion(&look),
-        renderer_setup: renderer_setup(&look),
         ..Options::default()
     };
     let n = vo::render_offline_with(Popup::new(look, &fonts), &scenario, fps, dir, options)
