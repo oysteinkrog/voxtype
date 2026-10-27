@@ -246,6 +246,9 @@ impl App for Wall {
                     .size(native.w, native.h)
                     .scale(s)
                     .motion(Prop::Scale, Motion::Snap)
+                    // Each look moves as it does on its own popup: swiss
+                    // snaps, the others spring.
+                    .default_motion(default_motion(look))
                     .child(p.view(tokens)),
                 (cell_w - native.w) / 2.0,
                 (cell_h - native.h) / 2.0,
