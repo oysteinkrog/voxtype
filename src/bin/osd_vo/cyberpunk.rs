@@ -21,6 +21,7 @@ use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
 use vo::scene::taffy;
+use vo::scene::Insets;
 use vo::scene::taffy::prelude::{auto, length};
 use vo_core::words::WordId;
 
@@ -493,6 +494,16 @@ const SLICES: [(u8, f32, f32, f32, f32, u32); 16] = [
     (1, 0.765, -2.0, 18.0, 1.4, CYAN),
     (1, 0.810, -12.0, 26.0, 2.0, RED),
 ];
+
+/// How far the decoration canvas draws past the surface: the right slices
+/// reach 24 px past the frame and a burst shakes them 15 px more, frame
+/// pieces jitter 14 px, and the frame's 2 px glow fades out over about 12 px.
+const DECO_REACH: Insets = Insets {
+    left: 8.0,
+    top: 8.0,
+    right: 20.0,
+    bottom: 8.0,
+};
 
 /// Everything the decoration canvas needs, copied out of the popup.
 #[derive(Clone)]
@@ -1265,7 +1276,8 @@ impl Popup {
             0.0,
             0.0,
         )
-        .size(size.w, size.h);
+        .size(size.w, size.h)
+        .declare_reach(DECO_REACH);
 
         // A burst also glitches the transcript and the waveform for a moment.
         let burst_on = !reduced()
