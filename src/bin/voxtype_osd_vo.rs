@@ -253,6 +253,11 @@ struct Args {
     #[arg(long)]
     envelope: bool,
 
+    /// With `--offline`: print each surface's GPU time per frame (median,
+    /// 95th percentile and worst) when the GPU has timestamps. Development.
+    #[arg(long, requires = "offline", env = "VOXTYPE_OSD_VO_GPU_TIMES")]
+    gpu_times: bool,
+
     /// Record each dictation's audio, voice features and runtime files to
     /// `DIR/<unix ms>.jsonl`, for `--preview --replay FILE`.
     #[arg(long, value_name = "DIR", env = "VOXTYPE_OSD_VO_RECORD")]
@@ -2158,7 +2163,7 @@ fn main() -> anyhow::Result<()> {
         return moments::offline(look, fonts, dir, args.fps, m);
     }
     if let Some(dir) = &args.offline {
-        return offline(look, fonts, dir, args.fps, args.cancel);
+        return offline(look, fonts, dir, args.fps, args.cancel, args.gpu_times);
     }
 
     let shared: Shared = Arc::new((Mutex::new(Sink::default()), Condvar::new()));
@@ -2452,21 +2457,62 @@ fn offline(
     dir: &Path,
     fps: f64,
     cancel: bool,
+    gpu_times: bool,
 ) -> anyhow::Result<()> {
     let scenario = scenario(&look, cancel);
+    // GPU milliseconds per frame, by surface: "main" or an extra surface's key.
+    let times: Arc<Mutex<Vec<(String, f64)>>> = Arc::default();
+    let sink = times.clone();
     let options = Options {
         fonts: fonts.clone(),
         default_motion: default_motion(&look),
+        frame_timings: gpu_times.then(|| {
+            Arc::new(move |f: &vo::FrameTiming| {
+                let key = f.surface.unwrap_or("main").to_string();
+                sink.lock().unwrap().push((key, f.timings.total_ms));
+            }) as vo::FrameTimingsSink
+        }),
         ..Options::default()
     };
     let n = vo::render_offline_with(Popup::new(look, &fonts), &scenario, fps, dir, options)
         .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
     eprintln!("voxtype-osd-vo: wrote {n} frames to {}", dir.display());
+    if gpu_times {
+        print_gpu_times(&times.lock().unwrap());
+    }
     eprintln!(
         "voxtype-osd-vo: heap peak {:.2} MB",
         mb(PEAK.load(Ordering::Relaxed))
     );
     Ok(())
+}
+
+/// One line per surface: frames, and GPU milliseconds per frame as median,
+/// 95th percentile and worst.
+fn print_gpu_times(times: &[(String, f64)]) {
+    if times.is_empty() {
+        eprintln!("voxtype-osd-vo: no GPU times: this GPU has no timestamps inside encoders");
+        return;
+    }
+    let mut keys: Vec<&str> = times.iter().map(|(k, _)| k.as_str()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    for key in keys {
+        let mut ms: Vec<f64> = times
+            .iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, m)| *m)
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        let at = |q: f64| ms[((ms.len() - 1) as f64 * q).round() as usize];
+        eprintln!(
+            "voxtype-osd-vo: GPU {key}: {} frames, median {:.3} ms, p95 {:.3} ms, max {:.3} ms",
+            ms.len(),
+            at(0.5),
+            at(0.95),
+            ms[ms.len() - 1]
+        );
+    }
 }
 
 /// The looks the vo frontend draws itself.
