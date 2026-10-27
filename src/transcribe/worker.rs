@@ -399,8 +399,8 @@ impl Progress {
     /// the parts done so far, or 0.1 s per second of audio before that.
     fn status(&self, loaded: bool) -> String {
         let left: f32 = self.pending.iter().sum();
-        let (text, fraction) = if !loaded {
-            ("Finishing: loading the model".to_string(), None)
+        let (text, fraction, eta) = if !loaded {
+            ("Finishing: loading the model".to_string(), None, None)
         } else {
             let rate = if self.done_audio > 0.0 {
                 self.done_took / self.done_audio
@@ -419,9 +419,16 @@ impl Progress {
                 } else {
                     1.0
                 }),
+                Some(left * rate),
             )
         };
-        serde_json::json!({ "text": text, "fraction": fraction }).to_string()
+        serde_json::json!({
+            "text": text,
+            "fraction": fraction,
+            "audio_left_s": left,
+            "eta_s": eta,
+        })
+        .to_string()
     }
 }
 

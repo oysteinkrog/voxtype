@@ -1288,12 +1288,38 @@ impl Daemon {
     }
 
     /// Play audio feedback sound if enabled
+    /// `meta` in preview.json: the engine, the models, the microphone and
+    /// the language, as configured.
+    fn publish_live_meta(&self) {
+        let c = &self.config;
+        let engine = serde_json::to_value(&c.engine)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        crate::osd::live::meta(crate::osd::live::LiveMeta {
+            engine,
+            model: c.model_name().to_string(),
+            live_model: c
+                .live_preview_active()
+                .then(|| c.live_preview_model.clone())
+                .flatten(),
+            mic: c.audio.device.clone(),
+            language: c.active_language().map(str::to_string),
+        });
+    }
+
     fn play_feedback(&self, event: SoundEvent) {
         // Each dictation ends with one of these sounds, so they also tell
         // the popup how it ended, whether or not sounds are on.
         use crate::osd::outcome::{self, Outcome};
         match event {
-            SoundEvent::RecordingStart => outcome::clear(),
+            SoundEvent::RecordingStart => {
+                outcome::clear();
+                // A dictation, not a meeting: tell the popup what makes the text.
+                if self.meeting_daemon.is_none() {
+                    self.publish_live_meta();
+                }
+            }
             SoundEvent::TranscriptionComplete => outcome::write(Outcome::Done),
             SoundEvent::Cancelled => outcome::write(Outcome::Cancelled),
             SoundEvent::Error => outcome::write(Outcome::Failed),

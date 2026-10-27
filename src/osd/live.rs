@@ -10,8 +10,11 @@
 //! {"version": 1, "rev": 7, "text": "hello world",
 //!  "words": [{"text": "hello", "start": 0.32, "end": 0.56, "conf": 0.98,
 //!             "since": 3, "changes": 1}, ...],
-//!  "status": {"phase": "finishing", "fraction": 0.4, "text": "Finishing: ..."},
-//!  "target": {"app": "org.kde.konsole"}}
+//!  "status": {"phase": "finishing", "fraction": 0.4, "text": "Finishing: ...",
+//!             "audio_left_s": 4.0, "eta_s": 0.6},
+//!  "target": {"app": "org.kde.konsole"},
+//!  "meta": {"engine": "cohere", "model": "...", "live_model": "...",
+//!           "mic": "default", "language": "en"}}
 //! ```
 //!
 //! `rev` counts the preview updates of this dictation. A word's `since` is
@@ -20,7 +23,12 @@
 //! same. Word times are seconds into the recording; `start`, `end` and
 //! `conf` are null when the engine gives no timing. `status` is null when
 //! there is none; while finishing, `fraction` is the share done (0 to 1), or
-//! null when unknown. `target` is null until the app is known.
+//! null when unknown. While finishing, `audio_left_s` is the seconds of
+//! audio still to transcribe and `eta_s` the estimated seconds until the
+//! final text; both are null when unknown. `target` is null until the app is
+//! known. `meta` says, from the config, which engine and model make the
+//! final text, which model makes the live text, the microphone, and the
+//! language (null for automatic); it is written when the recording starts.
 //!
 //! The file is written to a temporary name and renamed, so a reader never
 //! sees half of it. It is removed when the dictation ends.
@@ -45,6 +53,8 @@ pub struct LiveDoc {
     pub words: Vec<LiveWord>,
     pub status: Option<LiveStatus>,
     pub target: Option<LiveTarget>,
+    #[serde(default)]
+    pub meta: Option<LiveMeta>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -76,6 +86,27 @@ pub struct LiveStatus {
     /// Share done, 0 to 1, or None when unknown.
     pub fraction: Option<f64>,
     pub text: String,
+    /// Seconds of audio still to transcribe, while finishing.
+    #[serde(default)]
+    pub audio_left_s: Option<f32>,
+    /// Estimated seconds until the final text, while finishing.
+    #[serde(default)]
+    pub eta_s: Option<f32>,
+}
+
+/// What makes the text, from the config.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LiveMeta {
+    /// The engine of the final text, such as "whisper" or "cohere".
+    pub engine: String,
+    /// Its model name or path.
+    pub model: String,
+    /// The model of the live text, if a separate one makes it.
+    pub live_model: Option<String>,
+    /// The audio input device as configured, "default" for the default.
+    pub mic: String,
+    /// The language code, or null for automatic detection.
+    pub language: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -151,6 +182,7 @@ static LIVE: Mutex<Live> = Mutex::new(Live {
         words: Vec::new(),
         status: None,
         target: None,
+        meta: None,
     },
     session: 0,
     timed: None,
@@ -198,13 +230,32 @@ pub fn preview(text: &str) {
 }
 
 pub fn status(phase: Phase, fraction: Option<f64>, text: &str) {
+    finishing_status(phase, fraction, text, None, None);
+}
+
+/// A status with the seconds of audio left and the estimated seconds until
+/// the final text, when they are known.
+pub fn finishing_status(
+    phase: Phase,
+    fraction: Option<f64>,
+    text: &str,
+    audio_left_s: Option<f32>,
+    eta_s: Option<f32>,
+) {
     with_live(|live| {
         live.doc.status = Some(LiveStatus {
             phase,
             fraction: fraction.map(|f| f.clamp(0.0, 1.0)),
             text: text.to_string(),
+            audio_left_s,
+            eta_s,
         })
     });
+}
+
+/// What makes the text, at the start of a recording.
+pub fn meta(meta: LiveMeta) {
+    with_live(|live| live.doc.meta = Some(meta));
 }
 
 pub fn clear_status() {
@@ -293,6 +344,15 @@ mod tests {
             phase: Phase::Finishing,
             fraction: Some(0.5),
             text: "Finishing".into(),
+            audio_left_s: Some(4.0),
+            eta_s: None,
+        });
+        doc.meta = Some(LiveMeta {
+            engine: "cohere".into(),
+            model: "m".into(),
+            live_model: None,
+            mic: "default".into(),
+            language: Some("en".into()),
         });
         let v: serde_json::Value = serde_json::to_value(&doc).unwrap();
         assert_eq!(v["version"], 1);
@@ -301,8 +361,23 @@ mod tests {
         assert!(v["words"][0]["start"].is_null());
         assert_eq!(v["status"]["phase"], "finishing");
         assert_eq!(v["status"]["fraction"], 0.5);
+        assert_eq!(v["status"]["audio_left_s"], 4.0);
+        assert!(v["status"]["eta_s"].is_null());
         assert!(v["target"].is_null());
+        assert_eq!(v["meta"]["engine"], "cohere");
+        assert_eq!(v["meta"]["language"], "en");
         let back: LiveDoc = serde_json::from_value(v).unwrap();
         assert_eq!(back, doc);
+    }
+
+    /// A file from before `meta`, `audio_left_s` and `eta_s` still reads.
+    #[test]
+    fn an_older_file_still_parses() {
+        let json = r#"{"version":1,"rev":1,"text":"hi","words":[],
+            "status":{"phase":"finishing","fraction":null,"text":"Finishing"},
+            "target":null}"#;
+        let doc: LiveDoc = serde_json::from_str(json).unwrap();
+        assert_eq!(doc.status.unwrap().audio_left_s, None);
+        assert_eq!(doc.meta, None);
     }
 }

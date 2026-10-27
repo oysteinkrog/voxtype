@@ -739,9 +739,9 @@ mod tests {
     }
 }
 
-/// Write a worker status line (`{"text", "fraction"}`) to the file the OSD
-/// shows: the fraction on the first line (empty if unknown), the text on
-/// the second.
+/// Write a worker status line (`{"text", "fraction", "audio_left_s",
+/// "eta_s"}`) to the file the OSD shows: the fraction on the first line
+/// (empty if unknown), the text on the second. `preview.json` gets all four.
 fn write_live_status(json: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return;
@@ -751,7 +751,13 @@ fn write_live_status(json: &str) {
         v["text"].as_str().unwrap_or_default(),
     );
     write_status_file(fraction, text);
-    crate::osd::live::status(crate::osd::live::Phase::Finishing, fraction, text);
+    crate::osd::live::finishing_status(
+        crate::osd::live::Phase::Finishing,
+        fraction,
+        text,
+        v["audio_left_s"].as_f64().map(|s| s as f32),
+        v["eta_s"].as_f64().map(|s| s as f32),
+    );
 }
 
 /// How long to wait for READY before telling the user the live model is
