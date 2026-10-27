@@ -96,6 +96,12 @@ pub enum OsdTheme {
     /// waveform, a level meter and the transcript in heavy condensed type.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Mecha,
+    /// A cyberpunk HUD: a chamfered black panel in a yellow and red frame, a
+    /// yellow tag that types "VOICE LINK ACTIVE", hazard slashes, yellow and
+    /// red bars between brackets, and bold white words. Glitch slices fire on
+    /// a revised word or a change of state. Drawn by the vo frontend only;
+    /// the gtk4 frontend draws `swiss` for it.
+    Cyberpunk,
 }
 
 impl OsdTheme {
@@ -105,6 +111,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "cyberpunk" => Some(OsdTheme::Cyberpunk),
             "synthwave" => Some(OsdTheme::Synthwave),
             "mecha" => Some(OsdTheme::Mecha),
             _ => None,

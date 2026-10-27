@@ -262,6 +262,7 @@ fn vo_draws(theme: OsdTheme) -> bool {
             | OsdTheme::Type
             | OsdTheme::Synthwave
             | OsdTheme::Mecha
+            | OsdTheme::Cyberpunk
     )
 }
 

@@ -53,6 +53,8 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/cyberpunk.rs"]
+mod cyberpunk;
 #[path = "osd_vo/wall.rs"]
 mod wall;
 #[path = "osd_vo/synthwave.rs"]
@@ -465,6 +467,9 @@ impl Look {
         if self.theme == OsdTheme::Mecha {
             return mecha::text_width(self);
         }
+        if self.theme == OsdTheme::Cyberpunk {
+            return cyberpunk::text_width(self);
+        }
         self.width - swiss::PANEL_INSET_PX as f32
     }
 
@@ -491,6 +496,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Mecha {
             return mecha::text_style(self);
+        }
+        if self.theme == OsdTheme::Cyberpunk {
+            return cyberpunk::text_style(self);
         }
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
@@ -523,6 +531,9 @@ impl Look {
     fn surface(&self) -> Size {
         if self.theme == OsdTheme::Showcase {
             return Popup::showcase_surface(self);
+        }
+        if self.theme == OsdTheme::Cyberpunk {
+            return Popup::cyber_surface(self);
         }
         if self.theme == OsdTheme::Synthwave {
             return Popup::synthwave_surface(self);
@@ -605,6 +616,8 @@ struct Popup {
     was_recording: bool,
     /// What only the showcase look keeps.
     extra: showcase::Extra,
+    /// What only the cyberpunk look keeps.
+    cyber: cyberpunk::State,
     /// What only the synthwave look keeps.
     synth: synthwave::State,
 }
@@ -633,6 +646,7 @@ impl Popup {
             in_wall: false,
             was_recording: false,
             extra: showcase::Extra::default(),
+            cyber: cyberpunk::State::default(),
             synth: synthwave::State::default(),
         }
     }
@@ -806,7 +820,9 @@ impl App for Popup {
         self.shown_at = cx.t();
         self.extra.now = cx.t();
         self.sync_showcase(cx.t());
+        self.sync_cyber(cx.t());
         self.arm_tick(cx);
+        self.arm_cyber_tick(cx);
     }
 
     fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
@@ -844,8 +860,10 @@ impl App for Popup {
             Msg::Loop => {}
         }
         self.sync_showcase(t);
+        self.sync_cyber(t);
         self.sync_synthwave(t);
         self.arm_tick(cx);
+        self.arm_cyber_tick(cx);
         if !tick && self.idle(t) {
             tracing::info!(
                 recording = self.files.recording,
@@ -865,6 +883,9 @@ impl App for Popup {
         let root = Element::column("root").align_items(AlignItems::CENTER);
         if self.look.theme == OsdTheme::Showcase {
             return self.showcase_view();
+        }
+        if self.look.theme == OsdTheme::Cyberpunk {
+            return self.cyber_view();
         }
         if self.look.theme == OsdTheme::Type {
             return self.type_view();
@@ -1076,7 +1097,7 @@ impl Popup {
 fn default_motion(look: &Look) -> Motion {
     if matches!(
         look.theme,
-        OsdTheme::Showcase | OsdTheme::Type | OsdTheme::Mecha
+        OsdTheme::Showcase | OsdTheme::Type | OsdTheme::Mecha | OsdTheme::Cyberpunk
     ) {
         Motion::Spring(Spring::SOFT)
     } else {
