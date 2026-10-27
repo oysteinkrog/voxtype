@@ -536,6 +536,8 @@ struct Popup {
     lines: u32,
     check: Option<vo::TimerId>,
     closing: bool,
+    /// The daemon has said a recording runs since the popup opened.
+    was_recording: bool,
     /// What only the showcase look keeps.
     extra: showcase::Extra,
 }
@@ -561,12 +563,40 @@ impl Popup {
             lines: 1,
             check: None,
             closing: false,
+            was_recording: false,
             extra: showcase::Extra::default(),
         }
     }
 
     fn status(&self) -> StatusLine {
+        if self.ended() {
+            // The daemon is idle and the popup is about to close: an empty
+            // status would read as "Listening", as if a new recording began.
+            let state = if self.extra.finish_at.is_some() {
+                "Done"
+            } else {
+                "Stopped"
+            };
+            return StatusLine {
+                state: state.into(),
+                detail: String::new(),
+                loading: false,
+                finishing: true,
+            };
+        }
         StatusLine::new(&self.files.status, &self.look.stop_hint)
+    }
+
+    /// A recording ran, has stopped, and nothing is being finished: the
+    /// short time between the daemon going idle and the popup closing.
+    fn ended(&self) -> bool {
+        self.was_recording && !self.files.recording && self.files.status.is_empty()
+    }
+
+    /// The progress bar shows while a model loads or the final text is made,
+    /// not once the dictation has ended.
+    fn shows_progress(&self, status: &StatusLine) -> bool {
+        status.shows_progress() && !self.ended()
     }
 
     fn audio(&mut self, frames: Vec<AudioFrame>, t: f64) {
@@ -728,6 +758,7 @@ impl App for Popup {
                 let preview_changed = files.preview != self.files.preview;
                 let live_changed = files.live != self.files.live;
                 self.extra.files(&self.files, &files, t);
+                self.was_recording |= files.recording;
                 self.files = files;
                 if preview_changed {
                     let preview = self.files.preview.clone();
@@ -941,7 +972,7 @@ impl Popup {
                     .shrink(1.0)
                     .min_width(0.0),
             );
-        if status.shows_progress() {
+        if self.shows_progress(status) {
             let progress = Progress {
                 fraction: self.files.fraction.map(|f| f.clamp(0.0, 1.0) as f32),
                 track: l.border,

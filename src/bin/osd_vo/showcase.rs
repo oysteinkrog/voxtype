@@ -875,10 +875,10 @@ impl Popup {
                 .min_width(0.0),
             )
             .child(Element::row("spacer").grow(1.0));
-        if phase.ambient() && !status.shows_progress() {
+        if phase.ambient() && !self.shows_progress(&status) {
             row = row.child(self.level_meter());
         }
-        if status.shows_progress() {
+        if self.shows_progress(&status) {
             match self.files.fraction {
                 Some(f) => {
                     // A dot meter: lit dots for the fraction done.

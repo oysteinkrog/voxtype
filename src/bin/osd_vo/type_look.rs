@@ -244,7 +244,7 @@ impl Popup {
                 ));
             return slot;
         }
-        if stopped {
+        if stopped && !self.ended() {
             // The spinner: a dim track with a light head running round it.
             slot = slot.child(at(
                 Element::stroke_path(
@@ -337,7 +337,7 @@ impl Popup {
             .child(dot)
             .child(label)
             .child(self.type_detail(status, style, line));
-        if status.shows_progress() {
+        if self.shows_progress(status) {
             // A hairline that fills with the progress.
             let progress = Progress {
                 fraction: self.files.fraction.map(|f| f.clamp(0.0, 1.0) as f32),
