@@ -928,14 +928,22 @@ impl Popup {
                 ..WordParticles::default()
             });
         }
+        // A faint teal halo under the live words, drawn from the glyphs'
+        // distance field; it widens and turns to ice once when the final
+        // text lands.
+        let pulse = self.final_pulse();
+        let (halo, radius) = match phase {
+            _ if self.extra.final_at.is_some() => {
+                (c(ICE).fade(0.12 + 0.35 * pulse), 4.0 + 8.0 * pulse)
+            }
+            Phase::Finishing | Phase::Done => (c(SLATE).fade(0.12), 4.0),
+            _ => (c(TEAL).fade(0.22), 4.0),
+        };
+        let words = words
+            .text_halo(halo, radius)
+            .motion(Prop::TextFx, Spring::SOFT);
         let mut strip_fill = c(MATTE);
         strip_fill.a = 0.9;
-        // The words sit in a layer whose bloom is off except for one soft
-        // halo when the final text lands, so live text stays crisp.
-        let words = Element::layer("glowtext")
-            .bloom(0.9 * self.final_pulse(), 8.0)
-            .motion(Prop::Bloom, Spring::SNAP)
-            .child(words);
         Element::panel("strip")
             .height(self.lines as f32 * l.text_line + 2.0 * STRIP_PAD_Y)
             .pad_edges(STRIP_PAD_Y, STRIP_PAD_X, STRIP_PAD_Y, STRIP_PAD_X)
