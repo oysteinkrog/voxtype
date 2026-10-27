@@ -493,6 +493,7 @@ impl Look {
                     + (lines as f32 - 0.5) * self.text_line,
             ),
             OsdTheme::Mecha => Some(mecha::newest_line_centre(self)),
+            OsdTheme::Cyberpunk => Some(cyberpunk::newest_line_centre()),
             _ => None,
         }
     }
