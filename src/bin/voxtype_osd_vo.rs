@@ -81,6 +81,8 @@ mod captions;
 mod karaoke;
 #[path = "osd_vo/island.rs"]
 mod island;
+#[path = "osd_vo/envelope.rs"]
+mod envelope;
 #[path = "osd_vo/jarvis.rs"]
 mod jarvis;
 #[path = "osd_vo/cyberpunk.rs"]
@@ -226,10 +228,16 @@ struct Args {
     #[arg(long, default_value = "30")]
     fps: f64,
 
-    /// With `--offline`: script a dictation that is cancelled at the pause,
-    /// so the popup closes without a final text.
-    #[arg(long, requires = "offline")]
+    /// With `--offline` or `--envelope`: script a dictation that is
+    /// cancelled at the pause, so the popup closes without a final text.
+    #[arg(long)]
     cancel: bool,
+
+    /// Check the scripted dictation of `--offline` against the reading-line
+    /// envelope and measure its GPU time per frame, then exit. Fails when
+    /// either is breached. Needs a GPU but no display and no daemon.
+    #[arg(long)]
+    envelope: bool,
 
     /// Record each dictation's audio, voice features and runtime files to
     /// `DIR/<unix ms>.jsonl`, for `--preview --replay FILE`.
@@ -1983,6 +1991,9 @@ fn main() -> anyhow::Result<()> {
 
     if args.wall {
         return run_wall(&args, &cfg, &theme, stop_hint(&hotkey), fonts);
+    }
+    if args.envelope {
+        return envelope::run(look, fonts, args.fps, args.cancel);
     }
     if let Some(dir) = &args.offline {
         return offline(look, fonts, dir, args.fps, args.cancel);
