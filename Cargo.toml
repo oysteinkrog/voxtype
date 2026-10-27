@@ -143,9 +143,9 @@ rubato = "0.16"
 
 # OSD on the vo GPU overlay framework (gated on `osd-vo`). Pinned to a commit
 # of the framework repo; nothing in the default build pulls it in.
-vo = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "c33eb9b44491474a75dcaba05e60fe2775e1627b", optional = true }
-vo-core = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "c33eb9b44491474a75dcaba05e60fe2775e1627b", optional = true }
-vo-dots = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "c33eb9b44491474a75dcaba05e60fe2775e1627b", optional = true }
+vo = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "551ae76c02c55671e3ddefbd1ac5a89758069ec5", optional = true }
+vo-core = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "551ae76c02c55671e3ddefbd1ac5a89758069ec5", optional = true }
+vo-dots = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "551ae76c02c55671e3ddefbd1ac5a89758069ec5", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tao = "0.32"

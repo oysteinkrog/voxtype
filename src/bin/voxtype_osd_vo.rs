@@ -37,7 +37,7 @@ use vo::{
     App, Cx, FontRegistry, Input, InputMode, LogDiagnostics, Options, OverlaySpec, Placement,
 };
 use vo_core::spring::Spring;
-use vo_core::words::{Word, WordModel};
+use vo_core::words::{Word, WordInfo, WordModel};
 
 use voxtype::audio::levels::{AudioFrame, FRAME_BYTES, FRAME_HZ};
 use voxtype::config::{Config as VoxtypeConfig, HotkeyConfig};
@@ -493,6 +493,8 @@ struct Files {
     fraction: Option<f64>,
     /// The status file's text line.
     status: String,
+    /// `preview.json`: the words with their timing and how settled they are.
+    live: Option<voxtype::osd::live::LiveDoc>,
 }
 
 #[derive(Clone, Debug)]
@@ -620,6 +622,30 @@ impl Popup {
         self.wave = smooth_levels(&raw).into_iter().map(|l| l as f32).collect();
     }
 
+    /// Hands the daemon's word facts to the word model, when `preview.json`
+    /// describes the text on screen. The two files are written one after the
+    /// other, so either may be read first.
+    fn word_info(&mut self) {
+        let Some(doc) = self.files.live.as_ref() else {
+            return;
+        };
+        if doc.text != self.files.preview {
+            return;
+        }
+        let info: Vec<WordInfo> = doc
+            .words
+            .iter()
+            .map(|w| WordInfo {
+                start: w.start,
+                end: w.end,
+                conf: w.conf,
+                settled: doc.rev.saturating_sub(w.since),
+                changes: w.changes,
+            })
+            .collect();
+        self.model.set_info(&info);
+    }
+
     fn text(&mut self, preview: &str) {
         if preview.is_empty() {
             // The daemon removes the file at the end; keep the last words.
@@ -700,11 +726,15 @@ impl App for Popup {
             }
             Msg::Files(files) => {
                 let preview_changed = files.preview != self.files.preview;
+                let live_changed = files.live != self.files.live;
                 self.extra.files(&self.files, &files, t);
                 self.files = files;
                 if preview_changed {
                     let preview = self.files.preview.clone();
                     self.text(&preview);
+                }
+                if preview_changed || live_changed {
+                    self.word_info();
                 }
                 self.arm_check(cx);
             }
@@ -1110,6 +1140,7 @@ fn read_files() -> Files {
             .to_string(),
         fraction: fraction.trim().parse::<f64>().ok(),
         status: text.trim().to_string(),
+        live: voxtype::osd::live::read(),
     }
 }
 
