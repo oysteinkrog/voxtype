@@ -43,6 +43,7 @@ use voxtype::audio::levels::{AudioFrame, AudioReader, FRAME_HZ};
 use voxtype::config::{Config as VoxtypeConfig, HotkeyConfig};
 use voxtype::osd::config::{OsdAnchor, OsdConfig, OsdPosition, OsdTheme};
 use voxtype::osd::ipc::resolve_socket_path;
+use voxtype::osd::outcome::Outcome;
 use voxtype::osd::plasma::{self, PlasmaTheme};
 use voxtype::osd::swiss::{
     self, smooth_levels, stop_hint, tick_level, wave_hues, wave_stops, StatusLine,
@@ -243,6 +244,14 @@ struct Args {
 /// Silence on the audio socket longer than this, with no recording and no
 /// final text in progress, closes the popup. The GTK4 frontend's value.
 const IDLE_TIMEOUT_SECS: f64 = 0.15;
+
+/// After a cancel or a failure the popup stays this long, so a look can
+/// show it.
+const CANCEL_LINGER_SECS: f64 = 0.6;
+
+/// The daemon says how a dictation ended just after it goes idle. Until
+/// then, or this long, the popup does not call it "Stopped".
+const OUTCOME_GRACE_SECS: f64 = 0.1;
 
 /// Audio held back so 10 to 40 ms capture batches scroll smoothly, as in
 /// `osd::ipc::FrameRing`.
@@ -688,6 +697,37 @@ struct Files {
     status: String,
     /// `preview.json`: the words with their timing and how settled they are.
     live: Option<voxtype::osd::live::LiveDoc>,
+    /// The state file says "transcribing": the recording stopped and the
+    /// final text is being made, before or without a status line.
+    transcribing: bool,
+    /// How the dictation ended, once the daemon says so. Older daemons do
+    /// not write it.
+    outcome: Option<Outcome>,
+}
+
+/// How a dictation ended, as a look shows it in the moment before the popup
+/// closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    /// The final text was made (and, with a daemon that says so, delivered).
+    Done,
+    /// The recording stopped with no final pass and no word from the daemon.
+    Stopped,
+    /// The user cancelled. The popup stays `CANCEL_LINGER_SECS`.
+    Cancelled,
+    /// Something failed. The popup stays `CANCEL_LINGER_SECS`.
+    Failed,
+}
+
+impl Ending {
+    fn label(self) -> &'static str {
+        match self {
+            Ending::Done => "Done",
+            Ending::Stopped => "Stopped",
+            Ending::Cancelled => "Cancelled",
+            Ending::Failed => "Failed",
+        }
+    }
 }
 
 /// One frame's voice features, by its sequence number.
@@ -748,6 +788,14 @@ struct Popup {
     in_wall: bool,
     /// The daemon has said a recording runs since the popup opened.
     was_recording: bool,
+    /// The daemon has said it makes the final text since the popup opened.
+    was_finishing: bool,
+    /// When the daemon went idle after a recording.
+    quiet_since: Option<f64>,
+    /// When the dictation ended, as `ending()` first said.
+    ended_at: Option<f64>,
+    /// The linger after a cancel or a failure has its idle check.
+    linger_armed: bool,
     /// What only the showcase look keeps.
     extra: showcase::Extra,
     /// What only the scope look keeps.
@@ -790,6 +838,10 @@ impl Popup {
             closing: false,
             in_wall: false,
             was_recording: false,
+            was_finishing: false,
+            quiet_since: None,
+            ended_at: None,
+            linger_armed: false,
             extra: showcase::Extra::default(),
             scope: scope::State::default(),
             captions: captions::State::default(),
@@ -802,20 +854,20 @@ impl Popup {
     }
 
     fn status(&self) -> StatusLine {
-        if self.ended() {
+        if let Some(ending) = self.ending() {
             // The daemon is idle and the popup is about to close: an empty
             // status would read as "Listening", as if a new recording began.
-            let state = if self.extra.finish_at.is_some() {
-                "Done"
-            } else {
-                "Stopped"
-            };
             return StatusLine {
-                state: state.into(),
+                state: ending.label().into(),
                 detail: String::new(),
                 loading: false,
                 finishing: true,
             };
+        }
+        if self.files.status.is_empty() && self.files.transcribing {
+            // Stopped, and the daemon has not yet written how far the final
+            // text is: not "Listening" any more.
+            return StatusLine::new("Finishing", "");
         }
         StatusLine::new(&self.files.status, &self.look.stop_hint)
     }
@@ -823,7 +875,40 @@ impl Popup {
     /// A recording ran, has stopped, and nothing is being finished: the
     /// short time between the daemon going idle and the popup closing.
     fn ended(&self) -> bool {
-        self.was_recording && !self.files.recording && self.files.status.is_empty()
+        self.ending().is_some()
+    }
+
+    /// How the dictation ended, once it has; `None` while it records or the
+    /// final text is made. Looks use this to tell a cancel from a normal end.
+    fn ending(&self) -> Option<Ending> {
+        if !self.was_recording || self.busy() {
+            return None;
+        }
+        Some(match self.files.outcome {
+            Some(Outcome::Done) => Ending::Done,
+            Some(Outcome::Cancelled) => Ending::Cancelled,
+            Some(Outcome::Failed) => Ending::Failed,
+            None if self.was_finishing || self.extra.finish_at.is_some() => Ending::Done,
+            // The outcome may be on its way: a cancel is written just after
+            // the state goes idle.
+            None if self
+                .quiet_since
+                .is_none_or(|q| self.extra.now - q < OUTCOME_GRACE_SECS) =>
+            {
+                return None
+            }
+            None => Ending::Stopped,
+        })
+    }
+
+    /// The daemon records or makes the final text.
+    fn busy(&self) -> bool {
+        self.files.recording || self.files.transcribing || !self.files.status.is_empty()
+    }
+
+    /// Seconds since the dictation ended, or `None` while it runs.
+    fn ended_for(&self, t: f64) -> Option<f64> {
+        self.ended_at.map(|at| t - at)
     }
 
     /// The progress bar shows while a model loads or the final text is made,
@@ -967,8 +1052,18 @@ impl Popup {
     }
 
     fn idle(&self, t: f64) -> bool {
+        if self.files.suppressed {
+            return true;
+        }
+        // A cancel or a failure stays a moment, so the look can show it.
+        let lingering = matches!(self.ending(), Some(Ending::Cancelled | Ending::Failed))
+            && self.ended_for(t).is_some_and(|d| d < CANCEL_LINGER_SECS);
         let stalled = self.last_audio.is_none_or(|a| t - a > IDLE_TIMEOUT_SECS);
-        (stalled && !self.files.finishing && !self.files.recording) || self.files.suppressed
+        stalled
+            && !lingering
+            && !self.files.finishing
+            && !self.files.recording
+            && !self.files.transcribing
     }
 
     fn arm_check(&mut self, cx: &mut Cx<Msg>) {
@@ -1019,7 +1114,18 @@ impl App for Popup {
                 let live_changed = files.live != self.files.live;
                 self.extra.files(&self.files, &files, t);
                 self.was_recording |= files.recording;
+                self.was_finishing |= files.transcribing || (files.finishing && !files.recording);
                 self.files = files;
+                if self.busy() {
+                    // A new recording in the same popup.
+                    self.quiet_since = None;
+                    self.ended_at = None;
+                    self.linger_armed = false;
+                } else if self.was_recording && self.quiet_since.is_none() {
+                    self.quiet_since = Some(t);
+                    // Looks again once the outcome has had time to come.
+                    cx.after(OUTCOME_GRACE_SECS + 0.01, Msg::Check);
+                }
                 if preview_changed {
                     let preview = self.files.preview.clone();
                     self.text(&preview);
@@ -1033,6 +1139,18 @@ impl App for Popup {
             Msg::Check => self.check = None,
             Msg::Tick => self.extra.tick = None,
             Msg::Loop => {}
+        }
+        if let Some(ending) = self.ending() {
+            if self.ended_at.is_none() {
+                self.ended_at = Some(t);
+                tracing::info!(?ending, "the dictation ended");
+            }
+            if matches!(ending, Ending::Cancelled | Ending::Failed) && !self.linger_armed {
+                // The idle check runs again when the linger ends.
+                self.linger_armed = true;
+                let left = CANCEL_LINGER_SECS - self.ended_for(t).unwrap_or(0.0);
+                cx.after(left.max(0.0) + 0.01, Msg::Check);
+            }
         }
         self.sync_showcase(t);
         self.sync_scope(t);
@@ -1510,9 +1628,17 @@ fn read_files() -> Files {
         .is_some_and(|age| age < STATUS_STALE);
     let status = std::fs::read_to_string(&status_path).unwrap_or_default();
     let (fraction, text) = status.split_once('\n').unwrap_or(("", ""));
+    let state = std::fs::read_to_string(dir.join("state")).unwrap_or_default();
+    // A state file this old is left over from a crash.
+    let state_fresh = std::fs::metadata(dir.join("state"))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .is_some_and(|age| age < STATUS_STALE);
     Files {
-        recording: std::fs::read_to_string(dir.join("state"))
-            .is_ok_and(|s| matches!(s.trim(), "recording" | "streaming")),
+        recording: matches!(state.trim(), "recording" | "streaming"),
+        transcribing: state.trim() == "transcribing" && state_fresh,
+        outcome: voxtype::osd::outcome::read(),
         finishing,
         suppressed: dir.join("osd_suppressed").exists(),
         preview: std::fs::read_to_string(VoxtypeConfig::live_preview_path())
@@ -1802,6 +1928,7 @@ fn scenario(look: &Look, cancel: bool) -> vo::Scenario<Msg> {
     }
     files.recording = false;
     if cancel {
+        files.outcome = Some(Outcome::Cancelled);
         at(stop, &files, &mut inputs);
         inputs.sort_by(|a, b| a.0.total_cmp(&b.0));
         return vo::Scenario {
@@ -1812,6 +1939,8 @@ fn scenario(look: &Look, cancel: bool) -> vo::Scenario<Msg> {
         };
     }
     // Stop: the final text is made, then pasted.
+    files.transcribing = true;
+    at(stop, &files, &mut inputs);
     files.finishing = true;
     for (k, f) in [0.1, 0.35, 0.6, 0.85, 1.0].iter().enumerate() {
         files.fraction = Some(*f);
@@ -1827,8 +1956,10 @@ fn scenario(look: &Look, cancel: bool) -> vo::Scenario<Msg> {
     files.preview = fin;
     at(done - 0.4, &files, &mut inputs);
     files.finishing = false;
+    files.transcribing = false;
     files.fraction = None;
     files.status.clear();
+    files.outcome = Some(Outcome::Done);
     at(done, &files, &mut inputs);
     inputs.sort_by(|a, b| a.0.total_cmp(&b.0));
     vo::Scenario {
