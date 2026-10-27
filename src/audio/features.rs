@@ -8,7 +8,10 @@
 //!   voiced;
 //! - brightness: the spectral centroid in Hz;
 //! - noisiness: the spectral flatness, 0 (tonal) to 1 (white noise);
-//! - a coarse spectrum: 24 mel bands from 50 Hz to 8 kHz, as bytes.
+//! - a coarse spectrum: 24 mel bands from 50 Hz to 8 kHz, as bytes;
+//! - onset strength: how fast the mel bands rise, 0 to 1. A value of 0.5 or
+//!   more marks an onset, roughly a syllable or word start, at most one per
+//!   50 ms.
 //!
 //! Everything is causal: a frame only uses audio up to its own end. The
 //! work is a 512-point FFT and a YIN difference function per hop, with no
@@ -41,6 +44,18 @@ const YIN_THRESHOLD: f32 = 0.3;
 const YIN_TOLERANCE: f32 = 0.02;
 /// Frames quieter than this are never voiced.
 const VOICED_MIN_DBFS: f32 = -55.0;
+/// Onset strength compares each mel band with the frame this many hops
+/// back (20 ms), and reads 1 when the bands rise by `ONSET_FULL_DB` on
+/// average. Frames below `ONSET_MIN_DBFS` have none. Against the syllable
+/// nuclei of three recorded dictations (72 syllables), 78% of syllables had
+/// an onset in the 120 ms before their nucleus and 63% of onsets had a
+/// nucleus in the 120 ms after, at 1.45 onsets per syllable. Onsets at
+/// random times in speech scored 48% and 46%.
+const ONSET_LAG: usize = 2;
+const ONSET_FULL_DB: f32 = 6.0;
+const ONSET_MIN_DBFS: f32 = -50.0;
+/// After an onset, strength stays below 0.5 for this many hops (50 ms).
+const ONSET_REFRACTORY: u32 = 5;
 
 /// The voice features of one frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -56,6 +71,8 @@ pub struct AudioFeatures {
     pub flatness: f32,
     /// Mel band levels, 0 for -100 dB or less and 255 for 0 dB.
     pub mel: [u8; MEL_BANDS],
+    /// Onset strength, 0 to 1; 0.5 or more is an onset.
+    pub onset: f32,
 }
 
 /// Turns the sample stream into one [`AudioFeatures`] per 10 ms hop.
@@ -76,6 +93,10 @@ pub struct FeatureAnalyzer {
     im: [f32; WINDOW],
     power: [f32; WINDOW / 2 + 1],
     diff: Vec<f32>,
+    /// Mel band levels in dB of the last `ONSET_LAG` hops, newest last.
+    mel_db: [[f32; MEL_BANDS]; ONSET_LAG],
+    /// Hops left in which no new onset may start.
+    refractory: u32,
 }
 
 impl Default for FeatureAnalyzer {
@@ -165,6 +186,8 @@ impl FeatureAnalyzer {
             im: [0.0; WINDOW],
             power: [0.0; WINDOW / 2 + 1],
             diff: vec![0.0; max_lag + 1],
+            mel_db: [[-MEL_DB_RANGE; MEL_BANDS]; ONSET_LAG],
+            refractory: 0,
         }
     }
 
@@ -214,15 +237,17 @@ impl FeatureAnalyzer {
         };
 
         let mut mel = [0u8; MEL_BANDS];
-        for (m, (first, w)) in mel.iter_mut().zip(&self.mel) {
+        let mut mel_db = [0.0; MEL_BANDS];
+        for ((m, d), (first, w)) in mel.iter_mut().zip(&mut mel_db).zip(&self.mel) {
             let p: f32 = w
                 .iter()
                 .zip(&self.power[*first..])
                 .map(|(w, p)| w * p)
                 .sum();
-            let db = dbfs(p);
-            *m = ((db + MEL_DB_RANGE) / MEL_DB_RANGE * 255.0).clamp(0.0, 255.0) as u8;
+            *d = dbfs(p).max(-MEL_DB_RANGE);
+            *m = ((*d + MEL_DB_RANGE) / MEL_DB_RANGE * 255.0).clamp(0.0, 255.0) as u8;
         }
+        let onset = self.onset(&mel_db, rms_dbfs);
 
         AudioFeatures {
             rms_dbfs,
@@ -231,7 +256,34 @@ impl FeatureAnalyzer {
             centroid_hz,
             flatness,
             mel,
+            onset,
         }
+    }
+
+    /// Spectral flux: the mean rise of the mel bands over `ONSET_LAG` hops,
+    /// scaled so `ONSET_FULL_DB` reads 1, with a refractory time after each
+    /// onset.
+    fn onset(&mut self, mel_db: &[f32; MEL_BANDS], rms_dbfs: f32) -> f32 {
+        let rise = mel_db
+            .iter()
+            .zip(&self.mel_db[0])
+            .map(|(now, then)| (now - then).max(0.0))
+            .sum::<f32>()
+            / MEL_BANDS as f32;
+        self.mel_db.rotate_left(1);
+        self.mel_db[ONSET_LAG - 1] = *mel_db;
+        let mut strength = if rms_dbfs < ONSET_MIN_DBFS {
+            0.0
+        } else {
+            (rise / ONSET_FULL_DB).clamp(0.0, 1.0)
+        };
+        if self.refractory > 0 {
+            self.refractory -= 1;
+            strength = strength.min(0.49);
+        } else if strength >= 0.5 {
+            self.refractory = ONSET_REFRACTORY - 1;
+        }
+        strength
     }
 
     /// YIN on the window. The frame is voiced when the cumulative mean
@@ -342,6 +394,38 @@ mod tests {
     }
 
     #[test]
+    fn a_tone_burst_is_one_onset() {
+        // 300 ms of silence, then a voice; a steady tone after that.
+        let v = voice(150.0);
+        let f = run(move |n| if n < 4800 { 0.0 } else { v(n) }, 0.8);
+        let onsets: Vec<usize> = (0..f.len()).filter(|&i| f[i].onset >= 0.5).collect();
+        assert_eq!(onsets.len(), 1, "onsets at {onsets:?}");
+        assert!(
+            (30..34).contains(&onsets[0]),
+            "onset at frame {}",
+            onsets[0]
+        );
+        assert!(
+            f[60..].iter().all(|x| x.onset < 0.1),
+            "steady tone has no onset"
+        );
+        assert!(run(|_| 0.0, 0.3).iter().all(|x| x.onset == 0.0));
+    }
+
+    #[test]
+    fn onsets_keep_50_ms_apart() {
+        // Bursts every 30 ms: only every other one may count.
+        let v = voice(150.0);
+        let f = run(move |n| if (n / 240) % 2 == 1 { v(n) } else { 0.0 }, 1.0);
+        let onsets: Vec<usize> = (0..f.len()).filter(|&i| f[i].onset >= 0.5).collect();
+        assert!(onsets.len() >= 3, "onsets at {onsets:?}");
+        assert!(
+            onsets.windows(2).all(|w| w[1] - w[0] >= 5),
+            "onsets at {onsets:?}"
+        );
+    }
+
+    #[test]
     fn one_frame_per_hop() {
         assert_eq!(run(|_| 0.0, 1.0).len(), 100);
     }
@@ -431,17 +515,18 @@ mod tests {
         };
         let mut reader = hound::WavReader::open(wav).unwrap();
         let mut a = FeatureAnalyzer::new();
-        let mut out = String::from("rms_dbfs,f0_hz,centroid_hz,flatness,mel\n");
+        let mut out = String::from("rms_dbfs,f0_hz,centroid_hz,flatness,mel,onset\n");
         for s in reader.samples::<i16>() {
             if let Some(f) = a.push(s.unwrap() as f32 / 32768.0) {
                 let mel: Vec<String> = f.mel.iter().map(|m| m.to_string()).collect();
                 out += &format!(
-                    "{},{},{},{},{}\n",
+                    "{},{},{},{},{},{}\n",
                     f.rms_dbfs,
                     f.f0_hz,
                     f.centroid_hz,
                     f.flatness,
-                    mel.join(" ")
+                    mel.join(" "),
+                    f.onset
                 );
             }
         }

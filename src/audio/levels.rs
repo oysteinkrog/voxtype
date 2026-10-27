@@ -40,6 +40,27 @@
 //! Silence-pump frames carry no features (flag bit 1 clear). See
 //! [`crate::audio::features`] for how the features are measured.
 //!
+//! ## Version 3 frames
+//!
+//! The hello `b"VXA"` + `3` gets the ack `b"VXA"` + `3` + the frame size as
+//! a little-endian `u32` (72), then 72-byte frames, all fields little-endian:
+//!
+//! ```text
+//! 0   seq u32
+//! 4   sample_clock u64  samples since the recording started, at the end of
+//!                       the frame (16 kHz); 0 for silence-pump frames
+//! 12  min f32, max f32, peak_dbfs f32
+//! 24  rms_dbfs f32, f0_hz f32, centroid_hz f32, flatness f32
+//! 40  onset f32         0 to 1; 0.5 or more is an onset
+//! 44  voiced u8         1 when voiced
+//! 45  present u8        1 when the features were measured
+//! 46  zero, 2 bytes
+//! 48  mel [u8; 24]
+//! ```
+//!
+//! A version 3 client talking to a daemon that only knows version 2 gets
+//! version 1 frames: the daemon ignores a hello it does not know.
+//!
 //! The emitter is *additive*: it taps the existing
 //! `mpsc::Receiver<Vec<f32>>` returned by `AudioCapture::start()` (which the
 //! daemon used to discard). When recording stops, the input channel closes
@@ -162,6 +183,12 @@ pub const FRAME_V2_BYTES: usize = 64;
 /// What a version 2 client writes after connecting: `b"VXA"` + version.
 pub const HELLO_V2: [u8; 4] = *b"VXA\x02";
 
+/// Wire size of a version 3 frame in bytes.
+pub const FRAME_V3_BYTES: usize = 72;
+
+/// What a version 3 client writes after connecting.
+pub const HELLO_V3: [u8; 4] = *b"VXA\x03";
+
 /// How long the daemon waits for a hello before sending version 1 frames.
 pub const HELLO_WAIT: Duration = Duration::from_millis(50);
 
@@ -173,6 +200,15 @@ pub fn ack_v2() -> [u8; 8] {
     ack
 }
 
+/// The daemon's answer to a version 3 hello: the hello, then the frame size
+/// as a little-endian `u32`.
+pub fn ack_v3() -> [u8; 8] {
+    let mut ack = [0u8; 8];
+    ack[..4].copy_from_slice(&HELLO_V3);
+    ack[4..].copy_from_slice(&(FRAME_V3_BYTES as u32).to_le_bytes());
+    ack
+}
+
 const FLAG_VOICED: u32 = 1;
 const FLAG_FEATURES: u32 = 2;
 
@@ -181,6 +217,9 @@ const FLAG_FEATURES: u32 = 2;
 pub struct RichFrame {
     pub frame: AudioFrame,
     pub features: Option<AudioFeatures>,
+    /// Samples since the recording started, at the end of this frame; 0
+    /// when unknown (silence-pump frames, and frames before version 3).
+    pub sample_clock: u64,
 }
 
 impl From<AudioFrame> for RichFrame {
@@ -188,6 +227,7 @@ impl From<AudioFrame> for RichFrame {
         Self {
             frame,
             features: None,
+            sample_clock: 0,
         }
     }
 }
@@ -221,12 +261,67 @@ impl RichFrame {
             centroid_hz: f32_at(24),
             flatness: f32_at(28),
             mel: bytes[36..36 + MEL_BANDS].try_into().unwrap(),
+            onset: 0.0,
         });
-        Self { frame, features }
+        Self {
+            frame,
+            features,
+            sample_clock: 0,
+        }
+    }
+
+    /// Serialise to the 72-byte version 3 layout in the module docs.
+    pub fn to_bytes_v3(self) -> [u8; FRAME_V3_BYTES] {
+        let mut buf = [0u8; FRAME_V3_BYTES];
+        let f = self.features.unwrap_or_default();
+        buf[0..4].copy_from_slice(&self.frame.seq.to_le_bytes());
+        buf[4..12].copy_from_slice(&self.sample_clock.to_le_bytes());
+        let floats = [
+            self.frame.min,
+            self.frame.max,
+            self.frame.peak_dbfs,
+            f.rms_dbfs,
+            f.f0_hz,
+            f.centroid_hz,
+            f.flatness,
+            f.onset,
+        ];
+        for (i, v) in floats.iter().enumerate() {
+            buf[12 + 4 * i..16 + 4 * i].copy_from_slice(&v.to_le_bytes());
+        }
+        buf[44] = f.voiced as u8;
+        buf[45] = self.features.is_some() as u8;
+        buf[48..48 + MEL_BANDS].copy_from_slice(&f.mel);
+        buf
+    }
+
+    /// Parse a version 3 frame.
+    pub fn from_bytes_v3(bytes: &[u8; FRAME_V3_BYTES]) -> Self {
+        let f32_at = |i: usize| f32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+        let frame = AudioFrame {
+            seq: u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+            min: f32_at(12),
+            max: f32_at(16),
+            peak_dbfs: f32_at(20),
+        };
+        let features = (bytes[45] != 0).then(|| AudioFeatures {
+            rms_dbfs: f32_at(24),
+            f0_hz: f32_at(28),
+            voiced: bytes[44] != 0,
+            centroid_hz: f32_at(32),
+            flatness: f32_at(36),
+            mel: bytes[48..48 + MEL_BANDS].try_into().unwrap(),
+            onset: f32_at(40),
+        });
+        Self {
+            frame,
+            features,
+            sample_clock: u64::from_le_bytes(bytes[4..12].try_into().unwrap()),
+        }
     }
 }
 
-/// A blocking client for the audio socket. It asks for version 2 frames
+/// A blocking client for the audio socket. It asks for version 3 frames
 /// and falls back to version 1 when the daemon is older.
 pub struct AudioReader {
     stream: std::os::unix::net::UnixStream,
@@ -240,12 +335,12 @@ impl AudioReader {
     /// its ack or, if it is older, its first frame.
     pub fn new(mut stream: std::os::unix::net::UnixStream) -> io::Result<Self> {
         use std::io::{Read, Write};
-        stream.write_all(&HELLO_V2)?;
+        stream.write_all(&HELLO_V3)?;
         let mut first = [0u8; 8];
         stream.read_exact(&mut first)?;
-        let mut buf = vec![0u8; FRAME_V2_BYTES * 64];
-        let (version, have) = if first == ack_v2() {
-            (2, 0)
+        let mut buf = vec![0u8; FRAME_V3_BYTES * 64];
+        let (version, have) = if first == ack_v3() {
+            (3, 0)
         } else {
             // An older daemon: these are the first bytes of a 16-byte frame.
             buf[..8].copy_from_slice(&first);
@@ -259,7 +354,7 @@ impl AudioReader {
         })
     }
 
-    /// 1 or 2.
+    /// 1 or 3.
     pub fn version(&self) -> u8 {
         self.version
     }
@@ -268,10 +363,10 @@ impl AudioReader {
     /// frame read so far. Version 1 frames come without features.
     pub fn read(&mut self) -> io::Result<Vec<RichFrame>> {
         use std::io::Read;
-        let size = if self.version == 2 {
-            FRAME_V2_BYTES
-        } else {
-            FRAME_BYTES
+        let size = match self.version {
+            3 => FRAME_V3_BYTES,
+            2 => FRAME_V2_BYTES,
+            _ => FRAME_BYTES,
         };
         while self.have < size {
             match self.stream.read(&mut self.buf[self.have..])? {
@@ -282,12 +377,10 @@ impl AudioReader {
         let whole = self.have / size * size;
         let frames = self.buf[..whole]
             .chunks_exact(size)
-            .map(|c| {
-                if self.version == 2 {
-                    RichFrame::from_bytes_v2(c.try_into().unwrap())
-                } else {
-                    AudioFrame::from_bytes(c.try_into().unwrap()).into()
-                }
+            .map(|c| match self.version {
+                3 => RichFrame::from_bytes_v3(c.try_into().unwrap()),
+                2 => RichFrame::from_bytes_v2(c.try_into().unwrap()),
+                _ => AudioFrame::from_bytes(c.try_into().unwrap()).into(),
             })
             .collect();
         self.buf.copy_within(whole..self.have, 0);
@@ -593,26 +686,34 @@ async fn run_accept_loop(
 }
 
 /// Waits up to [`HELLO_WAIT`] for a client hello and returns the frame
-/// version to send: 2 after a version 2 hello, else 1.
+/// version to send: 2 or 3 after that hello, else 1.
 async fn read_hello(stream: &mut UnixStream) -> u8 {
     use tokio::io::AsyncReadExt;
     let mut hello = [0u8; 4];
     match tokio::time::timeout(HELLO_WAIT, stream.read_exact(&mut hello)).await {
         Ok(Ok(_)) if hello == HELLO_V2 => 2,
+        Ok(Ok(_)) if hello == HELLO_V3 => 3,
         _ => 1,
     }
 }
 
 async fn run_subscriber_writer(mut stream: UnixStream, mut rx: mpsc::Receiver<RichFrame>) {
     let version = read_hello(&mut stream).await;
-    if version == 2 && stream.write_all(&ack_v2()).await.is_err() {
-        return;
+    let ack = match version {
+        3 => Some(ack_v3()),
+        2 => Some(ack_v2()),
+        _ => None,
+    };
+    if let Some(ack) = ack {
+        if stream.write_all(&ack).await.is_err() {
+            return;
+        }
     }
     while let Some(frame) = rx.recv().await {
-        let written = if version == 2 {
-            stream.write_all(&frame.to_bytes_v2()).await
-        } else {
-            stream.write_all(&frame.frame.to_bytes()).await
+        let written = match version {
+            3 => stream.write_all(&frame.to_bytes_v3()).await,
+            2 => stream.write_all(&frame.to_bytes_v2()).await,
+            _ => stream.write_all(&frame.frame.to_bytes()).await,
         };
         if let Err(e) = written {
             tracing::trace!("Audio subscriber write error: {}", e);
@@ -679,6 +780,8 @@ pub struct LevelBucketer {
     max: f32,
     peak_abs: f32,
     seq: u32,
+    /// Samples pushed so far.
+    samples: u64,
     /// Voice features per frame, for [`LevelBucketer::push_rich`].
     analyzer: Option<Box<FeatureAnalyzer>>,
 }
@@ -692,6 +795,7 @@ impl LevelBucketer {
             max: f32::NEG_INFINITY,
             peak_abs: 0.0,
             seq: 0,
+            samples: 0,
             analyzer: None,
         }
     }
@@ -710,7 +814,11 @@ impl LevelBucketer {
         for &s in samples {
             let features = self.analyzer.as_mut().and_then(|a| a.push(s));
             if let Some(frame) = self.step(s) {
-                out.push(RichFrame { frame, features });
+                out.push(RichFrame {
+                    frame,
+                    features,
+                    sample_clock: self.samples,
+                });
             }
         }
     }
@@ -741,6 +849,7 @@ impl LevelBucketer {
                 self.peak_abs = a;
             }
             self.accumulated += 1;
+            self.samples += 1;
 
             if self.accumulated >= self.samples_per_frame {
                 let peak_dbfs = if self.peak_abs <= 1e-6 {
@@ -1109,7 +1218,9 @@ mod tests {
                 centroid_hz: 900.0,
                 flatness: 0.1,
                 mel,
+                onset: 0.0,
             }),
+            sample_clock: 0,
         };
         let bytes = rich.to_bytes_v2();
         assert_eq!(RichFrame::from_bytes_v2(&bytes), rich);
@@ -1153,6 +1264,7 @@ mod tests {
                 peak_dbfs: -30.0,
             },
             features: Some(features),
+            sample_clock: 0,
         });
         let mut buf = [0u8; FRAME_V2_BYTES];
         tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut buf))
@@ -1165,10 +1277,55 @@ mod tests {
         hub.cleanup();
     }
 
-    /// The blocking reader negotiates version 2 and reads rich frames.
+    /// Version 3 frames carry everything, little-endian, at fixed offsets.
+    #[test]
+    fn v3_frame_round_trips() {
+        let mut mel = [0u8; MEL_BANDS];
+        mel[23] = 77;
+        let rich = RichFrame {
+            frame: AudioFrame {
+                seq: 0x0102_0304,
+                min: -0.5,
+                max: 0.25,
+                peak_dbfs: -6.0,
+            },
+            features: Some(AudioFeatures {
+                rms_dbfs: -20.0,
+                f0_hz: 140.5,
+                voiced: true,
+                centroid_hz: 900.0,
+                flatness: 0.1,
+                mel,
+                onset: 0.75,
+            }),
+            sample_clock: 48_000,
+        };
+        let bytes = rich.to_bytes_v3();
+        assert_eq!(RichFrame::from_bytes_v3(&bytes), rich);
+        assert_eq!(bytes[0..4], [4, 3, 2, 1]);
+        assert_eq!(u64::from_le_bytes(bytes[4..12].try_into().unwrap()), 48_000);
+        assert_eq!(f32::from_le_bytes(bytes[40..44].try_into().unwrap()), 0.75);
+        assert_eq!((bytes[44], bytes[45], bytes[71]), (1, 1, 77));
+        let plain = RichFrame::from(rich.frame);
+        assert_eq!(RichFrame::from_bytes_v3(&plain.to_bytes_v3()), plain);
+        assert_eq!(&ack_v3()[4..], &[72, 0, 0, 0]);
+    }
+
+    /// The sample clock counts samples to the end of each frame.
+    #[test]
+    fn bucketer_counts_the_sample_clock() {
+        let mut b = LevelBucketer::with_features();
+        let mut out = Vec::new();
+        b.push_rich(&[0.0; 250], &mut out);
+        b.push_rich(&[0.0; 250], &mut out);
+        let clocks: Vec<u64> = out.iter().map(|f| f.sample_clock).collect();
+        assert_eq!(clocks, [160, 320, 480]);
+    }
+
+    /// The blocking reader negotiates version 3 and reads rich frames.
     #[tokio::test(flavor = "multi_thread")]
     #[allow(clippy::await_holding_lock)]
-    async fn audio_reader_gets_version_2() {
+    async fn audio_reader_gets_version_3() {
         let _guard = HUB_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_tmp, path) = temp_socket_dir();
         let hub = LevelHub::start(path.clone()).await.expect("start hub");
@@ -1189,12 +1346,13 @@ mod tests {
                 peak_dbfs: -30.0,
             },
             features: Some(AudioFeatures::default()),
+            sample_clock: 0,
         });
         let (version, frames) = tokio::time::timeout(Duration::from_secs(2), reader)
             .await
             .expect("reader in time")
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         assert_eq!(frames[0].frame.seq, 4);
         assert_eq!(frames[0].features, Some(AudioFeatures::default()));
         hub.cleanup();
@@ -1219,6 +1377,7 @@ mod tests {
                     peak_dbfs: -30.0,
                 },
                 features: Some(AudioFeatures::default()),
+                sample_clock: 0,
             });
         }
         let mut buf = [0u8; 2 * FRAME_BYTES];
