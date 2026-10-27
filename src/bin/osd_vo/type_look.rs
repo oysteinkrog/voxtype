@@ -291,6 +291,7 @@ impl Popup {
             done: l.accent,
             cancel: l.inactive,
             width: 0.08,
+            done_secs: None,
         });
         for &(e, t) in &self.extra.icon_events {
             match e {
