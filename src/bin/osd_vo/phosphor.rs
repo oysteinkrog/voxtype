@@ -4,9 +4,11 @@
 //! phosphor blocks; the transcript in a monospaced face with a block caret;
 //! and an italic status line.
 //!
-//! New words type in from the left. The caret glides to the end of each new
-//! word, stays solid while words come and blinks once they stop. A revised
-//! word flashes in reverse video and types in again. The meter's columns
+//! New words are written by a bright 3 px beam head that sweeps each word in
+//! 80 ms, leaving the glyphs lit behind it (MO-61). The caret glides to the
+//! end of each new word, stays solid while words come and blinks once they
+//! stop. A revision flashes only the changed letters in reverse video, and
+//! the beam rewrites just those letters. The meter's columns
 //! light whole blocks, the newest level in the middle and older ones running
 //! out to both sides; once the recording stops they sink to a row of dots
 //! and an ASCII progress bar counts up the final pass.
@@ -64,6 +66,11 @@ const CARET_HZ: f64 = 1.06;
 const CARET_GLIDE: f64 = 0.12;
 /// Seconds a revised word stays in reverse video.
 const FLASH_SECS: f64 = 0.35;
+/// The beam: seconds to write a whole word, the head's width in logical
+/// pixels and how long its afterglow trails.
+const BEAM_SECS: f64 = 0.08;
+const BEAM_W: f32 = 3.0;
+const BEAM_TAIL: f64 = 0.05;
 
 const GREEN: u32 = 0x42f9a8;
 const HOT: u32 = 0xa6ffdc;
@@ -363,6 +370,134 @@ impl Screen {
     }
 }
 
+/// One sweep of the beam: the line box it writes on, from and to which x,
+/// when it starts and how long it takes. In the transcript's coordinates.
+#[derive(Clone, Copy, Debug)]
+struct Sweep {
+    line: Rect,
+    x0: f32,
+    x1: f32,
+    at: f64,
+    secs: f64,
+}
+
+impl Sweep {
+    /// Where the beam head is at `t`, or `None` before it starts and after
+    /// it has written the last letter.
+    fn head(&self, t: f64) -> Option<f32> {
+        let s = t - self.at;
+        if !(0.0..self.secs).contains(&s) {
+            return None;
+        }
+        Some(self.x0 + (self.x1 - self.x0) * (s / self.secs) as f32)
+    }
+}
+
+/// The beam that writes new words and rewrites changed letters (MO-61):
+/// the letters it has not reached yet are covered with the screen's own
+/// colour, and a bright head with a short afterglow sweeps over them.
+#[derive(Clone)]
+struct Beam {
+    sweeps: Vec<Sweep>,
+    k: f32,
+    /// The transcript's top in the screen, and the screen's height, for the
+    /// screen's gradient behind the cover.
+    top: f32,
+    screen_h: f32,
+}
+
+impl Beam {
+    fn until(&self) -> f64 {
+        self.sweeps
+            .iter()
+            .map(|s| s.at + s.secs + BEAM_TAIL)
+            .fold(0.0, f64::max)
+    }
+
+    /// The screen's colour at transcript height `y`.
+    fn screen_at(&self, y: f32) -> Color {
+        let f = ((self.top + y) / self.screen_h).clamp(0.0, 1.0);
+        let (a, b) = (hex(SCREEN, 1.0), hex(DEEP, 1.0));
+        Color::rgba(
+            a.r + (b.r - a.r) * f,
+            a.g + (b.g - a.g) * f,
+            a.b + (b.b - a.b) * f,
+            1.0,
+        )
+    }
+
+    fn draw(&self, t: f64, r: Rect, p: &mut Painter) {
+        let k = self.k;
+        let pad = 6.0 * k;
+        for s in &self.sweeps {
+            let y = r.y + s.line.y;
+            let h = s.line.h;
+            let cover = |from: f32, p: &mut Painter| {
+                let x = r.x + from;
+                let w = s.x1 + pad - from;
+                if w > 0.0 {
+                    p.shape(ShapeInstance::rrect(
+                        RRect::new(Rect::new(x, y, w, h), 0.0),
+                        Paint::linear(
+                            Point::new(0.0, y),
+                            self.screen_at(s.line.y),
+                            Point::new(0.0, y + h),
+                            self.screen_at(s.line.y + h),
+                        ),
+                    ));
+                }
+            };
+            let since = t - s.at;
+            if since < 0.0 {
+                // Its turn has not come: the letters wait unwritten.
+                cover(s.x0, p);
+                continue;
+            }
+            let (head, glow) = match s.head(t) {
+                Some(x) => (x, 1.0),
+                None => {
+                    // The afterglow at the end of the word fades.
+                    let g = 1.0 - ((since - s.secs) / BEAM_TAIL) as f32;
+                    if g <= 0.0 {
+                        continue;
+                    }
+                    (s.x1, g)
+                }
+            };
+            if glow >= 1.0 {
+                cover(head, p);
+            }
+            // The afterglow: the just-written letters still hot behind the
+            // head.
+            let tail = (s.x1 - s.x0).min(24.0 * k).max(BEAM_W * k);
+            p.shape(ShapeInstance::rrect(
+                RRect::new(
+                    Rect::new(r.x + head - tail, y + 4.0 * k, tail, h - 6.0 * k),
+                    0.0,
+                ),
+                Paint::linear(
+                    Point::new(r.x + head - tail, 0.0),
+                    hex(HOT, 0.0),
+                    Point::new(r.x + head, 0.0),
+                    hex(HOT, 0.28 * glow),
+                ),
+            ));
+            let bar = Rect::new(
+                r.x + head - BEAM_W * k / 2.0,
+                y + 3.0 * k,
+                BEAM_W * k,
+                h - 4.0 * k,
+            );
+            let bar = RRect::new(bar, BEAM_W * k / 2.0);
+            p.shape(ShapeInstance::rrect(
+                bar,
+                Paint::glow(hex(GREEN, 0.8 * glow), 6.0 * k, 0.6),
+            ));
+            p.shape(ShapeInstance::rrect(bar, Paint::solid(hex(HOT, glow))));
+        }
+    }
+}
+
 /// The transcript's type: JetBrains Mono, scaled with the popup.
 pub(crate) fn text_style(look: &Look) -> TextStyle {
     let k = look.width / CONCEPT_W;
@@ -537,11 +672,23 @@ impl Popup {
             let i = self.shown.iter().position(|w| w.id == id)?;
             let (shaped, starts) = self.phosphor_shaped();
             let r = self.phosphor_word_box(&shaped, &starts, i)?;
+            // With the beam, only the letters the revision changed.
+            let x = self
+                .tally
+                .revision(id)
+                .filter(|_| self.motion("beam-write"))
+                .and_then(|rev| {
+                    let b =
+                        self.tally_word_box(i, &self.look.text_style(), self.look.text_width())?;
+                    b.letters.get(rev.from).map(|l| l.0)
+                })
+                .unwrap_or(r.x)
+                .clamp(r.x, r.x + r.w);
             Some((
                 Rect::new(
-                    PAD_X * k + r.x,
+                    PAD_X * k + x,
                     TEXT_TOP * k + r.y + 4.0 * k,
-                    r.w,
+                    r.x + r.w - x,
                     r.h - 6.0 * k,
                 ),
                 at,
@@ -710,7 +857,62 @@ impl Popup {
         ))
     }
 
-    /// The transcript, typed in word by word.
+    /// The beam's sweeps over the newest words and the newest changed
+    /// letters, or `None` under reduced motion.
+    fn phosphor_beam(&self, g: &Geo) -> Option<Beam> {
+        if !self.motion("beam-write") || self.still() {
+            return None;
+        }
+        let k = g.k;
+        let style = self.look.text_style();
+        let width = self.look.text_width();
+        let keep = BEAM_SECS + BEAM_TAIL + 0.3;
+        let mut sweeps: Vec<Sweep> = self
+            .tally_arrivals(&style, width, keep)
+            .into_iter()
+            .map(|(b, at)| Sweep {
+                line: b.rect,
+                x0: b.rect.x,
+                x1: b.rect.x + b.rect.w,
+                at,
+                secs: BEAM_SECS,
+            })
+            .collect();
+        let now = self.extra.now;
+        if self.extra.final_at.is_none() {
+            for rev in self.tally.revised.iter().filter(|r| now - r.at < keep) {
+                let Some(i) = self.shown.iter().position(|w| w.id == rev.id) else {
+                    continue;
+                };
+                let Some(b) = self.tally_word_box(i, &style, width) else {
+                    continue;
+                };
+                let x1 = b.rect.x + b.rect.w;
+                let x0 = b.letters.get(rev.from).map_or(x1, |l| l.0);
+                if x1 - x0 < 1.0 {
+                    continue;
+                }
+                // The same speed as a whole word, so a short fix is quick.
+                let secs = (BEAM_SECS * ((x1 - x0) / b.rect.w.max(1.0)) as f64).max(0.035);
+                sweeps.retain(|s| !(s.line == b.rect && s.at > rev.at));
+                sweeps.push(Sweep {
+                    line: b.rect,
+                    x0,
+                    x1,
+                    at: rev.at,
+                    secs,
+                });
+            }
+        }
+        Some(Beam {
+            sweeps,
+            k,
+            top: TEXT_TOP * k,
+            screen_h: g.screen_h(self.lines),
+        })
+    }
+
+    /// The transcript, written word by word by the beam.
     fn phosphor_text(&self, g: &Geo) -> Element<Msg> {
         let k = g.k;
         let style = self.look.text_style();
@@ -721,9 +923,19 @@ impl Popup {
             .width(self.look.text_width())
             .motion(Prop::Opacity, Spring::critical_to_98(0.08))
             .motion(Prop::Offset, Spring::critical_to_98(0.1))
-            .motion(Prop::TextFx, Spring::critical_to_98(0.16))
-            .word_enter(Transition::NONE.wipe(1.0))
-            .word_change(Transition::NONE.wipe(1.0));
+            .motion(Prop::TextFx, Spring::critical_to_98(0.16));
+        // The beam writes new and changed letters itself; without it, as
+        // under reduced motion, words type in with a wipe.
+        let beam = self.phosphor_beam(g);
+        words = if beam.is_some() {
+            words
+                .word_enter(Transition::NONE)
+                .word_change(Transition::NONE)
+        } else {
+            words
+                .word_enter(Transition::NONE.wipe(1.0))
+                .word_change(Transition::NONE.wipe(1.0))
+        };
         if self.phos.ended_at.is_some() {
             words = words.opacity(0.35);
         }
@@ -734,12 +946,23 @@ impl Popup {
             hex(GREEN, 1.0),
             hex(HOT, 1.0),
         );
+        let size = Size::new(
+            self.look.text_width() + 22.0 * k,
+            self.lines as f32 * LINE * k,
+        );
         let mut layer = at(Element::layer("text"), PAD_X * k, TEXT_TOP * k)
-            .size(
-                self.look.text_width() + 22.0 * k,
-                self.lines as f32 * LINE * k,
-            )
+            .size(size.w, size.h)
             .child(words);
+        if let Some(beam) = beam {
+            layer = layer.child(
+                at(
+                    Element::canvas("beam", beam.until(), move |t, r, p| beam.draw(t, r, p)),
+                    0.0,
+                    0.0,
+                )
+                .size(size.w, size.h),
+            );
+        }
         if self.phos.ended_at.is_some() {
             // Cancelled: a strike line types through the text.
             layer = layer.child(
