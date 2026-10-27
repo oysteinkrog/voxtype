@@ -53,6 +53,8 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/captions.rs"]
+mod captions;
 #[path = "osd_vo/karaoke.rs"]
 mod karaoke;
 #[path = "osd_vo/island.rs"]
@@ -519,6 +521,9 @@ impl Look {
 
     /// Width of the transcript: the panel less padding and border.
     fn text_width(&self) -> f32 {
+        if self.theme == OsdTheme::Captions {
+            return captions::text_width(self);
+        }
         if self.theme == OsdTheme::Karaoke {
             return karaoke::text_width(self);
         }
@@ -542,6 +547,9 @@ impl Look {
 
     /// Transcript lines the look has room for.
     fn max_lines(&self) -> u32 {
+        if self.theme == OsdTheme::Captions {
+            return captions::MAX_LINES;
+        }
         if self.theme == OsdTheme::Karaoke {
             return karaoke::MAX_LINES;
         }
@@ -564,6 +572,9 @@ impl Look {
     }
 
     fn text_style(&self) -> TextStyle {
+        if self.theme == OsdTheme::Captions {
+            return captions::text_style(self);
+        }
         if self.theme == OsdTheme::Karaoke {
             return karaoke::text_style(self);
         }
@@ -611,6 +622,9 @@ impl Look {
     /// inside it, so the surface never resizes; the rest is transparent and
     /// click-through.
     fn surface(&self) -> Size {
+        if self.theme == OsdTheme::Captions {
+            return Popup::captions_surface(self);
+        }
         if self.theme == OsdTheme::Karaoke {
             return Popup::karaoke_surface(self);
         }
@@ -722,6 +736,8 @@ struct Popup {
     was_recording: bool,
     /// What only the showcase look keeps.
     extra: showcase::Extra,
+    /// What only the captions look keeps.
+    captions: captions::State,
     /// What only the karaoke look keeps.
     karaoke: karaoke::State,
     /// What only the island look keeps.
@@ -759,6 +775,7 @@ impl Popup {
             in_wall: false,
             was_recording: false,
             extra: showcase::Extra::default(),
+            captions: captions::State::default(),
             karaoke: karaoke::State::default(),
             island: island::State::default(),
             jarvis: jarvis::Extra::default(),
@@ -952,10 +969,12 @@ impl App for Popup {
         self.shown_at = cx.t();
         self.extra.now = cx.t();
         self.sync_showcase(cx.t());
+        self.sync_captions(cx.t());
         self.sync_karaoke(cx.t());
         self.sync_island(cx.t());
         self.sync_cyber(cx.t());
         self.arm_tick(cx);
+        self.arm_captions_tick(cx);
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
         self.arm_cyber_tick(cx);
@@ -997,12 +1016,14 @@ impl App for Popup {
             Msg::Loop => {}
         }
         self.sync_showcase(t);
+        self.sync_captions(t);
         self.sync_karaoke(t);
         self.sync_island(t);
         self.sync_jarvis(t);
         self.sync_cyber(t);
         self.sync_synthwave(t);
         self.arm_tick(cx);
+        self.arm_captions_tick(cx);
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
         self.arm_cyber_tick(cx);
@@ -1042,6 +1063,9 @@ impl Popup {
         }
         if self.look.theme == OsdTheme::Karaoke {
             return self.karaoke_view();
+        }
+        if self.look.theme == OsdTheme::Captions {
+            return self.captions_view();
         }
         if self.look.theme == OsdTheme::Showcase {
             return self.showcase_view();
@@ -1264,6 +1288,7 @@ fn default_motion(look: &Look) -> Motion {
         look.theme,
         OsdTheme::Showcase
             | OsdTheme::Type
+            | OsdTheme::Captions
             | OsdTheme::Karaoke
             | OsdTheme::Island
             | OsdTheme::Jarvis

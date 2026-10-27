@@ -110,6 +110,11 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// Cinema subtitles: the words in two large centred lines on a soft
+    /// dark backdrop, the newest word in accent blue, lines that roll up, and
+    /// a small red dot that pulses while the mic is live. Drawn by the vo
+    /// frontend only; the gtk4 frontend draws `swiss` for it.
+    Captions,
     /// A teleprompter in a dark navy glass card: large centred words, older
     /// lines that roll up, shrink and fade, the newest word lit in a cyan to
     /// violet gradient with an underline that hops from word to word, and a
@@ -152,6 +157,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "captions" => Some(OsdTheme::Captions),
             "karaoke" => Some(OsdTheme::Karaoke),
             "island" => Some(OsdTheme::Island),
             "jarvis" => Some(OsdTheme::Jarvis),
