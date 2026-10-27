@@ -54,6 +54,8 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/dotmatrix.rs"]
+mod dotmatrix;
 #[path = "osd_vo/kit.rs"]
 mod kit;
 #[path = "osd_vo/swissfi.rs"]
@@ -563,6 +565,9 @@ impl Look {
         if self.theme == OsdTheme::Swissfi {
             return swissfi::text_width(self);
         }
+        if self.theme == OsdTheme::Dotmatrix {
+            return dotmatrix::text_width(self);
+        }
         self.width - swiss::PANEL_INSET_PX as f32
     }
 
@@ -585,6 +590,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Swissfi {
             return swissfi::max_lines();
+        }
+        if self.theme == OsdTheme::Dotmatrix {
+            return dotmatrix::max_lines();
         }
         swiss::MAX_LINES as u32
     }
@@ -625,6 +633,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Swissfi {
             return swissfi::text_style(self);
+        }
+        if self.theme == OsdTheme::Dotmatrix {
+            return dotmatrix::text_style(self);
         }
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
@@ -672,6 +683,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Showcase {
             return Popup::showcase_surface(self);
+        }
+        if self.theme == OsdTheme::Dotmatrix {
+            return dotmatrix::surface(self);
         }
         if self.theme == OsdTheme::Swissfi {
             return swissfi::surface(self);
@@ -1238,6 +1252,9 @@ impl Popup {
         if self.look.theme == OsdTheme::Type {
             return self.type_view();
         }
+        if self.look.theme == OsdTheme::Dotmatrix {
+            return self.dotmatrix_view();
+        }
         if self.look.theme == OsdTheme::Swissfi {
             return self.swissfi_view();
         }
@@ -1453,6 +1470,7 @@ fn default_motion(look: &Look) -> Motion {
         look.theme,
         OsdTheme::Showcase
             | OsdTheme::Type
+            | OsdTheme::Dotmatrix
             | OsdTheme::Swissfi
             | OsdTheme::Scope
             | OsdTheme::Captions

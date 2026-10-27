@@ -110,6 +110,11 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// A dot-matrix look: white dots on black, a waveform built from dots,
+    /// the status in a dot-matrix face, the transcript in a clean grotesk and
+    /// one red dot while recording. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Dotmatrix,
     /// Swiss type meets sci-fi: off-black and off-white with one orange
     /// accent, huge grotesk words, a hairline waveform of ticks with an
     /// orange centre, and small mono numerals that roll. Drawn by the vo
@@ -167,6 +172,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "dotmatrix" => Some(OsdTheme::Dotmatrix),
             "swissfi" => Some(OsdTheme::Swissfi),
             "scope" => Some(OsdTheme::Scope),
             "captions" => Some(OsdTheme::Captions),
