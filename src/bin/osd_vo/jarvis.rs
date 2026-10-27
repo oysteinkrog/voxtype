@@ -705,6 +705,10 @@ impl Popup {
                     .rest(3.0 * g.k)
                     .width(width)
                     .curve(1.6)
+                    // Fixed per-bar variation, the same seed on both rings so
+                    // the cores match their bars. No drift, so the scene sleeps
+                    // when the bus is quiet.
+                    .jitter(0.4, 7)
             };
             let place = |key: &'static str, spectrum: Spectrum| {
                 at(Element::spectrum_ring(key, spectrum), g.cx - r, g.cy - r)
