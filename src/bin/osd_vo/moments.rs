@@ -466,12 +466,13 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
                 "open the configuration file and set the popup theme to swish",
                 "open the configuration file and set the popup theme to swiss",
             ];
-            k.sound(t, t + 0.25 * burst.len() as f64 + 0.3, Sound::Speech);
+            let burst_end = t + 0.22 * burst.len() as f64 + 0.2;
+            k.sound(t, burst_end, Sound::Speech);
             for b in burst {
                 t += 0.22;
                 k.say(t, b);
             }
-            let t = k.speak(t + 0.1, &sentence_words(11, 5), per);
+            let t = k.speak(burst_end, &sentence_words(11, 5), per);
             k.stop(t);
             let shown = k.finish(t, 0.6, &final_text(&sentence_words(0, 16)));
             k.pump(t + 0.03, shown);
@@ -638,6 +639,23 @@ mod tests {
                 s.inputs.windows(2).all(|w| w[0].0 <= w[1].0),
                 "{m:?} is not in time order"
             );
+            // Overlapping stretches of sound would break the sequence, and
+            // the popup would start its waveform again.
+            let seqs: Vec<u32> = s
+                .inputs
+                .iter()
+                .filter_map(|(_, i)| match i {
+                    Input::Msg(Msg::Audio(f)) => Some(f.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .filter(|f| !f.is_pump_silence())
+                .map(|f| f.seq)
+                .collect();
+            assert!(
+                seqs.windows(2).all(|w| w[1] == w[0] + 1),
+                "{m:?} breaks the frame sequence"
+            );
         }
     }
 
@@ -687,6 +705,7 @@ mod tests {
             .iter()
             .any(|v| v.features.voiced && v.features.f0_hz > 150.0));
         assert!(voice.windows(2).all(|w| w[1].clock > w[0].clock));
+        assert!(voice.windows(2).all(|w| w[1].seq == w[0].seq + 1));
         let doc = files(&s).last().unwrap().1.live.clone().unwrap();
         let starts: Vec<f32> = doc.words.iter().filter_map(|w| w.start).collect();
         assert!(starts.windows(2).all(|w| w[1] >= w[0]));

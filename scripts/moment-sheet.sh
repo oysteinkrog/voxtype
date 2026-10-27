@@ -36,7 +36,7 @@ i=0
 for f in "$frames"/*.png; do
     if ((i % step == 0)); then
         t=$(awk -v i="$i" -v f="$fps" 'BEGIN { printf "%.1f s", i / f }')
-        convert "$f" -background '#202228' -fill '#c8ccd4' -gravity south \
+        magick "$f" -trim +repage -bordercolor '#202228' -border 8 -background '#202228' -fill '#c8ccd4' -gravity south \
             -splice 0x22 -pointsize 14 -annotate +0+3 "$t" "$f.l.png"
         labelled+=("$f.l.png")
     fi
