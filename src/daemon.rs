@@ -409,11 +409,13 @@ fn write_live_preview(text: &str) {
     if std::fs::write(&tmp, text).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
     }
+    crate::osd::live::preview(text);
 }
 
 fn clear_live_preview() {
     let _ = std::fs::remove_file(Config::live_preview_path());
     let _ = std::fs::remove_file(Config::live_status_path());
+    crate::osd::live::clear();
 }
 
 fn discard_stale_cancel(start_at: Option<u128>) {

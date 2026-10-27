@@ -204,6 +204,10 @@ fn run_worker_with(
 /// Prefix of a live-preview line: `P <json string>\n`, the running transcript.
 pub const PARTIAL_PREFIX: &str = "P ";
 
+/// Prefix of a word timing line, sent just before the partial line it
+/// belongs to: `W [{"text": "hello", "start": 0.32, "end": 0.56, "conf": 0.9}]`.
+pub const WORDS_PREFIX: &str = "W ";
+
 /// Prefix of a status line sent after recording stops, while the engine
 /// model finishes: `S {"text": "...", "fraction": 0.8}`. `fraction` is the
 /// share of the recording's audio transcribed so far, or null while the
@@ -639,10 +643,12 @@ fn live_session(
             Ok(delta) if !delta.is_empty() => {
                 last_partial.push_str(&delta);
                 let shown = last_partial.trim_start();
+                let words = preview_words(u);
+                writeln!(out, "{}{}", WORDS_PREFIX, serde_json::to_string(&words)?)?;
                 writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(shown)?)?;
                 out.flush()?;
                 if let Some(log) = revlog.as_mut() {
-                    log.preview(samples.len() as f32 / 16000.0, shown, preview_words(u));
+                    log.preview(samples.len() as f32 / 16000.0, shown, words);
                 }
             }
             Ok(_) => {}
@@ -668,6 +674,14 @@ fn live_session(
         if !tail.is_empty() {
             last_partial.push_str(&tail);
             // Show the last words too; the OSD stays up while finishing.
+            if let Some(u) = unified.as_ref() {
+                writeln!(
+                    out,
+                    "{}{}",
+                    WORDS_PREFIX,
+                    serde_json::to_string(&preview_words(u))?
+                )?;
+            }
             writeln!(
                 out,
                 "{}{}",

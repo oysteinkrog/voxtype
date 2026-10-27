@@ -9,6 +9,7 @@
 //! ## Module layout
 //!
 //! - [`ipc`] — Unix-socket connection, frame decode, ring buffer, reconnect.
+//! - [`live`]: the live preview as JSON (`preview.json`), with word timing.
 //! - [`visual`] — peak-hold decay, waveform envelope helpers, palette types.
 //! - [`config`] — `[osd]` config block (`OsdConfig`).
 //! - [`theme`] — Omarchy theme parsing + change watcher.
@@ -21,6 +22,7 @@
 pub mod config;
 pub mod gtk_env;
 pub mod ipc;
+pub mod live;
 pub mod plasma;
 pub mod recipe;
 pub mod showcase;

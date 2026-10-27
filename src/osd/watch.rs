@@ -13,7 +13,13 @@ use std::time::Duration;
 use inotify::{EventMask, Inotify, WatchMask};
 
 /// The runtime files the popups show.
-const NAMES: [&str; 4] = ["state", "preview", "preview-status", "osd_suppressed"];
+const NAMES: [&str; 5] = [
+    "state",
+    "preview",
+    "preview-status",
+    "preview.json",
+    "osd_suppressed",
+];
 
 /// An inotify watch on the runtime folder.
 pub struct RuntimeWatch {

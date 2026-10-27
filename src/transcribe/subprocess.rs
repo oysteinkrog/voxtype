@@ -17,7 +17,7 @@
 //! - Perceived latency is just transcription time, not model load + transcription
 
 use super::streaming::{StreamHandle, StreamingEvent, StreamingTranscriber};
-use super::worker::{PARTIAL_PREFIX, READY_SIGNAL, STATUS_PREFIX};
+use super::worker::{PARTIAL_PREFIX, READY_SIGNAL, STATUS_PREFIX, WORDS_PREFIX};
 use super::Transcriber;
 use crate::config::WhisperConfig;
 use crate::error::TranscribeError;
@@ -267,7 +267,10 @@ impl SubprocessTranscriber {
             stdout.read_line(&mut line).map_err(|e| {
                 TranscribeError::InferenceFailed(format!("Failed to read worker output: {}", e))
             })?;
-            if !line.starts_with(PARTIAL_PREFIX) && !line.starts_with(STATUS_PREFIX) {
+            if ![PARTIAL_PREFIX, STATUS_PREFIX, WORDS_PREFIX]
+                .iter()
+                .any(|p| line.starts_with(p))
+            {
                 break;
             }
         }
@@ -627,6 +630,11 @@ impl StreamingTranscriber for SubprocessTranscriber {
                 } else if let Some(json) = trimmed.strip_prefix(STATUS_PREFIX) {
                     write_live_status(json);
                     continue;
+                } else if let Some(json) = trimmed.strip_prefix(WORDS_PREFIX) {
+                    if let Ok(words) = serde_json::from_str(json) {
+                        crate::osd::live::timed_words(words);
+                    }
+                    continue;
                 }
                 match serde_json::from_str::<WorkerResponse>(trimmed) {
                     Ok(r) if r.ok => {
@@ -738,10 +746,12 @@ fn write_live_status(json: &str) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
         return;
     };
-    write_status_file(
+    let (fraction, text) = (
         v["fraction"].as_f64(),
         v["text"].as_str().unwrap_or_default(),
     );
+    write_status_file(fraction, text);
+    crate::osd::live::status(crate::osd::live::Phase::Finishing, fraction, text);
 }
 
 /// How long to wait for READY before telling the user the live model is
@@ -780,10 +790,9 @@ impl LoadingStatus {
                     let secs = spawned_at.elapsed().as_secs_f64();
                     // Never show a full bar: the last load time is a guess.
                     let fraction = expected.map(|e| (secs / e).min(0.95));
-                    write_status_file(
-                        fraction,
-                        &format!("Loading: live text model, {:.0} s", secs),
-                    );
+                    let text = format!("Loading: live text model, {:.0} s", secs);
+                    write_status_file(fraction, &text);
+                    crate::osd::live::status(crate::osd::live::Phase::Loading, fraction, &text);
                     st.shown = true;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -804,6 +813,7 @@ impl LoadingStatus {
         st.ready = true;
         if st.shown {
             let _ = std::fs::remove_file(crate::config::Config::live_status_path());
+            crate::osd::live::clear_status();
             let secs = self.spawned_at.elapsed().as_secs_f64();
             let _ = std::fs::write(load_secs_path(), format!("{:.2}", secs));
         }
