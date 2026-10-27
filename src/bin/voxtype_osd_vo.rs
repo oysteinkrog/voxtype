@@ -1113,8 +1113,11 @@ fn read_files() -> Files {
     }
 }
 
-/// Reads the runtime files and passes on each change.
+/// Reads the runtime files and passes on each change: at once when inotify
+/// reports one, and every `POLL_INTERVAL` anyway, which also ages out a stale
+/// status.
 fn poll_files(shared: Shared) {
+    let mut watch = voxtype::osd::watch::RuntimeWatch::new(VoxtypeConfig::runtime_dir());
     let mut last = None;
     loop {
         let files = read_files();
@@ -1124,7 +1127,7 @@ fn poll_files(shared: Shared) {
             lock.lock().unwrap().files(files);
             cv.notify_one();
         }
-        std::thread::sleep(POLL_INTERVAL);
+        watch.wait(POLL_INTERVAL);
     }
 }
 
