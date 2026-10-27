@@ -146,6 +146,7 @@ rubato = "0.16"
 vo = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "33fd56fd9079e6805635b1143785ed72e0b761c2", optional = true }
 vo-core = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "33fd56fd9079e6805635b1143785ed72e0b761c2", optional = true }
 vo-dots = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "33fd56fd9079e6805635b1143785ed72e0b761c2", optional = true }
+vo-3d = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "33fd56fd9079e6805635b1143785ed72e0b761c2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tao = "0.32"
@@ -196,7 +197,7 @@ osd-native = [
 osd-gtk4 = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:cairo-rs", "dep:glib"]
 # The Swiss popup on the vo GPU overlay framework. Opt-in; pick it with
 # `[osd] frontend = "vo"`.
-osd-vo = ["dep:vo", "dep:vo-core", "dep:vo-dots", "vo/record"]
+osd-vo = ["dep:vo", "dep:vo-core", "dep:vo-dots", "dep:vo-3d", "vo/record"]
 # The popup in the vo preview window: `voxtype-osd-vo --preview [--theme T]
 # [--replay FILE]`. Development only; the installed popup leaves it out.
 osd-vo-preview = ["osd-vo", "vo/preview"]
