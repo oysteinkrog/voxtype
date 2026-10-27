@@ -53,6 +53,8 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/jarvis.rs"]
+mod jarvis;
 #[path = "osd_vo/cyberpunk.rs"]
 mod cyberpunk;
 #[path = "osd_vo/wall.rs"]
@@ -461,6 +463,9 @@ impl Look {
 
     /// Width of the transcript: the panel less padding and border.
     fn text_width(&self) -> f32 {
+        if self.theme == OsdTheme::Jarvis {
+            return jarvis::text_width(self);
+        }
         if self.theme == OsdTheme::Synthwave {
             return synthwave::text_width(self);
         }
@@ -491,6 +496,9 @@ impl Look {
     }
 
     fn text_style(&self) -> TextStyle {
+        if self.theme == OsdTheme::Jarvis {
+            return jarvis::text_style(self);
+        }
         if self.theme == OsdTheme::Synthwave {
             return synthwave::text_style(self);
         }
@@ -529,6 +537,9 @@ impl Look {
     /// inside it, so the surface never resizes; the rest is transparent and
     /// click-through.
     fn surface(&self) -> Size {
+        if self.theme == OsdTheme::Jarvis {
+            return Popup::jarvis_surface(self);
+        }
         if self.theme == OsdTheme::Showcase {
             return Popup::showcase_surface(self);
         }
@@ -628,6 +639,8 @@ struct Popup {
     was_recording: bool,
     /// What only the showcase look keeps.
     extra: showcase::Extra,
+    /// What only the jarvis look keeps.
+    jarvis: jarvis::Extra,
     /// What only the cyberpunk look keeps.
     cyber: cyberpunk::State,
     /// What only the synthwave look keeps.
@@ -659,6 +672,7 @@ impl Popup {
             in_wall: false,
             was_recording: false,
             extra: showcase::Extra::default(),
+            jarvis: jarvis::Extra::default(),
             cyber: cyberpunk::State::default(),
             synth: synthwave::State::default(),
         }
@@ -890,6 +904,7 @@ impl App for Popup {
             Msg::Loop => {}
         }
         self.sync_showcase(t);
+        self.sync_jarvis(t);
         self.sync_cyber(t);
         self.sync_synthwave(t);
         self.arm_tick(cx);
@@ -919,6 +934,9 @@ impl App for Popup {
         }
         if self.look.theme == OsdTheme::Type {
             return self.type_view();
+        }
+        if self.look.theme == OsdTheme::Jarvis {
+            return self.jarvis_view();
         }
         if self.look.theme == OsdTheme::Synthwave {
             return self.synthwave_view();
@@ -1127,7 +1145,11 @@ impl Popup {
 fn default_motion(look: &Look) -> Motion {
     if matches!(
         look.theme,
-        OsdTheme::Showcase | OsdTheme::Type | OsdTheme::Mecha | OsdTheme::Cyberpunk
+        OsdTheme::Showcase
+            | OsdTheme::Type
+            | OsdTheme::Jarvis
+            | OsdTheme::Mecha
+            | OsdTheme::Cyberpunk
     ) {
         Motion::Spring(Spring::SOFT)
     } else {

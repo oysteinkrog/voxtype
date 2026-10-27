@@ -86,6 +86,11 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// A holographic HUD in cyan: arcs, ticks and thin ring segments that
+    /// turn round a radial waveform with the microphone in the middle, small
+    /// level readouts, and the transcript centred in a chamfered frame. Drawn
+    /// by the vo frontend only; the gtk4 frontend draws `swiss` for it.
+    Jarvis,
     /// Retro synthwave neon: a magenta to cyan neon tube round a dark card,
     /// a chrome title that names the state, a neon bar waveform over a
     /// scrolling perspective grid, and white centred words. Drawn by the vo
@@ -111,6 +116,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "jarvis" => Some(OsdTheme::Jarvis),
             "cyberpunk" => Some(OsdTheme::Cyberpunk),
             "synthwave" => Some(OsdTheme::Synthwave),
             "mecha" => Some(OsdTheme::Mecha),
