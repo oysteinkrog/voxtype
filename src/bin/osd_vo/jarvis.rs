@@ -54,8 +54,11 @@ const OPEN_SECS: f64 = 0.45;
 const REST_SECS: f64 = 0.6;
 /// Seconds of level history round each half of the bar ring.
 const HISTORY_SECS: f32 = 0.6;
-/// Bars on each side of the ring.
+/// Level-history samples on each side, when the ring has no signal bus.
 const HALF_BARS: usize = 46;
+/// Bars round the spectrum ring: about one per mel band on each side, so
+/// neighbouring bars differ instead of blending.
+const SPECTRUM_BARS: u32 = 48;
 /// Seconds for the done ring to close.
 const CLOSE_SECS: f64 = 0.3;
 
@@ -655,14 +658,12 @@ impl Popup {
                 100f32.to_radians(),
             )
             .ticks(ticks)
-            .trim(0.0, 1.0)
             .presence(draw_on, Transition::fade());
             layer = layer.child(turn(square(e), TICKS_SPEED));
         }
         // The dotted ring: dot-long ticks.
         let dots = Element::polar("dots", 2.0 * half, 2.0 * half, 142.0 * g.k, 0.0, TAU)
             .ticks(Ticks::new(90, 0.01, 1.8 * g.k, hex(MID, 0.7)))
-            .trim(0.0, 1.0)
             .presence(draw_on, Transition::fade());
         layer = layer.child(turn(square(dots), DOTS_SPEED));
         for speed in SEGMENT_SPEEDS {
@@ -702,11 +703,11 @@ impl Popup {
             };
             let spectrum = Spectrum::new(low, high)
                 .bands(bands)
-                .count(2 * HALF_BARS as u32)
+                .count(SPECTRUM_BARS)
                 .mirror()
                 .ring(62.0 / 160.0, 0.95)
                 .rest(3.0 * g.k)
-                .width(0.43)
+                .width(0.3)
                 .curve(1.6)
                 .glow(1.2 * g.k, 1.2);
             let e = at(
