@@ -85,6 +85,11 @@ pub struct Extra {
     level: LevelTrack,
     /// The level last pushed to `level`.
     level_sent: Option<f32>,
+    /// The status icon's events for the `type` look, in order.
+    pub icon_events: Vec<(super::type_look::IconEvent, f64)>,
+    /// Words the engine was unsure of, with when it became sure (`None`
+    /// while still unsure), for the `type` look's wavy underlines.
+    pub doubtful: std::collections::HashMap<vo_core::words::WordId, Option<f64>>,
 }
 
 /// Reach of the card's glow. Its falloff is exp(-d / GLOW_PX), so it is
@@ -390,6 +395,7 @@ impl Extra {
         if self.finish_at.is_some() && new.preview != old.preview && !new.preview.is_empty() {
             self.final_at = Some(t);
         }
+        super::type_look::note_icon(self, old, new, t);
     }
 }
 

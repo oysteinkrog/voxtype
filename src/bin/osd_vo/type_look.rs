@@ -2,38 +2,82 @@
 //! behaviour, with the motion in the type and the lines rather than in
 //! light. The frame draws itself on when the popup opens and is erased when
 //! a dictation is cancelled; the clock and the word count roll their digits;
-//! the icon turns from microphone to a stop square inside a spinner, and
-//! the spinner closes into a ring round a check; the state label swaps by
-//! sliding and changed numbers in the detail dip and settle; the rules open
-//! from their middle; new words rise into place.
+//! the status icon goes from record dot to stop square to spinner, and the
+//! spinner closes into a ring round a check (an X on cancel); the state
+//! label swaps by sliding and changed numbers in the detail dip and settle;
+//! the rules open from their middle; new words rise into place, and a word
+//! the engine is unsure of gets a wavy underline that straightens once it
+//! is sure or the final pass starts.
 //!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
 
 use super::*;
 
-use std::sync::OnceLock;
-
 use vo::scene::geom::Point;
-use vo::scene::path::{icons, make, Morph, Outline, StrokeStyle};
+use vo::scene::path::{make, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
+use vo::scene::status_icon::{IconStyle, StatusIcon};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
 
 /// Seconds for the frame to draw itself on.
 const FRAME_SECS: f64 = 0.45;
-/// Seconds for the icon to morph to its next shape.
-const ICON_SECS: f64 = 0.30;
 /// How far a new word rises into place, in logical pixels.
 const WORD_RISE: f32 = 8.0;
 /// How far the state label slides when it changes.
 const LABEL_SLIDE: f32 = 7.0;
 /// The digit size of the clock and the word count, against the swiss values.
 const STAT_SCALE: f32 = 1.3;
-/// The icon's box: room for the ring round the stop square and the check.
+/// The status icon's box.
 const ICON_BOX: f32 = 18.0;
-/// Seconds for the ring to close once the final text lands.
-const RING_SECS: f32 = 0.25;
+/// The icon's done step (ring closes, then the check) plays this much
+/// faster than the framework's, so the check is drawn before the popup
+/// closes, about half a second after the final text.
+const DONE_SPEED: f64 = 2.0;
+/// Below this confidence a word gets a wavy underline.
+const DOUBT: f32 = 0.6;
+/// The wavy underline: wave height and length, stroke width, in logical
+/// pixels, and how far below the baseline it sits.
+const WAVE_AMP: f32 = 1.6;
+const WAVE_LEN: f32 = 6.0;
+const WAVE_WIDTH: f32 = 1.2;
+const WAVE_DROP: f32 = 2.0;
+/// The underline's colour: amber, apart from the theme's accent.
+const DOUBT_COLOR: u32 = 0xf5a524;
+
+/// What happened to the dictation, for the status icon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IconEvent {
+    Record,
+    Stop,
+    Finish,
+    Done,
+    Cancel,
+}
+
+/// Notes the status icon's events from a change of the runtime files, after
+/// `Extra::files` has noted the stop and the final text.
+pub(crate) fn note_icon(x: &mut showcase::Extra, old: &Files, new: &Files, t: f64) {
+    let last = x.icon_events.last().map(|e| e.0);
+    let working = StatusLine::new(&new.status, "").finishing;
+    let mut push = |e: IconEvent| x.icon_events.push((e, t));
+    match last {
+        None if new.recording => push(IconEvent::Record),
+        Some(IconEvent::Record) if !new.recording && (working || old.recording) => {
+            push(IconEvent::Stop);
+            if working {
+                push(IconEvent::Finish);
+            } else if new.status.is_empty() && x.finish_at.is_none() {
+                // Stopped with nothing to finish: cancelled.
+                push(IconEvent::Cancel);
+            }
+        }
+        Some(IconEvent::Stop) if working => push(IconEvent::Finish),
+        Some(IconEvent::Finish) if x.final_at.is_some() => push(IconEvent::Done),
+        _ => {}
+    }
+}
 /// Seconds for a rule to open from its middle.
 const RULE_SECS: f64 = 0.35;
 
@@ -82,7 +126,7 @@ impl Popup {
             .fill(l.background)
             .presence(Transition::fade().offset(0.0, 6.0), exit)
             .child(self.type_frame(h, cancelled))
-            .child(self.type_header(&status))
+            .child(self.type_header())
             .child(self.waveform(&status))
             .child(self.type_text())
             .child(
@@ -149,7 +193,7 @@ impl Popup {
             .child(half("right", w))
     }
 
-    fn type_header(&self, status: &StatusLine) -> Element<Msg> {
+    fn type_header(&self) -> Element<Msg> {
         let l = &self.look;
         let caption = |key: &'static str, text: &str, px: f32, tracking: f32| {
             Element::label(key, text)
@@ -175,7 +219,7 @@ impl Popup {
         );
         Element::row("header")
             .align_items(AlignItems::START)
-            .child(self.type_icon(status))
+            .child(self.type_icon())
             .child(
                 caption("title", "VOICE DICTATION", l.caption_px, 2.0)
                     .margin_edges(0.0, 0.0, 0.0, 8.0),
@@ -192,94 +236,118 @@ impl Popup {
             .child(stat("words", words, "WORDS"))
     }
 
-    /// Microphone while recording; a stop square inside a spinning arc
-    /// while the final text is made; then the arc closes into a ring and a
-    /// check draws on inside it.
-    fn type_icon(&self, status: &StatusLine) -> Element<Msg> {
-        static MIC_TO_STOP: OnceLock<Arc<Morph>> = OnceLock::new();
-        static CHECK: OnceLock<Arc<Outline>> = OnceLock::new();
-        static RING: OnceLock<Arc<Outline>> = OnceLock::new();
+    /// The framework's status icon, replayed from the events so far.
+    fn type_icon(&self) -> Element<Msg> {
         let l = &self.look;
-        let icon_view = Rect::new(0.0, 0.0, 24.0, 24.0);
-        let ring_view = Rect::new(0.0, 0.0, ICON_BOX, ICON_BOX);
-        let ring = RING.get_or_init(|| {
-            let c = ICON_BOX / 2.0;
-            Arc::new(Outline {
-                contours: vec![make::ring(Point::new(c, c), c - 1.0)],
-            })
+        let mut icon = StatusIcon::new(IconStyle {
+            record: l.accent,
+            work: l.foreground,
+            done: l.accent,
+            cancel: l.inactive,
+            width: 0.08,
         });
-        let slot = Element::column("icon").size(ICON_BOX, ICON_BOX);
-        let done = self.extra.final_at.is_some();
-        let stopped = !done && (status.finishing || self.extra.finish_at.is_some());
-        let mut slot = slot;
-        if done {
-            let check = CHECK.get_or_init(|| Arc::new(Outline::new(&icons::check(), 0.05)));
-            slot = slot
-                .child(at(
-                    Element::stroke_path(
-                        "ring-closed",
-                        ring.clone(),
-                        ring_view,
-                        StrokeStyle::solid(1.2, l.accent),
-                    )
-                    .size(ICON_BOX, ICON_BOX)
-                    .motion(Prop::Trim, Spring::critical_to_98(RING_SECS as f64))
-                    .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade()),
-                    0.0,
-                    0.0,
-                ))
-                .child(at(
-                    Element::stroke_path(
-                        "check",
-                        check.clone(),
-                        icon_view,
-                        StrokeStyle::solid(2.4, l.accent),
-                    )
-                    .size(10.0, 10.0)
-                    // Slower than the ring, so the ring closes first.
-                    .motion(Prop::Trim, Spring::critical_to_98(2.0 * ICON_SECS))
-                    .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade()),
-                    (ICON_BOX - 10.0) / 2.0,
-                    (ICON_BOX - 10.0) / 2.0,
-                ));
-            return slot;
+        for &(e, t) in &self.extra.icon_events {
+            match e {
+                IconEvent::Record => icon.record(t),
+                IconEvent::Stop => icon.stop(t),
+                IconEvent::Finish => icon.finish(t),
+                IconEvent::Done => icon.done(t),
+                IconEvent::Cancel => icon.cancel(t),
+            }
         }
-        if stopped && !self.ended() {
-            // The spinner: a dim track with a light head running round it.
-            slot = slot.child(at(
-                Element::stroke_path(
-                    "ring-spin",
-                    ring.clone(),
-                    ring_view,
-                    StrokeStyle::solid(1.2, l.border),
-                )
-                .size(ICON_BOX, ICON_BOX)
-                .light_head(0.3, 0.8, l.accent, 0.0)
-                .presence(Transition::fade().scale(0.6), Transition::fade()),
-                0.0,
-                0.0,
-            ));
+        let done_at = self
+            .extra
+            .icon_events
+            .iter()
+            .find(|e| e.0 == IconEvent::Done)
+            .map(|e| e.1);
+        let fast = move |t: f64| match done_at {
+            Some(d) if t > d => d + (t - d) * DONE_SPEED,
+            _ => t,
+        };
+        let until = match done_at {
+            Some(d) if icon.until().is_finite() => d + (icon.until() - d) / DONE_SPEED,
+            _ => icon.until(),
+        };
+        let icon = Arc::new(icon);
+        Element::canvas("icon", until, move |t, r, p| {
+            let centre = Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
+            icon.paint(fast(t), centre, r.w.min(r.h), p);
+        })
+        .size(ICON_BOX, ICON_BOX)
+    }
+
+    /// Notes which words the engine is unsure of and when it became sure,
+    /// after the word facts changed.
+    pub(crate) fn note_doubtful(&mut self, t: f64) {
+        for w in self.model.words() {
+            let conf = self.model.info(w.id).and_then(|i| i.conf);
+            match conf {
+                Some(c) if c < DOUBT => {
+                    self.extra.doubtful.insert(w.id, None);
+                }
+                Some(_) => {
+                    if let Some(sure) = self.extra.doubtful.get_mut(&w.id) {
+                        sure.get_or_insert(t);
+                    }
+                }
+                None => {}
+            }
         }
-        let morph = MIC_TO_STOP.get_or_init(|| {
-            let mic = Outline::new(&icons::mic(), 0.05);
-            let stop = Outline::new(&icons::stop(), 0.05);
-            Arc::new(Morph::new(&mic, &stop, 64))
-        });
-        let side = if stopped { 9.0 } else { ICON };
-        slot.child(at(
-            Element::morph(
-                "mic",
-                morph.clone(),
-                icon_view,
-                StrokeStyle::solid(1.8, l.accent),
+    }
+
+    /// Wavy underlines under the words on screen the engine was unsure of,
+    /// placed from the same layout the live text uses.
+    fn doubt_lines(&self) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        if self.extra.doubtful.is_empty() {
+            return Vec::new();
+        }
+        let style = l.text_style();
+        let joined = self
+            .shown
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let laid = self.measure.layout(&joined, &style, Some(l.text_width()));
+        let mut lines = Vec::new();
+        let mut start = 0usize;
+        for w in &self.shown {
+            let range = start..start + w.text.len();
+            start = range.end + 1;
+            let Some(sure) = self.extra.doubtful.get(&w.id) else {
+                continue;
+            };
+            let Some(first) = laid
+                .glyphs
+                .iter()
+                .find(|g| range.contains(&(g.cluster as usize)))
+            else {
+                continue;
+            };
+            let width = self.measure.layout(&w.text, &style, None).size.w;
+            // Sure now, or the final pass has begun: the wave straightens,
+            // then the line fades.
+            let settled = sure.is_some() || self.extra.finish_at.is_some();
+            let line = Element::wavy_line(
+                format!("doubt-{}", w.id),
+                StrokeStyle::solid(WAVE_WIDTH, Color::hex(DOUBT_COLOR, 1.0)),
+                if settled { 0.0 } else { WAVE_AMP },
+                WAVE_LEN,
             )
-            .size(side, side)
-            .morph_to(if stopped { 1.0 } else { 0.0 })
-            .motion(Prop::Morph, Spring::critical_to_98(ICON_SECS))
-            .presence(Transition::fade(), Transition::fade().scale(0.6)),
-            (ICON_BOX - side) / 2.0,
-            (ICON_BOX - side) / 2.0,
-        ))
+            .size(width, 2.0 * WAVE_AMP + WAVE_WIDTH + 2.0)
+            .opacity(if settled { 0.0 } else { 0.9 })
+            .motion(Prop::Trim, Spring::critical_to_98(0.25))
+            .motion(Prop::Wave, Spring::critical_to_98(0.2))
+            .motion(Prop::Opacity, Spring::critical_to_98(0.25))
+            // The text reflows at once, so the line jumps with its word.
+            .motion(Prop::Position, Motion::Snap)
+            .motion(Prop::Size, Motion::Snap)
+            .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade());
+            lines.push(at(line, first.pos.x, first.pos.y + WAVE_DROP - WAVE_AMP));
+        }
+        lines
     }
 
     fn type_text(&self) -> Element<Msg> {
@@ -293,10 +361,14 @@ impl Popup {
             .motion(Prop::Offset, Spring::POP)
             .word_enter(Transition::fade().opacity(0.0).offset(0.0, WORD_RISE))
             .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
-        Element::column("text")
+        let mut text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
             .margin_edges(0.0, 0.0, TEXT_MARGIN_BOTTOM, 0.0)
-            .child(words)
+            .child(words);
+        for line in self.doubt_lines() {
+            text = text.child(line);
+        }
+        text
     }
 
     fn type_status(&self, status: &StatusLine) -> Element<Msg> {

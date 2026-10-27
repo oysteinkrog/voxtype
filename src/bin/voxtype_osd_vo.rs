@@ -785,6 +785,7 @@ impl App for Popup {
                 }
                 if preview_changed || live_changed {
                     self.word_info();
+                    self.note_doubtful(t);
                 }
                 self.arm_check(cx);
             }
@@ -1395,6 +1396,30 @@ fn scenario(look: &Look, cancel: bool) -> vo::Scenario<Msg> {
         recording: true,
         ..Files::default()
     };
+    // Word facts as preview.json gives them. The newest word is unsure when
+    // it is one the engine often gets wrong, and "popup" stays unsure until
+    // the final pass.
+    let mut doc = voxtype::osd::live::LiveDoc::default();
+    let mut facts = |text: &str| {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let timed: Vec<voxtype::osd::live::TimedWord> = words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let newest = i + 1 == words.len();
+                let unsure =
+                    *w == "popup" || (newest && matches!(*w, "swish" | "confi" | "dictation"));
+                voxtype::osd::live::TimedWord {
+                    text: w.to_string(),
+                    start: i as f32 * 0.3,
+                    end: i as f32 * 0.3 + 0.25,
+                    conf: Some(if unsure { 0.4 } else { 0.93 }),
+                }
+            })
+            .collect();
+        doc.apply_preview(text, Some(&timed));
+        Some(doc.clone())
+    };
     let at = |t: f64, files: &Files, inputs: &mut Vec<(f64, Input<Msg>)>| {
         inputs.push((t, Input::Msg(Msg::Files(files.clone()))));
     };
@@ -1425,12 +1450,14 @@ fn scenario(look: &Look, cancel: bool) -> vo::Scenario<Msg> {
         // A word still being spoken shows its start first.
         if words[i] == "configuration" {
             files.preview = format!("{} confi", words[..i].join(" "));
+            files.live = facts(&files.preview);
             at(t, &files, &mut inputs);
             t += per_word * 0.5;
         }
         if i + 1 == words.len() {
             text = text.trim().to_string();
         }
+        files.live = facts(&text);
         files.preview = text;
         at(t, &files, &mut inputs);
         t += per_word;
