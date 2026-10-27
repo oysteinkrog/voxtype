@@ -53,6 +53,8 @@ use voxtype::osd::visual::Color as OsdColor;
 mod showcase;
 #[path = "osd_vo/type_look.rs"]
 mod type_look;
+#[path = "osd_vo/wall.rs"]
+mod wall;
 #[path = "osd_vo/synthwave.rs"]
 mod synthwave;
 #[path = "osd_vo/mecha.rs"]
@@ -182,6 +184,34 @@ struct Args {
     /// so the popup closes without a final text.
     #[arg(long, requires = "offline")]
     cancel: bool,
+
+    /// Development: a wall of looks side by side on one surface, all fed the
+    /// same dictation. With `--offline`, renders one loop of the demo.
+    #[arg(long)]
+    wall: bool,
+
+    /// With `--wall`: the looks to show, comma separated, for example
+    /// `swiss,showcase,type`. Default: every look the vo frontend draws.
+    #[arg(long, value_name = "THEMES", requires = "wall", value_delimiter = ',')]
+    wall_themes: Vec<String>,
+
+    /// With `--wall`: cells per row.
+    #[arg(long, value_name = "N", default_value = "3", requires = "wall")]
+    wall_cols: usize,
+
+    /// With `--wall`: `demo` loops a scripted dictation and a cancelled
+    /// one; `live` follows the daemon, so you can dictate.
+    #[arg(long, value_name = "SCRIPT", default_value = "demo", requires = "wall")]
+    wall_script: String,
+
+    /// With `--wall`: the surface size in logical pixels, `WxH`.
+    #[arg(
+        long,
+        value_name = "WxH",
+        default_value = "1800x1000",
+        requires = "wall"
+    )]
+    wall_size: String,
 }
 
 /// Silence on the audio socket longer than this, with no recording and no
@@ -536,6 +566,8 @@ enum Msg {
     Check,
     /// An ambient frame of the showcase look.
     Tick,
+    /// The theme wall starts its cells afresh. A popup ignores it.
+    Loop,
 }
 
 /// The popup for one dictation. It closes itself when the daemon goes idle.
@@ -566,6 +598,9 @@ struct Popup {
     lines: u32,
     check: Option<vo::TimerId>,
     closing: bool,
+    /// In a cell of the theme wall: closing empties the cell rather than
+    /// ending the app.
+    in_wall: bool,
     /// The daemon has said a recording runs since the popup opened.
     was_recording: bool,
     /// What only the showcase look keeps.
@@ -595,6 +630,7 @@ impl Popup {
             lines: 1,
             check: None,
             closing: false,
+            in_wall: false,
             was_recording: false,
             extra: showcase::Extra::default(),
             synth: synthwave::State::default(),
@@ -805,6 +841,7 @@ impl App for Popup {
             }
             Msg::Check => self.check = None,
             Msg::Tick => self.extra.tick = None,
+            Msg::Loop => {}
         }
         self.sync_showcase(t);
         self.sync_synthwave(t);
@@ -818,7 +855,9 @@ impl App for Popup {
                 "closing: the daemon is idle"
             );
             self.closing = true;
-            cx.exit();
+            if !self.in_wall {
+                cx.exit();
+            }
         }
     }
 
@@ -1264,6 +1303,9 @@ fn main() -> anyhow::Result<()> {
     let fonts = load_fonts(&theme)?;
     let look = Look::new(&cfg, &theme, stop_hint(&hotkey), &fonts);
 
+    if args.wall {
+        return run_wall(&args, &cfg, &theme, stop_hint(&hotkey), fonts);
+    }
     if let Some(dir) = &args.offline {
         return offline(look, fonts, dir, args.fps, args.cancel);
     }
@@ -1542,6 +1584,98 @@ fn offline(
         mb(PEAK.load(Ordering::Relaxed))
     );
     Ok(())
+}
+
+/// The looks the vo frontend draws itself.
+const WALL_THEMES: &[OsdTheme] = &[OsdTheme::Swiss, OsdTheme::Showcase, OsdTheme::Type];
+
+/// `voxtype-osd-vo --wall`: see `osd_vo/wall.rs`.
+fn run_wall(
+    args: &Args,
+    cfg: &OsdConfig,
+    theme: &PlasmaTheme,
+    stop_hint: String,
+    fonts: FontRegistry,
+) -> anyhow::Result<()> {
+    let themes: Vec<OsdTheme> = if args.wall_themes.is_empty() {
+        WALL_THEMES.to_vec()
+    } else {
+        args.wall_themes
+            .iter()
+            .map(|t| {
+                OsdTheme::parse_str(t.trim()).ok_or_else(|| anyhow::anyhow!("unknown theme {t:?}"))
+            })
+            .collect::<anyhow::Result<_>>()?
+    };
+    let looks: Vec<Look> = themes
+        .iter()
+        .map(|&t| {
+            let mut c = cfg.clone();
+            c.theme = t;
+            Look::new(&c, theme, stop_hint.clone(), &fonts)
+        })
+        .collect();
+    let (w, h) = args
+        .wall_size
+        .split_once('x')
+        .and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))
+        .ok_or_else(|| anyhow::anyhow!("--wall-size wants WxH, for example 1800x1000"))?;
+    let size = Size::new(w, h);
+    let script = match args.wall_script.as_str() {
+        "demo" => wall::Script::Demo,
+        "live" => wall::Script::Live,
+        s => anyhow::bail!("--wall-script is demo or live, not {s:?}"),
+    };
+    let app = wall::Wall::new(looks, &fonts, args.wall_cols, size, script);
+    let options = |inbox| Options {
+        fonts: fonts.clone(),
+        inbox,
+        default_motion: Motion::Spring(Spring::SOFT),
+        ..Options::default()
+    };
+    if let Some(dir) = &args.offline {
+        let scenario = vo::Scenario {
+            size,
+            scale: 1.0,
+            duration: app.demo_len(),
+            inputs: Vec::new(),
+        };
+        let n = vo::render_offline_with(app, &scenario, args.fps, dir, options(None))
+            .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
+        eprintln!("voxtype-osd-vo: wrote {n} wall frames to {}", dir.display());
+        eprintln!(
+            "voxtype-osd-vo: heap peak {:.2} MB",
+            mb(PEAK.load(Ordering::Relaxed))
+        );
+        return Ok(());
+    }
+    let inbox = if script == wall::Script::Live {
+        let shared: Shared = Arc::new((Mutex::new(Sink::default()), Condvar::new()));
+        let socket = resolve_socket_path(args.socket.clone());
+        let reconnect = Duration::from_secs_f32(args.reconnect_secs.max(0.05));
+        let (proxy, inbox) = vo::channel();
+        shared.0.lock().unwrap().proxy = Some(proxy);
+        {
+            let shared = shared.clone();
+            std::thread::Builder::new()
+                .name("voxtype-osd-audio".into())
+                .spawn(move || read_audio(shared, socket, reconnect))?;
+        }
+        std::thread::Builder::new()
+            .name("voxtype-osd-files".into())
+            .spawn(move || poll_files(shared))?;
+        Some(inbox)
+    } else {
+        None
+    };
+    let spec = OverlaySpec {
+        size,
+        placement: Placement::Centered,
+        input: InputMode::None,
+        app_id: "voxtype-osd-wall".into(),
+        ..OverlaySpec::default()
+    };
+    vo::run_overlay_with(app, spec, options(inbox)).map_err(|e| anyhow::anyhow!("wall: {e}"))
 }
 
 #[cfg(test)]
