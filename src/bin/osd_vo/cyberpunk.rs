@@ -1319,11 +1319,23 @@ impl Popup {
                 )
                 .presence(Transition::fade(), Transition::fade()),
             )
-            .child(self.cyber_wave(mode, progress, ox, oy))
-            .child(self.cyber_text(mode, ox, oy));
+            .child(self.cyber_wave(mode, progress, ox, oy));
+        // The transcript rides with the body but is cut at the status bar's
+        // top, so a new line rises from behind the bar while the panel grows
+        // instead of overlapping it.
+        let text = at(Element::layer("textclip"), 0.0, 0.0)
+            .size(size.w, oy + sy - 2.0)
+            .clip()
+            .child(
+                at(Element::column("textmove"), 0.0, dy)
+                    .size(size.w, size.h - dy)
+                    .motion(Prop::Position, Motion::Snap)
+                    .child(self.cyber_text(mode, ox, oy)),
+            );
         panel
             .child(deco)
             .child(body)
+            .child(text)
             .child(self.cyber_status(mode, &status, ox, oy + sy))
             .child(self.cyber_count(mode, ox + w - 84.0, oy + sy + 17.0))
     }
