@@ -110,6 +110,11 @@ pub enum OsdTheme {
     /// morphs from microphone to stop to check, and words rise into place.
     /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
     Type,
+    /// Tron light lines: a black glass panel traced by cyan light lines that
+    /// run round its border, the waveform as one luminous line, and the
+    /// transcript in a thin geometric face. Drawn by the vo frontend only;
+    /// the gtk4 frontend draws `swiss` for it.
+    Tron,
     /// A green CRT terminal: a bowed screen with scanlines, a block meter,
     /// the transcript in a monospaced face typed in behind a block caret, and
     /// an italic status line. Drawn by the vo frontend only; the gtk4
@@ -188,6 +193,7 @@ impl OsdTheme {
             "swiss" => Some(OsdTheme::Swiss),
             "showcase" => Some(OsdTheme::Showcase),
             "type" => Some(OsdTheme::Type),
+            "tron" => Some(OsdTheme::Tron),
             "phosphor" => Some(OsdTheme::Phosphor),
             "mission" => Some(OsdTheme::Mission),
             "palette" => Some(OsdTheme::Palette),
