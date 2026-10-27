@@ -562,6 +562,13 @@ impl Popup {
         if self.amber.ended_at.is_some() {
             words = words.opacity(0.4);
         }
+        let words = self.handoff_or(
+            words,
+            &self.look.text_style(),
+            Some(self.look.text_width()),
+            hex(TEXT, 1.0),
+            hex(AMBER, 1.0),
+        );
         at(words, TEXT_X * k, TEXT_TOP * k)
     }
 

@@ -95,6 +95,8 @@ mod replay;
 mod synthwave;
 #[path = "osd_vo/mecha.rs"]
 mod mecha;
+#[path = "osd_vo/lifecycle.rs"]
+mod lifecycle;
 
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;
@@ -831,6 +833,8 @@ struct Files {
     /// How the dictation ended, once the daemon says so. Older daemons do
     /// not write it.
     outcome: Option<Outcome>,
+    /// `result.json`: what a typed or pasted dictation delivered.
+    delivery: Option<voxtype::osd::outcome::Delivery>,
 }
 
 /// How a dictation ended, as a look shows it in the moment before the popup
@@ -838,6 +842,7 @@ struct Files {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ending {
     /// The final text was made (and, with a daemon that says so, delivered).
+    /// The popup stays `lifecycle::DONE_LINGER_SECS`, or until the hand-off ends.
     Done,
     /// The recording stopped with no final pass and no word from the daemon.
     Stopped,
@@ -850,9 +855,9 @@ enum Ending {
 }
 
 impl Ending {
-    /// The popup stays `CANCEL_LINGER_SECS` so the look can show it.
+    /// The popup stays a moment so the look can show it (`Popup::linger_secs`).
     fn lingers(self) -> bool {
-        matches!(self, Ending::Cancelled | Ending::Empty | Ending::Failed)
+        self != Ending::Stopped
     }
 
     fn label(self) -> &'static str {
@@ -1003,6 +1008,8 @@ struct Popup {
     cyber: cyberpunk::State,
     /// What only the synthwave look keeps.
     synth: synthwave::State,
+    /// The end of the dictation: the delivery and its hand-off.
+    life: lifecycle::State,
 }
 
 impl Popup {
@@ -1049,6 +1056,7 @@ impl Popup {
             jarvis: jarvis::Extra::default(),
             cyber: cyberpunk::State::default(),
             synth: synthwave::State::default(),
+            life: lifecycle::State::default(),
         }
     }
 
@@ -1056,8 +1064,13 @@ impl Popup {
         if let Some(ending) = self.ending() {
             // The daemon is idle and the popup is about to close: an empty
             // status would read as "Listening", as if a new recording began.
+            // After a reported delivery the status says what happened: "Typed".
+            let state = match self.delivered() {
+                Some(d) => d.via.label().into(),
+                None => ending.label().into(),
+            };
             return StatusLine {
-                state: ending.label().into(),
+                state,
                 detail: String::new(),
                 loading: false,
                 finishing: true,
@@ -1244,9 +1257,9 @@ impl Popup {
         if self.files.suppressed {
             return true;
         }
-        // A cancel or a failure stays a moment, so the look can show it.
+        // An ending stays a moment, so the look can show it.
         let lingering = self.ending().is_some_and(Ending::lingers)
-            && self.ended_for(t).is_some_and(|d| d < CANCEL_LINGER_SECS);
+            && self.ended_for(t).is_some_and(|d| d < self.linger_secs());
         let stalled = self.last_audio.is_none_or(|a| t - a > IDLE_TIMEOUT_SECS);
         stalled
             && !lingering
@@ -1337,10 +1350,16 @@ impl App for Popup {
                 self.ended_at = Some(t);
                 tracing::info!(?ending, "the dictation ended");
             }
-            if ending.lingers() && !self.linger_armed {
-                // The idle check runs again when the linger ends.
+        }
+        let had_delivery = self.life.delivered.is_some();
+        self.sync_lifecycle(t);
+        if let Some(ending) = self.ending() {
+            // The idle check runs again when the linger ends; a delivery seen later
+            // lengthens it to the end of the hand-off.
+            let rearm = had_delivery != self.life.delivered.is_some();
+            if ending.lingers() && (!self.linger_armed || rearm) {
                 self.linger_armed = true;
-                let left = CANCEL_LINGER_SECS - self.ended_for(t).unwrap_or(0.0);
+                let left = self.linger_secs() - self.ended_for(t).unwrap_or(0.0);
                 cx.after(left.max(0.0) + 0.01, Msg::Check);
             }
         }
@@ -1597,6 +1616,13 @@ impl Popup {
                 .motion(Prop::Offset, Spring::SNAP)
                 .word_enter(Transition::fade().offset(0.0, 3.0));
         }
+        let words = self.handoff_or(
+            words,
+            &l.text_style(),
+            Some(l.text_width()),
+            l.foreground,
+            l.accent,
+        );
         let text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
             .child(words);
@@ -1617,7 +1643,7 @@ impl Popup {
         let style = l.text_style();
         let w = self.measure.layout("…", &style, None).size.w.ceil();
         let mut text = text;
-        if self.cut > 0 && !self.shown.is_empty() {
+        if self.cut > 0 && !self.shown.is_empty() && self.delivered().is_none() {
             text = text.child(
                 Element::label("ellipsis", "…")
                     .text_style(style)
@@ -1923,6 +1949,7 @@ fn read_files() -> Files {
         recording: matches!(state.trim(), "recording" | "streaming"),
         transcribing: state.trim() == "transcribing" && state_fresh,
         outcome: voxtype::osd::outcome::read(),
+        delivery: voxtype::osd::outcome::read_delivery(),
         finishing,
         suppressed: dir.join("osd_suppressed").exists(),
         preview: std::fs::read_to_string(VoxtypeConfig::live_preview_path())
@@ -2252,14 +2279,36 @@ fn scenario(look: &Look, cancel: bool) -> vo::Scenario<Msg> {
     files.transcribing = false;
     files.fraction = None;
     files.status.clear();
+    files.delivery = Some(demo_delivery(&files.preview));
     files.outcome = Some(Outcome::Done);
     at(done, &files, &mut inputs);
     inputs.sort_by(|a, b| a.0.total_cmp(&b.0));
     vo::Scenario {
         size: look.surface(),
         scale: 1.0,
-        duration: done + 1.0,
+        duration: done + 1.8,
         inputs,
+    }
+}
+
+/// The demo's `result.json`. `VOXTYPE_OSD_VO_DELIVERY` picks how it went: `typed`
+/// (the default), `typed-enter`, `paste`, `paste-enter` or `clipboard`.
+fn demo_delivery(text: &str) -> voxtype::osd::outcome::Delivery {
+    let how = std::env::var("VOXTYPE_OSD_VO_DELIVERY").unwrap_or_default();
+    let method = match how.trim_end_matches("-enter") {
+        "paste" => "paste",
+        "clipboard" => "clipboard",
+        _ => "wtype",
+    };
+    let chars = text.chars().count();
+    voxtype::osd::outcome::Delivery {
+        text: text.to_string(),
+        chars,
+        method: method.into(),
+        enter: how.ends_with("-enter"),
+        output_ms: if method == "wtype" { chars as u64 * 3 } else { 40 },
+        latency_ms: Some(620),
+        audio_s: Some(6.4),
     }
 }
 

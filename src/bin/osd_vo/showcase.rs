@@ -837,6 +837,13 @@ impl Popup {
         let words = words
             .text_halo(halo, radius)
             .motion(Prop::TextFx, Spring::SOFT);
+        let words = self.handoff_or(
+            words,
+            &l.text_style(),
+            Some(l.text_width()),
+            c(ICE),
+            c(TEAL),
+        );
         let mut strip_fill = c(MATTE);
         strip_fill.a = 0.9;
         Element::panel("strip")

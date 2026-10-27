@@ -727,6 +727,13 @@ impl Popup {
         if self.phos.ended_at.is_some() {
             words = words.opacity(0.35);
         }
+        let words = self.handoff_or(
+            words,
+            &style,
+            Some(self.look.text_width()),
+            hex(GREEN, 1.0),
+            hex(HOT, 1.0),
+        );
         let mut layer = at(Element::layer("text"), PAD_X * k, TEXT_TOP * k)
             .size(
                 self.look.text_width() + 22.0 * k,

@@ -350,6 +350,13 @@ impl Popup {
             .motion(Prop::Offset, Spring::POP)
             .word_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0))
             .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
+        let words = self.handoff_or(
+            words,
+            &l.text_style(),
+            Some(l.text_width()),
+            hex(INK),
+            hex(RED),
+        );
         Element::column("text")
             .height(self.lines.min(MAX_LINES) as f32 * TEXT_LINE)
             .margin_edges(TEXT_TOP, TEXT_X, 0.0, TEXT_X)

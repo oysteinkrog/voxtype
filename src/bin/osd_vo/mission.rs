@@ -707,6 +707,13 @@ impl Popup {
             .motion(Prop::Offset, Spring::POP)
             .word_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0))
             .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
+        let words = self.handoff_or(
+            words,
+            &l.text_style(),
+            Some(text_width(l)),
+            hex(INK),
+            accent,
+        );
         let live = mode == Mode::Listening;
         let name = match mode {
             Mode::Listening | Mode::Loading => "LIVE TRANSCRIPT",

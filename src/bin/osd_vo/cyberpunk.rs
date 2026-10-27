@@ -1460,6 +1460,13 @@ impl Popup {
             .word_enter(Transition::fade().offset(0.0, 6.0))
             .word_revise(Revise::Roll)
             .text_halo(Color::WHITE.fade(if cancelled { 0.0 } else { 0.12 }), 3.0);
+        let words = self.handoff_or(
+            words,
+            &l.text_style(),
+            Some(l.text_width()),
+            colour,
+            hex(YELLOW),
+        );
         let mut text = at(
             Element::column("text")
                 .width(l.text_width())
