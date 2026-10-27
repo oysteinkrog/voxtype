@@ -165,6 +165,15 @@ pub(crate) fn text_style(look: &Look) -> TextStyle {
     TextStyle::new(fonts(&look.fonts).text, TEXT_PX * s, TEXT_LINE * s)
 }
 
+/// The centre of the newest transcript line, from the surface top. The card
+/// grows upward as lines are added, so the newest line stays at this spot.
+#[allow(dead_code)]
+pub(crate) fn newest_line_centre(look: &Look) -> f32 {
+    let s = look.width / DESIGN_W;
+    let tall = (HEAD + FOOT + swiss::MAX_LINES as f32 * TEXT_LINE) * s;
+    MARGIN + tall - (FOOT + TEXT_LINE / 2.0) * s
+}
+
 pub(crate) fn text_width(look: &Look) -> f32 {
     TEXT_W * look.width / DESIGN_W
 }
@@ -360,7 +369,13 @@ impl Popup {
             .child(self.sw_text())
             .child(self.sw_status(h))
             .child(at(self.sw_tube(), -MARGIN, -MARGIN));
-        root.child(at(card, MARGIN, MARGIN))
+        // The card's bottom stays put and it grows upward: its top springs
+        // up as lines are added, on the same spring as its drawn height.
+        let tall = self.card_h(swiss::MAX_LINES as u32);
+        root.child(
+            at(card, MARGIN, MARGIN + tall - h)
+                .motion(Prop::Position, Spring::critical_to_98(GROW_SECS)),
+        )
     }
 
     /// The card's height at time `t`: it springs to each new line count.
