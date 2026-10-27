@@ -19,6 +19,7 @@ use std::sync::OnceLock;
 use vo::scene::display::{BlendMode, Paint, ShapeInstance};
 use vo::scene::{Loop, LoopProp};
 use vo::scene::geom::{Point, RRect};
+use vo::scene::material::Material;
 use vo::scene::path::{icons, make, Contour, Morph, Outline, StrokeStyle};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
@@ -799,54 +800,22 @@ impl Popup {
             }
             out
         };
-        // Chrome: white above the caps' middle fading to lavender, a white
-        // horizon, then deep violet into hot pink below.
-        let cap_top = box_h * 0.22;
-        let horizon = box_h * 0.53;
-        let cap_bottom = box_h * 0.82;
-        let (top0, top1, low0, low1) = if cancelled {
-            (0xfff0f4, 0xff9ab8, 0x7a0628, 0xff3b6b)
-        } else {
-            (0xffffff, 0xbfa2ff, 0x3a0b9e, 0xff5ee8)
-        };
-        let band = |key: &'static str, y: f32, h: f32, a: u32, b: u32| {
-            at(
-                Element::shape(key, ShapeKind::RRect)
-                    .size(w, h)
-                    .fill_gradient(hex(a), hex(b))
-                    .motion(Prop::Fill, Spring::SOFT),
-                0.0,
-                y,
+        // 80s chrome on the glyphs themselves, keyed to the em height so the
+        // horizon runs straight across the word. Cancelled turns it red.
+        let chrome_fill = if cancelled {
+            Material::chrome(
+                hex(0x5a0420),
+                hex(0xffd6e0),
+                hex(0x3a0610),
+                hex(0xff3b6b),
             )
+        } else {
+            Material::chrome_classic()
         };
         let chrome = Element::layer("title-chrome")
             .size(w, box_h)
-            .child(band("sky", 0.0, cap_top, top0, top0))
-            .child(band("top", cap_top, horizon - cap_top, top0, top1))
-            .child(band("low", horizon, cap_bottom - horizon, low0, low1))
-            .child(band("floor", cap_bottom, box_h - cap_bottom, low1, low1))
-            .child(at(
-                Element::shape("horizon", ShapeKind::RRect)
-                    .size(w, 1.6 * s)
-                    .fill(Color::hex(0xffffff, 0.95)),
-                0.0,
-                horizon - 0.8 * s,
-            ))
-            .child(at(
-                Element::shape("tint-l", ShapeKind::RRect)
-                    .size(w / 2.0, box_h)
-                    .fill(Color::hex(MAGENTA, 0.12)),
-                0.0,
-                0.0,
-            ))
-            .child(at(
-                Element::shape("tint-r", ShapeKind::RRect)
-                    .size(w / 2.0, box_h)
-                    .fill(Color::hex(CYAN, if cancelled { 0.0 } else { 0.12 })),
-                w / 2.0,
-                0.0,
-            ))
-            .child(Element::mask("letters").children(letters("chrome")));
+            .material(chrome_fill.horizon_line(0.9, 0.02))
+            .children(letters("chrome"));
         let glow_hue = if cancelled { 0xff2b5e } else { MAGENTA };
         let glow = Element::layer("title-glow")
             .size(w, box_h)
