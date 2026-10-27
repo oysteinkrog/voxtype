@@ -899,6 +899,8 @@ struct Popup {
     model: WordModel,
     /// The words on screen: the tail of the transcript.
     shown: Vec<Word>,
+    /// The first word on screen. It only moves forward, a whole line at a time.
+    cut: usize,
     /// Transcript lines the text area has room for. Grows, never shrinks.
     lines: u32,
     check: Option<vo::TimerId>,
@@ -964,6 +966,7 @@ impl Popup {
             word_count: 0,
             model: WordModel::new(),
             shown: Vec::new(),
+            cut: 0,
             lines: 1,
             check: None,
             closing: false,
@@ -1166,22 +1169,8 @@ impl Popup {
             let h = self.measure.layout(&text, &style, width).size.h;
             (h / style.line_height).round() as u32
         };
-        let tail = |start: usize| {
-            let mut shown = words[start..].to_vec();
-            if start > 0 {
-                if let Some(first) = shown.first_mut() {
-                    first.text = format!("…{}", first.text);
-                }
-            }
-            shown
-        };
-        // Drop words from the front until the rest fits.
-        let mut start = words.len().saturating_sub(120);
-        let mut shown = tail(start);
-        while lines_of(&shown) > self.look.max_lines() && start + 1 < words.len() {
-            start += 1;
-            shown = tail(start);
-        }
+        let (cut, shown) = cut_lines(&words, self.cut, self.look.max_lines(), lines_of);
+        self.cut = cut;
         self.lines = self
             .lines
             .max(lines_of(&shown).clamp(1, self.look.max_lines()));
@@ -2283,9 +2272,87 @@ fn run_wall(
     vo::run_overlay_with(app, spec, options(inbox)).map_err(|e| anyhow::anyhow!("wall: {e}"))
 }
 
+/// The words from `start` on, with "…" on the first when earlier words are cut.
+fn tail(words: &[Word], start: usize) -> Vec<Word> {
+    let mut shown = words[start..].to_vec();
+    if start > 0 {
+        if let Some(first) = shown.first_mut() {
+            first.text = format!("…{}", first.text);
+        }
+    }
+    shown
+}
+
+/// The tail of `words` that fits in `max` lines, and where it starts. From
+/// `start`, the whole first line of the layout is dropped until the rest fits,
+/// so the text moves only when a line fills, and then by one line.
+fn cut_lines(
+    words: &[Word],
+    start: usize,
+    max: u32,
+    lines_of: impl Fn(&[Word]) -> u32,
+) -> (usize, Vec<Word>) {
+    let last = words.len().saturating_sub(1);
+    let mut start = start.min(last).max(words.len().saturating_sub(120));
+    let mut shown = tail(words, start);
+    while start < last && lines_of(&shown) > max {
+        let mut first_line = 1;
+        while first_line < shown.len() && lines_of(&shown[..=first_line]) == 1 {
+            first_line += 1;
+        }
+        start = (start + first_line).min(last);
+        shown = tail(words, start);
+    }
+    (start, shown)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lines of `words` wrapped greedily at `width` characters.
+    fn wrapped(words: &[Word], width: usize) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        for w in words {
+            match lines.last_mut() {
+                Some(l) if l.chars().count() + 1 + w.text.chars().count() <= width => {
+                    l.push(' ');
+                    l.push_str(&w.text);
+                }
+                _ => lines.push(w.text.clone()),
+            }
+        }
+        lines
+    }
+
+    /// As words arrive, the text only moves when a line fills, and then the
+    /// whole first line goes; the new first word starts with "…".
+    #[test]
+    fn overflow_drops_the_whole_first_line() {
+        let text = "the quick brown fox jumps over a lazy dog while seven tired \
+                    cats watch from under the old green garden bench at noon today";
+        let all: Vec<&str> = text.split_whitespace().collect();
+        let lines_of = |shown: &[Word]| wrapped(shown, 18).len() as u32;
+        let mut model = WordModel::new();
+        let (mut cut, mut before) = (0, Vec::new());
+        let mut moves = 0;
+        for n in 1..=all.len() {
+            model.update(&all[..n].join(" "));
+            let words = model.words();
+            let (next, shown) = cut_lines(&words, cut, 3, lines_of);
+            assert!(lines_of(&shown) <= 3, "fits in three lines");
+            if next != cut {
+                moves += 1;
+                // The words dropped are exactly the first line on screen before.
+                let first = wrapped(&before, 18)[0].split(' ').count();
+                assert_eq!(next - cut, first, "a whole line goes at once");
+                assert!(shown[0].text.starts_with('…'));
+                assert_eq!(shown[0].text, format!("…{}", words[next].text));
+            }
+            (cut, before) = (next, shown);
+        }
+        assert!(moves >= 2, "the sample scrolls more than once");
+    }
 
     #[test]
     fn a_plain_symbolic_icon_gives_its_view_box_and_paths() {
