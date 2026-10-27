@@ -68,6 +68,9 @@ const COAST_SECS: f64 = 0.6;
 const GRID_ROW_SECS: f64 = 1.2;
 /// Seconds for the tube to power down on a cancel.
 const POWER_DOWN_SECS: f64 = 0.45;
+/// Seconds the daemon must stay idle without a final pass before the look
+/// calls it a cancel, so a stop whose status comes late does not flash one.
+const CANCEL_CONFIRM: f64 = 0.08;
 /// When the title first tracks in, after the tube has started drawing.
 const TITLE_DELAY: f64 = 0.22;
 
@@ -173,7 +176,8 @@ pub struct State {
     lines_from: u32,
     lines_to: u32,
     lines_at: f64,
-    cancel_at: Option<f64>,
+    /// When the daemon went idle with no final pass running.
+    ended_at: Option<f64>,
 }
 
 /// The card outline as two halves from the bottom middle, left and right
@@ -248,7 +252,8 @@ fn card_shape_inset(w: f32, h: f32, s: f32, inset: f32) -> Contour {
     // Bottom middle up the left to the top middle, then down the right.
     let left = tube_points(w, h, s, inset);
     let mut pts = left[..left.len() - 1].to_vec();
-    pts.extend(left.iter().skip(1).rev().map(|p| Point::new(w - p.x, p.y)));
+    pts.extend(left.iter().rev().map(|p| Point::new(w - p.x, p.y)));
+    // `polyline` draws no closing segment, so the last point is the first.
     Contour::polyline(&pts, true)
 }
 
@@ -278,8 +283,13 @@ impl Popup {
             st.lines_to = self.lines;
             st.lines_at = t;
         }
-        if cancelled && st.cancel_at.is_none() {
-            st.cancel_at = Some(t);
+        if cancelled && st.ended_at.is_none() {
+            st.ended_at = Some(t);
+        }
+        // The daemon can go idle a moment before it writes the finishing
+        // status: that was a stop, not a cancel.
+        if !cancelled {
+            st.ended_at = None;
         }
     }
 
@@ -304,8 +314,15 @@ impl Popup {
         self.extra.now
     }
 
+    /// When the dictation counts as cancelled: once the daemon has stayed
+    /// idle, with no final pass, for `CANCEL_CONFIRM` seconds.
+    fn cancel_at(&self) -> Option<f64> {
+        let at = self.synth.ended_at? + CANCEL_CONFIRM;
+        (self.now() >= at).then_some(at)
+    }
+
     fn cancelled(&self) -> bool {
-        self.synth.cancel_at.is_some()
+        self.cancel_at().is_some()
     }
 
     /// The word the title shows.
@@ -317,7 +334,8 @@ impl Popup {
             "PASTED"
         } else if status.loading {
             "LOADING"
-        } else if status.finishing || self.extra.finish_at.is_some() {
+        } else if self.extra.finish_at.is_some() || (status.finishing && !self.ended()) {
+            // While a stop might still turn out a cancel, the title stays.
             "FINISHING"
         } else {
             "LISTENING"
@@ -362,7 +380,7 @@ impl Popup {
     fn sw_until(&self) -> f64 {
         let mut until = self.shown_at + DRAW_SECS + FLICKER_SECS + 0.1;
         until = until.max(self.synth.lines_at + GROW_SECS + 0.1);
-        if let Some(c) = self.synth.cancel_at {
+        if let Some(c) = self.cancel_at() {
             until = until.max(c + POWER_DOWN_SECS + 0.1);
         }
         if let Some(f) = self.extra.final_at {
@@ -399,7 +417,7 @@ impl Popup {
         let (w, s) = (self.look.width, self.scale());
         let height = self.height_fn();
         let shown = self.shown_at;
-        let cancel = self.synth.cancel_at;
+        let cancel = self.cancel_at();
         let pulse = self.extra.final_at;
         let surface = Self::synthwave_surface(&self.look);
         let m = MARGIN;
@@ -482,7 +500,7 @@ impl Popup {
         let (w, s) = (l.width, self.scale());
         let shown = self.shown_at;
         let status = self.status();
-        let stop = self.extra.finish_at.or(self.synth.cancel_at);
+        let stop = self.extra.finish_at.or(self.cancel_at());
         let done = self.extra.final_at;
         let loading = status.loading;
         let fraction = self.files.fraction.map(|f| f.clamp(0.0, 1.0) as f32);
@@ -912,7 +930,9 @@ impl Popup {
             .gap(10.0 * s)
             .child(self.sw_icon(&status))
             .child(label);
-        if !detail.is_empty() && !self.cancelled() {
+        // Once pasted, the finishing detail ("0 s of audio left") is stale.
+        let pasted = self.extra.final_at.is_some();
+        if !detail.is_empty() && !self.cancelled() && !pasted {
             let base = state
                 .bytes()
                 .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32))
