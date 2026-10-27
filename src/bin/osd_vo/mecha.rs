@@ -359,7 +359,7 @@ impl Label {
             });
         }
         let typed = self.start + (n as f32 * self.per_char) as f64;
-        if self.cursor && self.per_char > 0.0 && t < typed + 0.08 {
+        if self.cursor && self.px < 20.0 && self.per_char > 0.0 && t < typed + 0.08 {
             let i = (((t - self.start) / self.per_char as f64) as usize).min(n);
             let x = self.text.glyphs.get(i).map_or(self.width(), |g| g.pos.x);
             p.shape(ShapeInstance::rrect(
