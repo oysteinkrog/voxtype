@@ -28,7 +28,7 @@ use std::time::{Duration, SystemTime};
 use clap::Parser;
 use vo::scene::display::ShapeKind;
 use vo::scene::element::{Element, TextStyle};
-use vo::scene::geom::{Color, Size};
+use vo::scene::geom::{Color, Rect, Size};
 use vo::scene::taffy::{AlignItems, AlignSelf};
 use vo::scene::text::TextLayout;
 use vo::scene::timed::{Progress, Wave};
@@ -218,6 +218,90 @@ const DOT: f32 = 7.0;
 /// Pixels per point as GTK4 sets them on Wayland: 96 DPI times the text
 /// scale, so text is as large as in the GTK4 popup. GTK takes the font DPI
 /// from the settings portal there, not from `gtk-xft-dpi` in settings.ini.
+/// The microphone GTK shows: `audio-input-microphone-symbolic` from the GTK icon theme,
+/// registered as a path. `None` when no plain SVG of it is found.
+fn load_mic_icon(fonts: &FontRegistry) -> Option<(u32, Rect)> {
+    let svg = icon_theme_names()
+        .iter()
+        .flat_map(|theme| icon_dirs().into_iter().map(move |dir| dir.join(theme)))
+        .flat_map(|theme| {
+            [
+                "devices/16",
+                "devices/22",
+                "symbolic/devices",
+                "16x16/devices",
+                "scalable/devices",
+            ]
+            .map(|sub| theme.join(sub).join("audio-input-microphone-symbolic.svg"))
+        })
+        .find_map(|path| std::fs::read_to_string(path).ok())?;
+    let (view, d) = svg_icon_path(&svg)?;
+    let path = vo::scene::path::kurbo::BezPath::from_svg(&d).ok()?;
+    Some((fonts.add_path(path), view))
+}
+
+/// The GTK icon theme, then the usual fallbacks.
+fn icon_theme_names() -> Vec<String> {
+    let config = dirs::config_dir().map(|d| d.join("gtk-4.0/settings.ini"));
+    let gtk = config
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|ini| {
+            ini.lines().find_map(|l| {
+                let (k, v) = l.split_once('=')?;
+                (k.trim() == "gtk-icon-theme-name").then(|| v.trim().to_string())
+            })
+        });
+    gtk.into_iter()
+        .chain(["breeze", "Adwaita", "hicolor"].map(String::from))
+        .collect()
+}
+
+/// Icon theme folders in lookup order: the user's, then each of `XDG_DATA_DIRS`.
+fn icon_dirs() -> Vec<std::path::PathBuf> {
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    dirs::data_dir()
+        .into_iter()
+        .chain(std::env::split_paths(&data_dirs))
+        .map(|d| d.join("icons"))
+        .collect()
+}
+
+/// The viewBox and the joined path data of a symbolic icon. Only plain icons qualify: paths
+/// alone, with no transforms, so drawing `d` in the viewBox draws what GTK draws.
+fn svg_icon_path(svg: &str) -> Option<(Rect, String)> {
+    let shapes = [
+        "<circle",
+        "<rect",
+        "<ellipse",
+        "<polygon",
+        "<polyline",
+        "<line",
+        "<use",
+    ];
+    if svg.contains("transform") || shapes.iter().any(|s| svg.contains(s)) {
+        return None;
+    }
+    let attr = |tag: &str, name: &str| {
+        let at = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+        Some(tag[at..].split('"').next()?.to_string())
+    };
+    let view: Vec<f32> = attr(svg, "viewBox")?
+        .split([' ', ','])
+        .filter(|v| !v.is_empty())
+        .map(|v| v.parse().ok())
+        .collect::<Option<_>>()?;
+    let [x, y, w, h] = view[..] else { return None };
+    let d: Vec<String> = svg
+        .split("<path")
+        .skip(1)
+        .filter_map(|tag| attr(tag.split('>').next()?, "d"))
+        .collect();
+    (!d.is_empty() && w > 0.0 && h > 0.0).then(|| (Rect::new(x, y, w, h), d.join(" ")))
+}
+
 fn px_per_pt() -> f32 {
     96.0 / 72.0 * text_scaling_factor()
 }
@@ -301,6 +385,9 @@ struct Look {
     word_fade: bool,
     /// `Swiss` or `Showcase`; anything else draws swiss.
     theme: OsdTheme,
+    /// The icon theme's microphone as a registered path and its viewBox, or `None` to draw
+    /// one from shapes.
+    mic: Option<(u32, Rect)>,
 }
 
 impl Look {
@@ -330,6 +417,7 @@ impl Look {
             stop_hint,
             word_fade: cfg.word_fade,
             theme: cfg.theme,
+            mic: load_mic_icon(fonts),
         }
     }
 
@@ -692,26 +780,13 @@ impl Popup {
                 )
                 .child(caption("caption", name, l.caption_small_px, 1.5))
         };
-        // A microphone from shapes: the capsule and its stand.
-        let mic = Element::column("mic")
-            .size(ICON, ICON)
-            .align_items(AlignItems::CENTER)
-            .gap(1.5)
-            .child(
-                Element::shape("body", ShapeKind::Capsule)
-                    .size(6.0, 9.0)
-                    .fill(l.accent),
-            )
-            .child(
-                Element::shape("stand", ShapeKind::RRect)
-                    .size(1.5, 2.0)
-                    .fill(l.accent),
-            )
-            .child(
-                Element::shape("base", ShapeKind::RRect)
-                    .size(7.0, 1.5)
-                    .fill(l.accent),
-            );
+        // The icon theme's microphone, or one from shapes: the capsule and its stand.
+        let mic = match l.mic {
+            Some((id, view)) => Element::path("mic", id, view)
+                .size(ICON, ICON)
+                .fill(l.accent),
+            None => self.shape_mic(),
+        };
         Element::row("header")
             .align_items(AlignItems::START)
             .child(mic)
@@ -729,6 +804,30 @@ impl Popup {
                     .layout(|s| s.align_self = Some(AlignSelf::STRETCH)),
             )
             .child(stat("words", &self.word_count.to_string(), "WORDS"))
+    }
+
+    /// A microphone from shapes, for when the icon theme has none.
+    fn shape_mic(&self) -> Element<Msg> {
+        let l = &self.look;
+        Element::column("mic")
+            .size(ICON, ICON)
+            .align_items(AlignItems::CENTER)
+            .gap(1.5)
+            .child(
+                Element::shape("body", ShapeKind::Capsule)
+                    .size(6.0, 9.0)
+                    .fill(l.accent),
+            )
+            .child(
+                Element::shape("stand", ShapeKind::RRect)
+                    .size(1.5, 2.0)
+                    .fill(l.accent),
+            )
+            .child(
+                Element::shape("base", ShapeKind::RRect)
+                    .size(7.0, 1.5)
+                    .fill(l.accent),
+            )
     }
 
     fn waveform(&self, status: &StatusLine) -> Element<Msg> {
@@ -1307,4 +1406,29 @@ fn offline(
         mb(PEAK.load(Ordering::Relaxed))
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_symbolic_icon_gives_its_view_box_and_paths() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+            <path style="fill:currentColor" d="M 8,2 L 10,4 Z" class="ColorScheme-Text"/>
+            <path id="b" d="M 4,7 l 0,1 Z"/></svg>"#;
+        let (view, d) = svg_icon_path(svg).unwrap();
+        assert_eq!((view.x, view.y, view.w, view.h), (0.0, 0.0, 16.0, 16.0));
+        assert_eq!(d, "M 8,2 L 10,4 Z M 4,7 l 0,1 Z");
+        assert!(vo::scene::path::kurbo::BezPath::from_svg(&d).is_ok());
+    }
+
+    #[test]
+    fn an_icon_with_transforms_or_other_shapes_is_refused() {
+        let moved = r#"<svg viewBox="0 0 16 16"><g transform="translate(1 1)"><path d="M0 0h4v4z"/></g></svg>"#;
+        let circle =
+            r#"<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M0 0h4v4z"/></svg>"#;
+        assert!(svg_icon_path(moved).is_none());
+        assert!(svg_icon_path(circle).is_none());
+    }
 }
