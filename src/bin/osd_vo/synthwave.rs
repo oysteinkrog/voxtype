@@ -69,9 +69,6 @@ const COAST_SECS: f64 = 0.6;
 const GRID_ROW_SECS: f64 = 1.2;
 /// Seconds for the tube to power down on a cancel.
 const POWER_DOWN_SECS: f64 = 0.45;
-/// Seconds the daemon must stay idle without a final pass before the look
-/// calls it a cancel, so a stop whose status comes late does not flash one.
-const CANCEL_CONFIRM: f64 = 0.08;
 /// How far the lit tube's brightness wanders while it hums.
 const HUM: f32 = 0.03;
 /// Seconds per cycle of the "..." after "Loading".
@@ -182,15 +179,12 @@ pub(crate) fn text_width(look: &Look) -> f32 {
     TEXT_W * look.width / DESIGN_W
 }
 
-/// What only the synthwave look keeps: when the card last changed height
-/// and when a dictation was cancelled.
+/// What only the synthwave look keeps: when the card last changed height.
 #[derive(Default)]
 pub struct State {
     lines_from: u32,
     lines_to: u32,
     lines_at: f64,
-    /// When the daemon went idle with no final pass running.
-    ended_at: Option<f64>,
 }
 
 /// The card outline as two halves from the bottom middle, left and right
@@ -286,7 +280,6 @@ impl Popup {
         if self.look.theme != OsdTheme::Synthwave {
             return;
         }
-        let cancelled = self.ended() && self.extra.finish_at.is_none();
         let st = &mut self.synth;
         if st.lines_to == 0 {
             st.lines_from = self.lines;
@@ -295,14 +288,6 @@ impl Popup {
             st.lines_from = st.lines_to;
             st.lines_to = self.lines;
             st.lines_at = t;
-        }
-        if cancelled && st.ended_at.is_none() {
-            st.ended_at = Some(t);
-        }
-        // The daemon can go idle a moment before it writes the finishing
-        // status: that was a stop, not a cancel.
-        if !cancelled {
-            st.ended_at = None;
         }
     }
 
@@ -327,11 +312,13 @@ impl Popup {
         self.extra.now
     }
 
-    /// When the dictation counts as cancelled: once the daemon has stayed
-    /// idle, with no final pass, for `CANCEL_CONFIRM` seconds.
+    /// When the dictation ended without text: cancelled, no speech heard,
+    /// or failed. The host keeps the popup up a moment for these.
     fn cancel_at(&self) -> Option<f64> {
-        let at = self.synth.ended_at? + CANCEL_CONFIRM;
-        (self.now() >= at).then_some(at)
+        match self.ending()? {
+            Ending::Cancelled | Ending::Empty | Ending::Failed => self.ended_at,
+            Ending::Done | Ending::Stopped => None,
+        }
     }
 
     fn cancelled(&self) -> bool {
@@ -341,14 +328,20 @@ impl Popup {
     /// The word the title shows.
     fn title_word(&self) -> &'static str {
         let status = self.status();
-        if self.cancelled() {
-            "CANCELLED"
-        } else if self.extra.final_at.is_some() {
+        match self.ending() {
+            Some(Ending::Cancelled) => return "CANCELLED",
+            Some(Ending::Empty) => return "NO SPEECH",
+            Some(Ending::Failed) => return "FAILED",
+            Some(Ending::Stopped) => return "STOPPED",
+            Some(Ending::Done) | None => {}
+        }
+        if self.extra.final_at.is_some() {
             "PASTED"
+        } else if self.ending().is_some() {
+            "DONE"
         } else if status.loading {
             "LOADING"
-        } else if self.extra.finish_at.is_some() || (status.finishing && !self.ended()) {
-            // While a stop might still turn out a cancel, the title stays.
+        } else if status.finishing || self.extra.finish_at.is_some() {
             "FINISHING"
         } else {
             "LISTENING"
@@ -365,21 +358,22 @@ impl Popup {
         let w = l.width;
         let h = self.card_h(self.lines);
         let card = Element::layer("card")
-            .size(w, self.card_h(swiss::MAX_LINES as u32))
-            .child(at(self.sw_card(), 0.0, 0.0))
+            .size(w, h)
             .child(at(self.sw_grid_and_wave(), 0.0, 0.0))
             .child(self.sw_done_mark())
             .child(self.sw_title())
             .child(self.sw_text())
-            .child(self.sw_status(h))
-            .child(at(self.sw_tube(), -MARGIN, -MARGIN));
-        // The card's bottom stays put and it grows upward: its top springs
-        // up as lines are added, on the same spring as its drawn height.
+            .child(self.sw_status(h));
+        // The card's bottom stays put and it grows upward: its content's top
+        // springs up as lines are added, on the same spring as the height
+        // the card and tube canvases draw.
         let tall = self.card_h(swiss::MAX_LINES as u32);
-        root.child(
-            at(card, MARGIN, MARGIN + tall - h)
-                .motion(Prop::Position, Spring::critical_to_98(GROW_SECS)),
-        )
+        root.child(at(self.sw_card(), 0.0, 0.0))
+            .child(
+                at(card, MARGIN, MARGIN + tall - h)
+                    .motion(Prop::Position, Spring::critical_to_98(GROW_SECS)),
+            )
+            .child(at(self.sw_tube(), 0.0, 0.0))
     }
 
     /// The card's height at time `t`: it springs to each new line count.
@@ -414,21 +408,22 @@ impl Popup {
         let height = self.height_fn();
         let shown = self.shown_at;
         let tall = self.card_h(swiss::MAX_LINES as u32);
+        let surface = Self::synthwave_surface(&self.look);
         Element::canvas("card-fill", self.sw_until(), move |t, rect, p| {
             let h = height(t);
             let open = smoothstep(0.0, 0.25, (t - shown) as f32);
-            let shape = card_shape(w, h, s).transform(&vo::scene::geom::Affine::translate(
-                rect.x, rect.y,
-            ));
+            // The card's bottom stays put; its top rises with its height.
+            let (ox, oy) = (rect.x + MARGIN, rect.y + MARGIN + tall - h);
+            let shape = card_shape(w, h, s).transform(&vo::scene::geom::Affine::translate(ox, oy));
             let style = StrokeStyle::solid(0.0, Color::hex(0x0d0828, 0.9 * open)).linear(
-                Point::new(rect.x, rect.y),
+                Point::new(ox, oy),
                 Color::hex(0x0a0722, 0.92 * open),
-                Point::new(rect.x, rect.y + h),
+                Point::new(ox, oy + h),
                 Color::hex(0x050314, 0.94 * open),
             );
             p.fill([&shape], &style);
         })
-        .size(w, tall)
+        .size(surface.w, surface.h)
     }
 
     /// The neon tube and the corner ticks, with the glow and bloom.
@@ -439,10 +434,10 @@ impl Popup {
         let cancel = self.cancel_at();
         let pulse = self.extra.final_at;
         let surface = Self::synthwave_surface(&self.look);
-        let m = MARGIN;
+        let tall = self.card_h(swiss::MAX_LINES as u32);
         let draw = Element::canvas("tube", self.sw_until(), move |t, rect, p| {
             let h = height(t);
-            let (ox, oy) = (rect.x + m, rect.y + m);
+            let (ox, oy) = (rect.x + MARGIN, rect.y + MARGIN + tall - h);
             let move_to = vo::scene::geom::Affine::translate(ox, oy);
             let k = ((t - shown) / DRAW_SECS).clamp(0.0, 1.0);
             let drawn = 1.0 - (1.0 - k as f32).powi(3);
@@ -786,8 +781,7 @@ impl Popup {
                     continue;
                 };
                 let d = (i as f32 - mid) / mid.max(1.0);
-                // A cancel shows for a moment only, so its title barely tracks.
-                let spread = d * if cancelled { 0.08 } else { 0.6 } * total / 2.0;
+                let spread = d * 0.6 * total / 2.0;
                 let secs = 0.28 + 0.14 * d.abs() as f64;
                 out.push(at(
                     Element::label(format!("{layer}-{word}-{i}"), ch.to_string())
@@ -936,9 +930,7 @@ impl Popup {
         let line = l.fonts.line_height(f.status, px).unwrap_or(px * 1.3);
         let style = TextStyle::new(f.status, px, line);
         let blue = hex(BLUE);
-        let state = if self.cancelled() {
-            "Cancelled".to_string()
-        } else if self.extra.final_at.is_some() {
+        let state = if self.extra.final_at.is_some() && !self.cancelled() {
             "Pasted".to_string()
         } else {
             status.state.clone()
