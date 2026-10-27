@@ -800,8 +800,9 @@ impl Popup {
             }
             out
         };
-        // 80s chrome on the glyphs themselves, keyed to the em height so the
-        // horizon runs straight across the word. Cancelled turns it red.
+        // Chrome on the glyphs themselves, keyed to the em height so the
+        // horizon runs straight across the word: white to lavender above,
+        // violet to hot pink below. Cancelled turns it red.
         let chrome_fill = if cancelled {
             Material::chrome(
                 hex(0x5a0420),
@@ -810,7 +811,12 @@ impl Popup {
                 hex(0xff3b6b),
             )
         } else {
-            Material::chrome_classic()
+            Material::chrome(
+                hex(0xffffff),
+                hex(0xbfa2ff),
+                hex(0x3a0b9e),
+                hex(0xff5ee8),
+            )
         };
         let chrome = Element::layer("title-chrome")
             .size(w, box_h)
