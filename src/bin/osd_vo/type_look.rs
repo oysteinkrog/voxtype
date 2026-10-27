@@ -145,7 +145,7 @@ impl Popup {
         let status = self.status();
         let h = Self::type_panel_height(l, self.lines);
         // A cancelled dictation erases the frame; a finished one fades.
-        let cancelled = self.extra.final_at.is_none();
+        let cancelled = self.came_to_nothing();
         let exit = if cancelled {
             Transition::fade().scale(0.98)
         } else {
@@ -271,6 +271,15 @@ impl Popup {
                     .layout(|s| s.align_self = Some(AlignSelf::STRETCH)),
             )
             .child(stat("words", words, "WORDS"))
+    }
+
+    /// The dictation ended without text: cancelled, no speech heard, or
+    /// failed. A stop with no final pass still counts as an ending with text.
+    pub(crate) fn came_to_nothing(&self) -> bool {
+        matches!(
+            self.ending(),
+            Some(Ending::Cancelled | Ending::Empty | Ending::Failed)
+        )
     }
 
     /// The framework's status icon, replayed from the events so far.

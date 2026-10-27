@@ -640,10 +640,10 @@ impl Popup {
         let mut tint = c(mix(INK_HIGH, INK, 0.5));
         tint.a = l.background.a.max(0.92);
         // Success leaves upward, cancel sinks away quietly.
-        let exit = if self.extra.final_at.is_some() {
-            Transition::fade().offset(0.0, -12.0)
-        } else {
+        let exit = if self.came_to_nothing() {
             Transition::fade().scale(0.97)
+        } else {
+            Transition::fade().offset(0.0, -12.0)
         };
         Element::panel("card")
             .width(l.width)
