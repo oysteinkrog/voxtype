@@ -1251,8 +1251,11 @@ impl Popup {
             Some(e) => e + 1.0,
             None => f64::INFINITY,
         };
+        // Ink past the box: the side notches slide in from 12 units outside,
+        // plus stroke and glow. Top and bottom only carry glow.
         let canvas = Element::canvas("frame", until, move |t, rect, p| snap.draw(t, rect, p))
-            .size(size.w, size.h);
+            .size(size.w, size.h)
+            .declare_reach(vo::scene::Insets::new(18.0 * s, 6.0 * s, 18.0 * s, 6.0 * s));
 
         let text_color = if phase == Phase::Cancelled {
             mix(hex(TEXT), hex(RED), 0.35).fade(0.55)
