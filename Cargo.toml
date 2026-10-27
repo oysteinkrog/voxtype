@@ -196,7 +196,10 @@ osd-native = [
 osd-gtk4 = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:cairo-rs", "dep:glib"]
 # The Swiss popup on the vo GPU overlay framework. Opt-in; pick it with
 # `[osd] frontend = "vo"`.
-osd-vo = ["dep:vo", "dep:vo-core", "dep:vo-dots"]
+osd-vo = ["dep:vo", "dep:vo-core", "dep:vo-dots", "vo/record"]
+# The popup in the vo preview window: `voxtype-osd-vo --preview [--theme T]
+# [--replay FILE]`. Development only; the installed popup leaves it out.
+osd-vo-preview = ["osd-vo", "vo/preview"]
 gpu-vulkan = ["whisper-rs/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]

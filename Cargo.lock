@@ -6297,7 +6297,12 @@ name = "vo"
 version = "0.0.0"
 source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=26d266c9332cba645ac37b2917163793820e9545#26d266c9332cba645ac37b2917163793820e9545"
 dependencies = [
+ "bytemuck",
+ "png 0.18.1",
  "pollster",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
  "vo-core",
  "vo-host",
  "vo-host-wayland",

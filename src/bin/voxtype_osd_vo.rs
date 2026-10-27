@@ -86,6 +86,8 @@ mod jarvis;
 mod cyberpunk;
 #[path = "osd_vo/wall.rs"]
 mod wall;
+#[path = "osd_vo/replay.rs"]
+mod replay;
 #[path = "osd_vo/synthwave.rs"]
 mod synthwave;
 #[path = "osd_vo/mecha.rs"]
@@ -227,6 +229,11 @@ struct Args {
     /// so the popup closes without a final text.
     #[arg(long, requires = "offline")]
     cancel: bool,
+
+    /// Record each dictation's audio, voice features and runtime files to
+    /// `DIR/<unix ms>.jsonl`, for `--preview --replay FILE`.
+    #[arg(long, value_name = "DIR", env = "VOXTYPE_OSD_VO_RECORD")]
+    record: Option<PathBuf>,
 
     /// Development: a wall of looks side by side on one surface, all fed the
     /// same dictation. With `--offline`, renders one loop of the demo.
@@ -866,6 +873,8 @@ enum Msg {
 /// The popup for one dictation. It closes itself when the daemon goes idle.
 struct Popup {
     look: Look,
+    /// Where this dictation's messages are recorded (`--record`).
+    recorder: Option<vo::record::Recorder>,
     measure: vo::ShapedLayout,
     /// Raw levels, oldest first, at most the waveform window plus a little.
     levels: VecDeque<f64>,
@@ -939,6 +948,7 @@ impl Popup {
     fn new(look: Look, fonts: &FontRegistry) -> Popup {
         Popup {
             look,
+            recorder: None,
             measure: vo::ShapedLayout::new(fonts.clone()),
             levels: VecDeque::new(),
             voice: VecDeque::new(),
@@ -1224,6 +1234,9 @@ impl App for Popup {
     fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
         if self.closing {
             return;
+        }
+        if let (Some(r), Some(rec)) = (&self.recorder, replay::Recorded::of(&msg)) {
+            let _ = r.record_at(cx.t(), &rec);
         }
         let t = cx.t();
         self.extra.now = t;
@@ -1848,6 +1861,10 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let started = std::time::Instant::now();
+    #[cfg(feature = "osd-vo-preview")]
+    if vo::preview::wanted() {
+        return replay::preview_main();
+    }
     let args = Args::parse();
     let (mut cfg, hotkey) = load_config(args.config.as_deref());
     if let Some(w) = args.width_px {
@@ -1946,7 +1963,9 @@ fn main() -> anyhow::Result<()> {
             default_motion: default_motion(&look),
             ..Options::default()
         };
-        let result = vo::run_overlay_with(Popup::new(look.clone(), &fonts), spec.clone(), options);
+        let mut popup = Popup::new(look.clone(), &fonts);
+        popup.recorder = args.record.as_deref().and_then(replay::recorder);
+        let result = vo::run_overlay_with(popup, spec.clone(), options);
         shared.0.lock().unwrap().proxy = None;
         if args.diag {
             eprintln!(
