@@ -66,6 +66,8 @@ const DIM: u32 = 0x0e5e86;
 const INK: u32 = 0x03111d;
 const TEXT: u32 = 0xe2f7ff;
 const SLATE: u32 = 0x58809a;
+/// The tips of the loudest bars, near white.
+const HOT: u32 = 0xe4fdff;
 
 fn hex(rgb: u32, a: f32) -> Color {
     Color::hex(rgb, a)
@@ -683,7 +685,7 @@ impl Popup {
             let (low, high) = if resting {
                 (hex(SLATE, 0.12), hex(SLATE, 0.4))
             } else {
-                (hex(CYAN, 0.45), hex(BRIGHT, 1.0))
+                (hex(CYAN, 0.45), hex(HOT, 1.0))
             };
             let r = 160.0 * g.k;
             // The mel bands from the signal bus, low bands at the top on both
@@ -705,7 +707,8 @@ impl Popup {
                 .ring(62.0 / 160.0, 0.95)
                 .rest(3.0 * g.k)
                 .width(0.43)
-                .glow(0.8 * g.k, 1.0);
+                .curve(1.6)
+                .glow(1.2 * g.k, 1.2);
             let e = at(
                 Element::spectrum_ring("spectrum", spectrum),
                 g.cx - r,
