@@ -21,6 +21,30 @@ pub enum OsdPosition {
     TopRight,
 }
 
+/// How the centered anchors place the popup vertically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OsdAnchor {
+    /// The popup's top edge sits at `top_margin` of the monitor height, and
+    /// the popup grows downward as the text gets longer.
+    #[default]
+    Top,
+    /// The newest text line, the one being read, sits at `reading_line` of
+    /// the monitor height, and the popup grows upward as the text gets
+    /// longer, so the line being read stays put.
+    ReadingLine,
+}
+
+impl OsdAnchor {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "top" => Some(OsdAnchor::Top),
+            "reading-line" => Some(OsdAnchor::ReadingLine),
+            _ => None,
+        }
+    }
+}
+
 /// Selects which OSD frontend the `voxtype-osd` wrapper launches.
 ///
 /// The wrapper treats this as a *preference*: if the chosen frontend's
@@ -389,6 +413,14 @@ pub struct OsdConfig {
     /// applied when `position` is `bottom-center` or `top-center` —
     /// corner anchors keep using `margin_px`.
     pub top_margin: f32,
+    /// What the centered anchors place: the popup's top edge (`top`, the
+    /// default, at `top_margin`) or its newest text line (`reading-line`,
+    /// at `reading_line`). Corner anchors ignore it.
+    pub anchor: OsdAnchor,
+    /// Height of the newest text line's centre as a fraction of the
+    /// monitor's height, when `anchor = "reading-line"`. 0.5 is the middle
+    /// of the screen.
+    pub reading_line: f32,
     /// Font size of the live preview text in points (gtk4 OSD). `None`
     /// keeps the GTK theme's size.
     pub preview_font_pt: Option<f32>,
@@ -437,6 +469,8 @@ impl Default for OsdConfig {
             position: OsdPosition::BottomCenter,
             margin_px: 24,
             top_margin: 0.85,
+            anchor: OsdAnchor::Top,
+            reading_line: 0.5,
             preview_font_pt: None,
             opacity: 0.95,
             theme: OsdTheme::Default,

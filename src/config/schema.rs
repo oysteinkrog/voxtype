@@ -247,6 +247,7 @@ const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom
 const OSD_FRAME_BACKGROUND_CHOICES: &[&str] = &["background", "none"];
 const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "none"];
 const OSD_LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
+const OSD_ANCHOR_CHOICES: &[&str] = &["top", "reading-line"];
 const OSD_POSITION_CHOICES: &[&str] = &[
     "bottom-center",
     "top-center",
@@ -1320,6 +1321,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "OSD",
         "Vertical position",
         "Top edge as a fraction of monitor height, matching swayosd. Only used by the centered anchors.",
+    ),
+    spec(
+        "osd.anchor",
+        "osd",
+        "anchor",
+        closed(OSD_ANCHOR_CHOICES),
+        "OSD",
+        "Vertical anchor",
+        "What the centered anchors place: the top edge (`top`, at top_margin) or the newest text line (`reading-line`, at reading_line), which keeps the line you read in one place.",
+    ),
+    spec(
+        "osd.reading_line",
+        "osd",
+        "reading_line",
+        KeyType::Float { min: 0.0, max: 1.0 },
+        "OSD",
+        "Reading line position",
+        "Newest text line's centre as a fraction of monitor height, with anchor = reading-line. 0.5 is the middle.",
     ),
     spec(
         "osd.preview_font_pt",
@@ -2636,6 +2655,8 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "osd.height_px" => json!(cfg.osd.height_px),
         "osd.margin_px" => json!(cfg.osd.margin_px),
         "osd.top_margin" => f32_json(cfg.osd.top_margin),
+        "osd.anchor" => serde_json::to_value(cfg.osd.anchor).ok()?,
+        "osd.reading_line" => f32_json(cfg.osd.reading_line),
         "osd.preview_font_pt" => match cfg.osd.preview_font_pt {
             Some(v) => f32_json(v),
             None => Json::Null,
