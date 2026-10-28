@@ -45,11 +45,45 @@ fn view(p: &Popup, tokens: &vo::Tokens) -> Element<Msg> {
             0.0,
             baseline,
         ))
-        .child(at(
-            Element::label("rule", "newest line: baseline ±3 px, tracking 5 %, ink 70 %")
-                .text_style(look.mono(9.0))
-                .color(accent),
-            8.0,
-            baseline + BASELINE_PX + 2.0,
-        ))
+        .child(
+            at(
+                Element::label("rule", "newest line: baseline ±3 px, tracking 5 %, ink 70 %")
+                    .text_style(look.mono(9.0))
+                    .color(accent),
+                8.0,
+                rule_y(baseline, look.text_line, size.h),
+            )
+            .fill(Color::rgba(0.0, 0.0, 0.0, 0.7)),
+        )
+}
+
+/// The status row's height at the foot of the popup, with some room.
+const FOOT_H: f32 = 40.0;
+/// The rule label's height.
+const RULE_H: f32 = 13.0;
+
+/// Where the rule label goes: under the band, or above the newest line
+/// when under the band it would run into the status row.
+fn rule_y(baseline: f32, text_line: f32, height: f32) -> f32 {
+    let below = baseline + BASELINE_PX + 2.0;
+    if below + RULE_H <= height - FOOT_H {
+        below
+    } else {
+        baseline - 0.2 * text_line - 0.5 * text_line - RULE_H
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rule_label_keeps_clear_of_the_status_row() {
+        // Room under the band: the label goes there.
+        assert!(rule_y(100.0, 30.0, 300.0) > 100.0);
+        // The newest line just over the status row: the label goes above it.
+        let y = rule_y(255.0, 30.0, 300.0);
+        assert!(y + RULE_H <= 255.0 - 0.2 * 30.0);
+        assert!(y + RULE_H <= 300.0 - FOOT_H);
+    }
 }
