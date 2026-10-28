@@ -159,7 +159,7 @@ const NAME_PX: f32 = 14.0;
 const SMALL_PX: f32 = 12.0;
 const MAX_SCALE: f32 = 1.25;
 /// Between one loop of a tile's moment and the next.
-const LOOP_GAP: f64 = 0.8;
+const LOOP_GAP: f64 = 0.4;
 /// After a live dictation ends, before the tiles go back to their moments.
 const RESUME_AFTER: f64 = 2.0;
 
@@ -173,6 +173,9 @@ struct Tile {
     /// When this loop of the moment ends, and how many loops have played.
     loop_end: f64,
     loops: usize,
+    /// The popup has had a message of its own. Until then it ignores the
+    /// other tiles' idle checks, which would close it before it starts.
+    fed: bool,
 }
 
 pub(crate) struct Station {
@@ -306,6 +309,7 @@ impl Station {
                     queue: VecDeque::new(),
                     loop_end: 0.0,
                     loops: 0,
+                    fed: false,
                 }
             })
             .collect();
@@ -328,6 +332,7 @@ impl Station {
         let popup = self.fresh_popup(&self.tiles[i].look);
         let tile = &mut self.tiles[i];
         tile.popup = popup;
+        tile.fed = false;
         tile.popup.init(cx);
         let m = tile.exhibit.moment_at(tile.loops);
         tile.loops += 1;
@@ -369,6 +374,7 @@ impl Station {
         for i in 0..self.tiles.len() {
             while self.tiles[i].queue.front().is_some_and(|q| q.0 <= now) {
                 let (_, m) = self.tiles[i].queue.pop_front().unwrap();
+                self.tiles[i].fed = true;
                 self.tiles[i].popup.update(m, cx);
             }
             if self.tiles[i].queue.is_empty() && self.tiles[i].loop_end <= now {
@@ -397,6 +403,7 @@ impl Station {
             let tile = &mut self.tiles[i];
             tile.queue.clear();
             tile.popup = popup;
+            tile.fed = false;
             tile.popup.init(cx);
         }
         self.arm_pump(cx);
@@ -416,6 +423,7 @@ impl Station {
             self.go_live(cx);
         }
         for t in &mut self.tiles {
+            t.fed = true;
             t.popup.update(msg.clone(), cx);
         }
         if !self.resume_armed && self.tiles.iter().all(|t| t.popup.closing) {
@@ -499,6 +507,11 @@ impl App for Station {
                 }
                 for t in &mut self.tiles {
                     t.popup.update(Msg::Tick, cx);
+                }
+            }
+            Msg::Check => {
+                for t in self.tiles.iter_mut().filter(|t| t.fed) {
+                    t.popup.update(Msg::Check, cx);
                 }
             }
             m => {
