@@ -143,10 +143,10 @@ rubato = "0.16"
 
 # OSD on the vo GPU overlay framework (gated on `osd-vo`). Pinned to a commit
 # of the framework repo; nothing in the default build pulls it in.
-vo = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "c3c172bd8cc59d21ed9538a6a8ce5f5b36271037", optional = true }
-vo-core = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "c3c172bd8cc59d21ed9538a6a8ce5f5b36271037", optional = true }
-vo-dots = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "c3c172bd8cc59d21ed9538a6a8ce5f5b36271037", optional = true }
-vo-3d = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "c3c172bd8cc59d21ed9538a6a8ce5f5b36271037", optional = true }
+vo = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "39cd09d5157d575bbf14dce4b94406e07de1ae54", optional = true }
+vo-core = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "39cd09d5157d575bbf14dce4b94406e07de1ae54", optional = true }
+vo-dots = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "39cd09d5157d575bbf14dce4b94406e07de1ae54", optional = true }
+vo-3d = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "39cd09d5157d575bbf14dce4b94406e07de1ae54", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tao = "0.32"
