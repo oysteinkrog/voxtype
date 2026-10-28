@@ -986,13 +986,13 @@ impl Popup {
                 .child(
                     at(Element::live_text("words", words), 0.0, 0.0)
                         .text_style(style)
+                        .revision_motion(revision::motion(&self.look))
                         .color(hex(TEXT, 1.0))
                         .text_halo(hex(CYAN, 0.45), 7.0 * k)
                         .size(w, style.line_height)
                         .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                         .motion(Prop::Offset, Spring::POP)
-                        .word_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k))
-                        .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0 * k)),
+                        .word_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k)),
                 );
             column = column.child(line);
         }

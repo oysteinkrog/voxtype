@@ -1319,13 +1319,13 @@ impl Popup {
             hex(TEXT)
         };
         let words = Element::live_text("words", &self.shown)
+            .revision_motion(revision::motion(&self.look))
             .text_style(text_style(l))
             .color(text_color)
             .text_halo(hex(DEEP).fade(0.25), 2.0 * s)
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(Transition::fade().offset(10.0 * s, 0.0))
-            .word_change(Transition::fade().opacity(0.3).offset(4.0 * s, 0.0));
+            .word_enter(Transition::fade().offset(10.0 * s, 0.0));
         let text = at(
             // Anchored to the bottom, so the newest line always sits on the
             // last line of the box.

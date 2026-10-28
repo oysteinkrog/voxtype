@@ -578,8 +578,7 @@ impl Popup {
             .width(self.look.text_width())
             .motion(Prop::Opacity, Spring::critical_to_98(0.22))
             .motion(Prop::Offset, Spring::critical_to_98(0.22))
-            .word_enter(Transition::fade().wipe(1.0))
-            .word_change(Transition::fade().opacity(0.3).offset(0.0, 4.0 * k));
+            .word_enter(Transition::fade().wipe(1.0));
         if self.amber.ended_at.is_some() {
             words = words.opacity(0.4);
         }

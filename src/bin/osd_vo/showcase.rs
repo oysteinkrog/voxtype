@@ -811,11 +811,7 @@ impl Popup {
             // ribbon above.
             .motion(Prop::Opacity, Spring::critical_to_98(0.10))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(Transition::fade().opacity(0.15).offset(0.0, -10.0))
-            .word_change(Transition::fade().opacity(0.3).offset(0.0, 5.0));
-        if phase == Phase::Done {
-            words = words.word_change(Transition::fade().opacity(0.5));
-        }
+            .word_enter(Transition::fade().opacity(0.15).offset(0.0, -10.0));
         // While listening, each new word forms from particles; a revision
         // scatters and re-forms only the glyphs that changed. Not in the
         // theme wall: word ids repeat from cell to cell, and the wall keeps

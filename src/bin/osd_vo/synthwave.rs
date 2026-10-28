@@ -882,8 +882,7 @@ impl Popup {
                 .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                 .motion(Prop::Offset, Spring::POP)
                 .motion(Prop::Position, Spring::critical_to_98(0.2))
-                .word_enter(Transition::fade().offset(0.0, 8.0 * s))
-                .word_change(Transition::fade().opacity(0.3).offset(0.0, -5.0 * s));
+                .word_enter(Transition::fade().offset(0.0, 8.0 * s));
             column = column.child(
                 Element::row(format!("row-{i}"))
                     .width(l.width)

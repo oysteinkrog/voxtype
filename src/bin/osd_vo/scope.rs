@@ -659,8 +659,7 @@ impl Popup {
                         .text_style(style)
                         .color(colour)
                         .motion(Prop::Opacity, Spring::critical_to_98(0.08))
-                        .word_enter(Transition::fade())
-                        .word_change(Transition::fade().opacity(0.3)),
+                        .word_enter(Transition::fade()),
                     o + TEXT_X,
                     o + TEXT_TOP + i as f32 * LINE,
                 )

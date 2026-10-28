@@ -589,8 +589,7 @@ impl Popup {
             .opacity(dim)
             .motion(Prop::Opacity, Spring::critical_to_98(0.3))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(enter)
-            .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
+            .word_enter(enter);
         let words = self.handoff_or(
             words,
             &l.text_style(),

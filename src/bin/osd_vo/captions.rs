@@ -409,12 +409,12 @@ impl Popup {
             let line_el = |key: String, ws: &[Word], colour: Color| {
                 Element::live_text(key, ws)
                     .text_style(style)
+                    .revision_motion(revision::motion(&self.look))
                     .color(colour)
                     .motion(Prop::TextColor, Spring::critical_to_98(0.15))
                     .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                     .motion(Prop::Offset, Spring::POP)
                     .word_enter(Transition::fade().offset(0.0, 6.0))
-                    .word_change(Transition::fade().opacity(0.35).offset(0.0, -3.0))
             };
             // Each part gets its own measured width, so neither wraps.
             let width = |ws: &[Word]| {

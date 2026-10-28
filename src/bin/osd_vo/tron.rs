@@ -540,8 +540,7 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.18))
             .motion(Prop::Offset, Spring::critical_to_98(0.22))
             .motion(Prop::TextFx, Spring::critical_to_98(0.22))
-            .word_enter(Transition::fade().offset(0.0, 5.0 * k).blur(3.0 * k))
-            .word_change(Transition::fade().opacity(0.25).blur(2.5 * k));
+            .word_enter(Transition::fade().offset(0.0, 5.0 * k).blur(3.0 * k));
         if self.tron.ended_at.is_some() {
             words = words.opacity(0.35);
         }

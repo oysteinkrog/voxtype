@@ -71,6 +71,8 @@ mod palette;
 mod dotmatrix;
 #[path = "osd_vo/kit.rs"]
 mod kit;
+#[path = "osd_vo/revision.rs"]
+mod revision;
 #[path = "osd_vo/letter_fx.rs"]
 mod letter_fx;
 #[path = "osd_vo/tally.rs"]
@@ -1771,6 +1773,7 @@ impl Popup {
     fn transcript(&self) -> Element<Msg> {
         let l = &self.look;
         let mut words = Element::live_text("words", &self.shown)
+            .revision_motion(revision::motion(&self.look))
             .text_style(l.text_style())
             .color(l.foreground);
         // Without word_fade nothing moves: a new word is on screen at full

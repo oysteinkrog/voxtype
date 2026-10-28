@@ -702,13 +702,13 @@ impl Popup {
         let h = transcript_h(self.lines.min(MAX_LINES));
         let dim = if mode == Mode::Cancelled { 0.45 } else { 1.0 };
         let words = Element::live_text("words", &self.shown)
+            .revision_motion(revision::motion(&self.look))
             .text_style(l.text_style())
             .color(hex(INK))
             .opacity(dim)
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0))
-            .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
+            .word_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0));
         let words = self.handoff_or(
             words,
             &l.text_style(),

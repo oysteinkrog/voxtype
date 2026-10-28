@@ -722,8 +722,7 @@ impl Popup {
                 .color(hex(WHITE))
                 .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                 .motion(Prop::Offset, Spring::POP)
-                .word_enter(Transition::fade().offset(0.0, 8.0))
-                .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
+                .word_enter(Transition::fade().offset(0.0, 8.0));
             let mut column = Element::column(key)
                 .size(LINE_BOX, LINE)
                 .align_items(AlignItems::CENTER)

@@ -544,8 +544,7 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.2))
             .motion(Prop::Offset, Spring::critical_to_98(0.25))
             .motion(Prop::TextFx, Spring::critical_to_98(0.22))
-            .word_enter(Transition::fade().offset(0.0, 7.0 * k))
-            .word_change(Transition::fade().opacity(0.3).blur(2.0 * k));
+            .word_enter(Transition::fade().offset(0.0, 7.0 * k));
         if self.radial.ended_at.is_some() {
             words = words.opacity(0.4);
         }
