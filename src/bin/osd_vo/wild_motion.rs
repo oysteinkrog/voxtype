@@ -73,7 +73,7 @@ impl<M> WildMotion for Element<M> {
         if magnet {
             words = words
                 .caret(Caret { width: 2.0, gap: 3.0, color: Some(accent), gradient: None })
-                .magnetic_caret(Magnet { still: reduced, ..Magnet::default().color(accent) });
+                .magnetic_caret(Magnet { still: reduced, reach: 1.4, ..Magnet::default().color(accent) });
         }
         if look.on(VARIABLE_BREATH) {
             let style = look.text_style();
