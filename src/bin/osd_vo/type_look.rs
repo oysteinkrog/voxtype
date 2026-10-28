@@ -25,10 +25,6 @@ use vo::scene::taffy::prelude::{auto, length};
 const FRAME_SECS: f64 = 0.45;
 /// How far a new word rises into place, in logical pixels.
 const WORD_RISE: f32 = 8.0;
-/// Seconds the words of a new line wait while the panel opens for it. The
-/// box springs open over about 0.2 s; by now the clipped text area has room
-/// for the line, so a word does not draw cut off under the status row.
-pub(crate) const ROOM_SECS: f64 = 0.08;
 /// How far the state label slides when it changes.
 const LABEL_SLIDE: f32 = 7.0;
 /// The digit size of the clock and the word count, against the swiss values.
@@ -474,39 +470,11 @@ impl Popup {
         lines
     }
 
-    /// How many shown words have room in the text area now. Just after it
-    /// gains a line, only the words that fit the old lines.
-    fn type_room(&self) -> usize {
-        let all = self.shown.len();
-        let Some((at, before)) = self.grew else {
-            return all;
-        };
-        if self.still() || self.extra.now - at >= ROOM_SECS {
-            return all;
-        }
-        let l = &self.look;
-        let style = l.text_style();
-        let fits = |n: usize| {
-            let text = self.shown[..n]
-                .iter()
-                .map(|w| w.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let h = self
-                .measure
-                .layout(&text, &style, Some(l.text_width()))
-                .size
-                .h;
-            (h / style.line_height).round() as u32 <= before
-        };
-        (0..=all).rev().find(|&n| fits(n)).unwrap_or(0)
-    }
-
     fn type_text(&self) -> Element<Msg> {
         let l = &self.look;
         // Each new word rises into place, readable within 120 ms; a
         // revised word dips and settles.
-        let words = Element::live_text("words", &self.shown[..self.type_room()])
+        let words = Element::live_text("words", &self.shown[..self.room()])
             .line_motion(&self.look)
             .revision_motion(revision::motion(&self.look))
             .text_style(l.text_style())

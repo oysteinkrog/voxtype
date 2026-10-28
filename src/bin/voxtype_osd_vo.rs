@@ -431,6 +431,9 @@ const RADIUS: f32 = 3.0;
 const ICON: f32 = 14.0;
 const WAVE_MARGIN: f32 = 10.0;
 const TEXT_MARGIN_BOTTOM: f32 = 4.0;
+/// Seconds the words of a new line wait while a springing panel opens for
+/// it. The box opens over about 0.2 s; by now it has room for the line.
+const ROOM_SECS: f64 = 0.08;
 const RULE_MARGIN_TOP: f32 = 12.0;
 const STATUS_MARGIN_TOP: f32 = 10.0;
 const DOT: f32 = 7.0;
@@ -1498,6 +1501,36 @@ impl Popup {
         self.shown = shown;
     }
 
+    /// How many shown words have room in the text area now. In the looks
+    /// whose panel springs open for a new line (type, mission), just after
+    /// the area gains a line only the words that fit the old lines, for
+    /// [`ROOM_SECS`], so a word does not draw outside its box.
+    pub(crate) fn room(&self) -> usize {
+        let all = self.shown.len();
+        let Some((at, before)) = self.grew else {
+            return all;
+        };
+        if self.still() || self.extra.now - at >= ROOM_SECS {
+            return all;
+        }
+        let l = &self.look;
+        let style = l.text_style();
+        let fits = |n: usize| {
+            let text = self.shown[..n]
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let h = self
+                .measure
+                .layout(&text, &style, Some(l.text_width()))
+                .size
+                .h;
+            (h / style.line_height).round() as u32 <= before
+        };
+        (0..=all).rev().find(|&n| fits(n)).unwrap_or(0)
+    }
+
     fn idle(&self, t: f64) -> bool {
         if self.files.suppressed {
             return true;
@@ -1583,7 +1616,7 @@ impl App for Popup {
                     if self.lines > before {
                         self.grew = Some((t, before));
                         // A wake-up for the view once the new line has room.
-                        cx.after(type_look::ROOM_SECS + 0.01, Msg::Loop);
+                        cx.after(ROOM_SECS + 0.01, Msg::Loop);
                     }
                 }
                 if preview_changed || live_changed {

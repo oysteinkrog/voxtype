@@ -701,7 +701,7 @@ impl Popup {
         let f = fonts(&l.fonts);
         let h = transcript_h(self.lines.min(MAX_LINES));
         let dim = if mode == Mode::Cancelled { 0.45 } else { 1.0 };
-        let words = Element::live_text("words", &self.shown)
+        let words = Element::live_text("words", &self.shown[..self.room()])
             .line_motion(&self.look)
             .revision_motion(revision::motion(&self.look))
             .text_style(l.text_style())
