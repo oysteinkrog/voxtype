@@ -68,6 +68,16 @@ const RELAX_SECS: f64 = 0.5;
 /// Seconds of the flare when the text lands.
 const FLARE_SECS: f64 = 0.6;
 
+/// With `light-line` (MO-68): at each onset the light head leaves the
+/// border, draws a line under the new word and goes back.
+pub(crate) const LIGHT_LINE: &str = "light-line";
+/// Seconds for the head to reach the word at the least, to draw the line
+/// under it, to hold it and to go back to the border.
+const LIGHT_LEAVE: f64 = 0.18;
+const LIGHT_DRAW: f64 = 0.22;
+const LIGHT_HOLD: f64 = 0.2;
+const LIGHT_BACK: f64 = 0.25;
+
 const CYAN: u32 = 0x29d3ff;
 const BRIGHT: u32 = 0xb5f3ff;
 const DIM: u32 = 0x0f6f99;
@@ -195,6 +205,60 @@ struct Lines {
     rate: f32,
     /// The waveform's clock during a rewind cancel (MO-50).
     scrub: endings::Scrub,
+    /// The light line under the newest word (MO-68).
+    light: Option<LightLine>,
+}
+
+/// MO-68: the light head's trip from the border to the newest word and
+/// back, in the canvas's logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LightLine {
+    /// The onset that sent it, or the word's arrival without one.
+    from: f64,
+    /// When the head reaches the word: the word must be there.
+    landed: f64,
+    x0: f32,
+    x1: f32,
+    y: f32,
+    reduced: bool,
+}
+
+/// Where a light line's trip is at `t`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Trip {
+    /// Not yet left, or back on the border.
+    Home,
+    /// Flying to the word's left end, 0 to 1.
+    Out(f32),
+    /// Drawing the line, 0 to 1 of its length.
+    Draw(f32),
+    Hold,
+    /// Flying back to the border, 0 to 1; the line fades.
+    Back(f32),
+}
+
+impl LightLine {
+    fn trip(&self, t: f64) -> Trip {
+        let k = |a: f64, d: f64| ((t - a) / d).clamp(0.0, 1.0) as f32;
+        let drawn = self.landed + LIGHT_DRAW;
+        let held = drawn + LIGHT_HOLD;
+        if t < self.from || t >= held + LIGHT_BACK {
+            Trip::Home
+        } else if t < self.landed {
+            Trip::Out(k(self.from, self.landed - self.from))
+        } else if t < drawn {
+            Trip::Draw(k(self.landed, LIGHT_DRAW))
+        } else if t < held {
+            Trip::Hold
+        } else {
+            Trip::Back(k(held, LIGHT_BACK))
+        }
+    }
+
+    /// Whether the head is off the border at `t`.
+    fn away(&self, t: f64) -> bool {
+        !self.reduced && self.trip(t) != Trip::Home
+    }
 }
 
 impl Lines {
@@ -261,8 +325,10 @@ impl Lines {
         p.stroke(&edge.trim(len * (1.0 - open * 0.5), len), &line);
 
         // The light: a head with a fading tail running round while
-        // listening, a growing trace while the final pass runs.
-        if open >= 1.0 && self.final_at.is_none() && !self.ended {
+        // listening, a growing trace while the final pass runs. It leaves
+        // the border while it draws a light line (MO-68).
+        let away = self.light.is_some_and(|l| l.away(t));
+        if open >= 1.0 && self.final_at.is_none() && !self.ended && !away {
             match (self.relax_at, self.progress) {
                 (Some(_), Some(f)) | (None, Some(f))
                     if !self.loading || self.relax_at.is_some() =>
@@ -357,6 +423,72 @@ impl Lines {
             &StrokeStyle::solid((1.8 + 0.6 * done) * k, hex(BRIGHT, (0.95 * fade).min(1.0)))
                 .glow((3.0 + 1.0 * done) * k),
         );
+        if self.final_at.is_none() && !self.ended {
+            if let Some(light) = self.light {
+                self.light_line(t, &light, &edge, p);
+            }
+        }
+    }
+
+    /// The light head on the border at `t`, where it runs while listening.
+    fn head_at(&self, t: f64, edge: &Contour) -> Option<Point> {
+        let len = edge.length();
+        let at = ((t - self.shown_at - OPEN_SECS) / LAP_SECS).rem_euclid(1.0) as f32;
+        edge.at(len * at).map(|(p, _)| p)
+    }
+
+    /// MO-68: the head flies from the border to the newest word, draws a
+    /// line under it and flies back. Reduced motion shows the line alone.
+    fn light_line(&self, t: f64, l: &LightLine, edge: &Contour, p: &mut Painter) {
+        let k = self.k;
+        let line = |p: &mut Painter, to: f32, a: f32| {
+            let pts = [Point::new(l.x0, l.y), Point::new(l.x0 + (l.x1 - l.x0) * to, l.y)];
+            p.stroke(
+                &Contour::polyline(&pts, false),
+                &StrokeStyle::solid(1.6 * k, hex(BRIGHT, a)).glow(4.0 * k),
+            );
+        };
+        if l.reduced {
+            if t >= l.landed {
+                line(p, 1.0, 0.7);
+            }
+            return;
+        }
+        let dot = |p: &mut Painter, at: Point| {
+            p.shape(ShapeInstance::circle(
+                at,
+                6.0 * k,
+                Paint::glow(hex(CYAN, 0.9), 9.0 * k, 1.2),
+            ));
+            p.shape(ShapeInstance::circle(at, 2.4 * k, Paint::solid(hex(BRIGHT, 1.0))));
+        };
+        let lerp = |a: Point, b: Point, f: f32| {
+            let f = 1.0 - (1.0 - f) * (1.0 - f);
+            Point::new(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f)
+        };
+        let (start, end) = (Point::new(l.x0, l.y), Point::new(l.x1, l.y));
+        match l.trip(t) {
+            Trip::Home => {}
+            Trip::Out(f) => {
+                if let Some(h) = self.head_at(l.from, edge) {
+                    dot(p, lerp(h, start, f));
+                }
+            }
+            Trip::Draw(f) => {
+                line(p, f, 0.95);
+                dot(p, Point::new(l.x0 + (l.x1 - l.x0) * f, l.y));
+            }
+            Trip::Hold => {
+                line(p, 1.0, 0.95);
+                dot(p, end);
+            }
+            Trip::Back(f) => {
+                line(p, 1.0, 0.95 * (1.0 - f));
+                if let Some(h) = self.head_at(t, edge) {
+                    dot(p, lerp(end, h, f));
+                }
+            }
+        }
     }
 
     /// A bright dot with a glow at `s` along the border.
@@ -436,6 +568,7 @@ impl Popup {
             newest_at: self.newest_at,
             rate: FRAME_HZ as f32,
             scrub: self.scrub(),
+            light: self.tron_light(k),
         };
         let until = match (self.extra.final_at, self.tron.ended_at) {
             (Some(f), _) => f + FLARE_SECS + 0.1,
@@ -477,6 +610,28 @@ impl Popup {
             .child(self.tron_rule(&g))
             .child(self.tron_status(&g, &status, bottom));
         root.child(panel)
+    }
+
+    /// MO-68: the light line for the newest word, in the canvas's pixels.
+    fn tron_light(&self, k: f32) -> Option<LightLine> {
+        if !self.look.on(LIGHT_LINE) {
+            return None;
+        }
+        let newest = self.shown.last()?;
+        let heard = self.heard.word(newest.id)?;
+        let style = self.look.text_style();
+        let (boxes, _) =
+            sounding::word_boxes(&self.measure, &self.shown, &style, Some(self.look.text_width()));
+        let b = boxes.iter().find(|b| b.id == newest.id)?;
+        let from = heard.onset.unwrap_or(heard.born);
+        Some(LightLine {
+            from,
+            landed: heard.born.max(from + LIGHT_LEAVE),
+            x0: TEXT_X * k + b.rect.x,
+            x1: TEXT_X * k + b.rect.x + b.rect.w,
+            y: TEXT_TOP * k + b.baseline + 5.0 * k,
+            reduced: self.look.on("reduced-motion"),
+        })
     }
 
     /// The microphone, the stop square, the check or the cross in the badge.
@@ -723,6 +878,7 @@ mod tests {
             newest_at: 1.0,
             rate: 100.0,
             scrub: endings::Scrub::default(),
+            light: None,
         };
         assert_eq!(lines.wave_y(1.0, 0.0, 0.0, 5.0, 1.0), 0.0);
         let peak = (0..50)
@@ -733,5 +889,27 @@ mod tests {
             })
             .fold(0.0f32, f32::max);
         assert!(peak > WAVE_AMP * 0.3);
+    }
+
+    #[test]
+    fn the_light_head_flies_out_draws_the_line_and_comes_back() {
+        let l = LightLine {
+            from: 1.0,
+            landed: 1.3,
+            x0: 10.0,
+            x1: 60.0,
+            y: 100.0,
+            reduced: false,
+        };
+        assert_eq!(l.trip(0.9), Trip::Home);
+        assert!(matches!(l.trip(1.15), Trip::Out(f) if (f - 0.5).abs() < 1e-3));
+        assert!(matches!(l.trip(1.3 + LIGHT_DRAW / 2.0), Trip::Draw(f) if (f - 0.5).abs() < 1e-3));
+        assert_eq!(l.trip(1.3 + LIGHT_DRAW + 0.1), Trip::Hold);
+        let back = 1.3 + LIGHT_DRAW + LIGHT_HOLD;
+        assert!(matches!(l.trip(back + 0.01), Trip::Back(_)));
+        assert_eq!(l.trip(back + LIGHT_BACK + 0.01), Trip::Home);
+        assert!(l.away(1.2) && !l.away(3.0));
+        // Reduced motion: the head never leaves the border.
+        assert!(!LightLine { reduced: true, ..l }.away(1.2));
     }
 }
