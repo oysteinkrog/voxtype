@@ -300,9 +300,14 @@ impl Popup {
 
         if self.hearing_on(PRE_ECHO) && listening {
             let (caret, room) = laid.caret(width);
-            // Each read blob goes to the box of the word it was handed to.
+            // Each read blob goes to the box of the word it was handed to;
+            // under reduced motion it only fades where it is.
+            let travel = !self.hearing_reduced();
             out.extend(hearing::pre_echo(&x.hearing, &look, caret, room, |b| {
-                x.blob_word.get(&b.id).and_then(|id| laid.word_box(*id))
+                x.blob_word
+                    .get(&b.id)
+                    .filter(|_| travel)
+                    .and_then(|id| laid.word_box(*id))
             }));
         }
 
