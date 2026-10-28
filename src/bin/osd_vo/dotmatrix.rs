@@ -577,18 +577,21 @@ impl Popup {
         let l = &self.look;
         let dim = if mode == Mode::Cancelled { 0.45 } else { 1.0 };
         // A new word stands at 70 % ink where it lands, readable at once,
-        // and the dots falling into it bring it to full ink (MO-60).
-        let enter = if !self.motion("dot-sort") || self.still() {
-            Transition::fade().opacity(0.0).offset(0.0, 6.0)
+        // and the dots falling into it bring it to full ink (MO-60). Without
+        // the dots the fade is short, so a word that grows while it fades in
+        // (its new letters fade in too) is readable in every frame.
+        let plain = !self.motion("dot-sort") || self.still();
+        let (enter, fade) = if plain {
+            (Transition::fade().opacity(0.0).offset(0.0, 6.0), 0.12)
         } else {
-            Transition::fade().opacity(0.7)
+            (Transition::fade().opacity(0.7), 0.3)
         };
         let words = Element::live_text("words", &self.shown)
             .line_motion(&self.look)
             .text_style(l.text_style())
             .color(hex(INK))
             .opacity(dim)
-            .motion(Prop::Opacity, Spring::critical_to_98(0.3))
+            .motion(Prop::Opacity, Spring::critical_to_98(fade))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(enter);
         let words = self.handoff_or(

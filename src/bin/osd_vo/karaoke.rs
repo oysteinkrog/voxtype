@@ -834,11 +834,12 @@ impl Popup {
             // Laid out but not drawn while it waits, so the line is already centred when
             // its words fade in.
             let hidden = age == 0 && waits;
+            // Shows at once when the roll ends, so its first word is readable in that frame.
             let text = Element::live_text("words", words)
                 .opacity(if hidden { 0.0 } else { 1.0 })
                 .text_style(style)
                 .color(hex(WHITE))
-                .motion(Prop::Opacity, Spring::critical_to_98(0.12))
+                .motion(Prop::Opacity, Motion::Snap)
                 .motion(Prop::Offset, Spring::POP)
                 .word_enter(Transition::fade().offset(0.0, 8.0));
             // The words sit in a box of their own, with the lit newest word in it, so the
@@ -869,8 +870,10 @@ impl Popup {
                 .motion(Prop::Size, Motion::Snap)
                 .motion(Prop::Scale, roll)
                 .motion(Prop::Opacity, roll)
+                // A new line comes in only through its words: it waits hidden for the roll,
+                // and a fade or slide of its own would still be running when they show.
                 .presence(
-                    Transition::fade().offset(0.0, 12.0),
+                    Transition::NONE,
                     Transition::fade().offset(0.0, -24.0).scale(0.9),
                 );
             panel = panel.child(line);
