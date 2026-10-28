@@ -115,6 +115,9 @@ const BAR_SECS: f64 = 0.035;
 const MORPH_SECS: f64 = 0.42;
 const CONTENT_DELAY: f64 = 0.12;
 const CONTENT_FADE: f64 = 0.18;
+/// Pixels the capsule's bottom edge may still be short of its place when
+/// the words of a new line show.
+const ROOM_GAP: f32 = 3.0;
 const TICK_HZ: f64 = 60.0;
 /// Word bulge (MO-74): each new word pushes the capsule's right edge out
 /// this far, quickly, and it relaxes.
@@ -278,6 +281,12 @@ pub struct State {
     /// change of shape.
     lines: u32,
     room: u32,
+    /// The form of the latest shape (pill or card, or the loading pill or
+    /// the cancel dot), and when its content last faded in. A new line or
+    /// a new step of the dictation only resizes the capsule and the content
+    /// rides on its edge; a new form fades the content in.
+    kind: Option<(bool, Option<Mode>)>,
+    fade_at: f64,
 }
 
 impl Default for State {
@@ -301,6 +310,8 @@ impl Default for State {
             words: 0,
             lines: 0,
             room: 0,
+            kind: None,
+            fade_at: 0.0,
         }
     }
 }
@@ -329,8 +340,9 @@ struct Scene {
     /// The caret after the newest word, relative to the capsule, and when
     /// the newest word came.
     caret: Option<(Point, f64)>,
-    /// Card rules, relative to the capsule's top.
-    rules: Vec<f32>,
+    /// Card rules, relative to the capsule's top, and whether each rides
+    /// on the capsule's bottom edge as it grows.
+    rules: Vec<(f32, bool)>,
     /// When the recent words came, for the bulge.
     words_at: Vec<f64>,
 }
@@ -421,9 +433,13 @@ impl Scene {
     }
 
     fn draw_content(&self, t: f64, g: Geo, p: &mut Painter) {
-        for y in &self.rules {
+        // What sits under the words rides on the bottom edge: while the
+        // capsule grows for a new line, it is `drop` above its place.
+        let drop = g.h - self.shape.to.h;
+        for &(y, rides) in &self.rules {
+            let y = if rides { y + drop } else { y };
             p.shape(ShapeInstance::rrect(
-                RRect::new(Rect::new(CARD_PAD_X, *y, g.w - 2.0 * CARD_PAD_X, 1.0), 0.0),
+                RRect::new(Rect::new(CARD_PAD_X, y, g.w - 2.0 * CARD_PAD_X, 1.0), 0.0),
                 Paint::solid(Color::WHITE.fade(0.08)),
             ));
         }
@@ -449,11 +465,12 @@ impl Scene {
             let r = if self.card { 27.0 } else { 23.0 };
             let c = Point::new(g.w - r - 16.0, head_y);
             self.draw_button(t, c, r, p);
-            self.draw_status_dot(p);
+            self.draw_status_dot(drop, p);
         }
         if let Some((a, b, at)) = self.prog {
             let f = a + (b - a) * ease_out((t - at) / 0.35);
-            let bar = self.bar;
+            let mut bar = self.bar;
+            bar.y += drop;
             let rr = bar.h / 2.0;
             p.shape(ShapeInstance::rrect(
                 RRect::new(bar, rr),
@@ -627,11 +644,12 @@ impl Scene {
 
     /// The dot before the status: none while finishing, a small green disc
     /// with a check once pasted.
-    fn draw_status_dot(&self, p: &mut Painter) {
+    fn draw_status_dot(&self, drop: f32, p: &mut Painter) {
+        let dot = Point::new(self.status_dot.x, self.status_dot.y + drop);
         match self.mode {
             Mode::Finishing => {}
             Mode::Done => {
-                let c = self.status_dot;
+                let c = dot;
                 p.shape(ShapeInstance::circle(c, 5.0, Paint::solid(hex(GREEN))));
                 let o = Outline::new(&icons::check(), 0.05).transform(
                     &Affine::translate(-12.0, -12.0)
@@ -641,7 +659,7 @@ impl Scene {
                 p.outline(&o, &StrokeStyle::solid(1.4, hex(BODY)));
             }
             _ => p.shape(ShapeInstance::circle(
-                self.status_dot,
+                dot,
                 3.6,
                 Paint::solid(self.status_colour),
             )),
@@ -758,6 +776,14 @@ impl Popup {
                 at: if first { self.shown_at } else { t },
             };
             s.room = s.lines;
+            let kind = (
+                s.card,
+                matches!(mode, Mode::Loading | Mode::Cancelled).then_some(mode),
+            );
+            if s.kind != Some(kind) {
+                s.kind = Some(kind);
+                s.fade_at = s.shape.at;
+            }
         }
         s.lines = lines;
         let f = self.files.fraction.unwrap_or(0.0).clamp(0.0, 1.0) as f32;
@@ -813,8 +839,14 @@ impl Popup {
         let oy = MARGIN_Y;
         let status = self.status();
         let finishing = mode == Mode::Finishing && self.files.fraction.is_some();
-        // The content of a new shape fades in once the shape is nearly there.
-        let content_at = s.shape.at + CONTENT_DELAY;
+        // The content of a new mode or form fades in once the shape is
+        // nearly there.
+        let content_at = s.fade_at + CONTENT_DELAY;
+        // The capsule now, and how far its bottom edge is above where it
+        // is going; the status row rides on that edge, as the canvas's
+        // rules, bar and status dot do.
+        let gm = s.shape.at(t);
+        let drop = gm.h - g.h;
         let k = if reduced() {
             1.0
         } else {
@@ -869,14 +901,16 @@ impl Popup {
         let status_x = if card { CARD_PAD_X } else { text_x };
         let status_line = STATUS_H;
         let rules = if card {
-            vec![CARD_HEADER, text_bottom + 13.0]
+            vec![(CARD_HEADER, false), (text_bottom + 13.0, true)]
         } else {
             Vec::new()
         };
 
         // The caret after the newest word, in the card.
         let caret = if card && mode == Mode::Listening {
-            self.island_last_line(text_w, &card_style(l))
+            let style = card_style(l);
+            let room = self.island_room(text_w, &style);
+            self.island_last_line(&self.shown[..room], text_w, &style)
                 .map(|(ly, right)| (Point::new(text_x + right + 4.0, text_y + ly + 4.0), s.word_at))
         } else {
             None
@@ -946,7 +980,7 @@ impl Popup {
             let (cx, cy) = if card {
                 (46.0, CARD_HEADER / 2.0)
             } else {
-                (46.0, g.h / 2.0)
+                (46.0, gm.h / 2.0)
             };
             let style = TextStyle::new(f.text, 14.0, 18.0).tracking(0.3);
             panel = panel.child(
@@ -1021,9 +1055,9 @@ impl Popup {
                     .presence(Transition::fade(), Transition::fade()),
             );
         panel.child(
-            at(row, ox + status_x + lead, oy + status_y)
+            at(row, ox + status_x + lead, oy + status_y + drop)
                 .opacity(opacity)
-                .motion(Prop::Position, Spring::critical_to_98(0.3)),
+                .motion(Prop::Position, Motion::Snap),
         )
     }
 
@@ -1058,12 +1092,13 @@ impl Popup {
     }
 
     /// How many shown words have room in the capsule now. While it grows
-    /// for a new line, that line's words wait until the content fades in
-    /// on the new shape, so they never draw over the status row.
+    /// for a new line, that line's words wait until its bottom edge, with
+    /// the status row on it, is within `ROOM_GAP` of its place, so they
+    /// never draw over the status row.
     fn island_room(&self, w: f32, style: &TextStyle) -> usize {
         let s = &self.island;
         let all = self.shown.len();
-        if reduced() || self.extra.now >= s.shape.at + CONTENT_DELAY {
+        if reduced() || s.shape.at(self.extra.now).h >= s.shape.to.h - ROOM_GAP {
             return all;
         }
         let fits = |n: usize| {
@@ -1090,7 +1125,7 @@ impl Popup {
         opacity: f32,
     ) -> Element<Msg> {
         let l = &self.look;
-        let live = |key: &'static str, words: &[Word], style: TextStyle, colour: Color| {
+        let live = |key: String, words: &[Word], style: TextStyle, colour: Color| {
             Element::live_text(key, words)
                 .text_style(style)
                 .revision_motion(revision::motion(&self.look))
@@ -1106,7 +1141,7 @@ impl Popup {
                     .width(w)
                     .height(lines as f32 * PILL_LINE)
                     .child(live(
-                        "words",
+                        "words".into(),
                         &self.shown[..self.island_room(w, &style)],
                         style,
                         hex(WHITE),
@@ -1118,22 +1153,30 @@ impl Popup {
             .presence(Transition::fade(), Transition::fade());
         }
         let style = card_style(l);
-        let room = self.island_room(w, &style);
-        let split = self.island_split(w, &style).min(room);
-        let (old, new) = (&self.shown[..split], &self.shown[split..room]);
-        let new_y = self.island_last_line(w, &style).map_or(0.0, |(ly, _)| ly);
+        let words = &self.shown[..self.island_room(w, &style)];
+        let (old, new) = words.split_at(self.island_split(words, w, &style));
+        let new_y = self
+            .island_last_line(words, w, &style)
+            .map_or(0.0, |(ly, _)| ly);
         at(
             Element::column("cardtext")
                 .width(w)
                 .height(lines as f32 * CARD_LINE)
                 .child(at(
-                    live("old", old, style, hex(DIM))
+                    live("old".into(), old, style, hex(DIM))
                         .word_enter(Transition::NONE)
                         .width(w),
                     0.0,
                     0.0,
                 ))
-                .child(at(live("new", new, style, hex(WHITE)).width(w), 0.0, new_y)),
+                // A node per line: when a line fills, its words go dim in
+                // "old" at once and the next line starts in a fresh node,
+                // so nothing slides or fades between the two lines.
+                .child(at(
+                    live(format!("new-{}", old.len()), new, style, hex(WHITE)).width(w),
+                    0.0,
+                    new_y,
+                )),
             x,
             y,
         )
@@ -1142,9 +1185,8 @@ impl Popup {
     }
 
     /// The index of the first word on the last line of the card's text.
-    fn island_split(&self, w: f32, style: &TextStyle) -> usize {
-        let text = self
-            .shown
+    fn island_split(&self, words: &[Word], w: f32, style: &TextStyle) -> usize {
+        let text = words
             .iter()
             .map(|w| w.text.as_str())
             .collect::<Vec<_>>()
@@ -1154,7 +1196,7 @@ impl Popup {
             return 0;
         };
         let mut start = 0usize;
-        for (i, word) in self.shown.iter().enumerate() {
+        for (i, word) in words.iter().enumerate() {
             let range = start..start + word.text.len();
             start = range.end + 1;
             if let Some(g) = shaped
@@ -1167,13 +1209,12 @@ impl Popup {
                 }
             }
         }
-        self.shown.len()
+        words.len()
     }
 
     /// The last line's top and its right end in the card's text.
-    fn island_last_line(&self, w: f32, style: &TextStyle) -> Option<(f32, f32)> {
-        let text = self
-            .shown
+    fn island_last_line(&self, words: &[Word], w: f32, style: &TextStyle) -> Option<(f32, f32)> {
+        let text = words
             .iter()
             .map(|w| w.text.as_str())
             .collect::<Vec<_>>()
@@ -1181,7 +1222,7 @@ impl Popup {
         let shaped = self.measure.layout(&text, style, Some(w));
         let last_y = shaped.glyphs.iter().map(|g| g.pos.y).reduce(f32::max)?;
         let row = (last_y / style.line_height).floor();
-        let tail = self.shown[self.island_split(w, style)..]
+        let tail = words[self.island_split(words, w, style)..]
             .iter()
             .map(|w| w.text.as_str())
             .collect::<Vec<_>>()
