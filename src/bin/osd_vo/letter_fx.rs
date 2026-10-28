@@ -126,7 +126,12 @@ impl Popup {
         }
         if self.look.on(LIQUID) {
             let (_, morphs) = self.letter_fx_sync();
-            let ids: Vec<u32> = morphs.iter().map(|m| m.0).collect();
+            // Once the text is handed off it leaves as a whole: nothing is drawn elsewhere.
+            let ids: Vec<u32> = if self.delivered().is_some() {
+                Vec::new()
+            } else {
+                morphs.iter().map(|m| m.0).collect()
+            };
             words = words.word_revise(Revise::Swap).words_drawn_elsewhere(&ids);
         }
         words
@@ -144,6 +149,7 @@ impl Popup {
         let reduced = self.letter_fx_reduced();
         let (born, morphs) = self.letter_fx_sync();
         let t = self.extra.now;
+        let leaving = self.delivered().is_some();
 
         // Every glyph on screen with its word, from the layout the live
         // text uses.
@@ -176,21 +182,33 @@ impl Popup {
         let mut under = Vec::new();
         let mut over = Vec::new();
         if l.on(LIGHT) {
-            let all: Vec<FxGlyph> = laid.glyphs.iter().map(|g| glyph(g, 0.0)).collect();
+            // While the text is handed off it leaves the box, so the light keeps shining
+            // but casts no letters, or it would show the old text as a ghost.
+            let all: Vec<FxGlyph> = if leaving {
+                Vec::new()
+            } else {
+                laid.glyphs.iter().map(|g| glyph(g, 0.0)).collect()
+            };
             let light = Light {
                 accent: l.accent,
                 ..Light::default()
             };
-            under.push(place(Element::gpu(
-                "light-under",
-                fx(Effect::Light(light, Side::Under), all.clone()),
-            )));
+            // The light dims away with the text it shone through.
+            let dim = Spring::critical_to_98(0.45);
+            under.push(place(
+                Element::gpu(
+                    "light-under",
+                    fx(Effect::Light(light, Side::Under), all.clone()),
+                )
+                .opacity(if leaving { 0.0 } else { 1.0 })
+                .motion(Prop::Opacity, dim),
+            ));
             over.push(place(Element::gpu(
                 "light-over",
                 fx(Effect::Light(light, Side::Over), all),
             )));
         }
-        if l.on(INK) {
+        if l.on(INK) && !leaving {
             let ink = Ink::default();
             let window = (ink.secs + ink.trace_secs) as f64;
             let fresh: Vec<FxGlyph> = laid
@@ -206,7 +224,7 @@ impl Popup {
                 over.push(place(Element::gpu("ink", fx(Effect::Ink(ink), fresh))));
             }
         }
-        if l.on(LIQUID) && !morphs.is_empty() {
+        if l.on(LIQUID) && !leaving && !morphs.is_empty() {
             let mut glyphs = Vec::new();
             for (group, (id, old, start)) in morphs.iter().enumerate() {
                 let Some(wi) = self.shown.iter().position(|w| w.id == *id) else {
