@@ -174,6 +174,19 @@ impl Popup {
             .presence(Transition::fade().offset(0.0, 6.0), exit)
             .child(self.type_frame(h, cancelled))
             .child(self.type_cast(h))
+            .children(self.limit_line(
+                Point::new(
+                    PAD_X + BORDER,
+                    PAD_TOP
+                        + BORDER
+                        + Self::type_header_height(l)
+                        + 2.0 * WAVE_MARGIN
+                        + swiss::WAVE_HEIGHT_PX as f32,
+                ),
+                Size::new(l.width, h),
+                l.foreground.fade(0.5),
+                Color::hex(DOUBT_COLOR, 1.0),
+            ))
             .child(self.type_header())
             .child(self.waveform(&status))
             .child(self.type_text())

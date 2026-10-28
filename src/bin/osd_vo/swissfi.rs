@@ -349,6 +349,12 @@ impl Popup {
             .presence(Transition::fade().offset(0.0, 6.0), exit)
             .child(self.swissfi_frame(h, cancelled))
             .child(self.swissfi_cast(h))
+            .children(self.limit_line(
+                Point::new(PAD_X + TEXT_INSET, PAD_TOP + HEADER_H + WAVE_H + TEXT_TOP),
+                Size::new(l.width, h),
+                hex(PAPER).fade(0.55),
+                hex(ORANGE),
+            ))
             .child(self.swissfi_header())
             .child(self.swissfi_ticks(mode, mode_at))
             .child(self.with_hearing(

@@ -810,7 +810,13 @@ impl Popup {
                 LABEL_Y - 2.0,
             ));
         }
-        tile.child(corners(
+        tile.children(self.limit_line(
+            Point::new(TEXT_X, TEXT_TOP),
+            Size::new(inner, h),
+            hex(INK).fade(0.5),
+            hex(0xFF3B30),
+        ))
+        .child(corners(
                 "brackets",
                 inner,
                 h,

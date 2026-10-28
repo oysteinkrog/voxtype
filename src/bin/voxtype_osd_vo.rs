@@ -73,6 +73,8 @@ mod dotmatrix;
 mod kit;
 #[path = "osd_vo/tally.rs"]
 mod tally;
+#[path = "osd_vo/limit.rs"]
+mod limit;
 #[path = "osd_vo/swissfi.rs"]
 mod swissfi;
 #[path = "osd_vo/scope.rs"]

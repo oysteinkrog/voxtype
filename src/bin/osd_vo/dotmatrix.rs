@@ -473,6 +473,12 @@ impl Popup {
             .border(hex(EDGE), 1.0)
             .presence(Transition::fade().offset(0.0, 6.0), exit)
             .child(self.dotmatrix_cast())
+            .children(self.limit_line(
+                self.dotmatrix_text_origin(),
+                Size::new(l.width, panel_h(self.lines.min(MAX_LINES))),
+                hex(DOT).fade(0.5),
+                hex(RED),
+            ))
             .child(wave)
             .child(self.dotmatrix_text(mode))
             .child(self.dotmatrix_status(mode, mode_at))
