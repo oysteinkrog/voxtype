@@ -267,21 +267,30 @@ impl Popup {
         let (all, total) = rewind_schedule(&self.spoken_times());
         // Each laid word takes its window by id, so a look may lay out
         // only some of the words on screen, one line at a time.
+        let index = |w: &WordBox| self.shown.iter().position(|s| s.id == w.id);
         let windows = laid
             .words
             .iter()
             .map(|w| {
-                self.shown
-                    .iter()
-                    .position(|s| s.id == w.id)
+                index(w)
                     .and_then(|i| all.get(i).copied())
                     .unwrap_or((0.0, total))
+            })
+            .collect();
+        let holds = laid
+            .words
+            .iter()
+            .map(|w| match index(w) {
+                Some(0) => f32::INFINITY,
+                Some(i) => all.get(i - 1).map_or(f32::INFINITY, |o| o.0),
+                None => f32::INFINITY,
             })
             .collect();
         Rewind {
             at: self.ended_at.unwrap_or(self.extra.now),
             laid: Arc::new(laid),
             windows,
+            holds,
             total,
             ink,
             still: self.still(),
@@ -1112,6 +1121,10 @@ struct Rewind {
     at: f64,
     laid: Arc<Laid>,
     windows: Vec<(f32, f32)>,
+    /// For each word, until when the caret rests at it: when the next
+    /// older word on screen starts to go, or never for the first word. A
+    /// look that draws each line in its own canvas so shows one caret.
+    holds: Vec<f32>,
     total: f32,
     ink: Ink,
     still: bool,
@@ -1134,21 +1147,22 @@ impl Rewind {
         let laid = &*self.laid;
         let style = laid.style;
         let o = Point::new(r.x, r.y);
-        // The caret sits at the right edge of the newest word not yet taken
-        // back, and ends where the first word began.
-        let mut caret = laid
-            .words
-            .first()
-            .map_or((0.0, style.line_height * 0.75), |w| (w.x0, w.baseline));
+        // The caret sits at the right edge of the word being taken back,
+        // then at its start until the next older word goes, and ends where
+        // the first word began.
+        let mut caret = None;
         for (i, w) in laid.words.iter().enumerate() {
             let Some(&(b, end)) = self.windows.get(i) else {
                 continue;
             };
             let k = ((e - b) / (end - b).max(1e-3)).clamp(0.0, 1.0);
+            let s = 1.0 - ease_in_out(k as f64);
+            if e >= b && e < self.holds.get(i).copied().unwrap_or(f32::INFINITY) {
+                caret = Some((w.x0 + (w.x1 - w.x0) * s, w.baseline));
+            }
             if k >= 1.0 {
                 continue;
             }
-            let s = 1.0 - ease_in_out(k as f64);
             let ink = self.ink.text.fade(1.0 - 0.6 * k);
             if k <= 0.0 {
                 for g in &laid.text.glyphs[w.first..w.end] {
@@ -1165,10 +1179,11 @@ impl Rewind {
                     }
                 });
             }
-            caret = (w.x0 + (w.x1 - w.x0) * s, w.baseline);
         }
+        let Some((x, base)) = caret else {
+            return;
+        };
         let fade = 1.0 - ((e - self.total) / 0.2).clamp(0.0, 1.0);
-        let (x, base) = caret;
         if fade > 0.0 {
             p.shape(ShapeInstance::line(
                 Point::new(o.x + x + 1.0, o.y + base + 2.0),
