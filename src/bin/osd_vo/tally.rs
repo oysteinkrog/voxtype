@@ -12,7 +12,7 @@
 //! `dot-sort`, `beam-write` and `word-bulge`. Under reduced motion each one
 //! keeps its state as a still mark.
 
-use super::kit::{ease_in_out, ease_out, mix, reduced};
+use super::kit::{ease_out, mix, reduced};
 use super::*;
 
 use std::collections::VecDeque;
@@ -26,6 +26,9 @@ use vo::scene::geom::{Point, RRect};
 pub(crate) const CAST_SHOW: f64 = 0.13;
 pub(crate) const CAST_LAND: f64 = 0.26;
 pub(crate) const CAST_SECS: f64 = 0.52;
+/// The cast waits this long after its word comes, so the word is on screen
+/// before its block shows.
+pub(crate) const CAST_DELAY: f64 = 0.1;
 /// Words that come in one update cast one after the other, this far apart.
 const CAST_STAGGER: f64 = 0.06;
 /// The pace digits lean at most this far, in radians (8 degrees).
@@ -120,7 +123,7 @@ impl State {
         }
         if self.counts.back().map(|c| c.0) != Some(count) {
             // The count lands with the last cast of this update.
-            let land = t + fresh.saturating_sub(1) as f64 * CAST_STAGGER + CAST_LAND;
+            let land = t + fresh.saturating_sub(1) as f64 * CAST_STAGGER + CAST_DELAY + CAST_LAND;
             self.counts
                 .push_back((count, if fresh > 0 { land } else { t }));
             while self.counts.len() > KEEP {
@@ -258,17 +261,22 @@ impl Casts {
                 0.18 + 0.12 * k,
             ));
         }
-        // It slides into the notch and contracts to the notch's size.
-        let k = ease_in_out((s - CAST_SHOW) / (CAST_LAND - CAST_SHOW));
-        let lerp = |a: f32, b: f32| a + (b - a) * k;
+        // It contracts toward its right end and lifts off the line first,
+        // so it does not sweep over the words after it, then glides into
+        // the notch.
+        let u = (s - CAST_SHOW) / (CAST_LAND - CAST_SHOW);
+        let (fast, slow) = (ease_out(u), (u * u) as f32);
+        let lerp = |a: f32, b: f32, k: f32| a + (b - a) * k;
+        let w = lerp(c.from.w, n.w, fast);
+        let right = lerp(c.from.x + c.from.w, n.x + n.w, slow);
         Some((
             Rect::new(
-                lerp(c.from.x, n.x),
-                lerp(c.from.y, n.y),
-                lerp(c.from.w, n.w),
-                lerp(c.from.h, n.h),
+                right - w,
+                lerp(c.from.y, n.y, fast),
+                w,
+                lerp(c.from.h, n.h, fast),
             ),
-            0.3 + 0.7 * k,
+            0.3 + 0.7 * fast,
         ))
     }
 
@@ -349,6 +357,15 @@ impl Popup {
     /// Reduced motion, from the environment or this look's features.
     pub(crate) fn still(&self) -> bool {
         reduced() || self.look.on("reduced-motion")
+    }
+
+    /// The width the transcript wraps at on screen. Swissfi's text column
+    /// is wider than `Look::text_width`, so its lines break later.
+    pub(crate) fn tally_text_width(&self) -> f32 {
+        match self.look.theme {
+            OsdTheme::Swissfi => swissfi::wrap_width(&self.look),
+            _ => self.look.text_width(),
+        }
     }
 
     /// Brings the tally up to date after a message.
@@ -437,17 +454,17 @@ impl Popup {
         dots: bool,
     ) -> Casts {
         let style = self.look.text_style();
-        let width = self.look.text_width();
+        let width = self.tally_text_width();
         let still = self.still() || self.extra.final_at.is_some();
         let casts = if still {
             Vec::new()
         } else {
-            self.tally_arrivals(&style, width, CAST_SECS)
+            self.tally_arrivals(&style, width, CAST_DELAY + CAST_SECS)
                 .into_iter()
                 .map(|(b, at)| {
                     // The block hugs the word's ink, not the whole line.
-                    let h = style.size * 0.9;
-                    let y = b.baseline - style.size * 0.75;
+                    let h = style.size * 0.92;
+                    let y = b.baseline - style.size * 0.8;
                     Cast {
                         from: Rect::new(
                             origin.x + b.rect.x - 2.0,
@@ -455,7 +472,7 @@ impl Popup {
                             b.rect.w + 4.0,
                             h,
                         ),
-                        at,
+                        at: at + CAST_DELAY,
                     }
                 })
                 .collect()
@@ -534,7 +551,8 @@ mod tests {
         s.sync(&words(&[(1, "a")]), 1, true, 1.0);
         s.sync(&words(&[(1, "a"), (2, "b")]), 2, true, 2.0);
         assert_eq!(s.count_at(2.0, true), 1);
-        assert_eq!(s.count_at(2.0 + CAST_LAND, true), 2);
+        assert_eq!(s.count_at(2.0 + CAST_DELAY + CAST_LAND - 0.01, true), 1);
+        assert_eq!(s.count_at(2.0 + CAST_DELAY + CAST_LAND, true), 2);
         assert_eq!(s.count_at(2.0, false), 2);
     }
 

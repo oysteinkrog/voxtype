@@ -124,7 +124,7 @@ impl Popup {
     ) -> Option<Element<Msg>> {
         let limit = self.limit_secs()?;
         let style = self.look.text_style();
-        let width = self.look.text_width();
+        let width = self.tally_text_width();
         let text = self
             .shown
             .iter()

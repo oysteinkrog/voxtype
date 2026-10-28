@@ -105,6 +105,12 @@ pub(crate) fn text_width(look: &Look) -> f32 {
     look.width - 2.0 * (PAD_X + TEXT_INSET)
 }
 
+/// The width the transcript's column wraps at: the panel less its padding
+/// and the text inset on the left only.
+pub(crate) fn wrap_width(look: &Look) -> f32 {
+    look.width - 2.0 * PAD_X - TEXT_INSET
+}
+
 pub(crate) fn max_lines() -> u32 {
     MAX_LINES
 }
