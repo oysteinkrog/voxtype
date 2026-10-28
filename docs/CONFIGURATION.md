@@ -328,6 +328,26 @@ post_process_command = "my-script.sh --formal"
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --profile <name>` instead. Avoid using the same key in both `modifiers` and `profile_modifiers` -- every hotkey press would always activate that profile.
 
+### look_chord
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Switches the look of the `vo` popup (`[osd] frontend = "vo"`) from the keyboard. Hold Left Ctrl and Right Ctrl, then press Down for the next look or Up for the previous one. The list wraps round. The chord only does something while the popup shows, during a dictation or while it lingers after one.
+
+The new look applies at once and is kept for later dictations, also after a restart, until you switch again. It is saved in `$XDG_STATE_HOME/voxtype/osd-look` (usually `~/.local/state/voxtype/osd-look`) and wins over `[osd] theme` and `--theme`. Delete that file to go back to the configured theme.
+
+The chord never counts as a tap of Right Ctrl, so it does not start, stop, paste or discard a dictation when `double_tap = true`. The focused app also receives Ctrl+Up or Ctrl+Down. In plain push-to-talk or toggle mode with `key = "RIGHTCTRL"` (no `double_tap`), the Right Ctrl press of the chord still counts as a hotkey press.
+
+**Example:**
+```toml
+[hotkey]
+look_chord = false  # Ctrl+Ctrl+Up/Down never switches the popup's look
+```
+
+**Note:** This only applies when using evdev hotkey detection (`enabled = true`).
+
 ---
 
 ## [audio]

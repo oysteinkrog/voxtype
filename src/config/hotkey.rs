@@ -82,6 +82,13 @@ pub struct HotkeyConfig {
     /// of the key alone never throws a dictation away.
     #[serde(default)]
     pub double_tap_cancel_key: Option<String>,
+
+    /// Left Ctrl and Right Ctrl held, then Down or Up, switches the vo
+    /// popup to its next or previous look while the popup shows. The look
+    /// is kept for later dictations. The chord never counts as a tap of
+    /// either Ctrl key.
+    #[serde(default = "default_true")]
+    pub look_chord: bool,
 }
 
 fn default_double_tap_ms() -> u64 {
@@ -102,6 +109,7 @@ impl Default for HotkeyConfig {
             double_tap_ms: default_double_tap_ms(),
             double_tap_alt_key: None,
             double_tap_cancel_key: None,
+            look_chord: true,
         }
     }
 }

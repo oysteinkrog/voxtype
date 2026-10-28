@@ -13,12 +13,13 @@ use std::time::Duration;
 use inotify::{EventMask, Inotify, WatchMask};
 
 /// The runtime files the popups show.
-const NAMES: [&str; 5] = [
+const NAMES: [&str; 6] = [
     "state",
     "preview",
     "preview-status",
     "preview.json",
     "osd_suppressed",
+    super::look_step::FILE,
 ];
 
 /// An inotify watch on the runtime folder.

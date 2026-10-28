@@ -18,12 +18,14 @@
 //! - [`swiss`] — the `swiss` look shared by the gtk4 and vo frontends.
 //! - [`showcase`] — palette and geometry of the vo frontend's `showcase` look.
 //! - [`watch`]: wakes the popups when the daemon changes a runtime file.
+//! - [`look_step`]: the keyboard chord that switches the vo popup's look.
 //! - [`gtk_env`] — environment workarounds for GTK4 bugs (GTK frontend only).
 
 pub mod config;
 pub mod gtk_env;
 pub mod ipc;
 pub mod live;
+pub mod look_step;
 pub mod outcome;
 pub mod plasma;
 pub mod recipe;
