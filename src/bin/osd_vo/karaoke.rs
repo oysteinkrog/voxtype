@@ -693,7 +693,8 @@ impl Popup {
                         0.0,
                     )),
                 ),
-            px,
+            // In the line's own box (see karaoke_text), which moves with the words.
+            px - lead,
             0.0,
         )
         .motion(Prop::Position, Motion::Snap)
@@ -802,14 +803,23 @@ impl Popup {
                 .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                 .motion(Prop::Offset, Spring::POP)
                 .word_enter(Transition::fade().offset(0.0, 8.0));
-            let mut column = Element::column(key)
+            // The words sit in a box of their own, with the lit newest word in it, so the
+            // two move as one when the line re-centres.
+            let mut hot = if age == 0 {
+                hot.take().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let mut inline = Element::column("inline").child(text.rewind_hide(self.rewinding()));
+            if !hot.is_empty() {
+                inline = inline.child(hot.remove(0));
+            }
+            let column = Element::column(key)
                 .size(LINE_BOX, LINE)
                 .align_items(AlignItems::CENTER)
-                .child(text.rewind_hide(self.rewinding()))
-                .children(self.karaoke_rewind(words, &style));
-            if age == 0 {
-                column = column.children(hot.take().unwrap_or_default());
-            }
+                .child(inline)
+                .children(self.karaoke_rewind(words, &style))
+                .children(hot);
             let line = at(column, ox + (CARD_W - LINE_BOX) / 2.0, oy + cy - LINE / 2.0)
                 .scale(scale)
                 .opacity(if cancelled { opacity * 0.4 } else { opacity })

@@ -598,10 +598,41 @@ impl Popup {
             hex(INK),
             hex(RED),
         );
-        Element::column("text")
+        let mut text = Element::column("text")
             .height(self.lines.min(MAX_LINES) as f32 * TEXT_LINE)
             .margin_edges(TEXT_TOP, TEXT_X, 0.0, TEXT_X)
-            .child(words)
+            .child(words);
+        if self.cut > 0 && !self.shown.is_empty() && self.delivered().is_none() {
+            text = text.child(self.dotmatrix_ellipsis(dim));
+        }
+        text
+    }
+
+    /// The "…" before cut text, in the left margin so it never changes where the lines
+    /// break. Smaller than the text when the margin is narrow.
+    fn dotmatrix_ellipsis(&self, dim: f32) -> Element<Msg> {
+        use vo::scene::taffy::{LengthPercentageAuto, Position, Rect};
+        let style = self.look.text_style();
+        let w = self.measure.layout("…", &style, None).size.w;
+        let room = TEXT_X - 6.0;
+        let mut style = style;
+        if w > room {
+            style.size *= room / w;
+        }
+        let w = w.min(room);
+        Element::label("ellipsis", "…")
+            .text_style(style)
+            .color(hex(INK))
+            .opacity(0.55 * dim)
+            .layout(move |s| {
+                s.position = Position::Absolute;
+                s.inset = Rect {
+                    left: LengthPercentageAuto::length(-w - 2.0),
+                    top: LengthPercentageAuto::length(0.0),
+                    right: LengthPercentageAuto::auto(),
+                    bottom: LengthPercentageAuto::auto(),
+                };
+            })
     }
 
     fn dotmatrix_status(&self, mode: Mode, mode_at: f64) -> Element<Msg> {
