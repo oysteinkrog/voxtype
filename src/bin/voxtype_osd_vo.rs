@@ -258,6 +258,12 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_VO_GPU_FIRST_FRAME")]
     gpu_first_frame: bool,
 
+    /// Do not get the GPU ready at startup. By default the GPU device,
+    /// shaders and glyphs are made in the background when the popup starts,
+    /// so the first dictation shows as fast as later ones.
+    #[arg(long, env = "VOXTYPE_OSD_VO_NO_PREWARM")]
+    no_prewarm: bool,
+
     /// Print startup timing, memory and frame counts to stderr.
     #[arg(long, env = "VOXTYPE_OSD_VO_DIAG")]
     diag: bool,
@@ -2403,6 +2409,18 @@ fn main() -> anyhow::Result<()> {
     // The display connection, GPU device and renderer stay warm between
     // dictations, so every popup after the first draws on the GPU at once.
     let mut resident = vo::Resident::new();
+    if !args.no_prewarm {
+        let warm = Options::<Msg> {
+            fonts: fonts.clone(),
+            renderer_setup: Some(Arc::new(vo_3d::install)),
+            ..Options::default()
+        };
+        let (look, fonts) = (look.clone(), fonts.clone());
+        if let Err(e) = resident.warm_up(&warm, move || warm_frames(look, fonts)) {
+            // Not fatal: the first dictation connects again.
+            tracing::warn!("cannot get the popup ready: {e}");
+        }
+    }
     loop {
         // Wait for a dictation, then hand everything held so far to a new
         // popup and route later messages straight to it.
@@ -2463,6 +2481,32 @@ fn main() -> anyhow::Result<()> {
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
+    }
+}
+
+/// Frames of a scripted dictation, four per second, for the start-up
+/// warm-up: drawing them once builds the shaders and glyphs a real
+/// dictation needs.
+fn warm_frames(look: Look, fonts: FontRegistry) -> vo::WarmFrames {
+    let scenario = scenario(&look, false);
+    let size = look.surface();
+    let options = Options {
+        fonts: fonts.clone(),
+        default_motion: default_motion(&look),
+        ..Options::default()
+    };
+    let mut lists = Vec::new();
+    vo::envelope::sample_scenario(
+        Popup::new(look, &fonts),
+        &scenario,
+        4.0,
+        options,
+        &mut |_, _, list| lists.push(list.clone()),
+    );
+    vo::WarmFrames {
+        lists,
+        size: [size.w.ceil() as u32, size.h.ceil() as u32],
+        scale: 1.0,
     }
 }
 
