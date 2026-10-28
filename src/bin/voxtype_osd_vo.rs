@@ -105,6 +105,8 @@ mod synthwave;
 mod mecha;
 #[path = "osd_vo/hearing.rs"]
 mod hearing;
+#[path = "osd_vo/channels.rs"]
+mod channels;
 #[path = "osd_vo/glyph_paths.rs"]
 mod glyph_paths;
 #[path = "osd_vo/lifecycle.rs"]
@@ -1113,6 +1115,8 @@ struct Popup {
     synth: synthwave::State,
     /// What the popup heard before the words came (`osd_vo/hearing.rs`).
     hearing: hearing::State,
+    /// Typographic channels on the words (`osd_vo/channels.rs`).
+    channels: channels::State,
     /// The end of the dictation: the delivery and its hand-off.
     life: lifecycle::State,
 }
@@ -1163,6 +1167,7 @@ impl Popup {
             cyber: cyberpunk::State::default(),
             synth: synthwave::State::default(),
             hearing: hearing::State::default(),
+            channels: channels::State::default(),
             life: lifecycle::State::default(),
         }
     }
@@ -1736,6 +1741,7 @@ impl Popup {
                 .motion(Prop::Offset, Spring::SNAP)
                 .word_enter(Transition::fade().offset(0.0, 3.0));
         }
+        let words = self.typo_words(words);
         let words = self.handoff_or(
             words,
             &l.text_style(),
@@ -1746,6 +1752,7 @@ impl Popup {
         let text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
             .child(words);
+        let text = self.typo_marks(text, l.text_width());
         let text = self.with_hearing(
             text,
             &l.text_style(),

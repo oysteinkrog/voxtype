@@ -468,6 +468,7 @@ impl Popup {
             .motion(Prop::Offset, Spring::POP)
             .word_enter(self.paths_word_enter(Transition::fade().opacity(0.0).offset(0.0, WORD_RISE)))
             .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
+        let words = self.typo_words(words);
         let words = self.handoff_or(
             words,
             &l.text_style(),
@@ -484,6 +485,7 @@ impl Popup {
         for line in self.doubt_lines() {
             text = text.child(line);
         }
+        let text = self.typo_marks(text, l.text_width());
         let text = self.with_hearing(
             text,
             &l.text_style(),
