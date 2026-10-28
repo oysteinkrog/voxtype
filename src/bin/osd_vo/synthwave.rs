@@ -68,6 +68,17 @@ const SETTLE_SECS: f64 = 0.4;
 /// Seconds for the grid to coast to a stop, and per grid row while running.
 const COAST_SECS: f64 = 0.6;
 const GRID_ROW_SECS: f64 = 1.2;
+/// With `onset-grid` (MO-67): each onset sends one row from the horizon.
+pub(crate) const ONSET_GRID: &str = "onset-grid";
+/// Depth a new row starts at (the even rows start there too) and the depth
+/// where it leaves at the bottom.
+const ROW_FAR: f32 = 7.3;
+const ROW_NEAR: f32 = 0.8;
+/// Even rows come one step nearer per `GRID_ROW_SECS`.
+const ROW_STEP: f32 = 0.7;
+/// An onset's row crosses the whole road in this long, so at a speaking
+/// rate the road holds the last few seconds of rhythm and a pause clears it.
+const ONSET_TRAVEL_SECS: f64 = 2.4;
 /// Seconds for the tube to power down on a cancel.
 const POWER_DOWN_SECS: f64 = 0.45;
 /// How far the lit tube's brightness wanders while it hums.
@@ -123,6 +134,20 @@ fn spike(n: i64) -> f32 {
     x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     x ^= x >> 32;
     (x & 0xffff) as f32 / 65535.0
+}
+
+/// The depth of the row each onset sent (MO-67), seen at `t` with the rows
+/// standing as they were at `still`; `run_at` is the road's own clock, which
+/// coasts to a stop after the recording. Onsets after `t` have no row yet.
+fn onset_depths(onsets: &[f64], t: f64, still: f64, run_at: impl Fn(f64) -> f64) -> Vec<f32> {
+    onsets
+        .iter()
+        .filter(|&&o| o <= t)
+        .map(|&o| {
+            let age = (run_at(still) - run_at(o)).max(0.0);
+            ROW_FAR - (ROW_FAR - ROW_NEAR) * (age / ONSET_TRAVEL_SECS) as f32
+        })
+        .collect()
 }
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
@@ -534,16 +559,29 @@ impl Popup {
         let horizon = WAVE_Y * s;
         let bottom = GRID_BOTTOM * s;
         let grid_until = stop.map_or(f64::INFINITY, |f| f + COAST_SECS + 0.05);
+        // MO-67: the rows are the onsets, so the road's spacing is the
+        // speech rhythm and silence is empty road. Under reduced motion the
+        // rows stand still between onsets.
+        let onset_rows = l.on(ONSET_GRID);
+        let reduced = l.on("reduced-motion");
+        let onsets: std::sync::Arc<[f64]> = if onset_rows {
+            self.heard.onsets().into()
+        } else {
+            std::sync::Arc::from([])
+        };
         let grid = Element::canvas("grid", grid_until, move |t, rect, p| {
             // Rows scroll toward the viewer and coast to a stop after the stop.
-            let run = match stop {
-                Some(f) if t > f => {
-                    let k = ((t - f) / COAST_SECS).min(1.0);
-                    (f - shown) + COAST_SECS * (k - 0.5 * k * k)
+            let run_at = |t: f64| {
+                match stop {
+                    Some(f) if t > f => {
+                        let k = ((t - f) / COAST_SECS).min(1.0);
+                        (f - shown) + COAST_SECS * (k - 0.5 * k * k)
+                    }
+                    _ => t - shown,
                 }
-                _ => t - shown,
-            }
-            .max(0.0);
+                .max(0.0)
+            };
+            let run = run_at(t);
             let phase = (run / GRID_ROW_SECS).fract() as f32;
             let open = smoothstep(0.1, 0.5, (t - shown) as f32);
             let (x0, y0) = (rect.x, rect.y + horizon);
@@ -565,9 +603,18 @@ impl Popup {
                 p.stroke(&Contour::polyline(&[a, b], false), &style);
             }
             // Rows at depth z land at y = horizon + span / z.
-            for n in 0..10 {
-                let z = 1.0 + (n as f32 - phase) * 0.7;
-                if z < 0.8 {
+            let still = if reduced {
+                onsets.iter().copied().filter(|&o| o <= t).fold(shown, f64::max)
+            } else {
+                t
+            };
+            let depths: Vec<f32> = if onset_rows {
+                onset_depths(&onsets, t, still, run_at)
+            } else {
+                (0..10).map(|n| 1.0 + (n as f32 - phase) * ROW_STEP).collect()
+            };
+            for z in depths {
+                if z < ROW_NEAR {
                     continue;
                 }
                 let y = y0 + span / z * 0.92;
@@ -1083,5 +1130,37 @@ impl Popup {
             (side - icon) / 2.0,
             (side - icon) / 2.0,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_onset_sends_one_row_from_the_horizon() {
+        let run = |t: f64| t;
+        let onsets = [1.0, 1.4, 5.0];
+        // At 2 s: two rows, the newer one further away; the third onset has
+        // not come yet.
+        let d = onset_depths(&onsets, 2.0, 2.0, run);
+        assert_eq!(d.len(), 2);
+        assert!(d[0] < d[1] && d[1] < ROW_FAR);
+        // A row starts at the horizon and crosses the road in the travel time.
+        let t = 3.0 + ONSET_TRAVEL_SECS;
+        let d = onset_depths(&[3.0], t, t, run);
+        assert!((d[0] - ROW_NEAR).abs() < 1e-5);
+        // Silence: no onsets, an empty road; old rows have left it.
+        assert!(onset_depths(&[], 9.0, 9.0, run).is_empty());
+        assert!(onset_depths(&[1.0], 9.0, 9.0, run)[0] < ROW_NEAR);
+    }
+
+    #[test]
+    fn reduced_motion_rows_stand_still_between_onsets() {
+        let run = |t: f64| t;
+        // Seen at 3 s and 4 s with the rows as they stood at the last onset.
+        let a = onset_depths(&[1.0, 2.0], 3.0, 2.0, run);
+        let b = onset_depths(&[1.0, 2.0], 4.0, 2.0, run);
+        assert_eq!(a, b);
     }
 }
