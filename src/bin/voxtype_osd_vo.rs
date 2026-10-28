@@ -127,6 +127,8 @@ mod channels;
 mod glyph_paths;
 #[path = "osd_vo/lifecycle.rs"]
 mod lifecycle;
+#[path = "osd_vo/ruler.rs"]
+mod ruler;
 
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;
@@ -1890,7 +1892,9 @@ impl Popup {
                     .shrink(1.0)
                     .min_width(0.0),
             );
-        if self.shows_progress(status) {
+        if let Some(ruler) = self.audio_ruler(l.accent, l.border) {
+            row = row.child(ruler.margin_edges(0.0, 0.0, 0.0, 16.0));
+        } else if self.shows_progress(status) {
             let progress = Progress {
                 fraction: self.files.fraction.map(|f| f.clamp(0.0, 1.0) as f32),
                 track: l.border,

@@ -23,6 +23,9 @@ use super::*;
 /// A normal end stays this long, so a look can show it. A new dictation cuts it short.
 pub(crate) const DONE_LINGER_SECS: f64 = 0.4;
 
+/// "No speech" stays this long, so the look can type it out and it can be read.
+pub(crate) const EMPTY_LINGER_SECS: f64 = 1.0;
+
 /// A typed hand-off never takes longer than this; faster typing plays at its own rate.
 const HANDOFF_MAX_SECS: f64 = 0.7;
 /// The typing rate's bounds, in seconds per character.
@@ -160,6 +163,8 @@ pub(crate) struct State {
     pub delivered: Option<Delivered>,
     /// The newest app name the daemon gave during the dictation.
     pub app: Option<String>,
+    /// The remaining-audio ruler (MO-41).
+    pub ruler: ruler::Ruler,
     /// The hand-off's drawing for the text it was made for.
     cache: Mutex<Option<(String, f32, Arc<Handoff>)>>,
 }
@@ -168,7 +173,9 @@ impl Popup {
     /// How long the popup stays after the dictation ended.
     pub(crate) fn linger_secs(&self) -> f64 {
         match self.ending() {
-            Some(Ending::Cancelled | Ending::Empty | Ending::Failed) => CANCEL_LINGER_SECS,
+            Some(Ending::Cancelled | Ending::Failed) => CANCEL_LINGER_SECS,
+            // "No speech" is typed out on the reading line, so it needs longer to read.
+            Some(Ending::Empty) => EMPTY_LINGER_SECS,
             Some(Ending::Done) => {
                 let handoff = self.life.delivered.as_ref().map_or(0.0, |d| {
                     let since = d.at - self.ended_at.unwrap_or(d.at);
@@ -220,6 +227,7 @@ impl Popup {
                 self.life.app = Some(app.to_string());
             }
         }
+        self.sync_ruler(t);
         if self.life.delivered.is_none() && self.ending() == Some(Ending::Done) {
             if let Some(d) = &self.files.delivery {
                 let mut d = Delivered::new(d, self.life.app.clone(), t);
