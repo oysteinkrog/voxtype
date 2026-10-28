@@ -92,6 +92,25 @@ const SLOTS: [(f32, f32, f32); 5] = [
     (95.0, 0.62, 0.22),
 ];
 const ROLL_SECS: f64 = 0.26;
+/// With `bowstring` (MO-64): the underline is a string from the word before
+/// to the newest word. It hangs slack when the word comes and tightens over
+/// `BOW_TIGHTEN` seconds; the word's pitch bends it, up to `BOW_BEND` px.
+pub(crate) const BOWSTRING: &str = "bowstring";
+const BOW_SLACK: f32 = 8.0;
+const BOW_BEND: f32 = 5.0;
+const BOW_TIGHTEN: f64 = 0.45;
+
+/// How far the string's middle sits below its ends at `age` seconds after
+/// the word came, for a word said at `pitch` (0 to 1, `None` unvoiced):
+/// slack that tightens, and a high pitch bending it up.
+fn bow_sag(age: f64, pitch: Option<f32>, reduced: bool) -> f32 {
+    let bend = pitch.map_or(0.0, |p| -(p - 0.5).clamp(-0.5, 0.5) * 2.0 * BOW_BEND);
+    if reduced {
+        return bend;
+    }
+    let tight = ease_out(age / BOW_TIGHTEN);
+    BOW_SLACK * (1.0 - tight) + bend * tight
+}
 
 const WAVE_Y: f32 = 418.0;
 const WAVE_X0: f32 = 104.0;
@@ -680,6 +699,9 @@ impl Popup {
         .motion(Prop::Position, Motion::Snap)
         // Keyed per word, so the lit copy enters with the word under it.
         .presence(Transition::fade().offset(0.0, 8.0), Transition::fade());
+        if self.look.on(BOWSTRING) {
+            return vec![lit, self.karaoke_bow(last, lead, px, ww, style)];
+        }
         // The underline hops to the new word: its left edge moves a little
         // faster than its width, so it stretches and settles (T05).
         let under = at(
@@ -694,6 +716,63 @@ impl Popup {
         .motion(Prop::Size, Spring::critical_to_98(0.24))
         .presence(Transition::fade(), Transition::fade());
         vec![lit, under]
+    }
+
+    /// MO-64: the underline as a bowstring from the middle of the word
+    /// before (or the line's start) to the end of the newest word.
+    fn karaoke_bow(&self, last: &[Word], lead: f32, px: f32, ww: f32, style: &TextStyle) -> Element<Msg> {
+        let word = &last[last.len() - 1];
+        let x0 = match last.len() {
+            0 | 1 => lead,
+            n => {
+                let before: String = last[..n - 2].iter().map(|w| format!("{} ", w.text)).collect();
+                let start = if before.is_empty() {
+                    0.0
+                } else {
+                    self.measure.layout(&format!("{before}x"), style, None).size.w
+                        - self.measure.layout("x", style, None).size.w
+                };
+                let prev_w = self.measure.layout(&last[n - 2].text, style, None).size.w;
+                lead + start + prev_w / 2.0
+            }
+        };
+        let x1 = px + ww;
+        let y = LINE * 0.86 + 1.5;
+        let heard = self.heard.word(word.id);
+        let born = heard.map_or(self.extra.now, |h| h.born);
+        let pitch = heard.and_then(|h| h.pitch);
+        let reduced = self.look.on("reduced-motion");
+        let until = if reduced { f64::NEG_INFINITY } else { born + BOW_TIGHTEN + 0.05 };
+        at(
+            Element::canvas(format!("bow-{}", word.id), until, move |t, r, p| {
+                let (a, b) = (Point::new(r.x + x0, r.y + y), Point::new(r.x + x1, r.y + y));
+                let sag = bow_sag(t - born, pitch, reduced);
+                let mid = Point::new((a.x + b.x) / 2.0, a.y + 2.0 * sag);
+                let n = 24;
+                let pts: Vec<Point> = (0..=n)
+                    .map(|i| {
+                        let u = i as f32 / n as f32;
+                        let v = 1.0 - u;
+                        Point::new(
+                            v * v * a.x + 2.0 * u * v * mid.x + u * u * b.x,
+                            v * v * a.y + 2.0 * u * v * mid.y + u * u * b.y,
+                        )
+                    })
+                    .collect();
+                let style = StrokeStyle::solid(2.6, ramp(0.0))
+                    .linear(a, ramp(0.0), b, ramp(1.0))
+                    .glow(4.0);
+                p.stroke(&vo::scene::path::Contour::polyline(&pts, false), &style);
+                // The nocks at both ends.
+                for (at, u) in [(a, 0.0), (b, 1.0)] {
+                    p.shape(ShapeInstance::circle(at, 2.4, Paint::solid(ramp(u))));
+                }
+            }),
+            0.0,
+            0.0,
+        )
+        .size(LINE_BOX, LINE + 2.0 * BOW_SLACK)
+        .presence(Transition::fade(), Transition::fade())
     }
 
     /// The rolling lines, the lit newest word and its underline, or the
@@ -815,5 +894,22 @@ impl Popup {
             _ => {}
         }
         panel
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bowstring_tightens_and_the_pitch_bends_it() {
+        // Slack when the word comes, tight a moment later.
+        assert!((bow_sag(0.0, None, false) - BOW_SLACK).abs() < 1e-4);
+        assert!(bow_sag(BOW_TIGHTEN, None, false).abs() < 0.2);
+        // A high word bends the string up, a low one down.
+        assert!(bow_sag(1.0, Some(1.0), false) < -BOW_BEND * 0.9);
+        assert!(bow_sag(1.0, Some(0.0), false) > BOW_BEND * 0.9);
+        // Reduced motion: no slack, only the bend.
+        assert_eq!(bow_sag(0.0, Some(0.5), true), 0.0);
     }
 }
