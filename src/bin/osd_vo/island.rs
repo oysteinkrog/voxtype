@@ -274,6 +274,10 @@ pub struct State {
     /// When the newest word came, for the caret.
     word_at: f64,
     words: usize,
+    /// Lines of words the capsule holds now, and held before its latest
+    /// change of shape.
+    lines: u32,
+    room: u32,
 }
 
 impl Default for State {
@@ -295,6 +299,8 @@ impl Default for State {
             prog: (0.0, 0.0, 0.0),
             word_at: f64::NEG_INFINITY,
             words: 0,
+            lines: 0,
+            room: 0,
         }
     }
 }
@@ -726,6 +732,11 @@ impl Popup {
         if !self.island.card && self.pill_lines() > PILL_LINES {
             self.island.card = true;
         }
+        let lines = if self.island.card {
+            self.lines
+        } else {
+            self.pill_lines().min(PILL_LINES)
+        };
         let first = self.island.mode.is_none();
         if self.island.mode != Some(mode) {
             if !first {
@@ -746,7 +757,9 @@ impl Popup {
                 to: geo,
                 at: if first { self.shown_at } else { t },
             };
+            s.room = s.lines;
         }
+        s.lines = lines;
         let f = self.files.fraction.unwrap_or(0.0).clamp(0.0, 1.0) as f32;
         if (f - s.prog.1).abs() > 1e-4 {
             let cur = s.prog.0 + (s.prog.1 - s.prog.0) * ease_out((t - s.prog.2) / 0.35);
@@ -1044,6 +1057,27 @@ impl Popup {
             .opacity(k)
     }
 
+    /// How many shown words have room in the capsule now. While it grows
+    /// for a new line, that line's words wait until the content fades in
+    /// on the new shape, so they never draw over the status row.
+    fn island_room(&self, w: f32, style: &TextStyle) -> usize {
+        let s = &self.island;
+        let all = self.shown.len();
+        if reduced() || self.extra.now >= s.shape.at + CONTENT_DELAY {
+            return all;
+        }
+        let fits = |n: usize| {
+            let text = self.shown[..n]
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let h = self.measure.layout(&text, style, Some(w)).size.h;
+            (h / style.line_height).round() as u32 <= s.room
+        };
+        (0..=all).rev().find(|&n| fits(n)).unwrap_or(0)
+    }
+
     /// The words: in the pill all white; in the card the older lines dim and
     /// the newest line white.
     fn island_words(
@@ -1071,7 +1105,12 @@ impl Popup {
                 Element::column("pilltext")
                     .width(w)
                     .height(lines as f32 * PILL_LINE)
-                    .child(live("words", &self.shown, style, hex(WHITE))),
+                    .child(live(
+                        "words",
+                        &self.shown[..self.island_room(w, &style)],
+                        style,
+                        hex(WHITE),
+                    )),
                 x,
                 y,
             )
@@ -1079,8 +1118,9 @@ impl Popup {
             .presence(Transition::fade(), Transition::fade());
         }
         let style = card_style(l);
-        let split = self.island_split(w, &style);
-        let (old, new) = self.shown.split_at(split);
+        let room = self.island_room(w, &style);
+        let split = self.island_split(w, &style).min(room);
+        let (old, new) = (&self.shown[..split], &self.shown[split..room]);
         let new_y = self.island_last_line(w, &style).map_or(0.0, |(ly, _)| ly);
         at(
             Element::column("cardtext")
