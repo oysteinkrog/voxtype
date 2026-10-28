@@ -583,6 +583,7 @@ pub(crate) fn offline(
     let options = Options {
         fonts: fonts.clone(),
         default_motion: default_motion(&look),
+        renderer_setup: Some(Arc::new(vo_3d::install)),
         ..Options::default()
     };
     let n = vo::render_offline_with(Popup::new(look, &fonts), &s, fps, dir, options)
