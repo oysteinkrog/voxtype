@@ -1261,12 +1261,9 @@ struct Popup {
     life: lifecycle::State,
     /// The variable font's voice readings (MO-81).
     breath: wild_motion::State,
-    /// The live popup's config, for placing a look picked with the look
-    /// chord. `None` elsewhere: the chord does nothing there.
+    /// The live popup's config, for sizing and placing a look picked with
+    /// the look chord. `None` elsewhere: the chord does nothing there.
     osd: Option<OsdConfig>,
-    /// The look the main surface opened with. A look picked later draws on
-    /// a surface of its own size (`Popup::surfaces`).
-    opened_as: OsdTheme,
     /// The first runtime files came: a look step after them is a new press.
     step_seen: bool,
     /// When the look chord last picked a look, to name it in the status row.
@@ -1276,7 +1273,6 @@ struct Popup {
 impl Popup {
     fn new(look: Look, fonts: &FontRegistry) -> Popup {
         Popup {
-            opened_as: look.theme,
             look,
             signals: SignalsCell::default(),
             recorder: None,
@@ -1734,34 +1730,25 @@ impl App for Popup {
         }
     }
 
-    fn surfaces(&self, tokens: &vo::Tokens) -> Vec<vo::SurfaceView<Msg>> {
-        let mut surfaces = Vec::new();
+    fn surfaces(&self, _: &vo::Tokens) -> Vec<vo::SurfaceView<Msg>> {
         if self.look.theme == OsdTheme::Captions {
-            surfaces = self.captions_surfaces();
+            let mut surfaces = self.captions_surfaces();
             for s in &mut surfaces {
                 let view = std::mem::replace(&mut s.view, Element::column("set-type"));
                 s.view = view.map_live_texts(&mut |e| self.set_type(e));
             }
+            return surfaces;
         }
-        if let Some(spec) = self.picked_spec() {
-            // Keyed by the look, so a new pick opens a surface of its size.
-            let key = format!("look-{:?}", self.look.theme);
-            surfaces.push(vo::SurfaceView::new(key, spec, self.main_view(tokens)));
-        }
-        surfaces
+        Vec::new()
+    }
+
+    /// A look picked with the look chord has its own size and place.
+    fn main_surface(&self) -> Option<(Size, Placement)> {
+        let spec = live_spec(self.osd.as_ref()?, &self.look);
+        Some((spec.size, spec.placement))
     }
 
     fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
-        if self.picked_spec().is_some() {
-            return Element::column("picked-elsewhere");
-        }
-        self.main_view(tokens)
-    }
-}
-
-impl Popup {
-    /// The popup's view on whichever surface shows it.
-    fn main_view(&self, tokens: &vo::Tokens) -> Element<Msg> {
         let look = self
             .look_view(tokens)
             .map_live_texts(&mut |e| self.set_type(e));
@@ -1775,18 +1762,13 @@ impl Popup {
         };
         root.signals(self.signals.clone())
     }
+}
 
-    /// Where a look picked with the look chord shows: a surface of its own
-    /// size and place, since the main surface keeps the size it opened
-    /// with. `None` while the popup shows the look it opened with.
-    fn picked_spec(&self) -> Option<OverlaySpec> {
-        let cfg = self.osd.as_ref()?;
-        (self.look.theme != self.opened_as).then(|| live_spec(cfg, &self.look))
-    }
-
+impl Popup {
     /// The look chord was pressed: show the next (or previous) look at
     /// once, keep it for later popups and name it in the status row. The
-    /// words, levels and timers stay as they are.
+    /// words, levels and timers stay as they are; `main_surface` gives vo
+    /// the new look's size and place.
     fn step_look(&mut self, forward: bool, t: f64, cx: &mut Cx<Msg>) {
         if self.osd.is_none() {
             return;
@@ -1795,6 +1777,12 @@ impl Popup {
         tracing::info!(from = ?self.look.theme, to = ?theme, "look chord");
         self.look.theme = theme;
         look_step::save(theme);
+        // The words wrap afresh to the new look's width and line count.
+        self.lines = 1;
+        self.cut = 0;
+        self.grew = None;
+        let preview = self.files.preview.clone();
+        self.text(&preview);
         self.picked_at = Some(t);
         cx.after(LOOK_NAME_SECS + 0.01, Msg::Loop);
     }
