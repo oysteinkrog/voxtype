@@ -115,6 +115,11 @@ const BAR_SECS: f64 = 0.035;
 const MORPH_SECS: f64 = 0.42;
 const CONTENT_DELAY: f64 = 0.12;
 const CONTENT_FADE: f64 = 0.18;
+/// A status label goes out in `SWAP_OUT`, then the next one comes in over
+/// `SWAP_IN`. Text that leaves with its form is gone within `SWAP_OUT` too,
+/// before the new form's content starts at `CONTENT_DELAY`.
+const SWAP_OUT: f64 = 0.08;
+const SWAP_IN: f64 = 0.14;
 /// Pixels the capsule's bottom edge may still be short of its place when
 /// the words of a new line show.
 const ROOM_GAP: f32 = 3.0;
@@ -287,6 +292,21 @@ pub struct State {
     /// rides on its edge; a new form fades the content in.
     kind: Option<(bool, Option<Mode>)>,
     fade_at: f64,
+    /// The status row, and the one before it with when the label changed:
+    /// the old row goes out before the new one comes in.
+    status: Option<StatusText>,
+    old: Option<StatusText>,
+    label_at: f64,
+}
+
+/// What the status row says, and how it is set.
+#[derive(Clone)]
+struct StatusText {
+    state: String,
+    detail: String,
+    colour: Color,
+    finishing: bool,
+    done: bool,
 }
 
 impl Default for State {
@@ -312,6 +332,9 @@ impl Default for State {
             room: 0,
             kind: None,
             fade_at: 0.0,
+            status: None,
+            old: None,
+            label_at: f64::NEG_INFINITY,
         }
     }
 }
@@ -337,6 +360,8 @@ struct Scene {
     /// The status dot's centre, relative to the capsule.
     status_dot: Point,
     status_colour: Color,
+    /// The dot comes in with a new status label.
+    status_alpha: f32,
     /// The caret after the newest word, relative to the capsule, and when
     /// the newest word came.
     caret: Option<(Point, f64)>,
@@ -650,18 +675,19 @@ impl Scene {
             Mode::Finishing => {}
             Mode::Done => {
                 let c = dot;
-                p.shape(ShapeInstance::circle(c, 5.0, Paint::solid(hex(GREEN))));
+                let a = self.status_alpha;
+                p.shape(ShapeInstance::circle(c, 5.0, Paint::solid(hex(GREEN).fade(a))));
                 let o = Outline::new(&icons::check(), 0.05).transform(
                     &Affine::translate(-12.0, -12.0)
                         .then(&Affine::scale(0.3))
                         .then(&Affine::translate(c.x, c.y)),
                 );
-                p.outline(&o, &StrokeStyle::solid(1.4, hex(BODY)));
+                p.outline(&o, &StrokeStyle::solid(1.4, hex(BODY).fade(a)));
             }
             _ => p.shape(ShapeInstance::circle(
                 dot,
                 3.6,
-                Paint::solid(self.status_colour),
+                Paint::solid(self.status_colour.fade(self.status_alpha)),
             )),
         }
     }
@@ -763,6 +789,7 @@ impl Popup {
             self.island.mode = Some(mode);
         }
         let geo = self.island_geo(mode, self.island.card);
+        let text = self.island_status_text(mode);
         let s = &mut self.island;
         if first {
             // Open from a dot.
@@ -786,6 +813,11 @@ impl Popup {
             }
         }
         s.lines = lines;
+        if s.status.as_ref().is_some_and(|st| st.state != text.state) {
+            s.old = s.status.take();
+            s.label_at = t;
+        }
+        s.status = Some(text);
         let f = self.files.fraction.unwrap_or(0.0).clamp(0.0, 1.0) as f32;
         if (f - s.prog.1).abs() > 1e-4 {
             let cur = s.prog.0 + (s.prog.1 - s.prog.0) * ease_out((t - s.prog.2) / 0.35);
@@ -797,9 +829,41 @@ impl Popup {
         }
     }
 
+    /// The status row in `mode`.
+    fn island_status_text(&self, mode: Mode) -> StatusText {
+        let status = self.status();
+        let (state, detail, colour) = match mode {
+            Mode::Done => {
+                let app = self
+                    .files
+                    .live
+                    .as_ref()
+                    .and_then(|d| d.target.as_ref())
+                    .map(|t| t.app.clone());
+                match app {
+                    Some(app) if !app.is_empty() => {
+                        (self.delivery_word().to_string(), format!("  ·  into {app}"), hex(GREEN))
+                    }
+                    _ => (self.delivery_word().to_string(), String::new(), hex(GREEN)),
+                }
+            }
+            Mode::Cancelled => ("Cancelled".to_string(), String::new(), hex(DIM)),
+            _ => (status.state.clone(), status.detail.clone(), hex(STATE)),
+        };
+        StatusText {
+            state,
+            detail,
+            colour,
+            finishing: mode == Mode::Finishing && self.files.fraction.is_some(),
+            done: mode == Mode::Done,
+        }
+    }
+
     fn island_busy(&self, t: f64) -> bool {
         let s = &self.island;
-        !self.closing && (t < s.shape.at + MORPH_SECS + CONTENT_DELAY + CONTENT_FADE)
+        !self.closing
+            && (t < s.shape.at + MORPH_SECS + CONTENT_DELAY + CONTENT_FADE
+                || t < s.label_at + SWAP_OUT + SWAP_IN)
     }
 
     pub(crate) fn arm_island_tick(&mut self, cx: &mut Cx<Msg>) {
@@ -880,23 +944,14 @@ impl Popup {
             (bar, sy)
         };
         let done = mode == Mode::Done;
-        let (state, detail, state_colour) = match mode {
-            Mode::Done => {
-                let app = self
-                    .files
-                    .live
-                    .as_ref()
-                    .and_then(|d| d.target.as_ref())
-                    .map(|t| t.app.clone());
-                match app {
-                    Some(app) if !app.is_empty() => {
-                        (self.delivery_word().to_string(), format!("  ·  into {app}"), hex(GREEN))
-                    }
-                    _ => (self.delivery_word().to_string(), String::new(), hex(GREEN)),
-                }
-            }
-            Mode::Cancelled => ("Cancelled".to_string(), String::new(), hex(DIM)),
-            _ => (status.state.clone(), status.detail.clone(), hex(STATE)),
+        let text = self.island_status_text(mode);
+        // A new status label waits for the old one to go, so the two never
+        // overlap; the dot before it comes in with it.
+        let since = t - s.label_at;
+        let swap_in = if reduced() {
+            1.0
+        } else {
+            ease_out((since - SWAP_OUT) / SWAP_IN)
         };
         let status_x = if card { CARD_PAD_X } else { text_x };
         let status_line = STATUS_H;
@@ -937,6 +992,7 @@ impl Popup {
             } else {
                 hex(BLUE)
             },
+            status_alpha: swap_in,
             caret,
             rules,
             words_at: if !self.motion("word-bulge") || self.still() {
@@ -1032,33 +1088,40 @@ impl Popup {
         }
         panel = panel.child(self.island_words(card, ox + text_x, oy + text_y, text_w, lines, opacity));
         // While finishing the status is larger and has no dot, as in 03-finish.
-        let (status_px, state_colour, lead) = if finishing {
-            (13.6, hex(0xb9c3d6), 0.0)
-        } else {
-            (STATUS_PX, state_colour, 13.0)
-        };
-        let style = TextStyle::new(f.medium, status_px, status_line).tracking(0.1);
-        let row = Element::row("status")
-            .align_items(AlignItems::CENTER)
-            .height(status_line)
-            .child(
-                Element::label(format!("state-{state}"), state.as_str())
-                    .text_style(style)
-                    .color(state_colour)
-                    .presence(Transition::fade().offset(0.0, 5.0), Transition::fade())
-                    .motion(Prop::TextColor, Spring::critical_to_98(0.25)),
-            )
-            .child(
-                Element::label(format!("detail-{state}"), detail.replace("  ·  ", "   ·   "))
-                    .text_style(style)
-                    .color(if done { hex(GREEN).fade(0.85) } else { hex(HINT) })
-                    .presence(Transition::fade(), Transition::fade()),
-            );
-        panel.child(
+        let row = |st: &StatusText, a: f32| {
+            let (status_px, state_colour, lead) = if st.finishing {
+                (13.6, hex(0xb9c3d6), 0.0)
+            } else {
+                (STATUS_PX, st.colour, 13.0)
+            };
+            let style = TextStyle::new(f.medium, status_px, status_line).tracking(0.1);
+            let row = Element::row(format!("status-{}", st.state))
+                .align_items(AlignItems::CENTER)
+                .height(status_line)
+                .child(
+                    Element::label("state", st.state.as_str())
+                        .text_style(style)
+                        .color(state_colour)
+                        .motion(Prop::TextColor, Spring::critical_to_98(0.25)),
+                )
+                .child(
+                    Element::label("detail", st.detail.replace("  ·  ", "   ·   "))
+                        .text_style(style)
+                        .color(if st.done { hex(GREEN).fade(0.85) } else { hex(HINT) }),
+                );
             at(row, ox + status_x + lead, oy + status_y + drop)
-                .opacity(opacity)
-                .motion(Prop::Position, Motion::Snap),
-        )
+                .opacity(opacity * a)
+                .presence(Transition::NONE, Transition::NONE)
+                .motion(Prop::Position, Motion::Snap)
+                .motion(Prop::Opacity, Motion::Snap)
+        };
+        if reduced() {
+            return panel.child(row(&text, 1.0));
+        }
+        if let Some(old) = s.old.as_ref().filter(|_| since < SWAP_OUT) {
+            panel = panel.child(row(old, 1.0 - ease_out(since / SWAP_OUT)));
+        }
+        panel.child(row(&text, swap_in))
     }
 
     /// The loading pill: the spinner, "Loading" and the percentage.
@@ -1150,7 +1213,8 @@ impl Popup {
                 y,
             )
             .opacity(opacity)
-            .presence(Transition::fade(), Transition::fade());
+            .presence(Transition::fade(), Transition::fade())
+            .motion(Prop::Opacity, Spring::critical_to_98(SWAP_OUT));
         }
         let style = card_style(l);
         let words = &self.shown[..self.island_room(w, &style)];
@@ -1182,6 +1246,7 @@ impl Popup {
         )
         .opacity(opacity)
         .presence(Transition::fade(), Transition::fade())
+        .motion(Prop::Opacity, Spring::critical_to_98(SWAP_OUT))
     }
 
     /// The index of the first word on the last line of the card's text.
