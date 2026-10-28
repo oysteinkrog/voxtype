@@ -15,6 +15,9 @@ use super::{default_motion, scenario, Look, Popup};
 const FRAME_MS: f64 = 1.0;
 /// No single section over this.
 const SECTION_MS: f64 = 2.0;
+/// Transcript word ids count up from 0. The live words of a status row carry ids hashed
+/// from their label, almost always far above this, and must not set the reading line.
+const TRANSCRIPT_IDS: u32 = 1 << 20;
 
 pub(crate) fn run(look: Look, fonts: FontRegistry, fps: f64, cancel: bool) -> anyhow::Result<()> {
     let scenario = scenario(&look, cancel);
@@ -29,7 +32,10 @@ pub(crate) fn run(look: Look, fonts: FontRegistry, fps: f64, cancel: bool) -> an
         &scenario,
         fps,
         options(),
-        &Envelope::default(),
+        &Envelope {
+            transcript: 0..TRANSCRIPT_IDS,
+            ..Envelope::default()
+        },
     );
     println!("envelope:\n{report}");
     let budget = measure_budget(Popup::new(look.clone(), &fonts), &scenario, fps, options())

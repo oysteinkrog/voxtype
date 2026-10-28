@@ -2400,6 +2400,9 @@ fn main() -> anyhow::Result<()> {
         app_id: "voxtype-osd".into(),
         ..OverlaySpec::default()
     };
+    // The display connection, GPU device and renderer stay warm between
+    // dictations, so every popup after the first draws on the GPU at once.
+    let mut resident = vo::Resident::new();
     loop {
         // Wait for a dictation, then hand everything held so far to a new
         // popup and route later messages straight to it.
@@ -2441,7 +2444,7 @@ fn main() -> anyhow::Result<()> {
         };
         let mut popup = Popup::new(look.clone(), &fonts);
         popup.recorder = args.record.as_deref().and_then(replay::recorder);
-        let result = vo::run_overlay_with(popup, spec.clone(), options);
+        let result = resident.run(popup, spec.clone(), options);
         shared.0.lock().unwrap().proxy = None;
         if args.diag {
             eprintln!(
