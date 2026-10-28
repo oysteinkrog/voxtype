@@ -160,6 +160,10 @@ const SMALL_PX: f32 = 12.0;
 const MAX_SCALE: f32 = 1.25;
 /// Between one loop of a tile's moment and the next.
 const LOOP_GAP: f64 = 0.4;
+/// The scripted messages go out at most this often, all tiles at once. Each
+/// wake builds every tile's view, and twelve tiles out of step would wake
+/// the station hundreds of times a second, so it fell behind the clock.
+const PUMP_STEP: f64 = 0.025;
 /// After a live dictation ends, before the tiles go back to their moments.
 const RESUME_AFTER: f64 = 2.0;
 
@@ -206,6 +210,8 @@ pub(crate) struct Station {
     /// A `Cue::Resume` is pending for this live dictation.
     resume_armed: bool,
     pump: Option<vo::TimerId>,
+    /// When the scripted messages last went out.
+    pumped_at: f64,
 }
 
 pub(crate) struct Setup {
@@ -251,6 +257,7 @@ impl Station {
             live_gen: 0,
             resume_armed: false,
             pump: None,
+            pumped_at: f64::NEG_INFINITY,
         }
     }
 
@@ -262,9 +269,13 @@ impl Station {
         self.exhibits.len().div_ceil(self.per_page()).max(1)
     }
 
-    /// How long one page shows, for an offline render.
-    pub(crate) fn dwell(&self) -> f64 {
-        self.dwell
+    /// How long an offline render runs: one page when a page is held,
+    /// otherwise every page once.
+    pub(crate) fn render_secs(&self) -> f64 {
+        match self.hold {
+            Some(_) => self.dwell,
+            None => self.dwell * self.pages() as f64,
+        }
     }
 
     fn look_for(&self, e: &Exhibit) -> Look {
@@ -362,7 +373,9 @@ impl Station {
             .flat_map(|t| t.queue.front().map(|q| q.0).into_iter().chain([t.loop_end]))
             .min_by(f64::total_cmp);
         if let Some(at) = next {
-            let wait = (at - cx.t()).max(0.0);
+            let wait = (at - cx.t())
+                .max(self.pumped_at + PUMP_STEP - cx.t())
+                .max(0.0);
             self.pump = Some(cx.after(wait, Msg::Station(Box::new(Cue::Pump))));
         }
     }
@@ -370,6 +383,7 @@ impl Station {
     /// Hands each tile its due scripted messages and restarts the tiles
     /// whose loop ended.
     fn pump(&mut self, cx: &mut Cx<Msg>) {
+        self.pumped_at = cx.t();
         let now = cx.t() + 1e-6;
         for i in 0..self.tiles.len() {
             while self.tiles[i].queue.front().is_some_and(|q| q.0 <= now) {
@@ -458,6 +472,7 @@ impl Station {
             return;
         }
         self.page = (self.page + 1) % self.pages();
+        tracing::info!(page = self.page + 1, t = cx.t(), "the station turns the page");
         self.open_page(cx);
     }
 }
@@ -772,7 +787,7 @@ pub(crate) fn run(
         let scenario = vo::Scenario {
             size,
             scale: 1.0,
-            duration: app.dwell(),
+            duration: app.render_secs(),
             inputs: Vec::new(),
         };
         let n = vo::render_offline_with(app, &scenario, args.fps, dir, options(None))
