@@ -105,6 +105,8 @@ mod station;
 mod synthwave;
 #[path = "osd_vo/mecha.rs"]
 mod mecha;
+#[path = "osd_vo/sounding.rs"]
+mod sounding;
 #[path = "osd_vo/hearing.rs"]
 mod hearing;
 #[path = "osd_vo/channels.rs"]
@@ -1115,6 +1117,8 @@ struct Popup {
     cyber: cyberpunk::State,
     /// What only the synthwave look keeps.
     synth: synthwave::State,
+    /// Onsets and the sound each word came from (`osd_vo/sounding.rs`).
+    heard: sounding::State,
     /// What the popup heard before the words came (`osd_vo/hearing.rs`).
     hearing: hearing::State,
     /// Typographic channels on the words (`osd_vo/channels.rs`).
@@ -1168,6 +1172,7 @@ impl Popup {
             jarvis: jarvis::Extra::default(),
             cyber: cyberpunk::State::default(),
             synth: synthwave::State::default(),
+            heard: sounding::State::default(),
             hearing: hearing::State::default(),
             channels: channels::State::default(),
             life: lifecycle::State::default(),
@@ -1483,6 +1488,7 @@ impl App for Popup {
         self.sync_tron(t);
         self.sync_phosphor(t);
         self.kit_sync(t);
+        self.sync_sounding(t);
         self.sync_tally(t);
         self.sync_scope(t);
         self.sync_captions(t);

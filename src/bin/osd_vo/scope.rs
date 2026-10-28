@@ -196,6 +196,8 @@ struct Scene {
     /// Lit segments of the three meters, out of 14, 10 and 10.
     meters: [usize; 3],
     caret: Option<(Point, f64)>,
+    /// Onsets for the caret's foot (MO-73), when the look has it on.
+    joint: Option<Arc<[f64]>>,
 }
 
 impl Scene {
@@ -441,6 +443,19 @@ impl Scene {
                 Paint::solid(hex(TEXT)),
             ));
         }
+        // MO-73: the caret stands on a foot that each onset splits.
+        if let Some(onsets) = &self.joint {
+            let gap = sounding::joint_gap(onsets, t, reduced());
+            sounding::draw_foot(
+                p,
+                gap,
+                c.x + 1.5,
+                c.y + LINE * 0.62 + 1.0,
+                12.0,
+                2.0,
+                hex(TEXT),
+            );
+        }
     }
 }
 
@@ -560,6 +575,7 @@ impl Popup {
                 ((s.wpm as f32 / 20.0).min(10.0)) as usize,
             ],
             caret: caret.map(|(c, at)| (Point::new(c.x + o, c.y + o), at)),
+            joint: self.joint_onsets(),
         };
         let until = scene.until(self.extra.now);
         let canvas = at(
@@ -647,6 +663,19 @@ impl Popup {
                 .motion(Prop::Position, Spring::critical_to_98(0.12))
                 .presence(Transition::fade(), Transition::fade()),
             );
+        }
+
+        // MO-71 receipts and MO-73 joint ticks under the newest line, and
+        // the MO-72 pitch score in the margin beside it.
+        if let Some((words, _)) = lines.last() {
+            let (x, y) = (o + TEXT_X, o + TEXT_TOP + (lines.len() - 1) as f32 * LINE);
+            // In the panel's right margin, past where lines wrap.
+            let sx = o + (INNER.0 + INNER.2) * S - 30.0;
+            let (ink, score) = (hex(VALUE), Rect::new(sx, y + LINE * 0.1, 24.0, LINE * 0.6));
+            panel = panel
+                .children(self.receipts_element("scope", words, &style, x, y, WRAP, ink))
+                .children(self.joint_ticks_element("scope", words, &style, x, y, WRAP, ink, false))
+                .children(self.score_element(score, hex(TRACE)));
         }
 
         // The status row.

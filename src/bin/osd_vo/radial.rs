@@ -473,6 +473,13 @@ impl Popup {
             .child(canvas)
             .child(self.radial_badge(&g, &status))
             .child(self.radial_text(&g))
+            .children(self.score_beside(
+                TEXT_X * g.k,
+                TEXT_TOP * g.k,
+                self.look.text_width(),
+                36.0,
+                hex(ICE, 1.0),
+            ))
             .child(self.radial_status(&g, &status, bottom));
         root.child(panel)
     }

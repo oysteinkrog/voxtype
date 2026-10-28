@@ -468,6 +468,22 @@ impl Popup {
             .child(self.amber_header(&g, &status))
             .child(self.amber_side_labels(&g))
             .child(self.amber_text(&g))
+            .children(self.receipts_element(
+                "amber",
+                &self.shown,
+                &self.look.text_style(),
+                TEXT_X * g.k,
+                TEXT_TOP * g.k,
+                self.look.text_width(),
+                hex(AMBER, 1.0),
+            ))
+            .children(self.score_beside(
+                TEXT_X * g.k,
+                TEXT_TOP * g.k,
+                self.look.text_width(),
+                36.0,
+                hex(AMBER, 1.0),
+            ))
             .child(self.amber_status(&g, &status));
         root.child(layer)
     }

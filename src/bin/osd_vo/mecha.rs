@@ -58,6 +58,18 @@ const FILL: u32 = 0x090504;
 const PANEL: u32 = 0x070403;
 const RED: u32 = 0xff2a1e;
 
+/// MO-70: a new word pushes the caret and the status plate; a revision
+/// slides the word's plate out and back.
+pub(crate) const HYDRAULIC_CHAIN: &str = "hydraulic-chain";
+/// MO-73: an onset opens a joint in the caret's foot that becomes the next
+/// word's baseline tick.
+pub(crate) const ONSET_JOINT: &str = sounding::ONSET_JOINT;
+
+/// The lag between two links of the hydraulic chain: word, caret, plate.
+const LINK: f64 = 0.015;
+/// How far one word pushes the status plate, in concept units.
+const PUSH: f32 = 5.0;
+
 /// The fonts of the look.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Fonts {
@@ -457,6 +469,8 @@ struct Snap {
     /// The status line: icon, state and detail.
     status: Vec<Label>,
     icon: Icon,
+    /// When new words came, newest last: each pushes the status plate.
+    pushes: Vec<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -684,19 +698,23 @@ impl Snap {
             ));
         }
 
-        // The status band: pill, joints and the mic hexagon.
-        let pill = ring(&PILL);
-        p.fill(
-            [&poly(&PILL)],
-            &StrokeStyle::solid(1.0, hex(FILL).fade(fill_k)),
-        );
+        // The status band: pill, joints and the mic hexagon. A new word
+        // pushes the plate along its rails (MO-70).
+        let push = Affine::translate(self.push(t), 0.0);
         let k = ease_out(ramp(u, 0.16, 0.46));
-        p.stroke(&pill.trim(0.0, k * pill.length()), &line(2.8));
-        let mh = ring(&MIC_HEX);
-        p.stroke(
-            &mh.trim(0.0, k * mh.length()),
-            &StrokeStyle::solid(1.2, accent.fade(0.7)),
-        );
+        p.layer(push, 1.0, |p| {
+            let pill = ring(&PILL);
+            p.fill(
+                [&poly(&PILL)],
+                &StrokeStyle::solid(1.0, hex(FILL).fade(fill_k)),
+            );
+            p.stroke(&pill.trim(0.0, k * pill.length()), &line(2.8));
+            let mh = ring(&MIC_HEX);
+            p.stroke(
+                &mh.trim(0.0, k * mh.length()),
+                &StrokeStyle::solid(1.2, accent.fade(0.7)),
+            );
+        });
         for j in [
             open(&[(110.0, 542.0), (270.0, 542.0), (290.0, 575.0)]),
             open(&[(690.0, 575.0), (710.0, 542.0), (884.0, 542.0)]),
@@ -738,10 +756,24 @@ impl Snap {
         for l in &self.badge {
             l.draw(p, t, red);
         }
-        for l in &self.status {
-            l.draw(p, t, red);
-        }
-        self.draw_icon(t, u, accent, p);
+        p.layer(push, 1.0, |p| {
+            for l in &self.status {
+                l.draw(p, t, red);
+            }
+            self.draw_icon(t, u, accent, p);
+        });
+    }
+
+    /// How far the status plate is pushed along its rails at `t`, in
+    /// concept units: each new word knocks it `PUSH` to the right, two links
+    /// down the chain from the caret, and it springs back.
+    fn push(&self, t: f64) -> f32 {
+        let d: f32 = self
+            .pushes
+            .iter()
+            .map(|&at| sounding::knock(t - at - 2.0 * LINK, 0.035))
+            .sum();
+        PUSH * d.min(1.6)
     }
 
     /// A hexagon plate that snaps in around `c`.
@@ -1229,6 +1261,7 @@ impl Popup {
             Phase::Cancelled => Icon::Cross,
         };
 
+        let chain = self.mecha_chain(phase);
         let end_at = phase.ended().then_some(phase_at);
         let snap = Snap {
             shown_at: self.shown_at,
@@ -1244,6 +1277,7 @@ impl Popup {
             badge,
             status: status_labels,
             icon,
+            pushes: chain.pushes(),
         };
         // The canvas keeps drawing while anything on it moves: the stripes
         // and the readout's dot until the dictation ends.
@@ -1291,6 +1325,7 @@ impl Popup {
             .size(size.w, size.h)
             .presence(Transition::fade().opacity(0.0), exit)
             .child(at(canvas, 0.0, 0.0))
+            .child(at(chain.element(), TEXT_X * s, TEXT_Y * s))
             .child(text);
         if phase == Phase::Cancelled {
             // Strike lines over the words, as wide as each line.
@@ -1319,5 +1354,272 @@ impl Popup {
             layer = layer.child(at(strikes, TEXT_X * s, TEXT_Y * s));
         }
         root.child(layer)
+    }
+}
+
+/// The hydraulic chain (MO-70) and the onset joint (MO-73), drawn behind the
+/// transcript in the text box's space: the caret block on its foot, the
+/// plates that slide out from under revised words, and the baseline ticks
+/// that onsets leave under the words they started.
+#[derive(Clone, Default)]
+struct Chain {
+    /// Text size in pixels.
+    size: f32,
+    /// Caret targets as words came: when, where (right of the word, on its
+    /// baseline) and on which line. In time order.
+    targets: Vec<(f64, Point, usize)>,
+    /// Where the caret waits before the first word.
+    home: Point,
+    /// Revised words: when and their box.
+    plates: Vec<(f64, Rect)>,
+    /// Onsets, in scene time.
+    joints: Vec<f64>,
+    /// Words an onset started: when they came and their box.
+    ticks: Vec<(f64, Rect)>,
+    /// The caret shows: listening.
+    caret: bool,
+    /// New words push the status plate.
+    push: bool,
+    reduced: bool,
+    /// The box's size.
+    box_size: Size,
+}
+
+/// Seconds a revised word's plate takes to slide out and back.
+const PLATE_SECS: f64 = 0.14;
+/// Seconds the onset joint takes to open and to close again.
+const JOINT_OPEN: f64 = 0.035;
+const JOINT_SECS: f64 = 0.11;
+/// Seconds a baseline tick stays under its word.
+const TICK_SECS: f64 = 0.12;
+
+impl Chain {
+    /// Arrival times of the words, for the status plate.
+    fn pushes(&self) -> Vec<f64> {
+        if !self.push {
+            return Vec::new();
+        }
+        self.targets.iter().map(|&(at, _, _)| at).collect()
+    }
+
+    /// The caret's place at `t`: each new word pushes it from the last
+    /// target to the next one link after the word, as a damped piston. A
+    /// new line moves it at once.
+    fn caret_at(&self, t: f64) -> Point {
+        let live: Vec<_> = self
+            .targets
+            .iter()
+            .filter(|&&(at, _, _)| at + LINK <= t || self.reduced)
+            .filter(|&&(at, _, _)| at <= t)
+            .collect();
+        let Some(base) = live
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(i, (_, _, line))| *i == 0 || live[i - 1].2 != *line)
+            .map(|(i, _)| i)
+        else {
+            return self.home;
+        };
+        let mut p = live[base].1;
+        for k in base + 1..live.len() {
+            let (at, to, _) = *live[k];
+            let from = live[k - 1].1;
+            let a = if self.reduced {
+                1.0
+            } else {
+                sounding::piston(t - at - LINK)
+            };
+            p.x += (to.x - from.x) * a;
+            p.y += (to.y - from.y) * a;
+        }
+        p
+    }
+
+    /// The scene keeps drawing until the last event has played out.
+    fn until(&self) -> f64 {
+        let last = self
+            .targets
+            .iter()
+            .map(|e| e.0)
+            .chain(self.plates.iter().map(|e| e.0))
+            .chain(self.joints.iter().copied())
+            .chain(self.ticks.iter().map(|e| e.0))
+            .fold(f64::NEG_INFINITY, f64::max);
+        last + 0.6
+    }
+
+    fn element(self) -> Element<Msg> {
+        let until = self.until();
+        let size = self.box_size;
+        Element::canvas("chain", until, move |t, rect, p| self.draw(t, rect, p))
+            .size(size.w, size.h)
+    }
+
+    fn draw(&self, t: f64, rect: Rect, p: &mut Painter) {
+        let s = self.size;
+        let o = |r: Rect, dy: f32| Rect::new(rect.x + r.x, rect.y + r.y + dy, r.w, r.h);
+        // Plates under revised words slide down out of their slot and back.
+        for &(at, r) in &self.plates {
+            let dt = t - at;
+            if !(0.0..0.6).contains(&dt) {
+                continue;
+            }
+            let (slide, a) = if self.reduced {
+                (0.0, if dt < 0.3 { 0.8 } else { 0.0 })
+            } else {
+                let k = (dt / PLATE_SECS).clamp(0.0, 1.0);
+                let slide = (std::f64::consts::PI * k).sin() as f32;
+                (slide, 1.0 - ramp(dt, 0.25, 0.6))
+            };
+            let r = o(r, slide * 0.24 * s);
+            let (x0, y0) = (r.x - 0.1 * s, r.y + 0.04 * s);
+            let (x1, y1) = (r.x + r.w + 0.1 * s, r.y + r.h + 0.12 * s);
+            let c = 0.12 * s;
+            let pts = [
+                (x0 + c, y0),
+                (x1, y0),
+                (x1, y1 - c),
+                (x1 - c, y1),
+                (x0, y1),
+                (x0, y0 + c),
+            ];
+            p.fill(
+                [&poly(&pts)],
+                &StrokeStyle::solid(1.0, hex(FILL).fade(0.9 * a)),
+            );
+            p.stroke(
+                &ring(&pts),
+                &StrokeStyle::solid(1.4, hex(ORANGE).fade(0.85 * a)).glow(1.2),
+            );
+            // The rail it runs on.
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(x0 + c, y1 + 2.0, x1 - x0 - 2.0 * c, 1.5), 0.0),
+                Paint::solid(hex(YELLOW).fade(0.7 * a * slide.max(0.3))),
+            ));
+        }
+        // Baseline ticks: the joint the word's onset opened, under its
+        // first letters.
+        for &(at, r) in &self.ticks {
+            let dt = t - at;
+            if !(0.0..TICK_SECS).contains(&dt) {
+                continue;
+            }
+            let a = 1.0 - ramp(dt, 0.0, TICK_SECS);
+            let w = r.w.min(0.4 * s);
+            let tr = Rect::new(rect.x + r.x, rect.y + r.y + r.h + 0.02 * s, w, 2.5);
+            p.shape(ShapeInstance::rrect(
+                RRect::new(tr, 0.0),
+                Paint::glow(hex(YELLOW), 2.0, 0.6 * a),
+            ));
+            p.shape(ShapeInstance::rrect(
+                RRect::new(tr, 0.0),
+                Paint::solid(hex(YELLOW).fade(a)),
+            ));
+        }
+        if !self.caret {
+            return;
+        }
+        // The caret: a block on a foot. An onset splits the foot at its
+        // middle, 2 px apart, and it closes again.
+        let c = self.caret_at(t);
+        let (x, y) = (rect.x + c.x, rect.y + c.y);
+        let block = Rect::new(x, y - 0.70 * s, 0.17 * s, 0.66 * s);
+        p.shape(ShapeInstance::rrect(
+            RRect::new(block, 0.0),
+            Paint::glow(hex(DEEP), 3.0, 0.35),
+        ));
+        p.shape(ShapeInstance::rrect(
+            RRect::new(block, 0.0),
+            Paint::solid(hex(YELLOW)),
+        ));
+        let gap = self
+            .joints
+            .iter()
+            .rev()
+            .find(|&&at| at <= t)
+            .map_or(0.0, |&at| {
+                let dt = t - at;
+                if self.reduced {
+                    if dt < JOINT_SECS {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                } else if dt < JOINT_OPEN {
+                    ease_out(ramp(dt, 0.0, JOINT_OPEN))
+                } else {
+                    1.0 - ramp(dt, JOINT_OPEN, JOINT_SECS)
+                }
+            })
+            * 2.0;
+        let foot_w = 0.42 * s;
+        let fx = x + block.w / 2.0 - foot_w / 2.0;
+        let fy = y + 0.06 * s;
+        let half = (foot_w - gap) / 2.0;
+        for (fx, w) in [(fx, half), (fx + half + gap, half)] {
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(fx, fy, w, 3.0), 0.0),
+                Paint::solid(hex(ORANGE)),
+            ));
+        }
+    }
+}
+
+impl Popup {
+    /// The chain's events for the words on screen, from what was heard.
+    fn mecha_chain(&self, phase: Phase) -> Chain {
+        let l = &self.look;
+        let s = scale(l);
+        let style = text_style(l);
+        let (boxes, lines) =
+            sounding::word_boxes(&self.measure, &self.shown, &style, Some(text_width(l)));
+        let box_size = Size::new(text_width(l), MAX_LINES as f32 * TEXT_LINE * s);
+        // The text sits at the bottom of its box.
+        let y0 = box_size.h - lines.max(1).min(MAX_LINES as usize) as f32 * style.line_height;
+        let gap = 0.12 * style.size;
+        let (hydraulic, joint) = (l.on(HYDRAULIC_CHAIN), l.on(ONSET_JOINT));
+        let mut chain = Chain {
+            size: style.size,
+            home: Point::new(0.0, y0 + style.line_height * 0.78),
+            caret: phase == Phase::Listening && (hydraulic || joint),
+            reduced: kit::reduced() || l.on("reduced-motion"),
+            box_size,
+            joints: if joint {
+                self.heard.onsets().to_vec()
+            } else {
+                Vec::new()
+            },
+            ..Chain::default()
+        };
+        if !hydraulic && !joint {
+            return chain;
+        }
+        if let Some(first) = boxes.first() {
+            chain.home = Point::new(0.0, y0 + first.baseline);
+        }
+        let mut targets: Vec<(f64, Point, usize)> = Vec::new();
+        for b in &boxes {
+            let Some(h) = self.heard.word(b.id) else {
+                continue;
+            };
+            let r = Rect::new(b.rect.x, y0 + b.rect.y, b.rect.w, b.rect.h);
+            targets.push((
+                h.born,
+                Point::new(b.rect.x + b.rect.w + gap, y0 + b.baseline),
+                b.line,
+            ));
+            match h.changed {
+                Some(c) if hydraulic => chain.plates.push((c, r)),
+                _ => {}
+            }
+            if joint && h.onset.is_some() {
+                chain.ticks.push((h.born, r));
+            }
+        }
+        targets.sort_by(|a, b| a.0.total_cmp(&b.0));
+        chain.targets = targets;
+        chain.push = hydraulic && !chain.reduced;
+        chain
     }
 }

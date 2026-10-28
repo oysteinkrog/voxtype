@@ -1474,7 +1474,18 @@ impl Popup {
             ox + TEXT_X,
             oy + TEXT_TOP,
         )
-        .child(words);
+        .child(words)
+        // MO-73: a caret on a foot that onsets split.
+        .children(self.joint_ticks_element(
+            "cyber",
+            &self.shown,
+            &l.text_style(),
+            0.0,
+            0.0,
+            l.text_width(),
+            hex(YELLOW),
+            true,
+        ));
         if cancelled {
             // A red strike through each line, drawn on.
             for (i, (y, w)) in self.cyber_line_extents().into_iter().enumerate() {

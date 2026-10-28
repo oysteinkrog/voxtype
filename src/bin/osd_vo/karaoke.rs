@@ -725,6 +725,28 @@ impl Popup {
         };
         let line_y = oy + SLOTS[0].0 - LINE / 2.0;
         let under_y = line_y + LINE * 0.86;
+        // MO-72: the phrase's pitch in the right margin, beside the line.
+        let margin = (CARD_W - LINE_BOX) / 2.0;
+        let score = Rect::new(
+            ox + CARD_W - margin + 2.0,
+            line_y + LINE * 0.2,
+            margin - 14.0,
+            LINE * 0.5,
+        );
+        panel = panel.children(self.score_element(score, hex(CYAN)));
+        // MO-71: the sound under the newest words, below the underline.
+        if let Some((last, _)) = lines.last() {
+            let x = ox + (CARD_W - LINE_BOX) / 2.0 + (LINE_BOX - lw) / 2.0;
+            panel = panel.children(self.receipts_element(
+                "karaoke",
+                last,
+                &style,
+                x,
+                line_y + 4.0,
+                WRAP,
+                hex(BLUE),
+            ));
+        }
         match mode {
             Mode::Finishing => {
                 {

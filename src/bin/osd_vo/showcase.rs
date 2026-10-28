@@ -15,10 +15,10 @@ use super::*;
 
 use std::sync::OnceLock;
 
-use vo::scene::display::BlendMode;
+use vo::scene::display::{BlendMode, Paint, ShapeInstance};
 use vo::scene::emitter::{
     tilt_x, Emitter, EmitterLook, EmitterSim, EmitterSource, LevelTrack, Shape, Shock, SpriteStyle,
-    WordParticles,
+    WordParticles, WordSource,
 };
 use vo::scene::geom::{Point, Rect};
 use vo::scene::glass::Glass;
@@ -40,6 +40,9 @@ const ICON: f32 = 18.0;
 const RIBBON_MARGIN: f32 = 10.0;
 const STRIP_PAD_Y: f32 = 10.0;
 const STRIP_PAD_X: f32 = 12.0;
+
+/// MO-69: words come from the ring's light and leave a negative impression.
+pub(crate) const PARTICLE_SOURCE: &str = "particle-source";
 const STATUS_MARGIN_TOP: f32 = 12.0;
 const STATUS_DOT: f32 = 8.0;
 const METER_DOTS: usize = 20;
@@ -611,9 +614,11 @@ impl Popup {
             finish_at: self.extra.finish_at,
             final_at: self.extra.final_at,
         };
+        let head = (live && l.on(PARTICLE_SOURCE)).then(|| self.source_head());
         at(Element::layer("back"), 0.0, 0.0)
             .size(surface.w, surface.h)
             .blend(BlendMode::Add)
+            .children(head)
             .bloom(if live { 0.2 + 0.2 * level } else { 0.1 }, 6.0)
             // Swirling particles leave short comet tails.
             .trail(0.06)
@@ -820,6 +825,9 @@ impl Popup {
                 color: c(mix(TEAL, ICE, 0.5)).fade(0.7),
                 size: 0.6,
                 density: 0.6,
+                // MO-69: each word's particles come from where the ring's
+                // light was when the word was said.
+                from: l.on(PARTICLE_SOURCE).then(|| self.particle_source()),
                 ..WordParticles::default()
             });
         }
@@ -846,6 +854,7 @@ impl Popup {
         );
         let mut strip_fill = c(MATTE);
         strip_fill.a = 0.9;
+        let negatives = self.negatives(phase);
         Element::panel("strip")
             .height(self.lines as f32 * l.text_line + 2.0 * STRIP_PAD_Y)
             .pad_edges(STRIP_PAD_Y, STRIP_PAD_X, STRIP_PAD_Y, STRIP_PAD_X)
@@ -858,6 +867,7 @@ impl Popup {
             .rim(c(ICE).fade(0.35), 1.0, 0.12, -0.375, 0.0)
             .sheen(c(ICE).fade(0.10), 0.7)
             .child(words)
+            .children(negatives)
     }
 
     fn sc_status(&self, phase: Phase) -> Element<Msg> {
@@ -1071,5 +1081,112 @@ impl Popup {
             }
         }
         layer
+    }
+}
+
+impl Popup {
+    /// Where the ring's light runs: along the back half of the ring above
+    /// the card, left to right, once every three seconds. A word's particles
+    /// start where the light was when it was said (MO-69).
+    fn particle_source(&self) -> WordSource {
+        let l = &self.look;
+        let m = sc::MARGIN_PX;
+        WordSource {
+            centre: Point::new(m + l.width / 2.0, m - 2.0),
+            radius: [l.width * 0.42, 26.0],
+            from: -std::f32::consts::PI + 0.25,
+            to: -0.25,
+            period: 3.0,
+            lag: 0.2,
+            spread: 0.3,
+        }
+    }
+
+    /// The ring's light: a short bright stretch of the ring that runs along
+    /// it, brighter with the voice.
+    fn source_head(&self) -> Element<Msg> {
+        let src = self.particle_source();
+        let surface = Self::showcase_surface(&self.look);
+        let level = self.extra.level.clone();
+        let reduced = self.look.on("reduced-motion") || kit::reduced();
+        let until = self.extra.finish_at.unwrap_or(f64::INFINITY);
+        at(
+            Element::canvas("source", until, move |t, rect, p| {
+                let o = Point::new(rect.x, rect.y);
+                let l = level.at(t).clamp(0.0, 1.2);
+                let a0 = if reduced { src.from + 0.5 * (src.to - src.from) } else { src.angle(t) };
+                // The head and a tail behind it.
+                for k in 0..10 {
+                    let a = a0 - k as f32 * 0.035;
+                    if a < src.from {
+                        break;
+                    }
+                    let q = Point::new(
+                        o.x + src.centre.x + src.radius[0] * a.cos(),
+                        o.y + src.centre.y + src.radius[1] * a.sin(),
+                    );
+                    let fade = 1.0 - k as f32 / 10.0;
+                    p.shape(ShapeInstance::circle(
+                        q,
+                        1.6 + 1.2 * fade,
+                        Paint::glow(c(ICE), 4.0, (0.25 + 0.5 * l) * fade),
+                    ));
+                    p.shape(ShapeInstance::circle(
+                        q,
+                        1.0 + 0.6 * fade,
+                        Paint::solid(c(mix(TEAL, ICE, 0.7)).fade((0.5 + 0.5 * l) * fade)),
+                    ));
+                }
+            }),
+            0.0,
+            0.0,
+        )
+        .size(surface.w, surface.h)
+        .presence(Transition::fade(), Transition::fade())
+    }
+
+    /// The negative impressions of the newest two words, drawn in the strip
+    /// over the words' box (MO-69).
+    fn negatives(&self, phase: Phase) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(PARTICLE_SOURCE) || !phase.ambient() {
+            return None;
+        }
+        let style = l.text_style();
+        let (boxes, _) =
+            sounding::word_boxes(&self.measure, &self.shown, &style, Some(l.text_width()));
+        let items: Vec<_> = boxes
+            .iter()
+            .rev()
+            .take(2)
+            .filter_map(|b| {
+                let h = self.heard.word(b.id)?;
+                let w = self.shown.iter().find(|w| w.id == b.id)?;
+                let dots = sounding::negative(&l.fonts, &self.measure, &w.text, &style);
+                Some((
+                    h.born,
+                    Point::new(STRIP_PAD_X + b.rect.x, STRIP_PAD_Y + b.baseline),
+                    dots,
+                ))
+            })
+            .collect();
+        let neg = sounding::Negatives {
+            items,
+            color: c(mix(TEAL, ICE, 0.4)),
+            size: style.size,
+            reduced: l.on("reduced-motion") || kit::reduced(),
+        };
+        let until = neg.until();
+        let h = self.lines as f32 * l.text_line + 2.0 * STRIP_PAD_Y + style.size;
+        Some(
+            at(
+                Element::canvas("negative", until, move |t, rect, p| {
+                    neg.draw(t, Point::new(rect.x, rect.y), p)
+                }),
+                0.0,
+                0.0,
+            )
+            .size(l.text_width() + 2.0 * STRIP_PAD_X, h),
+        )
     }
 }

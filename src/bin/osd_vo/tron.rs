@@ -459,6 +459,16 @@ impl Popup {
             .child(canvas)
             .child(self.tron_badge(&g, &status))
             .child(self.tron_text(&g))
+            .children(self.joint_ticks_element(
+                "tron",
+                &self.shown,
+                &self.look.text_style(),
+                TEXT_X * g.k,
+                TEXT_TOP * g.k,
+                self.look.text_width(),
+                hex(CYAN, 1.0),
+                true,
+            ))
             .child(self.tron_rule(&g))
             .child(self.tron_status(&g, &status, bottom));
         root.child(panel)

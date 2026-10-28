@@ -844,6 +844,16 @@ impl Popup {
                 TEXT_X,
                 TEXT_TOP,
             ))
+            // MO-71: the sound under the newest words.
+            .children(self.receipts_element(
+                "mission",
+                &self.shown,
+                &l.text_style(),
+                TEXT_X,
+                TEXT_TOP,
+                text_width(l),
+                accent,
+            ))
     }
 
     /// The waveform strip and the LIVE meter.
