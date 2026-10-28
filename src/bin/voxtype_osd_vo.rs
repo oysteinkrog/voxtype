@@ -1216,6 +1216,8 @@ struct Popup {
     tally: tally::State,
     /// When the text area last gained a line, and the lines it had before.
     grew: Option<(f64, u32)>,
+    /// Karaoke: when its newest line began, and that line's first word.
+    line_born: Option<(f64, vo_core::words::WordId)>,
     /// What only the scope look keeps.
     scope: scope::State,
     /// What only the captions look keeps.
@@ -1289,6 +1291,7 @@ impl Popup {
             fam: kit::State::default(),
             tally: tally::State::default(),
             grew: None,
+            line_born: None,
             scope: scope::State::default(),
             captions: captions::State::default(),
             karaoke: karaoke::State::default(),
@@ -1617,6 +1620,9 @@ impl App for Popup {
                         self.grew = Some((t, before));
                         // A wake-up for the view once the new line has room.
                         cx.after(ROOM_SECS + 0.01, Msg::Loop);
+                    }
+                    if let Some(wait) = self.karaoke_new_line(t) {
+                        cx.after(wait + 0.01, Msg::Loop);
                     }
                 }
                 if preview_changed || live_changed {

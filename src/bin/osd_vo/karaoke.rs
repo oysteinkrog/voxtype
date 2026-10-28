@@ -92,6 +92,8 @@ const SLOTS: [(f32, f32, f32); 5] = [
     (95.0, 0.62, 0.22),
 ];
 const ROLL_SECS: f64 = 0.26;
+/// How long a new line's words wait while the lines above roll up out of its slot.
+const LINE_WAIT: f64 = 0.16;
 /// With `bowstring` (MO-64): the underline is a string from the word before
 /// to the newest word. It hangs slack when the word comes and tightens over
 /// `BOW_TIGHTEN` seconds; the word's pitch bends it, up to `BOW_BEND` px.
@@ -490,6 +492,33 @@ impl Popup {
 
     /// The transcript as lines, oldest first, each with its width, broken
     /// from the first word so a line keeps its words as new ones come.
+    /// Notes when a new line starts. Returns how long its words wait for the roll, or
+    /// `None` when nothing waits (not karaoke, the first line, the same line).
+    pub(crate) fn karaoke_new_line(&mut self, t: f64) -> Option<f64> {
+        if self.look.theme != OsdTheme::Karaoke {
+            return None;
+        }
+        let lines = self.stable_lines(&self.look.text_style(), WRAP);
+        let Some(first) = lines.last().and_then(|(l, _)| l.first()).map(|w| w.id) else {
+            self.line_born = None;
+            return None;
+        };
+        if self.line_born.is_some_and(|(_, id)| id == first) {
+            return None;
+        }
+        self.line_born = Some((t, first));
+        (lines.len() > 1).then_some(LINE_WAIT)
+    }
+
+    /// Whether the newest line's words still wait for the lines above to roll up.
+    fn karaoke_waits(&self, first: vo_core::words::WordId, lines: usize) -> bool {
+        lines > 1
+            && !self.still()
+            && self
+                .line_born
+                .is_some_and(|(at, id)| id == first && self.extra.now - at < LINE_WAIT)
+    }
+
     pub(crate) fn stable_lines(&self, style: &TextStyle, wrap: f32) -> Vec<(Vec<Word>, f32)> {
         let all = self.model.words();
         let words = &all[all.len().saturating_sub(400)..];
@@ -785,8 +814,13 @@ impl Popup {
         let roll = Spring::critical_to_98(ROLL_SECS);
         let n = lines.len();
         let cancelled = mode == Mode::Cancelled;
+        // A new line rolls in empty, and its words come once the line before has left the slot.
+        let waits = lines
+            .last()
+            .is_some_and(|(l, _)| self.karaoke_waits(l[0].id, all.len()));
         // The lit newest word and its underline ride on the newest line.
         let hot = match (mode, lines.last()) {
+            _ if waits => Vec::new(),
             (Mode::Listening, Some((last, w))) => self.karaoke_hot(last, (LINE_BOX - w) / 2.0, &style),
             _ => Vec::new(),
         };
@@ -797,7 +831,11 @@ impl Popup {
                 continue;
             };
             let key = format!("line-{}", words[0].id);
+            // Laid out but not drawn while it waits, so the line is already centred when
+            // its words fade in.
+            let hidden = age == 0 && waits;
             let text = Element::live_text("words", words)
+                .opacity(if hidden { 0.0 } else { 1.0 })
                 .text_style(style)
                 .color(hex(WHITE))
                 .motion(Prop::Opacity, Spring::critical_to_98(0.12))
@@ -811,6 +849,10 @@ impl Popup {
                 Vec::new()
             };
             let mut inline = Element::column("inline").child(text.rewind_hide(self.rewinding()));
+            if hidden {
+                // Re-centres at once while hidden, so it does not slide when it shows.
+                inline = inline.motion(Prop::Position, Motion::Snap);
+            }
             if !hot.is_empty() {
                 inline = inline.child(hot.remove(0));
             }

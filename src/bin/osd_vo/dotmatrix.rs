@@ -600,12 +600,24 @@ impl Popup {
         );
         let mut text = Element::column("text")
             .height(self.lines.min(MAX_LINES) as f32 * TEXT_LINE)
-            .margin_edges(TEXT_TOP, TEXT_X, 0.0, TEXT_X)
             .child(words);
         if self.cut > 0 && !self.shown.is_empty() && self.delivered().is_none() {
             text = text.child(self.dotmatrix_ellipsis(dim));
         }
-        text
+        // The text area clips to its own box, as in Popup::text_area, so a line that leaves
+        // as the text scrolls slides behind the top edge instead of over the waveform. The
+        // box reaches into the left margin for the "…" and into the gap above the status row
+        // for descenders; the negative margins keep the layout as it was.
+        use vo::scene::taffy::LengthPercentage;
+        let (left, below) = (TEXT_X - 2.0, STATUS_TOP - 4.0);
+        Element::layer("textclip")
+            .clip()
+            .margin_edges(TEXT_TOP, TEXT_X, -below, TEXT_X - left)
+            .layout(move |s| {
+                s.padding.left = LengthPercentage::length(left);
+                s.padding.bottom = LengthPercentage::length(below);
+            })
+            .child(text)
     }
 
     /// The "…" before cut text, in the left margin so it never changes where the lines
