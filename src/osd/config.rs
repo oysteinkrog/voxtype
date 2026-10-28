@@ -201,6 +201,31 @@ pub enum OsdTheme {
 }
 
 impl OsdTheme {
+    /// Every look the vo frontend draws, in declaration order. `Default`
+    /// is left out: vo draws it as `Swiss`.
+    pub const VO_LOOKS: [OsdTheme; 20] = [
+        OsdTheme::Swiss,
+        OsdTheme::Showcase,
+        OsdTheme::Type,
+        OsdTheme::Amber,
+        OsdTheme::Radial,
+        OsdTheme::Tron,
+        OsdTheme::Phosphor,
+        OsdTheme::Mission,
+        OsdTheme::Palette,
+        OsdTheme::Dotmatrix,
+        OsdTheme::Swissfi,
+        OsdTheme::Scope,
+        OsdTheme::Captions,
+        OsdTheme::Karaoke,
+        OsdTheme::Island,
+        OsdTheme::Jarvis,
+        OsdTheme::Particles,
+        OsdTheme::Synthwave,
+        OsdTheme::Mecha,
+        OsdTheme::Cyberpunk,
+    ];
+
     pub fn parse_str(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "default" => Some(OsdTheme::Default),

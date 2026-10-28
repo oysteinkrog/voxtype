@@ -1791,7 +1791,7 @@ impl Popup {
         if self.osd.is_none() {
             return;
         }
-        let theme = look_step::step(WALL_THEMES, self.look.theme, forward);
+        let theme = look_step::step(&OsdTheme::VO_LOOKS, self.look.theme, forward);
         tracing::info!(from = ?self.look.theme, to = ?theme, "look chord");
         self.look.theme = theme;
         look_step::save(theme);
@@ -2866,8 +2866,7 @@ fn print_gpu_times(times: &[(String, f64)]) {
     }
 }
 
-/// The looks the vo frontend draws itself, in the order the look chord
-/// steps through them.
+/// The looks the vo frontend draws itself.
 const WALL_THEMES: &[OsdTheme] = &[
     OsdTheme::Swiss,
     OsdTheme::Showcase,

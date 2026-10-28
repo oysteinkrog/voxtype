@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn saved_names_parse_back() {
-        for theme in [OsdTheme::Swiss, OsdTheme::Swissfi, OsdTheme::Dotmatrix] {
+        for theme in OsdTheme::VO_LOOKS {
             let name = format!("{theme:?}").to_ascii_lowercase();
             assert_eq!(OsdTheme::parse_str(&name), Some(theme));
         }
