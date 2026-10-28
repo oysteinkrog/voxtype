@@ -19,15 +19,17 @@ use super::*;
 
 use std::sync::OnceLock;
 
-use vo::scene::display::BlendMode;
+use vo::scene::canvas::Painter;
+use vo::scene::display::{BlendMode, Paint, ShapeInstance};
 use vo::scene::emitter::{
     ColorBy, Emitter, EmitterLook, EmitterSim, EmitterSource, Shape, Shock, SpriteStyle,
     WordParticles,
 };
-use vo::scene::geom::Point;
+use vo::scene::geom::{Point, RRect};
 use vo::scene::path::{icons, make, Morph, Outline, StrokeStyle};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
+use vo::scene::{MarkShape, WordMark};
 
 /// Width the design is drawn for; everything scales with `look.width / DESIGN_W`.
 const DESIGN_W: f32 = 600.0;
@@ -49,9 +51,16 @@ const RINGS: [(f32, f32, f32, f32); 5] = [
     (88.0, 1.0, 0.95, -1.35),
 ];
 const RING_PARTICLES: u32 = 320;
+/// Half the height of the swirl's band, round the button's centre: the outer ring and its
+/// glow fit.
+const SWIRL_HALF: f32 = 100.0;
+/// Pools for the dust off the newest words, reused in turn.
+const TRAIL_SLOTS: usize = 3;
 const DUST_PARTICLES: u32 = 320;
 /// Wave strands each side, and where they start and end, from the button's centre.
-const STRANDS: usize = 6;
+const STRANDS: usize = 4;
+/// Particles in each wing: few enough that the strands read as dots, not ribbons.
+const WING_PARTICLES: u32 = 480;
 const STRAND_FROM: f32 = 36.0;
 const STRAND_TO: f32 = 292.0;
 /// The words: top of the first line below the card's top, width, size, line height.
@@ -89,6 +98,9 @@ const MIC: u32 = 0x8ec6ff;
 const HINT: u32 = 0x86a8ff;
 const LABEL: u32 = 0xd9def0;
 const GREEN: u32 = 0x2fd27a;
+const NEWEST_LEFT: u32 = 0xcfe4ff;
+const NEWEST_MID: u32 = 0x7fa8ff;
+const NEWEST_RIGHT: u32 = 0xa98bff;
 
 fn hex(c: u32) -> Color {
     Color::hex(c, 1.0)
@@ -240,11 +252,64 @@ impl Swirl {
             .map_or(0.0, |f| (1.0 - (t - f) / 0.8).max(0.0) as f32)
     }
 
+    /// The voice level; from the stop it dies away (`Voice::at`) rather than dropping to
+    /// nothing, which jerked the strands and drew every spark as a streak.
     fn level(&self, t: f64) -> f32 {
-        if self.finish_at.is_some_and(|f| t >= f) {
-            0.0
-        } else {
-            self.voice.at(t)
+        self.voice.at(t)
+    }
+}
+
+/// The swirl under reduced motion: the rings and strands as still dots, drawn once.
+#[derive(Clone, Copy, Debug)]
+struct StillSwirl {
+    /// The button's centre in the canvas.
+    centre: Point,
+    s: f32,
+    dim: f32,
+}
+
+impl StillSwirl {
+    fn draw(&self, p: &mut Painter) {
+        let s = self.s;
+        let ramp = |x: f32, half: f32| {
+            let k = (x / half * 0.5 + 0.5).clamp(0.0, 1.0);
+            let (a, b, m) = if k < 0.5 {
+                (hex(CYAN), hex(BLUE), 2.0 * k)
+            } else {
+                (hex(BLUE), hex(VIOLET), 2.0 * k - 1.0)
+            };
+            let l = |x: f32, y: f32| x + (y - x) * m;
+            Color::rgba(l(a.r, b.r), l(a.g, b.g), l(a.b, b.b), 1.0)
+        };
+        let mut dot = |x: f32, y: f32, r: f32, c: Color| {
+            let (cx, cy) = (self.centre.x + x, self.centre.y + y);
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(cx - r, cy - r, 2.0 * r, 2.0 * r), r),
+                Paint::solid(c),
+            ));
+        };
+        for &(radius, _, squash, tilt) in &RINGS {
+            let (sn, cs) = tilt.sin_cos();
+            let n = (radius * 1.3) as usize;
+            for i in 0..n {
+                let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                let (x, y) = (radius * s * a.cos(), radius * s * a.sin() * squash);
+                let (x, y) = (cs * x - sn * y, sn * x + cs * y);
+                dot(x, y, 0.9 * s, ramp(x, radius * s).fade(0.55 * self.dim));
+            }
+        }
+        for side in [-1.0f32, 1.0] {
+            for strand in 0..STRANDS {
+                let phase = strand as f32 / STRANDS as f32 * std::f32::consts::TAU;
+                for i in 0..40 {
+                    let u = i as f32 / 40.0;
+                    let x = side * (STRAND_FROM + (STRAND_TO - STRAND_FROM) * u) * s;
+                    let wave = (x.abs() / (130.0 * s) * std::f32::consts::TAU + phase).sin();
+                    let y = 24.0 * s * (std::f32::consts::PI * u).sin() * wave;
+                    let c = ramp(x, STRAND_TO * s).fade(0.45 * (1.0 - u) * self.dim);
+                    dot(x, y, 0.8 * s, c);
+                }
+            }
         }
     }
 }
@@ -368,6 +433,8 @@ struct Trail {
     /// The word's right end, mid x-height, relative to the centre of the emitter's box.
     origin: Point,
     s: f32,
+    /// Whether its word is the newest; an older word's dust only fades out.
+    newest: bool,
 }
 
 impl EmitterSource for Trail {
@@ -377,7 +444,7 @@ impl EmitterSource for Trail {
                 half_length: 9.0 * self.s,
                 angle: std::f32::consts::FRAC_PI_2,
             },
-            emit: 0.8,
+            emit: if self.newest { 0.8 } else { 0.0 },
             life: 1.1,
             life_jitter: 0.5,
             spawn_speed: 10.0 * self.s,
@@ -444,10 +511,13 @@ impl EmitterSource for Wing {
                     * w.open(t)
                     * s,
                 wavelength: 130.0 * s,
-                wave_speed: 0.35 + 0.4 * l,
-                width: 1.5 * s,
+                // Speed and wave speed stay fixed: the GPU places a path particle at speed
+                // times age, so a speed that follows the voice moved every dot at once and
+                // drew it as a streak. The voice moves the sway and the light instead.
+                wave_speed: 0.5,
+                width: 4.0 * s,
             },
-            spawn_speed: (50.0 + 40.0 * l) * s,
+            spawn_speed: 64.0 * s,
             emit: 1.0,
             life: 6.0,
             level: l,
@@ -460,8 +530,8 @@ impl EmitterSource for Wing {
         let l = w.level(t);
         EmitterLook {
             origin: w.origin,
-            size: 0.8 * w.s,
-            brightness: w.open(t) * w.dim * (0.35 + 0.3 * l),
+            size: 0.95 * w.s,
+            brightness: w.open(t) * w.dim * (0.3 + 0.25 * l),
             ramp: [hex(CYAN), hex(BLUE), hex(VIOLET)],
             color_by: ColorBy::X {
                 half: STRAND_TO * w.s,
@@ -469,7 +539,7 @@ impl EmitterSource for Wing {
             style: SpriteStyle::Spark {
                 accents: 0.01,
                 gain: 1.0,
-                twinkle: 0.25,
+                twinkle: 0.45,
             },
             ..EmitterLook::default()
         }
@@ -497,6 +567,10 @@ impl Popup {
         }
     }
 
+    fn particles_cancelled(&self) -> bool {
+        self.ending() == Some(Ending::Cancelled)
+    }
+
     pub(crate) fn particles_view(&self) -> Element<Msg> {
         let l = &self.look;
         let s = scale(l);
@@ -508,16 +582,16 @@ impl Popup {
         let phase = self.particles_phase();
         let (x0, y0) = (ROOM_SIDE * s, ROOM_TOP * s);
         let card_h = card_h(self.lines, phase) * s;
+        // The swirl keeps to a band round the button, so its layer is no bigger than it needs.
+        let band = Size::new(surface.w, 2.0 * SWIRL_HALF * s);
         let swirl = Swirl {
             voice: Voice {
                 levels: self.wave.clone(),
                 newest_at: self.newest_at,
                 stop_at: self.extra.finish_at,
             },
-            origin: Point::new(
-                x0 + l.width / 2.0 - surface.w / 2.0,
-                y0 + RING_Y * s - surface.h / 2.0,
-            ),
+            // Relative to the centre of the swirl's band, which is centred on the button.
+            origin: Point::new(x0 + l.width / 2.0 - surface.w / 2.0, 0.0),
             s,
             shown_at: self.shown_at,
             finish_at: self.extra.finish_at,
@@ -525,7 +599,11 @@ impl Popup {
             dim: if self.status().loading { 0.25 } else { 1.0 },
         };
         root.child(at(self.particles_card(card_h), x0, y0))
-            .child(at(self.particles_swirl(&swirl, surface), 0.0, 0.0))
+            .child(at(
+                self.particles_swirl(&swirl, band),
+                0.0,
+                y0 + RING_Y * s - band.h / 2.0,
+            ))
             .child(at(
                 self.particles_button(phase),
                 x0 + l.width / 2.0 - DISC_R * s,
@@ -556,22 +634,36 @@ impl Popup {
             .presence(Transition::fade().offset(0.0, 8.0), exit)
     }
 
-    /// The swirl as light: strands, rings and dust, with a bloom.
+    /// The swirl as light: strands, rings and dust, in a band `surface`.
     fn particles_swirl(&self, swirl: &Swirl, surface: Size) -> Element<Msg> {
+        // No bloom: over the card it cost about 0.5 ms a frame. The spark sprites carry
+        // their own glow.
         let mut layer = Element::layer("swirl")
             .size(surface.w, surface.h)
             .blend(BlendMode::Add)
-            .bloom(
-                0.35 + 0.25 * swirl.voice.at(self.extra.now.max(self.shown_at)),
-                5.0 * swirl.s,
-            )
             .presence(Transition::fade(), Transition::fade());
+        if self.still() {
+            let still = StillSwirl {
+                centre: Point::new(
+                    surface.w / 2.0 + swirl.origin.x,
+                    surface.h / 2.0 + swirl.origin.y,
+                ),
+                s: swirl.s,
+                dim: swirl.dim,
+            };
+            return layer.child(at(
+                Element::canvas("still-swirl", self.shown_at, move |_, _, p| still.draw(p))
+                    .size(surface.w, surface.h),
+                0.0,
+                0.0,
+            ));
+        }
         for (i, side) in [-1.0f32, 1.0].into_iter().enumerate() {
             let wing = Wing::new(swirl.clone(), side);
             layer = layer.child(at(
                 Element::emitter(
                     format!("wing-{i}"),
-                    Emitter::new(Arc::new(wing), 1200, 41 + i as u32),
+                    Emitter::new(Arc::new(wing), WING_PARTICLES, 41 + i as u32),
                 )
                 .size(surface.w, surface.h),
                 0.0,
@@ -618,7 +710,8 @@ impl Popup {
             let check = Outline::new(&icons::check(), 0.05);
             Arc::new(Morph::new(&mic, &check, 64))
         });
-        let checked = phase != Phase::Listening;
+        // A cancel keeps the mic: nothing was delivered.
+        let checked = phase != Phase::Listening && !self.particles_cancelled();
         let icon = 22.0 * s;
         Element::layer("button")
             .size(d, d)
@@ -648,10 +741,9 @@ impl Popup {
             ))
     }
 
-    /// The newest word's id and its right end on its baseline, in the text box, as the
-    /// live text lays it out.
-    fn particles_newest(&self) -> Option<(u32, Point)> {
-        let last = self.shown.last()?;
+    /// The last `n` words' places in the text and their right ends on their baselines, in
+    /// the text box, as the live text lays them out, oldest first.
+    fn particles_ends(&self, n: usize) -> Vec<(usize, Point)> {
         let l = &self.look;
         let style = text_style(l);
         let width = text_width(l);
@@ -661,18 +753,23 @@ impl Popup {
             .map(|w| w.text.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        let start = (text.len() - last.text.len()) as u32;
         let mut shaped = self.measure.layout(&text, &style, Some(width));
         shaped.align_in(style.align, width);
-        let mut glyphs = shaped
-            .glyphs
-            .iter()
-            .filter(|g| g.cluster >= start && g.cluster != u32::MAX);
-        let first = glyphs.next()?;
-        let end = glyphs.fold(first.pos.x + first.advance, |x, g| {
-            x.max(g.pos.x + g.advance)
-        });
-        Some((last.id, Point::new(end, first.pos.y)))
+        let mut start = 0u32;
+        let mut ends = Vec::new();
+        let first = self.shown.len().saturating_sub(n);
+        for (i, w) in self.shown.iter().enumerate() {
+            let range = start..start + w.text.len() as u32;
+            start = range.end + 1;
+            if i < first {
+                continue;
+            }
+            let mut glyphs = shaped.glyphs.iter().filter(|g| range.contains(&g.cluster));
+            let Some(g0) = glyphs.next() else { continue };
+            let end = glyphs.fold(g0.pos.x + g0.advance, |x, g| x.max(g.pos.x + g.advance));
+            ends.push((i, Point::new(end, g0.pos.y)));
+        }
+        ends
     }
 
     /// The words, centred, forming from particles.
@@ -691,7 +788,19 @@ impl Popup {
             .motion(Prop::Offset, Spring::POP)
             .word_enter(Transition::fade().opacity(0.0))
             .word_change(Transition::fade().opacity(0.4))
-            .word_particles(WordParticles {
+            // The newest word runs from pale blue through blue to violet, as drawn.
+            .current_word(self.shown.last().map(|w| w.id))
+            .word_mark(
+                WordMark::new(MarkShape::Underline, Color::TRANSPARENT).accent_gradient(
+                    hex(NEWEST_LEFT),
+                    hex(NEWEST_MID),
+                    hex(NEWEST_RIGHT),
+                ),
+            );
+        let words = if self.still() {
+            words
+        } else {
+            words.word_particles(WordParticles {
                 color: Color::hex(0x6fa6ff, 0.95),
                 style: SpriteStyle::SPARK,
                 dot_area: 5.0,
@@ -700,7 +809,8 @@ impl Popup {
                 hold: if phase == Phase::Done { 0.0 } else { 0.4 },
                 ..WordParticles::default()
             })
-            .presence(Transition::fade(), Transition::fade().dissolve(1.0));
+        }
+        .presence(Transition::fade(), Transition::fade().dissolve(1.0));
         at(
             Element::column("text")
                 .size(TEXT_W * s, self.lines as f32 * TEXT_LINE * s)
@@ -710,41 +820,44 @@ impl Popup {
         )
     }
 
-    /// The dust off the newest word while listening, one pool per word so a new word does
-    /// not drag the old dust along.
+    /// The dust off the newest word while listening. Each of the last `TRAIL_SLOTS` words
+    /// keeps a pool of its own, so a new word does not drag the old dust along, and the
+    /// pools are reused in turn: the renderer has room for 16 emitters in all.
     fn particles_trail(&self, phase: Phase, x0: f32, y0: f32, surface: Size) -> Element<Msg> {
         let l = &self.look;
         let s = scale(l);
-        let layer = Element::layer("trail")
+        let mut layer = Element::layer("trail")
             .size(surface.w, surface.h)
             .blend(BlendMode::Add);
-        let Some((id, end)) = self
-            .particles_newest()
-            .filter(|_| phase == Phase::Listening)
-        else {
+        if phase != Phase::Listening || self.still() {
             return at(layer, 0.0, 0.0);
-        };
+        }
         let tx = x0 + (l.width - TEXT_W * s) / 2.0;
         let ty = y0 + TEXT_TOP * s;
-        let p = Point::new(
-            tx + end.x + 2.0 * s - surface.w / 2.0,
-            ty + end.y - 0.3 * TEXT_PX * s - surface.h / 2.0,
-        );
-        let trail = Trail { origin: p, s };
-        at(
-            layer.child(at(
+        let ends = self.particles_ends(TRAIL_SLOTS);
+        let newest = ends.last().map(|e| e.0);
+        for (i, end) in ends {
+            let origin = Point::new(
+                tx + end.x + 2.0 * s - surface.w / 2.0,
+                ty + end.y - 0.3 * TEXT_PX * s - surface.h / 2.0,
+            );
+            let trail = Trail {
+                origin,
+                s,
+                newest: Some(i) == newest,
+            };
+            let slot = i % TRAIL_SLOTS;
+            layer = layer.child(at(
                 Element::emitter(
-                    format!("trail-{id}"),
-                    Emitter::new(Arc::new(trail), 192, 31 + id),
+                    format!("trail-{slot}"),
+                    Emitter::new(Arc::new(trail), 192, 31 + slot as u32),
                 )
-                .size(surface.w, surface.h)
-                .presence(Transition::fade(), Transition::fade()),
+                .size(surface.w, surface.h),
                 0.0,
                 0.0,
-            )),
-            0.0,
-            0.0,
-        )
+            ));
+        }
+        at(layer, 0.0, 0.0)
     }
 
     /// Under the words: the status row while listening, the progress bar and the status
@@ -781,10 +894,14 @@ impl Popup {
                         (bar_y - BAR_H / 2.0) * s,
                     ));
                 }
-                let row = self.particles_status(&status, phase).presence(
-                    Transition::fade().offset(0.0, 5.0),
-                    Transition::fade().offset(0.0, -5.0),
-                );
+                // A new row replaces the old one at once and settles up into place, so the
+                // two never sit over each other, even when the progress bar moves the row.
+                let step = if self.still() { 0.0 } else { 8.0 * s };
+                let row = self
+                    .particles_status(&status, phase)
+                    .motion(Prop::Opacity, Motion::Snap)
+                    .motion(Prop::Offset, Spring::critical_to_98(0.2))
+                    .presence(Transition::fade().offset(0.0, step), Transition::fade());
                 let row_h = 20.0 * s;
                 at(col.child(at(row, 0.0, status_y * s - row_h / 2.0)), x0, y0)
             }
@@ -843,7 +960,7 @@ impl Popup {
             .align_items(AlignItems::CENTER)
             .justify(vo::scene::taffy::JustifyContent::CENTER)
             .gap(8.0 * s);
-        if phase == Phase::Finishing || status.loading {
+        if (phase == Phase::Finishing && !self.particles_cancelled()) || status.loading {
             let side = 15.0 * s;
             let ring = RING.get_or_init(|| {
                 Arc::new(Outline {
