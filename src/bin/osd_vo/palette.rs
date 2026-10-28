@@ -505,6 +505,7 @@ impl Popup {
         let style = l.text_style();
         let dim = if mode == Mode::Cancelled { 0.45 } else { 1.0 };
         let words = Element::live_text("words", &self.shown)
+            .line_motion(&self.look)
             .text_style(style)
             .color(hex(INK))
             .opacity(dim)

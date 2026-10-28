@@ -1319,6 +1319,7 @@ impl Popup {
             hex(TEXT)
         };
         let words = Element::live_text("words", &self.shown)
+            .line_motion(&self.look)
             .revision_motion(revision::motion(&self.look))
             .text_style(text_style(l))
             .color(text_color)

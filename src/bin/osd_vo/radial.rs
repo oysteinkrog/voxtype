@@ -538,6 +538,7 @@ impl Popup {
     fn radial_text(&self, g: &Geo) -> Element<Msg> {
         let k = g.k;
         let mut words = Element::live_text("words", &self.shown)
+            .line_motion(&self.look)
             .text_style(self.look.text_style())
             .color(hex(TEXT, 1.0))
             .width(self.look.text_width())

@@ -475,6 +475,7 @@ impl Popup {
         // Each new word rises into place, readable within 120 ms; a
         // revised word dips and settles.
         let words = Element::live_text("words", &self.shown)
+            .line_motion(&self.look)
             .revision_motion(revision::motion(&self.look))
             .text_style(l.text_style())
             .color(l.foreground)

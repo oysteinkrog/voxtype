@@ -936,6 +936,7 @@ impl Popup {
         let k = g.k;
         let style = self.look.text_style();
         let mut words = Element::live_text("words", &self.shown)
+            .line_motion(&self.look)
             .text_style(style)
             .color(hex(GREEN, 1.0))
             .text_halo(hex(GREEN, 0.35), 5.0 * k)

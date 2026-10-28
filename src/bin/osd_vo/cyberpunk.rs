@@ -1452,6 +1452,7 @@ impl Popup {
         // New words rise into place; a revised word rolls up and out while
         // its replacement rolls in from below.
         let words = Element::live_text("words", &self.shown)
+            .line_motion(&self.look)
             .text_style(l.text_style())
             .color(colour)
             .motion(Prop::TextColor, Spring::critical_to_98(0.2))

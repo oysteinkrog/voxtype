@@ -27,6 +27,10 @@ use std::time::{Duration, SystemTime};
 use clap::Parser;
 use vo::scene::display::ShapeKind;
 use vo::scene::element::{Element, TextStyle};
+use vo::scene::flow::bell::Bell;
+use vo::scene::flow::margin::MarginMark;
+use vo::scene::flow::overflow::Overflow;
+use vo::scene::flow::spine::Spine;
 use vo::scene::geom::{Color, Rect, Size};
 use vo::scene::taffy::{AlignItems, AlignSelf};
 use vo::scene::text::TextLayout;
@@ -611,6 +615,29 @@ struct Look {
     features: Arc<[String]>,
 }
 
+/// The line motion features of a look on its transcript (MO-31 to MO-34).
+trait LineMotion {
+    fn line_motion(self, look: &Look) -> Self;
+}
+
+impl<M> LineMotion for Element<M> {
+    fn line_motion(self, look: &Look) -> Element<M> {
+        let words = self.overflow(look.overflow());
+        let words = match look.margin_mark() {
+            Some(m) => words.margin_mark(m),
+            None => words,
+        };
+        let words = match look.spine() {
+            Some(s) => words.overflow_spine(s),
+            None => words,
+        };
+        match look.bell() {
+            Some(b) => words.margin_bell(b),
+            None => words,
+        }
+    }
+}
+
 impl Look {
     fn new(cfg: &OsdConfig, theme: &PlasmaTheme, stop_hint: String, fonts: &FontRegistry) -> Look {
         let k = px_per_pt();
@@ -652,6 +679,61 @@ impl Look {
         let asked = |n: &str| self.features.iter().any(|f| f == n);
         // MO-75: `look-choice` also turns on the motions this look picks.
         asked(name) || (asked(choice::LOOK_CHOICE) && choice::picks(self.theme).contains(&name))
+    }
+
+    /// How the top line leaves when the text overflows (MO-33). With `fold-under` it
+    /// folds under about its baseline, or in the flat Swiss looks thins away; under
+    /// reduced motion, and without the feature, it scrolls up and fades.
+    fn overflow(&self) -> Overflow {
+        if !self.on("fold-under") || self.on("reduced-motion") {
+            return Overflow::Scroll;
+        }
+        match self.theme {
+            OsdTheme::Default | OsdTheme::Swiss | OsdTheme::Swissfi => Overflow::THIN,
+            _ => Overflow::FOLD,
+        }
+    }
+
+    /// With `margin-mark`, a bar beside the newest line in the accent colour that splits
+    /// when the text wraps (MO-32); under reduced motion it moves to the new line at once.
+    fn margin_mark(&self) -> Option<MarginMark> {
+        if !self.on("margin-mark") {
+            return None;
+        }
+        let mark = MarginMark::new(self.accent);
+        Some(if self.on("reduced-motion") {
+            MarginMark { travel: Spring::critical_to_98(0.001), fade: 0.001, ..mark }
+        } else {
+            mark
+        })
+    }
+
+    /// With `margin-bell`, the newest line tightens as it nears the edge and relaxes on
+    /// the wrap (MO-31); type and phosphor add a 3 px carriage return. Under reduced motion
+    /// nothing moves.
+    fn bell(&self) -> Option<Bell> {
+        if !self.on("margin-bell") || self.on("reduced-motion") {
+            return None;
+        }
+        Some(match self.theme {
+            OsdTheme::Type | OsdTheme::Phosphor => Bell::DEFAULT.carriage(3.0),
+            _ => Bell::DEFAULT,
+        })
+    }
+
+    /// With `overflow-spine`, each line that leaves the top leaves a tick in the accent
+    /// colour along the text's top edge (MO-34); under reduced motion the tick appears at
+    /// once.
+    fn spine(&self) -> Option<Spine> {
+        if !self.on("overflow-spine") {
+            return None;
+        }
+        let spine = Spine { y: 1.5, ..Spine::new(self.accent) };
+        Some(if self.on("reduced-motion") {
+            Spine { hold: 0.0, close: 0.0, ..spine }
+        } else {
+            spine
+        })
     }
 
     /// The centre of the newest text line in logical pixels below the
@@ -1790,6 +1872,7 @@ impl Popup {
     fn transcript(&self) -> Element<Msg> {
         let l = &self.look;
         let mut words = Element::live_text("words", &self.shown)
+            .line_motion(&self.look)
             .revision_motion(revision::motion(&self.look))
             .text_style(l.text_style())
             .color(l.foreground);

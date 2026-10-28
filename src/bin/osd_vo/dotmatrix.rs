@@ -584,6 +584,7 @@ impl Popup {
             Transition::fade().opacity(0.7)
         };
         let words = Element::live_text("words", &self.shown)
+            .line_motion(&self.look)
             .text_style(l.text_style())
             .color(hex(INK))
             .opacity(dim)

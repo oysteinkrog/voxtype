@@ -688,6 +688,7 @@ impl Popup {
     fn tron_text(&self, g: &Geo) -> Element<Msg> {
         let k = g.k;
         let mut words = Element::live_text("words", &self.shown)
+            .line_motion(&self.look)
             .text_style(self.look.text_style())
             .color(hex(TEXT, 1.0))
             .text_halo(hex(CYAN, 0.18), 4.0 * k)

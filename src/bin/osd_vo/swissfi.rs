@@ -518,6 +518,7 @@ impl Popup {
         let l = &self.look;
         let dim = if mode == Mode::Cancelled { 0.45 } else { 1.0 };
         let words = Element::live_text("words", &self.shown)
+            .line_motion(&self.look)
             .revision_motion(revision::motion(&self.look))
             .text_style(l.text_style())
             .color(hex(PAPER))

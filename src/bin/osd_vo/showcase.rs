@@ -804,6 +804,7 @@ impl Popup {
         // One brief brightening when the final text lands.
         let text = mix(ICE, OsdColor::rgb(1.0, 1.0, 1.0), self.final_pulse());
         let mut words = Element::live_text("words", &self.shown)
+            .line_motion(&self.look)
             .text_style(l.text_style())
             .color(c(text))
             .motion(Prop::TextColor, Spring::SOFT)
