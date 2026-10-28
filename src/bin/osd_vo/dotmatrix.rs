@@ -622,8 +622,10 @@ impl Popup {
         let shown = scrambled(&text, since);
         let mark = Mark { mode, mode_at };
         let until = mark.until();
+        // The count keeps its width; a long state label is cut short instead.
         let count = Element::row("count")
             .align_items(AlignItems::CENTER)
+            .shrink(0.0)
             .child(digit_roll(
                 "count",
                 &self.tally_count(),
