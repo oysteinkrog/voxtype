@@ -71,6 +71,71 @@ const CARRIER_HZ: f64 = 420.0;
 /// The level that reaches the top of the graticule.
 const FULL: f32 = 0.95;
 
+/// With `sentence-trace` (MO-63): each word keeps the stretch of trace it
+/// came from. Once the word arrives, that stretch freezes, shrinks and
+/// drops into a strip along the foot of the graticule with a tick at its
+/// start, so the strip reads as the sentence so far.
+pub(crate) const SENTENCE_TRACE: &str = "sentence-trace";
+/// The strip's height, in the mock-up's pixels before scaling.
+const STRIP_H: f32 = 38.0;
+/// Strip pixels per second of sound, and the narrowest word.
+const STRIP_PX_PER_SEC: f32 = 90.0 * S;
+const STRIP_MIN_W: f32 = 6.0;
+const STRIP_GAP: f32 = 3.0;
+/// How long a stretch takes to drop into the strip, and how long its tick
+/// stays bright after it lands.
+const STRIP_FLY: f64 = 0.5;
+const STRIP_TICK: f64 = 0.6;
+/// Envelope points kept per word, and words kept.
+const STRIP_POINTS: usize = 32;
+const STRIP_WORDS: usize = 64;
+
+/// MO-63: one word's stretch of trace, frozen when the word came.
+#[derive(Clone, Debug, PartialEq)]
+struct Frozen {
+    id: u32,
+    /// The sound it came from, in scene time.
+    sound: (f64, f64),
+    /// When it froze.
+    at: f64,
+    /// The envelope over the sound, 0 to 1, `STRIP_POINTS` long.
+    env: Arc<[f32]>,
+}
+
+/// The envelope of `levels` (newest last, the newest at `newest_at`) over
+/// the sound from `a` to `b`, as `n` points scaled like the trace.
+fn envelope(levels: &[f32], newest_at: f64, a: f64, b: f64, n: usize) -> Vec<f32> {
+    let len = levels.len();
+    (0..n)
+        .map(|i| {
+            let s = a + (b - a) * i as f64 / (n - 1).max(1) as f64;
+            let back = ((newest_at - s) * FRAME_HZ as f64).max(0.0);
+            let j = (len as f64 - 1.0 - back).round();
+            if len == 0 || j < 0.0 {
+                return 0.0;
+            }
+            (levels[j as usize] / FULL).min(1.0).powf(1.7)
+        })
+        .collect()
+}
+
+/// The right edge of each slot in the strip, oldest first. Each word makes
+/// room as it lands: `k` is how far each has landed, 0 to 1, and a word
+/// moves left by the width of each newer word times that word's `k`.
+fn slot_rights(widths: &[f32], k: &[f32], right: f32) -> Vec<f32> {
+    let mut out = vec![0.0; widths.len()];
+    let mut x = right;
+    for i in (0..widths.len()).rev() {
+        out[i] = x;
+        x -= (widths[i] + STRIP_GAP) * k[i];
+    }
+    out
+}
+
+fn strip_width(sound: (f64, f64)) -> f32 {
+    ((sound.1 - sound.0) as f32 * STRIP_PX_PER_SEC).max(STRIP_MIN_W)
+}
+
 #[derive(Clone, Copy)]
 struct Fonts {
     mono: u32,
@@ -165,6 +230,8 @@ pub struct State {
     read_at: f64,
     word_at: f64,
     words: usize,
+    /// MO-63: the words' frozen stretches of trace, in word order.
+    sentence: Vec<Frozen>,
 }
 
 impl Default for State {
@@ -178,6 +245,7 @@ impl Default for State {
             read_at: f64::NEG_INFINITY,
             word_at: f64::NEG_INFINITY,
             words: 0,
+            sentence: Vec::new(),
         }
     }
 }
@@ -200,6 +268,8 @@ struct Scene {
     caret: Option<(Point, f64)>,
     /// Onsets for the caret's foot (MO-73), when the look has it on.
     joint: Option<Arc<[f64]>>,
+    /// MO-63: the frozen words, and whether motion is reduced.
+    sentence: Option<(Arc<[Frozen]>, bool)>,
 }
 
 impl Scene {
@@ -239,6 +309,7 @@ impl Scene {
             self.draw_frames(p);
             self.draw_grid(p);
             self.draw_trace(t, p);
+            self.draw_sentence(t, p);
             self.draw_meters(p);
             self.draw_icons(t, p);
             self.draw_caret(t, p);
@@ -361,6 +432,74 @@ impl Scene {
                 RRect::new(Rect::new(x - 0.75, g.y, 1.5, g.h), 0.0),
                 Paint::solid(hex(TRACE)),
             ));
+        }
+    }
+
+    /// MO-63: the strip of frozen words along the foot of the graticule.
+    /// A word that just came drops from where its sound is on the trace;
+    /// with reduced motion it shows in its place at once.
+    fn draw_sentence(&self, t: f64, p: &mut Painter) {
+        let Some((words, reduced)) = &self.sentence else {
+            return;
+        };
+        let g = self.graticule();
+        let h = STRIP_H * S;
+        let y0 = g.y + g.h - h;
+        p.shape(
+            ShapeInstance::rrect(RRect::new(Rect::new(g.x, y0, g.w, h), 0.0), Paint::solid(hex(BG).fade(0.92)))
+                .with_stroke(Paint::solid(hex(GRID).fade(1.0)), 1.0),
+        );
+        if words.is_empty() {
+            return;
+        }
+        let landed = |f: &Frozen| if *reduced { 1.0 } else { ease_out((t - f.at) / STRIP_FLY) };
+        let widths: Vec<f32> = words.iter().map(|f| strip_width(f.sound)).collect();
+        let k: Vec<f32> = words.iter().map(landed).collect();
+        let rights = slot_rights(&widths, &k, g.x + g.w - 4.0);
+        let t_eff = self.scrub.map(self.finish_at.map_or(t, |f| t.min(f)));
+        let on_trace = |s: f64| g.x + g.w * (1.0 - (t_eff - s) / WINDOW).clamp(0.0, 1.0) as f32;
+        let cancelled = self.mode == Mode::Cancelled;
+        for (i, f) in words.iter().enumerate() {
+            let (k, w) = (k[i], widths[i]);
+            // Where it lands, and where its sound is on the trace now.
+            let (tx0, tx1, ty, ta) = (rights[i] - w, rights[i], y0 + h / 2.0, h / 2.0 - 3.0);
+            let (sx0, sx1) = (on_trace(f.sound.0), on_trace(f.sound.1));
+            let (sy, sa) = (g.y + g.h / 2.0, g.h / 2.0 - 4.0);
+            let mix = |a: f32, b: f32| a + (b - a) * k;
+            let (x0, x1, cy, amp) = (mix(sx0, tx0), mix(sx1, tx1), mix(sy, ty), mix(sa, ta));
+            // Words pushed off the left fade out.
+            let alpha = ((x0 - g.x) / 24.0).clamp(0.0, 1.0);
+            if alpha <= 0.0 || x1 - x0 < 1.0 {
+                continue;
+            }
+            let n = ((x1 - x0) / 1.5).max(4.0) as usize;
+            let pts: Vec<Point> = (0..n)
+                .map(|j| {
+                    let u = j as f32 / (n - 1) as f32;
+                    let e = f.env[((u * (f.env.len() - 1) as f32).round() as usize).min(f.env.len() - 1)];
+                    let sign = if j % 2 == 0 { 1.0 } else { -1.0 };
+                    let z = noise(j as i64 + f.id as i64 * 977);
+                    Point::new(x0 + u * (x1 - x0), cy - sign * (0.08 + 0.92 * z * z) * e * amp)
+                })
+                .collect();
+            let colour = if cancelled { hex(DIM) } else { hex(TRACE) };
+            let line = Contour::polyline(&pts, false);
+            p.stroke(&line, &StrokeStyle::solid(1.0, colour.fade((0.45 + 0.5 * k) * alpha)));
+            // The word tick, bright for a moment after it lands.
+            if k > 0.0 {
+                let fresh = if *reduced { 0.0 } else { 1.0 - ((t - f.at - STRIP_FLY) / STRIP_TICK).clamp(0.0, 1.0) };
+                let tick = if cancelled {
+                    hex(DIM)
+                } else {
+                    let (a, b, k) = (hex(TRACE).fade(0.45), hex(VALUE), fresh as f32);
+                    let m = |x: f32, y: f32| x + (y - x) * k;
+                    Color::rgba(m(a.r, b.r), m(a.g, b.g), m(a.b, b.b), m(a.a, b.a))
+                };
+                p.shape(ShapeInstance::rrect(
+                    RRect::new(Rect::new(tx0 - 2.0, y0 + 2.0, 1.0, h - 4.0), 0.0),
+                    Paint::solid(tick.fade(k * alpha)),
+                ));
+            }
         }
     }
 
@@ -522,6 +661,37 @@ impl Popup {
             s.words = self.word_count;
             s.word_at = t;
         }
+        if self.look.on(SENTENCE_TRACE) {
+            self.sync_sentence(t);
+        }
+    }
+
+    /// MO-63: freezes each new word's stretch of trace once its sound is
+    /// all in, and lets go of the words that went.
+    fn sync_sentence(&mut self, t: f64) {
+        let words = self.model.words();
+        let from = words.len().saturating_sub(STRIP_WORDS);
+        let mut kept = Vec::with_capacity(words.len() - from);
+        for w in &words[from..] {
+            if let Some(f) = self.scope.sentence.iter().find(|f| f.id == w.id) {
+                kept.push(f.clone());
+                continue;
+            }
+            let Some(h) = self.heard.word(w.id) else {
+                continue;
+            };
+            let (a, b) = h.sound;
+            if b > self.newest_at || b <= a {
+                continue;
+            }
+            kept.push(Frozen {
+                id: w.id,
+                sound: h.sound,
+                at: t,
+                env: envelope(&self.wave, self.newest_at, a, b, STRIP_POINTS).into(),
+            });
+        }
+        self.scope.sentence = kept;
     }
 
     pub(crate) fn arm_scope_tick(&mut self, _cx: &mut Cx<Msg>) {}
@@ -579,6 +749,9 @@ impl Popup {
             ],
             caret: caret.map(|(c, at)| (Point::new(c.x + o, c.y + o), at)),
             joint: self.joint_onsets(),
+            sentence: l
+                .on(SENTENCE_TRACE)
+                .then(|| (Arc::from(s.sentence.as_slice()), reduced() || l.on("reduced-motion"))),
         };
         let until = scene.until(self.extra.now);
         let canvas = at(
@@ -726,5 +899,45 @@ impl Popup {
             )
             .presence(Transition::fade(), Transition::fade()),
         )
+    }
+}
+
+#[cfg(test)]
+mod sentence_tests {
+    use super::*;
+
+    #[test]
+    fn landed_words_pack_from_the_right_without_overlap() {
+        let widths = [20.0, 8.0, 30.0];
+        let rights = slot_rights(&widths, &[1.0, 1.0, 1.0], 500.0);
+        assert_eq!(rights[2], 500.0);
+        for i in 0..2 {
+            let gap = (rights[i + 1] - widths[i + 1]) - rights[i];
+            assert!((gap - STRIP_GAP).abs() < 1e-4, "gap {gap}");
+        }
+    }
+
+    #[test]
+    fn older_words_make_room_only_as_the_new_one_lands() {
+        let widths = [20.0, 8.0, 30.0];
+        let before = slot_rights(&widths[..2], &[1.0, 1.0], 500.0);
+        let starting = slot_rights(&widths, &[1.0, 1.0, 0.0], 500.0);
+        assert_eq!(&starting[..2], &before[..]);
+        let half = slot_rights(&widths, &[1.0, 1.0, 0.5], 500.0);
+        assert!((before[1] - half[1] - 0.5 * (30.0 + STRIP_GAP)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_frozen_envelope_follows_the_levels_it_came_from() {
+        // One second of levels at FRAME_HZ: quiet, then loud.
+        let n = FRAME_HZ as usize;
+        let levels: Vec<f32> = (0..n).map(|i| if i < n / 2 { 0.0 } else { FULL }).collect();
+        let env = envelope(&levels, 1.0, 0.1, 0.9, 9);
+        assert_eq!(env.len(), 9);
+        assert_eq!(env[0], 0.0);
+        assert!((env[8] - 1.0).abs() < 1e-6);
+        // Sound from before the levels start reads as silence.
+        assert!(envelope(&levels, 1.0, -5.0, -4.0, 4).iter().all(|&e| e == 0.0));
+        assert!(strip_width((0.0, 0.01)) >= STRIP_MIN_W);
     }
 }
