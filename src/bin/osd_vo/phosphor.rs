@@ -943,8 +943,6 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.08))
             .motion(Prop::Offset, Spring::critical_to_98(0.1))
             .motion(Prop::TextFx, Spring::critical_to_98(0.16));
-        // The margin bell's carriage return (MO-31).
-        words = words.offset(self.bell_shift(), 0.0);
         // The beam writes new and changed letters itself; without it, as
         // under reduced motion, words type in with a wipe.
         let beam = self.phosphor_beam(g);

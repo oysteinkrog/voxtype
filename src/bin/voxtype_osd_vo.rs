@@ -128,8 +128,6 @@ mod choice;
 mod hearing;
 #[path = "osd_vo/channels.rs"]
 mod channels;
-#[path = "osd_vo/margin_bell.rs"]
-mod margin_bell;
 #[path = "osd_vo/glyph_paths.rs"]
 mod glyph_paths;
 #[path = "osd_vo/lifecycle.rs"]
@@ -1159,8 +1157,6 @@ struct Popup {
     hearing: hearing::State,
     /// Typographic channels on the words (`osd_vo/channels.rs`).
     channels: channels::State,
-    /// The margin bell: where the reading line wrapped (`osd_vo/margin_bell.rs`).
-    bell: margin_bell::State,
     /// The end of the dictation: the delivery and its hand-off.
     life: lifecycle::State,
     /// The variable font's voice readings (MO-81).
@@ -1219,7 +1215,6 @@ impl Popup {
             wild: wild_space::State::default(),
             hearing: hearing::State::default(),
             channels: channels::State::default(),
-            bell: margin_bell::State::default(),
             life: lifecycle::State::default(),
             breath: wild_motion::State::default(),
         }

@@ -481,7 +481,7 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(self.paths_word_enter(Transition::fade().opacity(0.0).offset(0.0, WORD_RISE)));
-        let words = self.typo_words(words).offset(self.bell_shift(), 0.0);
+        let words = self.typo_words(words);
         // Before the hand-off, which may wrap the live text.
         let words = self.letter_fx_words(words);
         let words = self.handoff_or(
