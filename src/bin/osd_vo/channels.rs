@@ -78,7 +78,7 @@ struct Seen {
 
 impl Popup {
     fn channels_on(&self) -> bool {
-        ALL.iter().any(|f| self.look.on(f))
+        ALL.iter().any(|f| self.look.on(f)) || self.bell_on()
     }
 
     fn channels_reduced(&self) -> bool {
@@ -151,12 +151,15 @@ impl Popup {
             l.on(TRACKING) || l.on(VOICE),
         );
         let newest = self.shown.last().map(|w| w.id);
+        // The margin bell tightens the reading line as it fills (MO-31).
+        let bell = self.bell_tracking();
         let still = self.status().finishing || self.ending().is_some();
         let mut typos = Typos::new();
         for w in &self.shown {
             let Some(seen) = seen.get(&w.id).copied() else { continue };
             let letters = w.text.chars().count();
             let mut rest = Typo::REST;
+            rest.tracking *= bell.get(&w.id).copied().unwrap_or(1.0);
             let mut arrive = Typo::REST;
             let mut motion = TypoMotion::default();
             if l.on(CHANNELS) {
