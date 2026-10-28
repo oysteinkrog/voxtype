@@ -105,6 +105,10 @@ mod station;
 mod synthwave;
 #[path = "osd_vo/mecha.rs"]
 mod mecha;
+#[path = "osd_vo/endings.rs"]
+mod endings;
+#[allow(unused_imports)]
+use endings::RewindHide;
 #[path = "osd_vo/sounding.rs"]
 mod sounding;
 #[path = "osd_vo/hearing.rs"]
@@ -1117,6 +1121,8 @@ struct Popup {
     cyber: cyberpunk::State,
     /// What only the synthwave look keeps.
     synth: synthwave::State,
+    /// The loading word's times and fill (MO-54).
+    endings: endings::State,
     /// Onsets and the sound each word came from (`osd_vo/sounding.rs`).
     heard: sounding::State,
     /// What the popup heard before the words came (`osd_vo/hearing.rs`).
@@ -1172,6 +1178,7 @@ impl Popup {
             jarvis: jarvis::Extra::default(),
             cyber: cyberpunk::State::default(),
             synth: synthwave::State::default(),
+            endings: endings::State::default(),
             heard: sounding::State::default(),
             hearing: hearing::State::default(),
             channels: channels::State::default(),
@@ -1497,6 +1504,7 @@ impl App for Popup {
         self.sync_jarvis(t);
         self.sync_cyber(t);
         self.sync_synthwave(t);
+        self.sync_endings(t);
         self.sync_hearing();
         self.arm_tick(cx);
         self.arm_scope_tick(cx);
@@ -1759,7 +1767,13 @@ impl Popup {
         );
         let text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
-            .child(words);
+            .child(words)
+            .children(self.line_marks(
+                l.text_style(),
+                l.text_width(),
+                endings::Ink::of(l),
+                endings::Cancel::Unthread,
+            ));
         let text = self.typo_marks(text, l.text_width());
         let text = self.with_hearing(
             text,

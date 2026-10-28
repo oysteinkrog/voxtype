@@ -198,6 +198,8 @@ struct Panel {
     wave: Arc<[f32]>,
     newest_at: f64,
     rate: f32,
+    /// The waveform's clock during a rewind cancel (MO-50).
+    scrub: endings::Scrub,
 }
 
 impl Panel {
@@ -207,6 +209,7 @@ impl Panel {
 
     /// The level shown at `age` seconds before now, 0 to 1.
     fn level_at(&self, t: f64, age: f32) -> f32 {
+        let t = self.scrub.map(t);
         let n = self.wave.len();
         if n == 0 {
             return 0.0;
@@ -437,6 +440,7 @@ impl Popup {
             wave: self.wave.clone(),
             newest_at: self.newest_at,
             rate: FRAME_HZ as f32,
+            scrub: self.scrub(),
         };
         let until = match (self.extra.final_at, self.amber.ended_at) {
             (Some(f), _) => f + JOIN_SECS + 0.1,
@@ -468,6 +472,7 @@ impl Popup {
             .child(self.amber_header(&g, &status))
             .child(self.amber_side_labels(&g))
             .child(self.amber_text(&g))
+            .children(self.amber_rewind(&g))
             .children(self.receipts_element(
                 "amber",
                 &self.shown,
@@ -585,7 +590,25 @@ impl Popup {
             hex(TEXT, 1.0),
             hex(AMBER, 1.0),
         );
-        at(words, TEXT_X * k, TEXT_TOP * k)
+        at(words.rewind_hide(self.rewinding()), TEXT_X * k, TEXT_TOP * k)
+    }
+
+    /// MO-50: a cancel takes the words back into the caret, drawn over
+    /// the hidden text.
+    fn amber_rewind(&self, g: &Geo) -> Option<Element<Msg>> {
+        if !self.rewinding() {
+            return None;
+        }
+        let ink = endings::Ink {
+            text: hex(TEXT, 0.4),
+            mark: hex(AMBER, 1.0),
+            faint: hex(TEXT, 0.3),
+        };
+        let (style, w) = (self.look.text_style(), self.look.text_width());
+        let h = self.lines.max(1) as f32 * style.line_height;
+        let laid = self.lay_words(style, w);
+        self.rewind_mark("rewind", laid, ink, Size::new(w, h))
+            .map(|e| at(e, TEXT_X * g.k, TEXT_TOP * g.k))
     }
 
     /// The status line: a level light, a spinner, a check or a cross, then
@@ -745,6 +768,7 @@ mod tests {
             wave: Arc::from(vec![level; 300].as_slice()),
             newest_at: 2.0,
             rate: 100.0,
+            scrub: endings::Scrub::default(),
         }
     }
 

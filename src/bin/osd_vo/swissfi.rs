@@ -536,6 +536,16 @@ impl Popup {
             .height(self.lines.min(MAX_LINES) as f32 * TEXT_LINE)
             .margin_edges(TEXT_TOP, 0.0, TEXT_BOTTOM, TEXT_INSET)
             .child(words)
+            .children(self.line_marks(
+                l.text_style(),
+                l.text_width(),
+                endings::Ink {
+                    text: hex(PAPER),
+                    mark: hex(ORANGE),
+                    faint: hex(GREY),
+                },
+                endings::Cancel::Unthread,
+            ))
     }
 
     /// The hairline over the status row, running from left to right.

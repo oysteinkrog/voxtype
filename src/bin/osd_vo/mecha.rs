@@ -461,6 +461,8 @@ struct Snap {
     end_at: Option<f64>,
     levels: Arc<[f32]>,
     newest_at: f64,
+    /// The bars' clock during a rewind cancel (MO-50).
+    scrub: endings::Scrub,
     window: f32,
     fraction: Option<f32>,
     labels: Vec<Label>,
@@ -860,7 +862,7 @@ impl Snap {
         };
         let frozen = matches!(self.phase, Phase::Finishing | Phase::Done);
         let slot = self.window / (w / BAR_PITCH);
-        let tc = t.min(self.newest_at);
+        let tc = self.scrub.map(t).min(self.newest_at);
         let n = self.levels.len();
         let last = (tc / slot as f64).floor() as i64;
         let count = (w / BAR_PITCH) as i64;
@@ -1079,6 +1081,25 @@ impl Popup {
         (Phase::Listening, self.shown_at)
     }
 
+    /// MO-50: a cancel takes the words back into the caret, drawn over the
+    /// hidden text at the bottom of its box.
+    fn mecha_rewind(&self, color: Color, s: f32) -> Option<Element<Msg>> {
+        if !self.rewinding() {
+            return None;
+        }
+        let l = &self.look;
+        let (style, w) = (text_style(l), text_width(l));
+        let h = MAX_LINES as f32 * TEXT_LINE * s;
+        let laid = self.lay_words(style, w);
+        let dy = h - laid.text.size.h;
+        let ink = endings::Ink {
+            text: color,
+            mark: hex(YELLOW),
+            faint: hex(DEEP),
+        };
+        self.rewind_mark("rewind", laid.shifted(0.0, dy), ink, Size::new(w, h))
+    }
+
     pub(crate) fn mecha_view(&self) -> Element<Msg> {
         let root = Element::column("root").align_items(AlignItems::CENTER);
         if self.closing {
@@ -1271,6 +1292,7 @@ impl Popup {
             end_at,
             levels: self.wave.clone(),
             newest_at: self.newest_at,
+            scrub: self.scrub(),
             window: l.window as f32,
             fraction: self.files.fraction.map(|f| f as f32),
             labels,
@@ -1311,7 +1333,8 @@ impl Popup {
                 .justify(JustifyContent::FLEX_END)
                 .width(text_width(l))
                 .height(MAX_LINES as f32 * TEXT_LINE * s)
-                .child(words),
+                .child(words.rewind_hide(self.rewinding()))
+                .children(self.mecha_rewind(text_color, s)),
             TEXT_X * s,
             TEXT_Y * s,
         );

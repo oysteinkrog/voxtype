@@ -498,6 +498,12 @@ impl Popup {
         for line in self.doubt_lines() {
             text = text.child(line);
         }
+        text = text.children(self.line_marks(
+            l.text_style(),
+            l.text_width(),
+            endings::Ink::of(l),
+            endings::Cancel::Unthread,
+        ));
         let text = self.typo_marks(text, l.text_width());
         let text = self.with_hearing(
             text,

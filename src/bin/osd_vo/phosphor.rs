@@ -184,6 +184,8 @@ struct Screen {
     wave: Arc<[f32]>,
     newest_at: f64,
     rate: f32,
+    /// The meter's clock during a rewind cancel (MO-50).
+    scrub: endings::Scrub,
     /// Where the caret goes, where it came from and when it left, or `None`
     /// when no caret shows.
     caret: Option<(Point, Point, f64)>,
@@ -204,6 +206,7 @@ struct Screen {
 impl Screen {
     /// The level shown at `age` seconds before now, 0 to 1.
     fn level_at(&self, t: f64, age: f32) -> f32 {
+        let t = self.scrub.map(t);
         let n = self.wave.len();
         if n == 0 {
             return 0.0;
@@ -705,6 +708,7 @@ impl Popup {
             wave: self.wave.clone(),
             newest_at: self.newest_at,
             rate: FRAME_HZ as f32,
+            scrub: self.scrub(),
             caret: self.phos.caret,
             flash,
             rec: !status.finishing && !done_or_ended(self),
@@ -859,6 +863,21 @@ impl Popup {
 
     /// The beam's sweeps over the newest words and the newest changed
     /// letters, or `None` under reduced motion.
+    /// MO-50: a cancel takes the words back into the caret, drawn over the
+    /// hidden text.
+    fn phosphor_rewind(&self, style: &TextStyle, size: Size) -> Option<Element<Msg>> {
+        if !self.rewinding() {
+            return None;
+        }
+        let ink = endings::Ink {
+            text: hex(GREEN, 0.35),
+            mark: hex(HOT, 1.0),
+            faint: hex(DIM, 1.0),
+        };
+        let laid = self.lay_words(*style, self.look.text_width());
+        self.rewind_mark("rewind", laid, ink, size)
+    }
+
     fn phosphor_beam(&self, g: &Geo) -> Option<Beam> {
         if !self.motion("beam-write") || self.still() {
             return None;
@@ -952,7 +971,8 @@ impl Popup {
         );
         let mut layer = at(Element::layer("text"), PAD_X * k, TEXT_TOP * k)
             .size(size.w, size.h)
-            .child(words);
+            .child(words.rewind_hide(self.rewinding()))
+            .children(self.phosphor_rewind(&style, size));
         if let Some(beam) = beam {
             layer = layer.child(
                 at(
@@ -1098,6 +1118,7 @@ mod tests {
             wave: Arc::from(wave),
             newest_at: 1.0,
             rate: 10.0,
+            scrub: endings::Scrub::default(),
             caret: None,
             flash: None,
             rec: true,

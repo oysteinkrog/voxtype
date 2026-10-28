@@ -190,6 +190,8 @@ struct Scene {
     shown_at: f64,
     levels: Arc<[f32]>,
     newest_at: f64,
+    /// The trace's clock during a rewind cancel (MO-50).
+    scrub: endings::Scrub,
     finish_at: Option<f64>,
     final_at: Option<f64>,
     prog: Option<(f32, f32, f64)>,
@@ -320,7 +322,7 @@ impl Scene {
     fn draw_trace(&self, t: f64, p: &mut Painter) {
         let g = self.graticule();
         let cy = g.y + g.h / 2.0;
-        let t_eff = self.finish_at.map_or(t, |f| t.min(f));
+        let t_eff = self.scrub.map(self.finish_at.map_or(t, |f| t.min(f)));
         let flat = self.final_at.map_or(0.0, |f| ease_out((t - f) / 0.35));
         let frozen = self.finish_at.is_some();
         let n = (g.w / 1.25) as usize;
@@ -566,6 +568,7 @@ impl Popup {
             shown_at: self.shown_at,
             levels: self.wave.clone(),
             newest_at: self.newest_at,
+            scrub: self.scrub(),
             finish_at: self.extra.finish_at,
             final_at: self.extra.final_at,
             prog: (mode == Mode::Finishing && self.files.fraction.is_some()).then_some(s.prog),
@@ -648,6 +651,7 @@ impl Popup {
 
         // The transcript lines, one live text each so a line keeps its place.
         let colour = if mode == Mode::Cancelled { hex(DIM) } else { hex(TEXT) };
+        let rw = self.rewinding();
         for (i, (words, _)) in lines.iter().enumerate() {
             panel = panel.child(
                 at(
@@ -661,8 +665,23 @@ impl Popup {
                     o + TEXT_TOP + i as f32 * LINE,
                 )
                 .motion(Prop::Position, Spring::critical_to_98(0.12))
+                .rewind_hide(rw)
                 .presence(Transition::fade(), Transition::fade()),
             );
+        }
+        // MO-50: a cancel takes the words back into the caret.
+        if rw {
+            let at_line: Vec<(&[Word], Point)> = lines
+                .iter()
+                .enumerate()
+                .map(|(i, (w, _))| (w.as_slice(), Point::new(o + TEXT_X, o + TEXT_TOP + i as f32 * LINE)))
+                .collect();
+            let ink = endings::Ink {
+                text: colour,
+                mark: hex(TRACE),
+                faint: hex(DIM),
+            };
+            panel = panel.children(self.rewind_mark("rewind", self.lay_lines(&at_line, style), ink, size));
         }
 
         // MO-71 receipts and MO-73 joint ticks under the newest line, and

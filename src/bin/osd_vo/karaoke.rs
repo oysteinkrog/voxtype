@@ -188,6 +188,8 @@ struct Scene {
     shown_at: f64,
     levels: Arc<[f32]>,
     newest_at: f64,
+    /// The wave's clock during a rewind cancel (MO-50).
+    scrub: endings::Scrub,
     finish_at: Option<f64>,
     final_at: Option<f64>,
     /// The status ring's centre, relative to the card.
@@ -311,7 +313,7 @@ impl Scene {
     fn draw_wave(&self, t: f64, p: &mut Painter) {
         let span = WAVE_X1 - WAVE_X0;
         let pitch = span / (BARS - 1) as f32;
-        let t_eff = self.finish_at.map_or(t, |f| t.min(f));
+        let t_eff = self.scrub.map(self.finish_at.map_or(t, |f| t.min(f)));
         let settle = self
             .finish_at
             .map_or(1.0, |f| 1.0 - ease_out((t - f) / 0.45));
@@ -552,6 +554,7 @@ impl Popup {
             shown_at: self.shown_at,
             levels: self.wave.clone(),
             newest_at: self.newest_at,
+            scrub: self.scrub(),
             finish_at: self.extra.finish_at,
             final_at: self.extra.final_at,
             ring: Point::new(row_x + 9.0, STATUS_Y),
@@ -607,6 +610,27 @@ impl Popup {
     /// The newest word in the gradient (a gradient box masked by the word's
     /// own glyphs, over the white word) and its gradient underline, placed
     /// in the newest line's box.
+    /// MO-50: a cancel takes a line's words back into the caret, drawn in
+    /// the line's own box so the line keeps its scale and fade.
+    fn karaoke_rewind(&self, words: &[Word], style: &TextStyle) -> Option<Element<Msg>> {
+        if !self.rewinding() {
+            return None;
+        }
+        let joined = words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let w = self.measure.layout(&joined, style, None).size.w;
+        let laid = self.lay_lines(&[(words, Point::new((LINE_BOX - w) / 2.0, 0.0))], *style);
+        let ink = endings::Ink {
+            text: hex(WHITE),
+            mark: hex(CYAN),
+            faint: hex(HINT),
+        };
+        self.rewind_mark("rewind", laid, ink, Size::new(LINE_BOX, LINE))
+    }
+
     fn karaoke_hot(&self, last: &[Word], lead: f32, style: &TextStyle) -> Vec<Element<Msg>> {
         let Some(word) = last.last() else {
             return Vec::new();
@@ -703,7 +727,8 @@ impl Popup {
             let mut column = Element::column(key)
                 .size(LINE_BOX, LINE)
                 .align_items(AlignItems::CENTER)
-                .child(text);
+                .child(text.rewind_hide(self.rewinding()))
+                .children(self.karaoke_rewind(words, &style));
             if age == 0 {
                 column = column.children(hot.take().unwrap_or_default());
             }
