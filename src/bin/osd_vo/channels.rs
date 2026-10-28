@@ -166,7 +166,8 @@ impl Popup {
             }
             if let Some(v) = s.voices.get(w.id) {
                 let a = vt.arrive(&v, letters);
-                if onset {
+                // Without any audio under the word there is no onset to show.
+                if onset && v.peak > 0.0 {
                     (arrive.weight, arrive.fill) = (a.weight, a.fill);
                 }
                 if tracking {

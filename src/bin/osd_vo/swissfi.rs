@@ -525,6 +525,7 @@ impl Popup {
             .motion(Prop::Offset, Spring::POP)
             .word_enter(Transition::fade().opacity(0.0).offset(0.0, WORD_RISE))
             .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
+        let words = self.typo_words(words);
         let words = self.handoff_or(
             words,
             &l.text_style(),
