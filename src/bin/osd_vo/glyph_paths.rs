@@ -28,11 +28,18 @@ use vo::scene::geom::{Affine, Point};
 use vo::scene::glyph_morph::{GlyphMorph, MorphFrom, MorphStyle, WordOutline};
 use vo::scene::path::{Contour, StrokeStyle};
 use vo::scene::snap::{snapped, Snap};
+use vo::scene::stroke_write::{WriteStyle, Writing};
 use vo::scene::text::ShapedText;
 
 pub(crate) const MORPH: &str = "glyph-morph";
 pub(crate) const BREATH: &str = "breath-line";
 pub(crate) const BROKEN: &str = "broken-frame";
+pub(crate) const WRITE: &str = "stroke-write";
+
+/// How long the pen takes to write one word, and how long its strokes stay
+/// once it is written.
+const WRITE_SECS: f64 = 0.42;
+const WRITE_FADE: f64 = 0.22;
 
 /// A new word's outline morph, in seconds.
 const MORPH_SECS: f64 = 0.24;
@@ -109,7 +116,7 @@ impl Popup {
     /// Whether an outline feature plays over the live text, so new words
     /// come in at the reading-line ink without a rise.
     pub(crate) fn paths_on(&self) -> bool {
-        self.look.on(MORPH) || self.look.on(BREATH)
+        self.look.on(MORPH) || self.look.on(BREATH) || self.look.on(WRITE)
     }
 
     fn paths_reduced(&self) -> bool {
@@ -219,9 +226,8 @@ impl Popup {
                 });
                 continue;
             }
-            let heard = self.heard.word(w.id);
-            let born = heard.map(|h| h.born);
-            let revised = heard.and_then(|h| h.changed);
+            let (born, revised) = self.paths_times(w);
+            let born = Some(born);
             if breath && Some(w.id) == first && self.cut == 0 {
                 if let Some(at) = born {
                     plays.push(Play {
@@ -317,6 +323,9 @@ impl Popup {
             };
             out.push(kit::at(Element::canvas("glyph-paths", until, draw), 0.0, 0.0).size(w, h));
         }
+        if self.look.on(WRITE) {
+            out.extend(self.writing_overlay(&laid, w, h));
+        }
         out
     }
 
@@ -339,7 +348,7 @@ impl Popup {
         let first = laid
             .first()
             .filter(|_| self.cut == 0)
-            .and_then(|x| Some((x.x, self.heard.word(x.id)?.born)));
+            .map(|x| (x.x, self.paths_times(x).0));
         let levels = kit::Levels {
             levels: self.wave.clone(),
             newest_at: self.newest_at,
@@ -498,5 +507,143 @@ impl Popup {
         } else {
             normal
         }
+    }
+}
+
+/// Pen writings by word id, text and place, shared like the morphs.
+type WriteKey = (u32, String, i32, i32, u32);
+
+fn write_cache() -> &'static Mutex<HashMap<WriteKey, Arc<Writing>>> {
+    static C: std::sync::OnceLock<Mutex<HashMap<WriteKey, Arc<Writing>>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+impl Popup {
+    /// The pen writing each new word by its strokes (MO-80), over the live
+    /// text, which arrives at the reading-line ink and fills as the pen
+    /// passes.
+    fn writing_overlay(&self, laid: &[Laid], w: f32, h: f32) -> Option<Element<Msg>> {
+        if self.paths_reduced() {
+            return None;
+        }
+        let l = &self.look;
+        let size = l.text_style().size;
+        let mut plays: Vec<(Arc<Writing>, f64)> = Vec::new();
+        for word in laid {
+            let born = self.paths_times(word).0;
+            if born + WRITE_SECS + WRITE_FADE < self.extra.now - 0.05 {
+                continue;
+            }
+            let key: WriteKey = (
+                word.id,
+                word.text.clone(),
+                (word.x.0 * 4.0) as i32,
+                (word.baseline * 4.0) as i32,
+                size.to_bits(),
+            );
+            let writing = {
+                let mut c = write_cache().lock().unwrap_or_else(|e| e.into_inner());
+                if c.len() > 256 {
+                    c.clear();
+                }
+                c.entry(key)
+                    .or_insert_with(|| {
+                        let outline =
+                            WordOutline::new(self.measure.fonts(), &word.shaped, size, Point::ZERO);
+                        // The laid glyph clusters index the joined text: rebase them
+                        // onto the word's own text.
+                        let base = word.shaped.glyphs.first().map_or(0, |g| g.cluster);
+                        let mut outline = outline;
+                        for g in &mut outline.glyphs {
+                            g.cluster -= base;
+                        }
+                        Arc::new(Writing::new(
+                            self.measure.fonts(),
+                            &word.text,
+                            outline,
+                            0.15 * size,
+                        ))
+                    })
+                    .clone()
+            };
+            plays.push((writing, born));
+        }
+        let until = plays
+            .iter()
+            .map(|p| p.1 + WRITE_SECS + WRITE_FADE)
+            .fold(0.0, f64::max);
+        if plays.is_empty() {
+            return None;
+        }
+        let (accent, head) = (l.accent, l.foreground);
+        let draw = move |t: f64, r: Rect, p: &mut Painter| {
+            p.layer(Affine::translate(r.x, r.y), 1.0, |p| {
+                for (writing, born) in &plays {
+                    if t < *born {
+                        continue;
+                    }
+                    let k = ((t - born) / WRITE_SECS).clamp(0.0, 1.0);
+                    let fade = (1.0 - (t - born - WRITE_SECS) / WRITE_FADE).clamp(0.0, 1.0) as f32;
+                    if fade <= 0.0 {
+                        continue;
+                    }
+                    // The pen starts quick and slows as it lands.
+                    let s = kit::ease_out(k) * writing.length();
+                    let style = WriteStyle {
+                        pen: StrokeStyle::solid(1.4, accent.fade(fade)),
+                        head: if k < 1.0 { 3.0 } else { 0.0 },
+                        head_color: head,
+                        ink: head.fade(0.0),
+                        ink_floor: 0.0,
+                    };
+                    writing.draw(p, s, &style);
+                }
+            })
+        };
+        Some(kit::at(Element::canvas("stroke-write", until, draw), 0.0, 0.0).size(w, h))
+    }
+}
+
+/// When each word was first seen and when its text last changed, by popup
+/// and word. A view sees a word the moment its message lands, so the first
+/// view that lays it out dates it.
+type SeenKey = (u64, u32);
+
+struct Seen {
+    text: String,
+    born: f64,
+    changed: Option<f64>,
+}
+
+fn seen() -> &'static Mutex<HashMap<SeenKey, Seen>> {
+    static C: std::sync::OnceLock<Mutex<HashMap<SeenKey, Seen>>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+impl Popup {
+    /// When `w` came and when its text last changed after that.
+    fn paths_times(&self, w: &Laid) -> (f64, Option<f64>) {
+        let now = self.extra.now;
+        // One popup: when it opened, its theme and its features, so the
+        // station's tiles keep apart.
+        let popup = self.look.features.iter().flat_map(|f| f.bytes()).fold(
+            self.shown_at.to_bits() ^ (self.look.theme as u64).rotate_left(48),
+            |h, b| h.rotate_left(5) ^ b as u64,
+        );
+        let mut map = seen().lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() > 4096 {
+            map.retain(|_, s| now - s.changed.unwrap_or(s.born) < 30.0);
+        }
+        let s = map.entry((popup, w.id)).or_insert_with(|| Seen {
+            text: w.text.clone(),
+            born: now,
+            changed: None,
+        });
+        if s.text != w.text {
+            s.text = w.text.clone();
+            s.changed = Some(now);
+        }
+        (s.born, s.changed)
     }
 }
