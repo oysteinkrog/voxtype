@@ -117,6 +117,8 @@ mod endings;
 use endings::RewindHide;
 #[path = "osd_vo/sounding.rs"]
 mod sounding;
+#[path = "osd_vo/choice.rs"]
+mod choice;
 #[path = "osd_vo/hearing.rs"]
 mod hearing;
 #[path = "osd_vo/channels.rs"]
@@ -640,7 +642,9 @@ impl Look {
     /// that have motion features.
     #[allow(dead_code)]
     fn on(&self, name: &str) -> bool {
-        self.features.iter().any(|f| f == name)
+        let asked = |n: &str| self.features.iter().any(|f| f == n);
+        // MO-75: `look-choice` also turns on the motions this look picks.
+        asked(name) || (asked(choice::LOOK_CHOICE) && choice::picks(self.theme).contains(&name))
     }
 
     /// The centre of the newest text line in logical pixels below the

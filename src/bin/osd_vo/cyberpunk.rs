@@ -1467,6 +1467,10 @@ impl Popup {
             colour,
             hex(YELLOW),
         );
+        // MO-50 as cyberpunk's cancel pick (MO-75): the words wind back
+        // into a yellow caret over the hidden text, in place of the red strike.
+        let rewinding = self.rewinding();
+        let words = words.rewind_hide(rewinding);
         let mut text = at(
             Element::column("text")
                 .width(l.text_width())
@@ -1485,8 +1489,9 @@ impl Popup {
             l.text_width(),
             hex(YELLOW),
             true,
-        ));
-        if cancelled {
+        ))
+        .children(self.cyber_rewind());
+        if cancelled && !rewinding {
             // A red strike through each line, drawn on.
             for (i, (y, w)) in self.cyber_line_extents().into_iter().enumerate() {
                 let line = Arc::new(Outline {
@@ -1508,6 +1513,22 @@ impl Popup {
             }
         }
         text
+    }
+
+    /// MO-50: a cancel takes the words back into the caret.
+    fn cyber_rewind(&self) -> Option<Element<Msg>> {
+        if !self.rewinding() {
+            return None;
+        }
+        let l = &self.look;
+        let ink = endings::Ink {
+            text: hex(PAPER).fade(0.45),
+            mark: hex(YELLOW),
+            faint: hex(RED),
+        };
+        let (style, w) = (l.text_style(), l.text_width());
+        let h = self.lines.max(1) as f32 * TEXT_LINE;
+        self.rewind_mark("rewind", self.lay_words(style, w), ink, Size::new(w, h))
     }
 
     /// The box of word `id` on screen, in panel space.
