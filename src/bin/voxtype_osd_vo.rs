@@ -48,6 +48,7 @@ use voxtype::audio::levels::{AudioFrame, AudioReader, FRAME_HZ};
 use voxtype::config::{Config as VoxtypeConfig, HotkeyConfig};
 use voxtype::osd::config::{OsdAnchor, OsdConfig, OsdPosition, OsdTheme};
 use voxtype::osd::ipc::resolve_socket_path;
+use voxtype::osd::look_step;
 use voxtype::osd::outcome::Outcome;
 use voxtype::osd::plasma::{self, PlasmaTheme};
 use voxtype::osd::swiss::{
@@ -440,6 +441,8 @@ const TEXT_MARGIN_BOTTOM: f32 = 4.0;
 /// Seconds the words of a new line wait while a springing panel opens for
 /// it. The box opens over about 0.2 s; by now it has room for the line.
 const ROOM_SECS: f64 = 0.08;
+/// How long the status row names a look picked with the look chord.
+const LOOK_NAME_SECS: f64 = 1.2;
 const RULE_MARGIN_TOP: f32 = 12.0;
 const STATUS_MARGIN_TOP: f32 = 10.0;
 const DOT: f32 = 7.0;
@@ -1057,6 +1060,8 @@ struct Files {
     outcome: Option<Outcome>,
     /// `result.json`: what a typed or pasted dictation delivered.
     delivery: Option<voxtype::osd::outcome::Delivery>,
+    /// `osd-look`: the last press of the look chord.
+    look_step: Option<look_step::Step>,
 }
 
 /// How a dictation ended, as a look shows it in the moment before the popup
@@ -1256,11 +1261,22 @@ struct Popup {
     life: lifecycle::State,
     /// The variable font's voice readings (MO-81).
     breath: wild_motion::State,
+    /// The live popup's config, for placing a look picked with the look
+    /// chord. `None` elsewhere: the chord does nothing there.
+    osd: Option<OsdConfig>,
+    /// The look the main surface opened with. A look picked later draws on
+    /// a surface of its own size (`Popup::surfaces`).
+    opened_as: OsdTheme,
+    /// The first runtime files came: a look step after them is a new press.
+    step_seen: bool,
+    /// When the look chord last picked a look, to name it in the status row.
+    picked_at: Option<f64>,
 }
 
 impl Popup {
     fn new(look: Look, fonts: &FontRegistry) -> Popup {
         Popup {
+            opened_as: look.theme,
             look,
             signals: SignalsCell::default(),
             recorder: None,
@@ -1314,10 +1330,24 @@ impl Popup {
             channels: channels::State::default(),
             life: lifecycle::State::default(),
             breath: wild_motion::State::default(),
+            osd: None,
+            step_seen: false,
+            picked_at: None,
         }
     }
 
     fn status(&self) -> StatusLine {
+        if self
+            .picked_at
+            .is_some_and(|at| self.extra.now - at < LOOK_NAME_SECS)
+        {
+            return StatusLine {
+                state: format!("{:?}", self.look.theme),
+                detail: String::new(),
+                loading: false,
+                finishing: false,
+            };
+        }
         if let Some(ending) = self.ending() {
             // The daemon is idle and the popup is about to close: an empty
             // status would read as "Listening", as if a new recording began.
@@ -1602,6 +1632,8 @@ impl App for Popup {
             }
             Msg::Voice(voice) => self.voice(voice, t),
             Msg::Files(files) => {
+                let step = new_step(self.step_seen, self.files.look_step, files.look_step);
+                self.step_seen = true;
                 let preview_changed = files.preview != self.files.preview;
                 let live_changed = files.live != self.files.live;
                 self.extra.files(&self.files, &files, t);
@@ -1634,6 +1666,9 @@ impl App for Popup {
                 if preview_changed || live_changed {
                     self.word_info();
                     self.note_doubtful(t);
+                }
+                if let Some(step) = step {
+                    self.step_look(step.forward, t, cx);
                 }
                 self.arm_check(cx);
             }
@@ -1699,19 +1734,34 @@ impl App for Popup {
         }
     }
 
-    fn surfaces(&self, _: &vo::Tokens) -> Vec<vo::SurfaceView<Msg>> {
+    fn surfaces(&self, tokens: &vo::Tokens) -> Vec<vo::SurfaceView<Msg>> {
+        let mut surfaces = Vec::new();
         if self.look.theme == OsdTheme::Captions {
-            let mut surfaces = self.captions_surfaces();
+            surfaces = self.captions_surfaces();
             for s in &mut surfaces {
                 let view = std::mem::replace(&mut s.view, Element::column("set-type"));
                 s.view = view.map_live_texts(&mut |e| self.set_type(e));
             }
-            return surfaces;
         }
-        Vec::new()
+        if let Some(spec) = self.picked_spec() {
+            // Keyed by the look, so a new pick opens a surface of its size.
+            let key = format!("look-{:?}", self.look.theme);
+            surfaces.push(vo::SurfaceView::new(key, spec, self.main_view(tokens)));
+        }
+        surfaces
     }
 
     fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
+        if self.picked_spec().is_some() {
+            return Element::column("picked-elsewhere");
+        }
+        self.main_view(tokens)
+    }
+}
+
+impl Popup {
+    /// The popup's view on whichever surface shows it.
+    fn main_view(&self, tokens: &vo::Tokens) -> Element<Msg> {
         let look = self
             .look_view(tokens)
             .map_live_texts(&mut |e| self.set_type(e));
@@ -1725,9 +1775,30 @@ impl App for Popup {
         };
         root.signals(self.signals.clone())
     }
-}
 
-impl Popup {
+    /// Where a look picked with the look chord shows: a surface of its own
+    /// size and place, since the main surface keeps the size it opened
+    /// with. `None` while the popup shows the look it opened with.
+    fn picked_spec(&self) -> Option<OverlaySpec> {
+        let cfg = self.osd.as_ref()?;
+        (self.look.theme != self.opened_as).then(|| live_spec(cfg, &self.look))
+    }
+
+    /// The look chord was pressed: show the next (or previous) look at
+    /// once, keep it for later popups and name it in the status row. The
+    /// words, levels and timers stay as they are.
+    fn step_look(&mut self, forward: bool, t: f64, cx: &mut Cx<Msg>) {
+        if self.osd.is_none() {
+            return;
+        }
+        let theme = look_step::step(WALL_THEMES, self.look.theme, forward);
+        tracing::info!(from = ?self.look.theme, to = ?theme, "look chord");
+        self.look.theme = theme;
+        look_step::save(theme);
+        self.picked_at = Some(t);
+        cx.after(LOOK_NAME_SECS + 0.01, Msg::Loop);
+    }
+
     fn look_view(&self, _: &vo::Tokens) -> Element<Msg> {
         let root = Element::column("root").align_items(AlignItems::CENTER);
         if self.look.theme == OsdTheme::Amber {
@@ -2133,6 +2204,28 @@ fn load_fonts(theme: &PlasmaTheme) -> anyhow::Result<FontRegistry> {
     Ok(fonts)
 }
 
+/// A press of the look chord that this popup has not seen yet. The first
+/// files a popup gets (`seen` false) only say where the chord stands: a press
+/// from before the popup opened does nothing.
+fn new_step(
+    seen: bool,
+    last: Option<look_step::Step>,
+    next: Option<look_step::Step>,
+) -> Option<look_step::Step> {
+    next.filter(|_| seen && next != last)
+}
+
+/// The live popup's surface for `look`.
+fn live_spec(cfg: &OsdConfig, look: &Look) -> OverlaySpec {
+    OverlaySpec {
+        size: look.surface(),
+        placement: placement(cfg, look),
+        input: InputMode::None,
+        app_id: "voxtype-osd".into(),
+        ..OverlaySpec::default()
+    }
+}
+
 fn placement(cfg: &OsdConfig, look: &Look) -> Placement {
     use vo::Edges;
     let m = cfg.margin_px as i32;
@@ -2299,6 +2392,7 @@ fn read_files() -> Files {
         fraction: fraction.trim().parse::<f64>().ok(),
         status: text.trim().to_string(),
         live: voxtype::osd::live::read(),
+        look_step: look_step::read(),
     }
 }
 
@@ -2399,13 +2493,10 @@ fn main() -> anyhow::Result<()> {
             .spawn(move || poll_files(shared))?;
     }
 
-    let spec = OverlaySpec {
-        size: look.surface(),
-        placement: placement(&cfg, &look),
-        input: InputMode::None,
-        app_id: "voxtype-osd".into(),
-        ..OverlaySpec::default()
-    };
+    // The look picked with the look chord wins over the config and --theme.
+    if let Some(theme) = look_step::saved() {
+        look.theme = theme;
+    }
     // The display connection, GPU device and renderer stay warm between
     // dictations, so every popup after the first draws on the GPU at once.
     let mut resident = vo::Resident::new();
@@ -2462,7 +2553,12 @@ fn main() -> anyhow::Result<()> {
         };
         let mut popup = Popup::new(look.clone(), &fonts);
         popup.recorder = args.record.as_deref().and_then(replay::recorder);
-        let result = resident.run(popup, spec.clone(), options);
+        popup.osd = Some(cfg.clone());
+        let result = resident.run(popup, live_spec(&cfg, &look), options);
+        // The popup may have picked a look with the look chord.
+        if let Some(theme) = look_step::saved() {
+            look.theme = theme;
+        }
         shared.0.lock().unwrap().proxy = None;
         if args.diag {
             eprintln!(
@@ -2770,7 +2866,8 @@ fn print_gpu_times(times: &[(String, f64)]) {
     }
 }
 
-/// The looks the vo frontend draws itself.
+/// The looks the vo frontend draws itself, in the order the look chord
+/// steps through them.
 const WALL_THEMES: &[OsdTheme] = &[
     OsdTheme::Swiss,
     OsdTheme::Showcase,
@@ -2920,6 +3017,23 @@ fn cut_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_presses_while_the_popup_shows_step_the_look() {
+        let press = |stamp| {
+            Some(look_step::Step {
+                stamp,
+                forward: true,
+            })
+        };
+        // A press from before the popup opened, in its first files.
+        assert_eq!(new_step(false, None, press(1)), None);
+        // A new press while it shows.
+        assert_eq!(new_step(true, press(1), press(2)), press(2));
+        // Files that changed for another reason.
+        assert_eq!(new_step(true, press(2), press(2)), None);
+        assert_eq!(new_step(true, None, None), None);
+    }
 
     /// A frame put on the signal bus is the frame vo reads off the wire.
     #[test]
