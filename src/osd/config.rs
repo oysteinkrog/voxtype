@@ -491,6 +491,90 @@ impl Default for OsdPackageManifest {
     }
 }
 
+/// Which motion features the vo popup turns on (`[osd] motion`).
+///
+/// In the config file this is `"look"` (the default: each look's own set),
+/// `"none"` (no features unless asked for) or a list of feature names. A
+/// list with any plain name replaces the look's set; `no-<name>` takes a
+/// name out; a list of only `no-` entries is the look's set minus those.
+/// Which names count as features is the popup's business: an unknown name
+/// is kept here and ignored there, never an error.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OsdMotion {
+    /// The look's own motion set.
+    #[default]
+    Look,
+    /// No motion features unless a name asks for one.
+    None,
+    /// These names, as written (trimmed, empty ones dropped).
+    Names(Vec<String>),
+}
+
+impl OsdMotion {
+    /// From names as the CLI or the environment give them: one `look` or
+    /// `none` is that mode, anything else is a list.
+    pub fn from_names<I, S>(names: I) -> OsdMotion
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let names: Vec<String> = names
+            .into_iter()
+            .flat_map(|n| {
+                n.as_ref()
+                    .split(',')
+                    .map(|p| p.trim().to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|n| !n.is_empty())
+            .collect();
+        match names.as_slice() {
+            [] => OsdMotion::Look,
+            [one] if one == "look" => OsdMotion::Look,
+            [one] if one == "none" => OsdMotion::None,
+            _ => OsdMotion::Names(names),
+        }
+    }
+
+    /// The setting in force: `over` (the CLI flag, or else the environment
+    /// variable, as clap already resolved them) when it names anything,
+    /// otherwise the config file's.
+    pub fn layered(over: &[String], config: &OsdMotion) -> OsdMotion {
+        if over.iter().all(|n| n.trim().is_empty()) {
+            config.clone()
+        } else {
+            OsdMotion::from_names(over)
+        }
+    }
+}
+
+impl Serialize for OsdMotion {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            OsdMotion::Look => s.serialize_str("look"),
+            OsdMotion::None => s.serialize_str("none"),
+            OsdMotion::Names(n) => n.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OsdMotion {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            One(String),
+            Many(Vec<String>),
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::One(s) => OsdMotion::from_names([s]),
+            // An empty list asks for nothing: no defaults either.
+            Raw::Many(v) if v.iter().all(|n| n.trim().is_empty()) => OsdMotion::None,
+            Raw::Many(v) => OsdMotion::from_names(v),
+        })
+    }
+}
+
 /// All user-facing OSD options. Defaults match BRIEF.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -536,6 +620,9 @@ pub struct OsdConfig {
     /// Fade new live words in (vo OSD only). Off by default: words appear
     /// at once, as in the gtk4 OSD.
     pub word_fade: bool,
+    /// Motion features of the vo popup: `"look"` (each look's own set),
+    /// `"none"`, or a list of names (see [`OsdMotion`]).
+    pub motion: OsdMotion,
     /// Visible waveform window in seconds (3.0 per BRIEF).
     pub waveform_window_secs: f32,
     /// Held-peak decay rate in dB/sec (6.0 per BRIEF).
@@ -580,6 +667,7 @@ impl Default for OsdConfig {
             opacity: 0.95,
             theme: OsdTheme::Default,
             word_fade: false,
+            motion: OsdMotion::Look,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,
             waveform_gain: 10.0,
@@ -681,6 +769,101 @@ mod tests {
         assert_eq!(OsdTheme::parse_str(" Swiss "), Some(OsdTheme::Swiss));
         assert_eq!(OsdTheme::parse_str("default"), Some(OsdTheme::Default));
         assert_eq!(OsdTheme::parse_str("glass"), None);
+    }
+
+    #[test]
+    fn motion_defaults_to_the_looks_set() {
+        assert_eq!(OsdConfig::default().motion, OsdMotion::Look);
+        let c: OsdConfig = toml::from_str("width_px = 800\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::Look);
+    }
+
+    #[test]
+    fn motion_parses_the_string_forms() {
+        let c: OsdConfig = toml::from_str("motion = \"look\"\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::Look);
+        let c: OsdConfig = toml::from_str("motion = \"none\"\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::None);
+        let c: OsdConfig = toml::from_str("motion = \" None \"\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::None);
+        let c: OsdConfig = toml::from_str("motion = \"onset-ink\"\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::Names(vec!["onset-ink".into()]));
+        let c: OsdConfig = toml::from_str("motion = \"onset-ink, rewind\"\n").unwrap();
+        assert_eq!(
+            c.motion,
+            OsdMotion::Names(vec!["onset-ink".into(), "rewind".into()])
+        );
+    }
+
+    #[test]
+    fn motion_parses_the_list_form() {
+        let c: OsdConfig = toml::from_str("motion = [\"no-fold-under\"]\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::Names(vec!["no-fold-under".into()]));
+        let c: OsdConfig =
+            toml::from_str("motion = [\"onset-ink\", \"no-rewind\"]\n").unwrap();
+        assert_eq!(
+            c.motion,
+            OsdMotion::Names(vec!["onset-ink".into(), "no-rewind".into()])
+        );
+        let c: OsdConfig = toml::from_str("motion = [\"none\"]\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::None);
+        let c: OsdConfig = toml::from_str("motion = []\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::None);
+    }
+
+    #[test]
+    fn motion_keeps_unknown_names_without_an_error() {
+        let c: OsdConfig =
+            toml::from_str("motion = [\"no-such-thing\", \"warp-drive\"]\nwidth_px = 500\n")
+                .unwrap();
+        assert_eq!(c.width_px, 500);
+        assert_eq!(
+            c.motion,
+            OsdMotion::Names(vec!["no-such-thing".into(), "warp-drive".into()])
+        );
+    }
+
+    #[test]
+    fn motion_round_trips_through_toml() {
+        for m in [
+            OsdMotion::Look,
+            OsdMotion::None,
+            OsdMotion::Names(vec!["onset-ink".into(), "no-fold-under".into()]),
+        ] {
+            let c = OsdConfig {
+                motion: m.clone(),
+                ..OsdConfig::default()
+            };
+            let back: OsdConfig = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+            assert_eq!(back.motion, m);
+        }
+    }
+
+    #[test]
+    fn motion_from_the_cli_or_env_wins_over_the_config() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let config = OsdMotion::Names(names(&["no-fold-under"]));
+        // Nothing on the CLI or in the environment: the config holds.
+        assert_eq!(OsdMotion::layered(&[], &config), config);
+        assert_eq!(OsdMotion::layered(&names(&[""]), &config), config);
+        // `--motion none` works over a config list.
+        assert_eq!(
+            OsdMotion::layered(&names(&["none"]), &config),
+            OsdMotion::None
+        );
+        assert_eq!(
+            OsdMotion::layered(&names(&["look"]), &OsdMotion::None),
+            OsdMotion::Look
+        );
+        assert_eq!(
+            OsdMotion::layered(&names(&["onset-ink"]), &OsdMotion::Look),
+            OsdMotion::Names(names(&["onset-ink"]))
+        );
+        // A comma list in one value, as the environment variable gives it.
+        assert_eq!(
+            OsdMotion::from_names(["onset-ink,no-rewind"]),
+            OsdMotion::Names(names(&["onset-ink", "no-rewind"]))
+        );
     }
 
     #[test]

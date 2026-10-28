@@ -338,6 +338,8 @@ Switches the look of the `vo` popup (`[osd] frontend = "vo"`) from the keyboard.
 
 The new look applies at once and is kept for later dictations, also after a restart, until you switch again. It is saved in `$XDG_STATE_HOME/voxtype/osd-look` (usually `~/.local/state/voxtype/osd-look`) and wins over `[osd] theme` and `--theme`. Delete that file to go back to the configured theme.
 
+Each look turns on its own motion set, so switching looks also switches the motion effects. To change or turn off those sets, see `[osd] motion` under "vo OSD" below.
+
 The chord never counts as a tap of Right Ctrl, so it does not start, stop, paste or discard a dictation when `double_tap = true`. The focused app also receives Ctrl+Up or Ctrl+Down. In plain push-to-talk or toggle mode with `key = "RIGHTCTRL"` (no `double_tap`), the Right Ctrl press of the chord still counts as a hotkey press.
 
 **Example:**
@@ -4046,6 +4048,64 @@ follow the Plasma scheme:
 frontend = "vo"
 theme = "type"    # or "showcase"
 ```
+
+#### motion
+
+**Type:** String or list of strings
+**Default:** `"look"`
+**Required:** No
+
+The motion features of the `vo` popup. Each look turns on its own set by
+default:
+
+| Look | Default set |
+|---|---|
+| `swiss` (also `default`) | `pause-marks`, `pitch-baseline`, `audio-ruler`, `fold-under` |
+| `showcase` | `particle-source`, `light-letters`, `variable-breath`, `depth-stack` |
+| `type` | `onset-ink`, `confidence-ink`, `width-escrow`, `margin-bell` |
+| `amber` | `pause-marks`, `margin-bell`, `onset-ink`, `fold-under` |
+| `radial` | `ring-reads`, `acoustic-receipts`, `audio-ruler`, `onset-joint` |
+| `tron` | `light-line`, `stroke-write`, `overflow-spine` |
+| `phosphor` | `beam-write`, `stroke-write`, `broken-frame`, `confidence-ink` |
+| `mission` | `correction-hinge`, `limit-hairline`, `audio-ruler`, `revision-address` |
+| `palette` | `correction-hinge`, `width-escrow`, `loading-word` |
+| `dotmatrix` | `dot-sort`, `count-cast`, `empty-measure`, `confidence-ink` |
+| `swissfi` | `spoken-stagger`, `count-cast` |
+| `scope` | `sentence-trace`, `kinetic-lattice`, `onset-joint`, `rewind` |
+| `captions` | `sound-sculpture`, `fold-under`, `pitch-baseline`, `unthread` |
+| `karaoke` | `bowstring`, `pitch-score`, `spoken-tracking`, `margin-mark` |
+| `island` | `word-bulge`, `lean-pace`, `exhale` |
+| `jarvis` | `ring-reads`, `depth-stack`, `onset-ink` |
+| `particles` | `particle-source`, `letter-physics`, `rewind`, `pre-echo` |
+| `synthwave` | `onset-grid`, `light-line`, `pitch-baseline`, `particle-source` |
+| `mecha` | `hydraulic-chain`, `onset-joint`, `look-choice`, `broken-frame` |
+| `cyberpunk` | `look-choice`, `broken-frame`, `rewind` |
+
+Some looks also have effects built in that no setting turns off. When you
+switch looks with the look chord, the new look's set applies at once.
+
+- `"look"`: each look's own set.
+- `"none"`: no set. Only effects built into the look run.
+- A list of names. Any feature name in the list replaces the look's set
+  with the listed names. `no-<name>` takes one name out of the set, so a
+  list of only `no-` entries keeps the rest of the set. Add `"look"` to a
+  list to keep the set and add the other names to it.
+
+Unknown names are ignored, never an error. `reduced-motion` (or
+`VO_REDUCED_MOTION=1`) keeps the set on, and each effect draws its calmer
+form.
+
+```toml
+[osd]
+motion = "none"                  # no motion features
+# motion = ["no-fold-under"]     # the look's set without fold-under
+# motion = ["onset-ink"]         # only onset-ink, in every look
+```
+
+`--motion NAMES` (comma separated) and `VOXTYPE_OSD_VO_MOTION` win over the
+config and follow the same rules, so `--motion none` turns the set off for
+one run. The `--station` exhibits ignore the set and show only their own
+effect.
 
 If `voxtype-osd-vo` is not installed, the launcher falls back to the GTK4
 popup. Options: `--theme swiss|showcase|type|swissfi|dotmatrix|palette|mission`

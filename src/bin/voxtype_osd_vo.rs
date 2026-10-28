@@ -46,7 +46,7 @@ use vo_core::words::{Word, WordInfo, WordModel};
 use voxtype::audio::features::AudioFeatures;
 use voxtype::audio::levels::{AudioFrame, AudioReader, FRAME_HZ};
 use voxtype::config::{Config as VoxtypeConfig, HotkeyConfig};
-use voxtype::osd::config::{OsdAnchor, OsdConfig, OsdPosition, OsdTheme};
+use voxtype::osd::config::{OsdAnchor, OsdConfig, OsdMotion, OsdPosition, OsdTheme};
 use voxtype::osd::ipc::resolve_socket_path;
 use voxtype::osd::look_step;
 use voxtype::osd::outcome::Outcome;
@@ -123,6 +123,8 @@ mod synthwave;
 mod mecha;
 #[path = "osd_vo/wild_space.rs"]
 mod wild_space;
+#[path = "osd_vo/defaults.rs"]
+mod defaults;
 #[path = "osd_vo/endings.rs"]
 mod endings;
 #[allow(unused_imports)]
@@ -331,9 +333,11 @@ struct Args {
     )]
     wall_size: String,
 
-    /// Motion features to switch on, comma separated, as the motion station's
-    /// exhibits do: for example `palimpsest,reduced-motion`. Each look reads
-    /// the names it knows and ignores the rest.
+    /// Motion features, comma separated; wins over `[osd] motion`. `look`
+    /// (the default) is each look's own set and `none` turns it off. Any
+    /// feature name replaces the set (for example `onset-ink`); `no-<name>`
+    /// takes one name out of it (for example `no-fold-under`). Unknown names
+    /// are ignored. `--station` exhibits keep their own features.
     #[arg(
         long,
         value_name = "NAMES",
@@ -625,8 +629,13 @@ struct Look {
     /// With `anchor = "reading-line"`: the newest text line's height on the
     /// output, as a fraction. `None` places the popup by its top edge.
     reading_line: Option<f32>,
-    /// Motion features switched on (`--motion`, a station exhibit).
+    /// Motion features asked for by name (`--motion`, `[osd] motion`, a
+    /// station exhibit), `no-<name>` entries included.
     features: Arc<[String]>,
+    /// The look's own motion set (`defaults::defaults`) is on too, minus
+    /// `no-` entries. Off in `Look::new`, so a station tile keeps exactly
+    /// its exhibit's features; `set_motion` turns it on.
+    look_set: bool,
 }
 
 /// The line motion features of a look on its transcript (MO-31 to MO-34).
@@ -683,16 +692,46 @@ impl Look {
             reading_line: (cfg.anchor == OsdAnchor::ReadingLine)
                 .then(|| cfg.reading_line.clamp(0.0, 1.0)),
             features: Arc::from([]),
+            look_set: false,
         }
+    }
+
+    /// Takes the resolved motion setting: `[osd] motion`, or `--motion` /
+    /// `VOXTYPE_OSD_VO_MOTION` over it.
+    fn set_motion(&mut self, m: &OsdMotion) {
+        let (names, look_set) = defaults::resolve(m);
+        self.features = names.into();
+        self.look_set = look_set;
+    }
+
+    fn asked(&self, name: &str) -> bool {
+        self.features.iter().any(|f| f == name)
+    }
+
+    fn removed(&self, name: &str) -> bool {
+        self.features
+            .iter()
+            .any(|f| f.strip_prefix("no-") == Some(name))
+    }
+
+    /// Asked for, or in the current look's set and not taken out. Reads
+    /// `self.theme` now, so a look switch mid-show answers the new look.
+    fn asked_or_set(&self, name: &str) -> bool {
+        self.asked(name)
+            || (self.look_set
+                && defaults::defaults(self.theme).contains(&name)
+                && !self.removed(name))
     }
 
     /// Whether the motion feature `name` is switched on. Read by the looks
     /// that have motion features.
     #[allow(dead_code)]
     fn on(&self, name: &str) -> bool {
-        let asked = |n: &str| self.features.iter().any(|f| f == n);
         // MO-75: `look-choice` also turns on the motions this look picks.
-        asked(name) || (asked(choice::LOOK_CHOICE) && choice::picks(self.theme).contains(&name))
+        self.asked_or_set(name)
+            || (self.asked_or_set(choice::LOOK_CHOICE)
+                && choice::picks(self.theme).contains(&name)
+                && !self.removed(name))
     }
 
     /// How the top line leaves when the text overflows (MO-33). With `fold-under` it
@@ -2173,7 +2212,7 @@ fn main() -> anyhow::Result<()> {
     let theme = plasma::load();
     let fonts = load_fonts(&theme)?;
     let mut look = Look::new(&cfg, &theme, stop_hint(&hotkey), &fonts);
-    look.features = args.motion.clone().into();
+    look.set_motion(&OsdMotion::layered(&args.motion, &cfg.motion));
 
     if args.moment.as_deref() == Some("list") {
         println!("{}", moments::Moment::names().replace(", ", "\n"));
@@ -2625,7 +2664,7 @@ fn run_wall(
             let mut c = cfg.clone();
             c.theme = t;
             let mut look = Look::new(&c, theme, stop_hint.clone(), &fonts);
-            look.features = args.motion.clone().into();
+            look.set_motion(&OsdMotion::layered(&args.motion, &cfg.motion));
             look
         })
         .collect();
