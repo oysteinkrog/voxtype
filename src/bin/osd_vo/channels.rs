@@ -160,7 +160,7 @@ impl Popup {
             let mut arrive = Typo::REST;
             let mut motion = TypoMotion::default();
             if l.on(CHANNELS) {
-                arrive = Typo { ink: 0.7, weight: 0.5, tracking: 1.05, baseline: 3.0, fill: 0.2 };
+                arrive = Typo { ink: 0.85, weight: 0.5, tracking: 1.05, baseline: 3.0, fill: 0.2 };
                 motion.ink = Spring::critical_to_98(0.45);
                 motion.fill = Spring::critical_to_98(0.35);
             }
