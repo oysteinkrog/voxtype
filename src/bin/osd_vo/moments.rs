@@ -32,6 +32,8 @@ pub(crate) enum Moment {
     Failure,
     Loading,
     TimeLimit,
+    /// A dictation with one press of the look chord in the middle.
+    LookSwitch,
 }
 
 impl Moment {
@@ -51,6 +53,7 @@ impl Moment {
         Moment::Failure,
         Moment::Loading,
         Moment::TimeLimit,
+        Moment::LookSwitch,
     ];
 
     /// The name on the command line.
@@ -71,6 +74,7 @@ impl Moment {
             Moment::Failure => "failure",
             Moment::Loading => "loading",
             Moment::TimeLimit => "time-limit",
+            Moment::LookSwitch => "look-switch",
         }
     }
 
@@ -553,6 +557,23 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             k.end(shown + 0.2, Outcome::Done);
             k.scenario(look, shown + 1.4)
         }
+        Moment::LookSwitch => {
+            k.record(s0);
+            let t = k.speak(s0, &sentence_words(0, 6), per);
+            // The chord steps to the next look mid-dictation, as the
+            // daemon's step file says.
+            k.files.look_step = Some(look_step::Step {
+                stamp: 1,
+                forward: true,
+            });
+            k.files_at(t + 0.1);
+            let t = k.speak(t + 0.2, &sentence_words(6, 6), per);
+            k.stop(t);
+            let shown = k.finish(t, 0.6, &final_text(&sentence_words(0, 12)));
+            k.pump(t + 0.03, shown);
+            k.end(shown + 0.2, Outcome::Done);
+            k.scenario(look, shown + 1.4)
+        }
         Moment::TimeLimit => {
             // Runs to the limit: the recording stops itself. `Files` does not
             // carry the limit yet; MO-35 adds it.
@@ -586,7 +607,7 @@ pub(crate) fn offline(
         renderer_setup: Some(Arc::new(vo_3d::install)),
         ..Options::default()
     };
-    let n = vo::render_offline_with(Popup::new(look, &fonts), &s, fps, dir, options)
+    let n = vo::render_offline_with(Popup::scripted(look, &fonts), &s, fps, dir, options)
         .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
     eprintln!(
         "voxtype-osd-vo: wrote {n} frames of {} to {}",
@@ -615,6 +636,81 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The popup, reporting its look after every message.
+    struct Spy(Popup, std::rc::Rc<std::cell::RefCell<Vec<OsdTheme>>>);
+
+    impl vo::App for Spy {
+        type Msg = Msg;
+
+        fn init(&mut self, cx: &mut Cx<Msg>) {
+            self.0.init(cx);
+        }
+
+        fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
+            self.0.update(msg, cx);
+            let mut seen = self.1.borrow_mut();
+            if seen.last() != Some(&self.0.look.theme) {
+                seen.push(self.0.look.theme);
+            }
+        }
+
+        fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
+            self.0.view(tokens)
+        }
+
+        fn surfaces(&self, tokens: &vo::Tokens) -> Vec<vo::SurfaceView<Msg>> {
+            self.0.surfaces(tokens)
+        }
+
+        fn main_surface(&self) -> Option<(Size, vo::Placement)> {
+            self.0.main_surface()
+        }
+    }
+
+    #[test]
+    fn the_look_switch_moment_steps_the_look_and_saves_nothing() {
+        // The saved look lives under XDG_STATE_HOME: point it at an empty
+        // folder, and nothing may appear there.
+        let state = std::path::PathBuf::from(format!(
+            "/var/tmp/voxtype-test-look-switch-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::create_dir_all(&state).unwrap();
+        std::env::set_var("XDG_STATE_HOME", &state);
+
+        let mut look = test_look();
+        look.theme = OsdTheme::Swiss;
+        let fonts = load_fonts(&PlasmaTheme::default()).unwrap();
+        let s = scenario(&look, Moment::LookSwitch);
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![OsdTheme::Swiss]));
+        let spy = Spy(Popup::scripted(look, &fonts), seen.clone());
+        let report = vo::exit_check(spy, &s, 10.0, Options::default());
+        let next = look_step::step(&OsdTheme::VO_LOOKS, OsdTheme::Swiss, true);
+        assert_eq!(
+            *seen.borrow(),
+            vec![OsdTheme::Swiss, next],
+            "one step, to the next look"
+        );
+        assert!(report.ending.after_exit().is_some(), "{report:?}");
+        let left: Vec<_> = walk(&state);
+        let _ = std::fs::remove_dir_all(&state);
+        assert!(left.is_empty(), "the scripted step saved {left:?}");
+    }
+
+    fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk(&p));
+            } else {
+                out.push(p);
+            }
+        }
+        out
     }
 
     #[test]

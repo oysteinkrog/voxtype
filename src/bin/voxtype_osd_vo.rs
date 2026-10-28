@@ -293,6 +293,14 @@ struct Args {
     #[arg(long)]
     envelope: bool,
 
+    /// Run the scripted dictation of `--offline` (or `--moment NAME`) with
+    /// no PNGs and check that the popup's exit settles before vo's exit
+    /// motion cap. Prints `exit-check: ok <look> settled <s> s after exit`,
+    /// or `exit-check: FAIL ...` and exits 1. Honours `--cancel`, `--motion`
+    /// and `VO_REDUCED_MOTION=1`. Needs no GPU, display or daemon.
+    #[arg(long)]
+    exit_check: bool,
+
     /// With `--offline`: print each surface's GPU time per frame (median,
     /// 95th percentile and worst) when the GPU has timestamps. Development.
     #[arg(long, requires = "offline", env = "VOXTYPE_OSD_VO_GPU_TIMES")]
@@ -346,9 +354,9 @@ struct Args {
     )]
     motion: Vec<String>,
 
-    /// With `--offline`: render one scripted moment instead of the demo
-    /// dictation, for example `revision-burst` or `cancel`. `--moment list`
-    /// prints them all.
+    /// With `--offline` or `--exit-check`: run one scripted moment instead
+    /// of the demo dictation, for example `revision-burst`, `cancel` or
+    /// `look-switch`. `--moment list` prints them all.
     #[arg(long, value_name = "MOMENT")]
     moment: Option<String>,
 
@@ -1305,6 +1313,9 @@ struct Popup {
     /// The live popup's config, for sizing and placing a look picked with
     /// the look chord. `None` elsewhere: the chord does nothing there.
     osd: Option<OsdConfig>,
+    /// A scripted run (`--offline`, `--exit-check`): the look chord steps
+    /// the look with no live config, and never saves it.
+    scripted: bool,
     /// The first runtime files came: a look step after them is a new press.
     step_seen: bool,
     /// When the look chord last picked a look, to name it in the status row.
@@ -1312,6 +1323,14 @@ struct Popup {
 }
 
 impl Popup {
+    /// A popup for a scripted run: the look chord steps the look, unsaved.
+    fn scripted(look: Look, fonts: &FontRegistry) -> Popup {
+        Popup {
+            scripted: true,
+            ..Popup::new(look, fonts)
+        }
+    }
+
     fn new(look: Look, fonts: &FontRegistry) -> Popup {
         Popup {
             look,
@@ -1368,6 +1387,7 @@ impl Popup {
             life: lifecycle::State::default(),
             breath: wild_motion::State::default(),
             osd: None,
+            scripted: false,
             step_seen: false,
             picked_at: None,
         }
@@ -1811,13 +1831,16 @@ impl Popup {
     /// words, levels and timers stay as they are; `main_surface` gives vo
     /// the new look's size and place.
     fn step_look(&mut self, forward: bool, t: f64, cx: &mut Cx<Msg>) {
-        if self.osd.is_none() {
+        if self.osd.is_none() && !self.scripted {
             return;
         }
         let theme = look_step::step(&OsdTheme::VO_LOOKS, self.look.theme, forward);
         tracing::info!(from = ?self.look.theme, to = ?theme, "look chord");
         self.look.theme = theme;
-        look_step::save(theme);
+        // Only the live popup keeps the pick for later popups.
+        if self.osd.is_some() {
+            look_step::save(theme);
+        }
         // The words wrap afresh to the new look's width and line count.
         self.lines = 1;
         self.cut = 0;
@@ -2227,6 +2250,9 @@ fn main() -> anyhow::Result<()> {
     if args.envelope {
         return envelope::run(look, fonts, args.fps, args.cancel);
     }
+    if args.exit_check {
+        return exit_check(look, fonts, args.fps, args.cancel, args.moment.as_deref());
+    }
     if let (Some(dir), Some(m)) = (&args.offline, &args.moment) {
         return moments::offline(look, fonts, dir, args.fps, m);
     }
@@ -2587,7 +2613,7 @@ fn offline(
         renderer_setup: Some(Arc::new(vo_3d::install)),
         ..Options::default()
     };
-    let n = vo::render_offline_with(Popup::new(look, &fonts), &scenario, fps, dir, options)
+    let n = vo::render_offline_with(Popup::scripted(look, &fonts), &scenario, fps, dir, options)
         .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
     eprintln!("voxtype-osd-vo: wrote {n} frames to {}", dir.display());
     if gpu_times {
@@ -2598,6 +2624,60 @@ fn offline(
         mb(PEAK.load(Ordering::Relaxed))
     );
     Ok(())
+}
+
+/// `--exit-check`: runs the scripted dictation, or `moment`, on the CPU and
+/// says whether the exit settled or vo's exit motion cap cut it. Exits 1 on
+/// a failure.
+fn exit_check(
+    look: Look,
+    fonts: FontRegistry,
+    fps: f64,
+    cancel: bool,
+    moment: Option<&str>,
+) -> anyhow::Result<()> {
+    let scenario = match moment {
+        Some(name) => {
+            let m = moments::Moment::parse(name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no moment {name:?}; the moments are {}",
+                    moments::Moment::names()
+                )
+            })?;
+            moments::scenario(&look, m)
+        }
+        None => scenario(&look, cancel),
+    };
+    let name = format!("{:?}", look.theme).to_ascii_lowercase();
+    let options = Options {
+        fonts: fonts.clone(),
+        default_motion: default_motion(&look),
+        ..Options::default()
+    };
+    let report = vo::exit_check(Popup::scripted(look, &fonts), &scenario, fps, options);
+    match report.ending {
+        vo::Ending::Settled { exit_at, at } => {
+            println!(
+                "exit-check: ok {name} settled {:.2} s after exit",
+                at - exit_at
+            );
+            Ok(())
+        }
+        vo::Ending::Capped { .. } => {
+            println!(
+                "exit-check: FAIL {name} still moving {} s after exit",
+                vo::Ending::CAP
+            );
+            std::process::exit(1);
+        }
+        vo::Ending::Unfinished { .. } => {
+            println!(
+                "exit-check: FAIL {name} never closed: the scripted dictation ended at {:.1} s and the popup did not ask to exit",
+                scenario.duration
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 /// One line per surface: frames, and GPU milliseconds per frame as median,
