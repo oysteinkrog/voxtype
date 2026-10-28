@@ -103,6 +103,9 @@ mod set_type;
 mod wall;
 #[path = "osd_vo/replay.rs"]
 mod replay;
+#[path = "osd_vo/wild_motion.rs"]
+mod wild_motion;
+use wild_motion::WildMotion;
 #[path = "osd_vo/moments.rs"]
 mod moments;
 #[path = "osd_vo/station/mod.rs"]
@@ -1156,6 +1159,8 @@ struct Popup {
     channels: channels::State,
     /// The end of the dictation: the delivery and its hand-off.
     life: lifecycle::State,
+    /// The variable font's voice readings (MO-81).
+    breath: wild_motion::State,
 }
 
 impl Popup {
@@ -1211,6 +1216,7 @@ impl Popup {
             hearing: hearing::State::default(),
             channels: channels::State::default(),
             life: lifecycle::State::default(),
+            breath: wild_motion::State::default(),
         }
     }
 
