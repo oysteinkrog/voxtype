@@ -736,6 +736,28 @@ pub(crate) fn run(
         "no exhibit matches --station-only {}",
         args.station_only.join(",")
     );
+    if args.station_list {
+        let per = (args.station_cols * args.station_rows).max(1);
+        for (i, e) in exhibits.iter().enumerate() {
+            let moments: Vec<&str> = (0..e.moments.len().max(1))
+                .map(|n| e.moment_at(n).name())
+                .collect();
+            println!(
+                "page {}  {}  {}  [{}]  features: {}  moments: {}",
+                i / per + 1,
+                e.id,
+                e.name,
+                format!("{:?}", e.theme).to_lowercase(),
+                if e.features.is_empty() {
+                    "-".to_string()
+                } else {
+                    e.features.join(",")
+                },
+                moments.join(",")
+            );
+        }
+        return Ok(());
+    }
     let (w, h) = args
         .station_size
         .split_once('x')

@@ -364,6 +364,11 @@ struct Args {
     /// With `--station`: every tile in its reduced-motion form.
     #[arg(long, requires = "station")]
     station_reduced: bool,
+
+    /// With `--station`: print the exhibits page by page, with their looks,
+    /// features and moments, and exit.
+    #[arg(long, requires = "station")]
+    station_list: bool,
 }
 
 /// Silence on the audio socket longer than this, with no recording and no
