@@ -167,6 +167,43 @@ pub struct Extra {
 /// this, so the line breaks stay put while words arrive.
 const LAYOUT_WORDS: usize = 120;
 
+/// With `ring-reads` (MO-62): a light head on the ring looks at the newest
+/// word like an eye, springs from word to word and sweeps the text once
+/// with the final pass.
+pub(crate) const RING_READS: &str = "ring-reads";
+/// The ring the eye runs on, in concept pixels from the centre.
+const EYE_R: f32 = 188.0;
+/// How long the eye takes to settle on a new word.
+const EYE_SETTLE: f64 = 0.35;
+
+/// MO-62: where the eye looks, as angles in degrees on the ring.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Eye {
+    /// The word looked at before the newest one, and the newest.
+    from: f32,
+    to: f32,
+    /// When the newest word came: the spring starts.
+    at: f64,
+    /// While the final pass runs: the first and last word and how far the
+    /// pass has got, 0 to 1.
+    sweep: Option<(f32, f32, f32)>,
+    reduced: bool,
+}
+
+impl Eye {
+    /// The eye's angle at `t`.
+    fn angle(&self, t: f64) -> f32 {
+        if let Some((a, b, f)) = self.sweep {
+            return a + (b - a) * f.clamp(0.0, 1.0);
+        }
+        if self.reduced || t <= self.at {
+            return if self.reduced || t > self.at { self.to } else { self.from };
+        }
+        let (y, _) = Spring::critical_to_98(EYE_SETTLE).eval(1.0, 0.0, t - self.at);
+        self.to + (self.from - self.to) * y as f32
+    }
+}
+
 /// What the ring canvases draw, fixed for one view.
 #[derive(Clone)]
 struct Hud {
@@ -226,6 +263,27 @@ impl Hud {
 
     fn spoke(&self, r0: f32, r1: f32, deg: f32) -> Contour {
         Contour::polyline(&[self.polar(r0, deg), self.polar(r1, deg)], false)
+    }
+
+    /// MO-62: the eye, a bright head with a short arc either side, on the
+    /// thin outer ring where it looks.
+    fn draw_eye(&self, t: f64, eye: &Eye, p: &mut Painter) {
+        let k = self.k;
+        let a = eye.angle(t);
+        p.stroke(
+            &self.arc(EYE_R, a - 7.0, a + 7.0),
+            &StrokeStyle::solid(2.4 * k, hex(BRIGHT, 0.85)).glow(5.0 * k),
+        );
+        p.shape(ShapeInstance::circle(
+            self.polar(EYE_R, a),
+            6.0 * k,
+            Paint::glow(hex(CYAN, 0.9), 10.0 * k, 1.2),
+        ));
+        p.shape(ShapeInstance::circle(
+            self.polar(EYE_R, a),
+            2.6 * k,
+            Paint::solid(hex(HOT, 1.0)),
+        ));
     }
 
     /// The parts of the ring that do not turn: the disc, the outer arcs,
@@ -730,8 +788,14 @@ impl Popup {
                 ));
             }
         }
+        let eye = self.jarvis_eye(g);
         let ring = at(
-            Element::canvas("ring", until, move |t, _, p| hud.draw(t, p)),
+            Element::canvas("ring", until, move |t, _, p| {
+                hud.draw(t, p);
+                if let Some(eye) = eye {
+                    hud.draw_eye(t, &eye, p);
+                }
+            }),
             0.0,
             0.0,
         )
@@ -741,6 +805,62 @@ impl Popup {
             layer = layer.child(self.jarvis_progress(g));
         }
         layer
+    }
+
+    /// MO-62: where the ring's eye looks, from the words on screen.
+    fn jarvis_eye(&self, g: &Geo) -> Option<Eye> {
+        if !self.look.on(RING_READS) || self.extra.final_at.is_some() {
+            return None;
+        }
+        let words = self.jarvis_word_centres(g);
+        let deg = |p: Point| (p.y - g.cy).atan2(p.x - g.cx).to_degrees();
+        let (newest_id, newest) = *words.last()?;
+        let reduced = self.look.on("reduced-motion");
+        if self.extra.finish_at.is_some() {
+            let f = self.files.fraction.unwrap_or(0.0) as f32;
+            return Some(Eye {
+                from: deg(newest),
+                to: deg(newest),
+                at: 0.0,
+                sweep: Some((deg(words[0].1), deg(newest), f)),
+                reduced,
+            });
+        }
+        let to = deg(newest);
+        let from = words.len().checked_sub(2).map_or(to, |i| deg(words[i].1));
+        let at = self.heard.word(newest_id).map_or(f64::NEG_INFINITY, |h| h.born);
+        Some(Eye {
+            from,
+            to,
+            at,
+            sweep: None,
+            reduced,
+        })
+    }
+
+    /// The centre of each word on screen in the frame, in surface pixels,
+    /// in reading order.
+    fn jarvis_word_centres(&self, g: &Geo) -> Vec<(vo_core::words::WordId, Point)> {
+        let style = self.look.text_style();
+        let rows = self.lines.max(1) as usize;
+        let skip = self.jarvis.lines.len().saturating_sub(rows);
+        let width = |text: &str| self.measure.layout(text, &style, None).size.w;
+        let mut out = Vec::new();
+        for (i, (words, line_w)) in self.jarvis.lines.iter().skip(skip).enumerate() {
+            let x0 = MARGIN + (g.w - line_w) / 2.0;
+            let y = g.frame_top + FRAME_PAD_TOP * g.k + (i as f32 + 0.5) * style.line_height;
+            let mut before = String::new();
+            for w in words {
+                let left = if before.is_empty() { 0.0 } else { width(&format!("{before} ")) };
+                let x = x0 + left + width(&w.text) / 2.0;
+                out.push((w.id, Point::new(x, y)));
+                if !before.is_empty() {
+                    before.push(' ');
+                }
+                before.push_str(&w.text);
+            }
+        }
+        out
     }
 
     /// When the rings, the frame and the pill stop moving: never while
@@ -1164,6 +1284,29 @@ impl Popup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_eye_springs_from_word_to_word_and_sweeps_with_the_final_pass() {
+        let eye = Eye {
+            from: 60.0,
+            to: 100.0,
+            at: 1.0,
+            sweep: None,
+            reduced: false,
+        };
+        assert_eq!(eye.angle(0.9), 60.0);
+        let mid = eye.angle(1.1);
+        assert!(mid > 60.0 && mid < 100.0, "{mid}");
+        assert!((eye.angle(1.0 + EYE_SETTLE) - 100.0).abs() < 1.0);
+        // Reduced motion: straight to the newest word.
+        assert_eq!(Eye { reduced: true, ..eye }.angle(1.01), 100.0);
+        // The final pass sweeps from the first word to the last.
+        let sweep = Eye {
+            sweep: Some((50.0, 130.0, 0.5)),
+            ..eye
+        };
+        assert_eq!(sweep.angle(5.0), 90.0);
+    }
 
     #[test]
     fn a_spin_turns_once_per_period_in_its_own_direction() {
