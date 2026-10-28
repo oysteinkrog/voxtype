@@ -824,6 +824,34 @@ impl Popup {
 
         // The transcript lines, one live text each so a line keeps its place.
         let colour = if mode == Mode::Cancelled { hex(DIM) } else { hex(TEXT) };
+        if l.on(wild_space::KINETIC_LATTICE) {
+            // The kinetic lattice under each line, the times on the newest.
+            for (i, (words, _)) in lines.iter().enumerate() {
+                let newest = i + 1 == lines.len();
+                let look = vo::scene::lattice::LatticeLook {
+                    bow: (1.5, 8.0),
+                    bow_per_sec: 22.0,
+                    drop: 4.0,
+                    stem: 6.0,
+                    color: hex(TRACE).fade(0.5),
+                    accent: hex(VALUE),
+                    label: newest.then(|| mono(8.0)),
+                    label_color: hex(LABEL).fade(0.8),
+                    ..Default::default()
+                };
+                panel = panel.child(at(
+                    self.lattice_line(
+                        format!("lattice-{}", words[0].id),
+                        words,
+                        &style,
+                        Size::new(WRAP + 40.0, LINE + 14.0),
+                        &look,
+                    ),
+                    o + TEXT_X,
+                    o + TEXT_TOP + i as f32 * LINE,
+                ));
+            }
+        }
         let rw = self.rewinding();
         for (i, (words, _)) in lines.iter().enumerate() {
             panel = panel.child(

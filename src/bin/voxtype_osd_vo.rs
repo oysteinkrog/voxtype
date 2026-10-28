@@ -111,6 +111,8 @@ mod station;
 mod synthwave;
 #[path = "osd_vo/mecha.rs"]
 mod mecha;
+#[path = "osd_vo/wild_space.rs"]
+mod wild_space;
 #[path = "osd_vo/endings.rs"]
 mod endings;
 #[allow(unused_imports)]
@@ -1146,6 +1148,8 @@ struct Popup {
     endings: endings::State,
     /// Onsets and the sound each word came from (`osd_vo/sounding.rs`).
     heard: sounding::State,
+    /// The depth stack, lattice and sound sculpture (`osd_vo/wild_space.rs`).
+    wild: wild_space::State,
     /// What the popup heard before the words came (`osd_vo/hearing.rs`).
     hearing: hearing::State,
     /// Typographic channels on the words (`osd_vo/channels.rs`).
@@ -1203,6 +1207,7 @@ impl Popup {
             synth: synthwave::State::default(),
             endings: endings::State::default(),
             heard: sounding::State::default(),
+            wild: wild_space::State::default(),
             hearing: hearing::State::default(),
             channels: channels::State::default(),
             life: lifecycle::State::default(),

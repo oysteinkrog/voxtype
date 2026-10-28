@@ -1097,7 +1097,23 @@ impl Popup {
         // the others keep their nodes and move up.
         // The popup counts the lines it has room for; show that many.
         let skip = self.jarvis.lines.len().saturating_sub(rows as usize);
-        for (words, width) in self.jarvis.lines.iter().skip(skip) {
+        if self.look.on(wild_space::DEPTH_STACK) {
+            column = column.child(self.depth_stack_lines(
+                &self.jarvis.lines[skip..],
+                g.w,
+                rows,
+                style,
+                k,
+                hex(TEXT, 1.0),
+                hex(CYAN, 1.0),
+            ));
+        }
+        let stacked = if self.look.on(wild_space::DEPTH_STACK) {
+            self.jarvis.lines.len()
+        } else {
+            skip
+        };
+        for (words, width) in self.jarvis.lines.iter().skip(stacked) {
             let key = words.first().map_or(0, |w| w.id);
             let w = width.ceil() + 2.0;
             let line = Element::layer(format!("line{key}"))

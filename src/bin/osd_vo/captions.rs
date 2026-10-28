@@ -390,6 +390,7 @@ impl Popup {
         let mut doubts = Vec::new();
         let mut dot = None;
         let mut texts = Vec::new();
+        let mut sculpt_rows = Vec::new();
         for (i, (words, w)) in lines.iter().enumerate() {
             let age = n - 1 - i;
             let (cy, opacity) = SLOTS[age.min(SLOTS.len() - 1)];
@@ -439,6 +440,7 @@ impl Popup {
                     0.0,
                 ));
             }
+            sculpt_rows.push((words.clone(), Point::new(x + lx, y + ly)));
             texts.push(
                 at(row, x + lx, y + ly)
                     .opacity(if mode == Mode::Cancelled { opacity * 0.4 } else { opacity })
@@ -523,8 +525,15 @@ impl Popup {
         let mut panel = at(Element::layer("captions"), x, y)
             .size(size.w, size.h)
             .presence(Transition::fade(), Transition::fade())
-            .child(canvas)
-            .children(texts);
+            .child(canvas);
+        if l.on(wild_space::SOUND_SCULPTURE) {
+            // Letter bodies behind the text, as deep as each word was loud.
+            let done = !matches!(mode, Mode::Listening | Mode::Loading);
+            if let Some(e) = self.sculpture_element(&sculpt_rows, &style, size, roll, done) {
+                panel = panel.child(e);
+            }
+        }
+        panel = panel.children(texts);
         if !label.is_empty() {
             panel = panel.child(
                 at(

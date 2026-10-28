@@ -21,6 +21,7 @@ pub(crate) fn run(look: Look, fonts: FontRegistry, fps: f64, cancel: bool) -> an
     let options = || Options {
         fonts: fonts.clone(),
         default_motion: default_motion(&look),
+        renderer_setup: Some(std::sync::Arc::new(vo_3d::install)),
         ..Options::default()
     };
     let report = check_scenario(
