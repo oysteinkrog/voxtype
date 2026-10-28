@@ -95,6 +95,8 @@ mod jarvis;
 mod particles;
 #[path = "osd_vo/cyberpunk.rs"]
 mod cyberpunk;
+#[path = "osd_vo/set_type.rs"]
+mod set_type;
 #[path = "osd_vo/wall.rs"]
 mod wall;
 #[path = "osd_vo/replay.rs"]
@@ -1124,6 +1126,8 @@ struct Popup {
     island: island::State,
     /// What only the jarvis look keeps.
     jarvis: jarvis::Extra,
+    /// The final pass that sets the type (MO-40).
+    set_type: set_type::State,
     /// Ink, light and liquid letter effects (`osd_vo/letter_fx.rs`).
     letter_fx: letter_fx::State,
     /// What only the cyberpunk look keeps.
@@ -1185,6 +1189,7 @@ impl Popup {
             karaoke: karaoke::State::default(),
             island: island::State::default(),
             jarvis: jarvis::Extra::default(),
+            set_type: set_type::State::default(),
             letter_fx: letter_fx::State::default(),
             cyber: cyberpunk::State::default(),
             synth: synthwave::State::default(),
@@ -1516,7 +1521,9 @@ impl App for Popup {
         self.sync_synthwave(t);
         self.sync_endings(t);
         self.sync_hearing();
+        self.sync_set_type(t);
         self.arm_tick(cx);
+        self.arm_set_type_tick(cx);
         self.arm_scope_tick(cx);
         self.arm_captions_tick(cx);
         self.arm_karaoke_tick(cx);
@@ -1539,13 +1546,20 @@ impl App for Popup {
 
     fn surfaces(&self, _: &vo::Tokens) -> Vec<vo::SurfaceView<Msg>> {
         if self.look.theme == OsdTheme::Captions {
-            return self.captions_surfaces();
+            let mut surfaces = self.captions_surfaces();
+            for s in &mut surfaces {
+                let view = std::mem::replace(&mut s.view, Element::column("set-type"));
+                s.view = view.map_live_texts(&mut |e| self.set_type(e));
+            }
+            return surfaces;
         }
         Vec::new()
     }
 
     fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
-        let look = self.look_view(tokens);
+        let look = self
+            .look_view(tokens)
+            .map_live_texts(&mut |e| self.set_type(e));
         // The shift and the taller panel come in the same frame, on a
         // surface that keeps its size, so the reading line never moves.
         let root = match self.look.reading_shift(self.lines) {
