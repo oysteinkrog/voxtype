@@ -118,7 +118,7 @@ const CONTENT_FADE: f64 = 0.18;
 const TICK_HZ: f64 = 60.0;
 /// Word bulge (MO-74): each new word pushes the capsule's right edge out
 /// this far, quickly, and it relaxes.
-const BULGE_PX: f32 = 2.0;
+const BULGE_PX: f32 = 4.0;
 const BULGE_RISE: f64 = 0.05;
 const BULGE_SECS: f64 = 0.2;
 

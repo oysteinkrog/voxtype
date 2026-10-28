@@ -1,5 +1,5 @@
 //! MO-74. Word bulge on the island look: each new word bulges the pill's
-//! right edge 2 px and it relaxes.
+//! right edge 4 px and it relaxes.
 
 use super::*;
 
