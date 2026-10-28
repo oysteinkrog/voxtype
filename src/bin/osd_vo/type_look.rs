@@ -482,6 +482,8 @@ impl Popup {
             .word_enter(self.paths_word_enter(Transition::fade().opacity(0.0).offset(0.0, WORD_RISE)))
             .word_change(Transition::fade().opacity(0.35).offset(0.0, -4.0));
         let words = self.typo_words(words);
+        // Before the hand-off, which may wrap the live text.
+        let words = self.letter_fx_words(words);
         let words = self.handoff_or(
             words,
             &l.text_style(),
@@ -489,7 +491,6 @@ impl Popup {
             l.foreground,
             l.accent,
         );
-        let words = self.letter_fx_words(words);
         let mut text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
             .child(words);
