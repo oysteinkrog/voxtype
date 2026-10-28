@@ -71,6 +71,8 @@ mod palette;
 mod dotmatrix;
 #[path = "osd_vo/kit.rs"]
 mod kit;
+#[path = "osd_vo/letter_fx.rs"]
+mod letter_fx;
 #[path = "osd_vo/tally.rs"]
 mod tally;
 #[path = "osd_vo/limit.rs"]
@@ -1122,6 +1124,8 @@ struct Popup {
     island: island::State,
     /// What only the jarvis look keeps.
     jarvis: jarvis::Extra,
+    /// Ink, light and liquid letter effects (`osd_vo/letter_fx.rs`).
+    letter_fx: letter_fx::State,
     /// What only the cyberpunk look keeps.
     cyber: cyberpunk::State,
     /// What only the synthwave look keeps.
@@ -1181,6 +1185,7 @@ impl Popup {
             karaoke: karaoke::State::default(),
             island: island::State::default(),
             jarvis: jarvis::Extra::default(),
+            letter_fx: letter_fx::State::default(),
             cyber: cyberpunk::State::default(),
             synth: synthwave::State::default(),
             endings: endings::State::default(),

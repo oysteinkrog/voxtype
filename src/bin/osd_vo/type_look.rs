@@ -489,6 +489,7 @@ impl Popup {
             l.foreground,
             l.accent,
         );
+        let words = self.letter_fx_words(words);
         let mut text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
             .child(words);
@@ -512,6 +513,7 @@ impl Popup {
             l.foreground,
             l.accent,
         );
+        let text = self.letter_fx_layers(text, l.text_width());
         self.text_area(text)
     }
 
