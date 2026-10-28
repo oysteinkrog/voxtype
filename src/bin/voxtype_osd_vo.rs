@@ -746,7 +746,7 @@ impl Look {
     /// folds under about its baseline, or in the flat Swiss looks thins away; under
     /// reduced motion, and without the feature, it scrolls up and fades.
     fn overflow(&self) -> Overflow {
-        if !self.on("fold-under") || self.on("reduced-motion") {
+        if !self.on("fold-under") || self.on("reduced-motion") || kit::reduced() {
             return Overflow::Scroll;
         }
         match self.theme {

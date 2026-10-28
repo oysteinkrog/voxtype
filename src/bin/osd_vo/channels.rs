@@ -153,7 +153,8 @@ impl Popup {
         };
         let (onset, pitch, tracking) = (
             l.on(ONSET) || l.on(VOICE),
-            l.on(PITCH) || l.on(VOICE),
+            // Under reduced motion the baseline stays flat.
+            (l.on(PITCH) || l.on(VOICE)) && !(self.channels_reduced() || kit::reduced()),
             l.on(TRACKING) || l.on(VOICE),
         );
         let newest = self.shown.last().map(|w| w.id);

@@ -16,8 +16,9 @@
 //!   bookmark in the margin marks the line where speech stopped). The next
 //!   onset, before its word exists, snaps it all back in one fast spring.
 //!
-//! Each is a motion feature (`--motion`, `VOXTYPE_OSD_VO_MOTION`). Swiss,
-//! type and swissfi switch all three on; `no-<name>` switches one off there.
+//! Each is a motion feature (`--motion`, `VOXTYPE_OSD_VO_MOTION`). A look
+//! turns on the ones in its set (`defaults.rs`; swiss has `pause-marks`);
+//! `no-<name>` switches one off there.
 //! A look takes part by passing its text column through
 //! [`Popup::with_hearing`] and its chrome through the `exhale_*` helpers.
 //!
@@ -102,16 +103,10 @@ fn bus_tune() -> HearingTune {
 
 impl Popup {
     /// Whether the hearing feature `name` is on in this look.
+    /// The look's own set (`defaults.rs`) decides, so `[osd] motion =
+    /// "none"` turns them all off.
     pub(crate) fn hearing_on(&self, name: &str) -> bool {
-        let l = &self.look;
-        if l.on(name) {
-            return true;
-        }
-        let default = matches!(
-            l.theme,
-            OsdTheme::Default | OsdTheme::Swiss | OsdTheme::Type | OsdTheme::Swissfi
-        );
-        default && !l.on(&format!("no-{name}"))
+        self.look.on(name)
     }
 
     fn hearing_any(&self) -> bool {
@@ -316,6 +311,7 @@ impl Popup {
                 ink: accent,
                 ..look
             };
+            let start = out.len();
             let final_at = self.extra.final_at;
             for m in &x.placed {
                 let Some(end) = laid.word_end(m.after) else {
@@ -339,6 +335,19 @@ impl Popup {
                 if p.mark.is_none() && p.ticks > 0 {
                     let (caret, _) = laid.caret(width);
                     out.extend(hearing::pause_marks(n, &p, &marks, caret, false));
+                }
+            }
+            if self.hearing_reduced() {
+                // Under reduced motion a tick or mark only fades in and out
+                // where it stands: no tick grows up, no mark draws itself in.
+                let still = Transition::fade();
+                for e in &mut out[start..] {
+                    let taken = std::mem::replace(e, Element::row("pause-taken"));
+                    *e = taken
+                        .presence(still, still)
+                        .motion(Prop::Position, Motion::Snap)
+                        .motion(Prop::Size, Motion::Snap)
+                        .motion(Prop::Trim, Motion::Snap);
                 }
             }
         }
