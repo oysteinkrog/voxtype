@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# CPU, frame rate and GPU budget per vo popup look (RD-02).
+#
+#   scripts/osd-vo-budget.sh [BINARY]
+#
+# For each look in OsdTheme::VO_LOOKS (read from src/osd/config.rs), with its
+# default motion and the default [osd] config (an empty config file, so the
+# user's own config is not read), it measures two states:
+#
+#   recording  `--live-moment dictation`, scene time 1.5 to 6.5 s: words
+#              arriving, one revision and a 1 s pause.
+#   idle-open  `--live-moment long-silence`, scene time 1.8 to 5.9 s: the
+#              popup open and recording room tone, no new words.
+#
+# Each live run plays the moment in the real popup surface inside its own
+# nested `kwin_wayland --virtual` (never the real display). CPU is the
+# process's utime + stime from /proc/<pid>/stat over the window, in percent of
+# one core. Frames per second count the `vo: frame` lines (VO_DIAG_FRAMES=1)
+# whose scene time falls in the window. GPU is the worst surface's p95 and p99
+# per frame from `--offline --gpu-times --moment <moment>` at --fps 10 (no
+# display, needs a GPU with timestamp queries; "-" when it has none).
+#
+# Each state runs VOXTYPE_BUDGET_RUNS times (default 2) and keeps the run
+# with the least CPU: the first start of a look builds its GPU pipelines and
+# can cost three times as much.
+#
+# Writes $VOXTYPE_BUDGET_DIR/looks.tsv (default /var/tmp/claude/vo-budget),
+# with logs in its looks/ folder:
+#   look  state  cpu_pct  frames_per_s  gpu_ms_p95  gpu_ms_p99
+# and exits 1 naming each look and state over a limit. Limits (env vars):
+#
+#   VOXTYPE_BUDGET_IDLE_CPU_PCT  default 2    idle-open CPU, % of one core
+#   VOXTYPE_BUDGET_IDLE_FPS      default 30   idle-open frames per second
+#   VOXTYPE_BUDGET_REC_CPU_PCT   default 10   recording CPU, % of one core
+#   VOXTYPE_BUDGET_GPU_MS        default 1    GPU p95 per frame, both states
+#   VOXTYPE_BUDGET_GPU_P99_MS    default 3    GPU p99 per frame, both states
+#
+# Other settings: LOOKS="swiss type" measures only those looks.
+# The policy behind the limits is rule 8 of docs/MOTION-PLAN.md in the vo
+# framework repo (voxtype-osd-gpu).
+set -uo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+bin=${1:-$root/target/debug/voxtype-osd-vo}
+out=${VOXTYPE_BUDGET_DIR:-/var/tmp/claude/vo-budget}
+# Its own folder: the framework's budget.sh uses the same parent.
+work=$out/looks
+runs=${VOXTYPE_BUDGET_RUNS:-2}
+idle_cpu=${VOXTYPE_BUDGET_IDLE_CPU_PCT:-2}
+idle_fps=${VOXTYPE_BUDGET_IDLE_FPS:-30}
+rec_cpu=${VOXTYPE_BUDGET_REC_CPU_PCT:-10}
+gpu_ms=${VOXTYPE_BUDGET_GPU_MS:-1}
+gpu_p99=${VOXTYPE_BUDGET_GPU_P99_MS:-3}
+
+if [[ ! -x $bin ]]; then
+    echo "osd-vo-budget: no binary at $bin; build it with" >&2
+    echo "  heavy-build cargo build --features osd-vo --bin voxtype-osd-vo" >&2
+    exit 2
+fi
+command -v kwin_wayland >/dev/null || { echo "osd-vo-budget: kwin_wayland is not installed" >&2; exit 2; }
+
+if [[ -n ${LOOKS:-} ]]; then
+    read -ra looks <<<"$LOOKS"
+else
+    mapfile -t looks < <(sed -n '/pub const VO_LOOKS/,/\];/s/.*OsdTheme::\([A-Za-z]*\),.*/\1/p' \
+        "$root/src/osd/config.rs" | tr '[:upper:]' '[:lower:]')
+fi
+((${#looks[@]} > 0)) || { echo "osd-vo-budget: found no looks in $root/src/osd/config.rs" >&2; exit 2; }
+
+mkdir -p "$work/xdg-config"
+: >"$work/empty.toml"
+tsv=$out/looks.tsv
+printf 'look\tstate\tcpu_pct\tframes_per_s\tgpu_ms_p95\tgpu_ms_p99\n' >"$tsv"
+failed=()
+over() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a != "-" && a > b) }'; }
+
+# Runs inside the nested KWin: plays the moment, reads the popup's CPU ticks
+# at the window's start and end, and waits for the popup to exit.
+cat >"$work/inner.sh" <<'EOF'
+#!/usr/bin/env bash
+set -u
+log=$1 ticks=$2 from=$3 to=$4
+shift 4
+VO_DIAG_FRAMES=1 RUST_LOG=warn "$@" >"$log" 2>&1 &
+pid=$!
+start=
+for _ in $(seq 400); do
+    start=$(grep -oP 'live-moment: \S+ starts at uptime \K[0-9.]+' "$log" 2>/dev/null) && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.02
+done
+cpu() { awk '{ sub(/.*\) /, ""); print $12 + $13 }' "/proc/$pid/stat" 2>/dev/null; }
+until_uptime() {
+    local now
+    now=$(cut -d' ' -f1 /proc/uptime)
+    sleep "$(awk -v a="$1" -v n="$now" 'BEGIN { d = a - n; print (d > 0 ? d : 0) }')"
+}
+if [[ -n $start ]]; then
+    until_uptime "$(awk -v s="$start" -v f="$from" 'BEGIN { print s + f }')"
+    a=$(cpu) ua=$(cut -d' ' -f1 /proc/uptime)
+    until_uptime "$(awk -v s="$start" -v t="$to" 'BEGIN { print s + t }')"
+    b=$(cpu) ub=$(cut -d' ' -f1 /proc/uptime)
+    echo "$a $ua $b $ub" >"$ticks"
+fi
+wait "$pid"
+echo "popup exit $?" >>"$log"
+EOF
+chmod +x "$work/inner.sh"
+
+hz=$(getconf CLK_TCK)
+
+# live LOOK STATE MOMENT FROM TO: one nested KWin run. Prints "cpu_pct fps".
+live() {
+    local look=$1 state=$2 moment=$3 from=$4 to=$5
+    local log=$work/$look-$state.log ticks=$work/$look-$state.ticks unit=vo-look-budget-$look-$state-$$
+    rm -f "$log" "$ticks"
+    # Its own scope in builds.slice: stopping it ends KWin and every helper
+    # its D-Bus session started.
+    XDG_CONFIG_HOME=$work/xdg-config KWIN_WAYLAND_NO_PERMISSION_CHECKS=1 WAYLAND_DISPLAY=no-such-wl DISPLAY= \
+        timeout 60 systemd-run --user --scope --quiet --collect --slice=builds.slice --unit="$unit" \
+        -p CPUQuota=400% -- dbus-run-session -- kwin_wayland --virtual --no-lockscreen --no-global-shortcuts \
+        --socket "vo-look-budget-$$" --width 1920 --height 1080 \
+        --exit-with-session "$work/inner.sh $log $ticks $from $to $bin --config $work/empty.toml --theme $look --live-moment $moment" \
+        >"$work/kwin-$look-$state.log" 2>&1
+    systemctl --user stop "$unit.scope" 2>/dev/null
+    if [[ ! -s $ticks ]] || ! grep -q 'popup exit 0' "$log" 2>/dev/null; then
+        echo "- -"
+        return
+    fi
+    read -r a ua b ub <"$ticks"
+    local cpu fps
+    cpu=$(awk -v a="$a" -v b="$b" -v ua="$ua" -v ub="$ub" -v hz="$hz" \
+        'BEGIN { printf "%.2f", 100 * (b - a) / hz / (ub - ua) }')
+    fps=$(grep -oP '^vo: frame [0-9]+ t=\K[0-9.]+' "$log" |
+        awk -v f="$from" -v t="$to" '$1 >= f && $1 < t { n++ } END { printf "%.1f", n / (t - f) }')
+    echo "$cpu $fps"
+}
+
+# gpu LOOK MOMENT: prints "p95 p99", the worst surface's, or "- -".
+gpu() {
+    local look=$1 moment=$2 dir=$work/offline-$1-$2
+    rm -rf "$dir"
+    local out
+    out=$(RUST_LOG=warn systemd-run --user --slice=builds.slice --scope -q -p CPUQuota=400% nice -n 10 \
+        "$bin" --config "$work/empty.toml" --theme "$look" --offline "$dir" --fps 10 --gpu-times \
+        --moment "$moment" 2>&1)
+    rm -rf "$dir"
+    awk '/GPU .* frames,/ {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "p95") p95 = ($(i + 1) > p95 ? $(i + 1) : p95)
+                if ($i == "p99") p99 = ($(i + 1) > p99 ? $(i + 1) : p99)
+            }
+            seen = 1
+        }
+        END { if (seen) printf "%.3f %.3f\n", p95, p99; else print "- -" }' <<<"$out"
+}
+
+for look in "${looks[@]}"; do
+    for state in recording idle-open; do
+        if [[ $state == recording ]]; then
+            moment=dictation from=1.5 to=6.5 cpu_max=$rec_cpu fps_max=
+        else
+            moment=long-silence from=1.8 to=5.9 cpu_max=$idle_cpu fps_max=$idle_fps
+        fi
+        cpu=- fps=-
+        for _ in $(seq "$runs"); do
+            read -r c f < <(live "$look" "$state" "$moment" "$from" "$to")
+            if [[ $c != - ]] && { [[ $cpu == - ]] || over "$cpu" "$c"; }; then
+                cpu=$c fps=$f
+            fi
+        done
+        read -r p95 p99 < <(gpu "$look" "$moment")
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$look" "$state" "$cpu" "$fps" "$p95" "$p99" >>"$tsv"
+        why=()
+        [[ $cpu == - ]] && why+=("live run failed (see $work/$look-$state.log)")
+        over "$cpu" "$cpu_max" && why+=("cpu ${cpu}% > ${cpu_max}%")
+        [[ -n $fps_max ]] && over "$fps" "$fps_max" && why+=("${fps} frames/s > $fps_max")
+        over "$p95" "$gpu_ms" && why+=("gpu p95 ${p95} ms > $gpu_ms ms")
+        over "$p99" "$gpu_p99" && why+=("gpu p99 ${p99} ms > $gpu_p99 ms")
+        if ((${#why[@]} == 0)); then
+            printf 'ok    %-10s %-10s cpu %6s%%  %5s frames/s  gpu p95 %s ms\n' "$look" "$state" "$cpu" "$fps" "$p95"
+        else
+            printf 'OVER  %-10s %-10s %s\n' "$look" "$state" "$(IFS=';'; echo "${why[*]}")"
+            failed+=("$look $state")
+        fi
+    done
+done
+
+echo
+echo "osd-vo-budget: ${#looks[@]} looks, ${#failed[@]} rows over a limit; table $tsv"
+for f in "${failed[@]}"; do
+    echo "  OVER $f"
+done
+((${#failed[@]} == 0))

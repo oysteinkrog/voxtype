@@ -360,6 +360,13 @@ struct Args {
     #[arg(long, value_name = "MOMENT")]
     moment: Option<String>,
 
+    /// Development: play one scripted moment (for example `dictation` or
+    /// `long-silence`) live in the real popup surface, print a line per
+    /// frame (with `VO_DIAG_FRAMES=1`) and the frame diagnostics, then exit.
+    /// Needs a display: scripts/osd-vo-budget.sh runs it in a nested KWin.
+    #[arg(long, value_name = "MOMENT")]
+    live_moment: Option<String>,
+
     /// Development: the motion station, every motion exhibit as a labelled
     /// popup tile, page by page. With `--offline`, renders one page.
     #[arg(long)]
@@ -2254,7 +2261,10 @@ fn main() -> anyhow::Result<()> {
         return exit_check(look, fonts, args.fps, args.cancel, args.moment.as_deref());
     }
     if let (Some(dir), Some(m)) = (&args.offline, &args.moment) {
-        return moments::offline(look, fonts, dir, args.fps, m);
+        return moments::offline(look, fonts, dir, args.fps, m, args.gpu_times);
+    }
+    if let Some(m) = args.live_moment.as_deref() {
+        return moments::live(look, fonts, &cfg, m);
     }
     if let Some(dir) = &args.offline {
         return offline(look, fonts, dir, args.fps, args.cancel, args.gpu_times);
@@ -2598,18 +2608,11 @@ fn offline(
     gpu_times: bool,
 ) -> anyhow::Result<()> {
     let scenario = scenario(&look, cancel);
-    // GPU milliseconds per frame, by surface: "main" or an extra surface's key.
-    let times: Arc<Mutex<Vec<(String, f64)>>> = Arc::default();
-    let sink = times.clone();
+    let (times, sink) = gpu_time_sink(gpu_times);
     let options = Options {
         fonts: fonts.clone(),
         default_motion: default_motion(&look),
-        frame_timings: gpu_times.then(|| {
-            Arc::new(move |f: &vo::FrameTiming| {
-                let key = f.surface.unwrap_or("main").to_string();
-                sink.lock().unwrap().push((key, f.timings.total_ms));
-            }) as vo::FrameTimingsSink
-        }),
+        frame_timings: sink,
         renderer_setup: Some(Arc::new(vo_3d::install)),
         ..Options::default()
     };
@@ -2680,8 +2683,24 @@ fn exit_check(
     }
 }
 
+/// GPU milliseconds per frame, by surface: "main" or an extra surface's key.
+type GpuTimes = Arc<Mutex<Vec<(String, f64)>>>;
+
+/// The GPU times, and the sink that fills them when `on`.
+fn gpu_time_sink(on: bool) -> (GpuTimes, Option<vo::FrameTimingsSink>) {
+    let times: GpuTimes = Arc::default();
+    let sink = times.clone();
+    let f = on.then(|| {
+        Arc::new(move |f: &vo::FrameTiming| {
+            let key = f.surface.unwrap_or("main").to_string();
+            sink.lock().unwrap().push((key, f.timings.total_ms));
+        }) as vo::FrameTimingsSink
+    });
+    (times, f)
+}
+
 /// One line per surface: frames, and GPU milliseconds per frame as median,
-/// 95th percentile and worst.
+/// 95th and 99th percentile and worst.
 fn print_gpu_times(times: &[(String, f64)]) {
     if times.is_empty() {
         eprintln!("voxtype-osd-vo: no GPU times: this GPU has no timestamps inside encoders");
@@ -2699,10 +2718,11 @@ fn print_gpu_times(times: &[(String, f64)]) {
         ms.sort_by(f64::total_cmp);
         let at = |q: f64| ms[((ms.len() - 1) as f64 * q).round() as usize];
         eprintln!(
-            "voxtype-osd-vo: GPU {key}: {} frames, median {:.3} ms, p95 {:.3} ms, max {:.3} ms",
+            "voxtype-osd-vo: GPU {key}: {} frames, median {:.3} ms, p95 {:.3} ms, p99 {:.3} ms, max {:.3} ms",
             ms.len(),
             at(0.5),
             at(0.95),
+            at(0.99),
             ms[ms.len() - 1]
         );
     }

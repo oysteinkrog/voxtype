@@ -596,14 +596,15 @@ pub(crate) fn offline(
     dir: &Path,
     fps: f64,
     name: &str,
+    gpu_times: bool,
 ) -> anyhow::Result<()> {
-    let m = Moment::parse(name).ok_or_else(|| {
-        anyhow::anyhow!("no moment {name:?}; the moments are {}", Moment::names())
-    })?;
+    let m = parse_or_list(name)?;
     let s = scenario(&look, m);
+    let (times, sink) = gpu_time_sink(gpu_times);
     let options = Options {
         fonts: fonts.clone(),
         default_motion: default_motion(&look),
+        frame_timings: sink,
         renderer_setup: Some(Arc::new(vo_3d::install)),
         ..Options::default()
     };
@@ -614,7 +615,97 @@ pub(crate) fn offline(
         m.name(),
         dir.display()
     );
+    if gpu_times {
+        print_gpu_times(&times.lock().unwrap());
+    }
     Ok(())
+}
+
+fn parse_or_list(name: &str) -> anyhow::Result<Moment> {
+    Moment::parse(name).ok_or_else(|| {
+        anyhow::anyhow!("no moment {name:?}; the moments are {}", Moment::names())
+    })
+}
+
+/// `--live-moment NAME`: the popup plays one moment on its real surface.
+/// The moment's messages come as timers in scene time, so a frame's `t` in
+/// the diagnostics is the moment's own time. At the start it prints
+/// `live-moment: <name> starts at uptime <s>` (from /proc/uptime), so a
+/// script can sample the process's CPU time at moment times.
+pub(crate) fn live(
+    look: Look,
+    fonts: FontRegistry,
+    cfg: &OsdConfig,
+    name: &str,
+) -> anyhow::Result<()> {
+    let m = parse_or_list(name)?;
+    let inputs = scenario(&look, m)
+        .inputs
+        .into_iter()
+        .filter_map(|(t, input)| match input {
+            Input::Msg(msg) => Some((t, msg)),
+            _ => None,
+        })
+        .collect();
+    let options = Options {
+        fonts: fonts.clone(),
+        cpu_first_frame: true,
+        diagnostics: Some(Box::new(LogDiagnostics::new(Some(heap)))),
+        default_motion: default_motion(&look),
+        renderer_setup: Some(Arc::new(vo_3d::install)),
+        ..Options::default()
+    };
+    let spec = live_spec(cfg, &look);
+    let played = Played {
+        name: m.name(),
+        popup: Popup::scripted(look, &fonts),
+        inputs,
+    };
+    vo::run_overlay_with(played, spec, options).map_err(|e| anyhow::anyhow!("live moment: {e}"))
+}
+
+/// A popup fed one moment's messages by timers (`--live-moment`).
+struct Played {
+    name: &'static str,
+    popup: Popup,
+    inputs: Vec<(f64, Msg)>,
+}
+
+impl App for Played {
+    type Msg = Msg;
+
+    fn init(&mut self, cx: &mut Cx<Msg>) {
+        let uptime = std::fs::read_to_string("/proc/uptime")
+            .ok()
+            .and_then(|s| s.split_whitespace().next()?.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        eprintln!(
+            "live-moment: {} starts at uptime {uptime:.3} (scene t={:.3})",
+            self.name,
+            cx.t()
+        );
+        let t0 = cx.t();
+        for (t, msg) in self.inputs.drain(..) {
+            cx.after((t - t0).max(0.0), msg);
+        }
+        self.popup.init(cx);
+    }
+
+    fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
+        self.popup.update(msg, cx);
+    }
+
+    fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
+        self.popup.view(tokens)
+    }
+
+    fn surfaces(&self, tokens: &vo::Tokens) -> Vec<vo::SurfaceView<Msg>> {
+        self.popup.surfaces(tokens)
+    }
+
+    fn main_surface(&self) -> Option<(Size, Placement)> {
+        self.popup.main_surface()
+    }
 }
 
 #[cfg(test)]
