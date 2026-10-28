@@ -27,6 +27,7 @@ use vo::scene::display::{GlyphInstance, Paint, ShapeInstance, NO_WORD};
 use vo::scene::geom::{Affine, Point};
 use vo::scene::path::{glyph_path, make, Outline, StrokeStyle};
 use vo::scene::text::{PlacedGlyph, ShapedText};
+use vo_core::timeline::{spoken_offsets, SpokenFit};
 
 /// MO-52: the breath line goes flat over this long.
 const FLAT_SECS: f64 = 0.3;
@@ -1074,44 +1075,42 @@ impl Thread {
 
 /// When each word rewinds, from the cancel, and how long the whole rewind
 /// takes. `times` are the words' spoken start and end in reading order.
-/// With every time known, the rewind replays them backwards at
-/// `REWIND_RATE` times the spoken rate, squeezed into `REWIND_MAX`; without
-/// them each word gets the same share, newest first.
+/// The newest word goes first; MO-05's spoken offsets replay the words'
+/// ends backwards at `1 / REWIND_RATE` of the spoken time, the whole run
+/// between `REWIND_MIN` and `REWIND_MAX`, filling in words without a time
+/// from their neighbours and spacing them evenly with none known. Each
+/// word shrinks until the next older one starts.
 fn rewind_schedule(times: &[Option<(f32, f32)>]) -> (Vec<(f32, f32)>, f32) {
     let n = times.len();
     if n == 0 {
         return (Vec::new(), REWIND_MIN);
     }
-    let known: Option<Vec<(f32, f32)>> = times.iter().copied().collect();
-    if let Some(known) = known {
-        let first = known.iter().map(|w| w.0).fold(f32::INFINITY, f32::min);
-        let last = known.iter().map(|w| w.1).fold(f32::NEG_INFINITY, f32::max);
-        let span = last - first;
-        if span > 0.0 {
-            let total = (span / REWIND_RATE).clamp(REWIND_MIN, REWIND_MAX);
-            let q = total / span;
-            let windows = known
-                .iter()
-                .map(|&(s, e)| {
-                    (
-                        (last - e.max(s)) * q,
-                        ((last - s) * q).max((last - e) * q + 0.02),
-                    )
-                })
-                .collect();
-            return (windows, total);
-        }
-    }
-    // In arrival order: each word a little longer than its share, so
-    // neighbours overlap.
-    let total = (0.06 * n as f32).clamp(REWIND_MIN, REWIND_MAX);
-    let share = total / n as f32;
-    let windows = (0..n)
-        .map(|i| {
-            let from = (n - 1 - i) as f32 * share;
-            (from, (from + share * 1.5).min(total))
-        })
+    // In rewind order, newest first, as time running backwards.
+    let back: Vec<Option<f64>> = times
+        .iter()
+        .rev()
+        .map(|t| t.map(|(s, e)| -(e.max(s) as f64)))
         .collect();
+    let fit = SpokenFit {
+        scale: 1.0 / REWIND_RATE as f64,
+        min: REWIND_MIN as f64,
+        max: REWIND_MAX as f64,
+    };
+    let offsets = spoken_offsets(&back, fit);
+    let last = offsets.last().copied().unwrap_or(0.0) as f32;
+    // The oldest word takes about one share of the run, so it is seen to go.
+    let share = if n > 1 {
+        last / (n - 1) as f32
+    } else {
+        REWIND_MIN
+    };
+    let total = last + share.max(0.03);
+    let mut windows = vec![(0.0, total); n];
+    for (k, &from) in offsets.iter().enumerate() {
+        let to = offsets.get(k + 1).map_or(total, |&o| o as f32);
+        let from = from as f32;
+        windows[n - 1 - k] = (from, to.max(from + 0.02).min(total.max(from + 0.02)));
+    }
     (windows, total)
 }
 
@@ -1183,7 +1182,12 @@ impl Rewind {
         let Some((x, base)) = caret else {
             return;
         };
-        let fade = 1.0 - ((e - self.total) / 0.2).clamp(0.0, 1.0);
+        // Under reduced motion the caret stays where the first word began.
+        let fade = if self.still {
+            1.0
+        } else {
+            1.0 - ((e - self.total) / 0.2).clamp(0.0, 1.0)
+        };
         if fade > 0.0 {
             p.shape(ShapeInstance::line(
                 Point::new(o.x + x + 1.0, o.y + base + 2.0),
@@ -1249,13 +1253,15 @@ mod tests {
     fn rewind_replays_spoken_time_backwards_four_times_faster() {
         let times = [Some((0.0, 0.3)), Some((0.4, 0.8)), Some((1.0, 1.2))];
         let (w, total) = rewind_schedule(&times);
-        assert!((total - 0.3).abs() < 1e-6, "1.2 s at 4x");
-        // The newest word goes first, the first word last.
-        assert_eq!(w[2].0, 0.0);
-        assert!(w[0].0 > w[1].0 && w[1].0 > w[2].0);
+        // The ends are 0.4 s and 0.5 s apart; at a quarter, 0.1 s and 0.125 s.
+        assert_eq!(w[2].0, 0.0, "the newest word goes first");
+        assert!((w[1].0 - 0.1).abs() < 1e-5, "{w:?}");
+        assert!((w[0].0 - 0.225).abs() < 1e-5, "{w:?}");
+        // Each word goes until the next older one starts; the oldest last.
+        assert_eq!(w[2].1, w[1].0);
+        assert_eq!(w[1].1, w[0].0);
         assert!((w[0].1 - total).abs() < 1e-6);
-        // The pause between the second and third word stays a pause.
-        assert!(w[1].0 > w[2].1);
+        assert!(total > 0.225 && total < 0.4);
     }
 
     #[test]
@@ -1264,10 +1270,14 @@ mod tests {
             .map(|i| Some((i as f32 * 0.3, i as f32 * 0.3 + 0.25)))
             .collect();
         let (w, total) = rewind_schedule(&times);
-        assert_eq!(total, REWIND_MAX);
+        assert!(
+            (w[0].0 - REWIND_MAX).abs() < 1e-5,
+            "the oldest word starts at 500 ms"
+        );
+        assert!(total < REWIND_MAX + 0.05);
         assert!(w
             .iter()
-            .all(|&(a, b)| a >= 0.0 && b <= REWIND_MAX + 0.021 && a < b));
+            .all(|&(a, b)| a >= 0.0 && b <= total + 1e-6 && a < b));
     }
 
     #[test]
