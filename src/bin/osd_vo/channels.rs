@@ -52,6 +52,9 @@ const STABLE_AFTER: u32 = 2;
 const SEAM_CLOSE_SECS: f64 = 0.5;
 /// The baseline relaxes flat over about this long after a word is said.
 const PITCH_RELAX: f64 = 0.6;
+/// Baseline per semitone of pitch (MO-14): twice the framework's default so the
+/// rise reads at popup size; the reading line still clamps it at 3 px.
+const PITCH_PX: f32 = 1.0;
 
 /// What the channels keep between views.
 #[derive(Default)]
@@ -144,7 +147,10 @@ impl Popup {
         let seen = self.channels_sync(t);
         let s = self.channels.0.lock().unwrap();
         let bus = self.signals.get();
-        let vt = VoiceTypo::default();
+        let vt = VoiceTypo {
+            pitch_px: PITCH_PX,
+            ..VoiceTypo::default()
+        };
         let (onset, pitch, tracking) = (
             l.on(ONSET) || l.on(VOICE),
             l.on(PITCH) || l.on(VOICE),
