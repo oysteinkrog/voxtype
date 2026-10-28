@@ -17,14 +17,14 @@ pub(crate) fn defaults(theme: OsdTheme) -> &'static [&'static str] {
     use OsdTheme::*;
     match theme {
         // vo draws `default` as swiss.
-        Default | Swiss => &["pause-marks", "pitch-baseline", "audio-ruler", "fold-under"],
+        Default | Swiss => &["pause-marks", "pitch-baseline", "audio-ruler", "fold-under", "pre-echo", "exhale"],
         Showcase => &[
             "particle-source",
             "light-letters",
             "variable-breath",
             "depth-stack",
         ],
-        Type => &["onset-ink", "confidence-ink", "width-escrow", "margin-bell"],
+        Type => &["onset-ink", "confidence-ink", "width-escrow", "margin-bell", "pre-echo", "pause-marks", "exhale"],
         Amber => &["pause-marks", "margin-bell", "onset-ink", "fold-under"],
         Radial => &["ring-reads", "acoustic-receipts", "audio-ruler", "onset-joint"],
         Tron => &["light-line", "stroke-write", "overflow-spine"],
@@ -37,7 +37,7 @@ pub(crate) fn defaults(theme: OsdTheme) -> &'static [&'static str] {
         ],
         Palette => &["correction-hinge", "width-escrow", "loading-word"],
         Dotmatrix => &["dot-sort", "count-cast", "empty-measure", "confidence-ink"],
-        Swissfi => &["spoken-stagger", "count-cast"],
+        Swissfi => &["spoken-stagger", "count-cast", "pre-echo", "pause-marks", "exhale"],
         Scope => &["sentence-trace", "kinetic-lattice", "onset-joint", "rewind"],
         Captions => &["sound-sculpture", "fold-under", "pitch-baseline", "unthread"],
         Karaoke => &["bowstring", "pitch-score", "spoken-tracking", "margin-mark"],

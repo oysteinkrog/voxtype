@@ -4060,9 +4060,9 @@ default:
 
 | Look | Default set |
 |---|---|
-| `swiss` (also `default`) | `pause-marks`, `pitch-baseline`, `audio-ruler`, `fold-under` |
+| `swiss` (also `default`) | `pause-marks`, `pitch-baseline`, `audio-ruler`, `fold-under`, `pre-echo`, `exhale` |
 | `showcase` | `particle-source`, `light-letters`, `variable-breath`, `depth-stack` |
-| `type` | `onset-ink`, `confidence-ink`, `width-escrow`, `margin-bell` |
+| `type` | `onset-ink`, `confidence-ink`, `width-escrow`, `margin-bell`, `pre-echo`, `pause-marks`, `exhale` |
 | `amber` | `pause-marks`, `margin-bell`, `onset-ink`, `fold-under` |
 | `radial` | `ring-reads`, `acoustic-receipts`, `audio-ruler`, `onset-joint` |
 | `tron` | `light-line`, `stroke-write`, `overflow-spine` |
@@ -4070,7 +4070,7 @@ default:
 | `mission` | `correction-hinge`, `limit-hairline`, `audio-ruler`, `revision-address` |
 | `palette` | `correction-hinge`, `width-escrow`, `loading-word` |
 | `dotmatrix` | `dot-sort`, `count-cast`, `empty-measure`, `confidence-ink` |
-| `swissfi` | `spoken-stagger`, `count-cast` |
+| `swissfi` | `spoken-stagger`, `count-cast`, `pre-echo`, `pause-marks`, `exhale` |
 | `scope` | `sentence-trace`, `kinetic-lattice`, `onset-joint`, `rewind` |
 | `captions` | `sound-sculpture`, `fold-under`, `pitch-baseline`, `unthread` |
 | `karaoke` | `bowstring`, `pitch-score`, `spoken-tracking`, `margin-mark` |
