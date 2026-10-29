@@ -1091,9 +1091,12 @@ impl Popup {
             .margin_edges(STATUS_MARGIN_TOP, 0.0, 0.0, 0.0)
             .child(dot)
             .child(
+                // One line at its full width: in a narrow card the hint gives
+                // way first, never the state (38yi: "LISTEN / ING" at 424 px).
                 Element::label("state", label.to_uppercase())
-                    .text_style(l.mono(l.status_px).tracking(1.8))
+                    .text_style(l.mono(l.status_px).tracking(1.8).clamp_lines(1))
                     .color(c(accent))
+                    .shrink(0.0)
                     .margin_edges(0.0, 0.0, 0.0, 10.0),
             )
             .child(
