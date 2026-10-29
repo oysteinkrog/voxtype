@@ -827,7 +827,7 @@ impl Popup {
             .opacity(dim)
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0));
+            .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0)));
         let words = self.handoff_or(
             words,
             &l.text_style(),
@@ -995,9 +995,15 @@ impl Popup {
             ))
             .child(at(glyph, inner - 34.0, LABEL_Y - 3.0))
             .child(at(
-                Element::column("text")
-                    .width(text_width(l))
-                    .child(words),
+                self.signal_marks(
+                    Element::column("text")
+                        .width(text_width(l))
+                        .child(words),
+                    &self.shown[..self.room()],
+                    text_width(l),
+                    (0.0, 0.0),
+                    hex(INK),
+                ),
                 TEXT_X,
                 TEXT_TOP,
             ))

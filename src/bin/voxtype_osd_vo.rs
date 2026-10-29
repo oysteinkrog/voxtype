@@ -98,6 +98,8 @@ mod karaoke;
 mod island;
 #[path = "osd_vo/envelope.rs"]
 mod envelope;
+#[path = "osd_vo/entry_latency.rs"]
+mod entry_latency;
 #[path = "osd_vo/jarvis.rs"]
 mod jarvis;
 #[path = "osd_vo/particles.rs"]
@@ -302,6 +304,13 @@ struct Args {
     /// and no daemon.
     #[arg(long)]
     envelope: bool,
+
+    /// Run the scripted dictation of `--offline` (or `--moment NAME`) on the
+    /// CPU and print how long new words take to become readable: their
+    /// entry animation's median, 90th percentile and longest time. Honours
+    /// `--motion` and `VO_REDUCED_MOTION=1`. Needs no GPU, display or daemon.
+    #[arg(long, hide = true)]
+    entry_latency: bool,
 
     /// Run the scripted dictation of `--offline` (or `--moment NAME`) with
     /// no PNGs and check that the popup's exit settles before vo's exit
@@ -772,7 +781,7 @@ impl Look {
     fn asked_or_set(&self, name: &str) -> bool {
         self.asked(name)
             || (self.look_set
-                && defaults::defaults(self.theme).contains(&name)
+                && defaults::in_set(self.theme, name)
                 && !self.removed(name))
     }
 
@@ -2464,6 +2473,9 @@ fn main() -> anyhow::Result<()> {
     }
     if args.envelope {
         return envelope::run(look, fonts, args.fps, args.cancel, args.moment.as_deref());
+    }
+    if args.entry_latency {
+        return entry_latency::run(look, fonts, args.fps, args.moment.as_deref());
     }
     if args.exit_check {
         return exit_check(look, fonts, args.fps, args.cancel, args.moment.as_deref());

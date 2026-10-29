@@ -843,7 +843,7 @@ impl Popup {
             .color(hex(INK))
             .motion(Prop::Opacity, Spring::critical_to_98(0.10))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(Transition::fade().opacity(0.0))
+            .word_enter(self.ghost_enter(Transition::fade().opacity(0.0)))
             .word_change(Transition::fade().opacity(0.4))
             // The newest word runs from pale blue through blue to violet, as drawn.
             .current_word(self.shown.last().map(|w| w.id))
@@ -887,6 +887,7 @@ impl Popup {
         let text = Element::column("text")
             .size(w, self.lines as f32 * TEXT_LINE * s)
             .child(words);
+        let text = self.signal_marks(text, &self.shown, w, (0.0, 0.0), hex(INK));
         let (x, y) = self.particles_text_at(phase, x0, y0);
         // Under reduced motion no pre-echo blobs: they are motion that comes before the
         // words. (The look's set has no other hearing feature.)

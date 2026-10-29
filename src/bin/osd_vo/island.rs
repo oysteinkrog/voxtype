@@ -1208,23 +1208,21 @@ impl Popup {
                 .color(colour)
                 .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                 .motion(Prop::Offset, Spring::POP)
-                .word_enter(Transition::fade().offset(0.0, 5.0))
+                .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 5.0)))
         };
         if !card {
             let style = pill_style(l);
+            let shown = &self.shown[..self.island_room(w, &style)];
             let text = Element::column("pilltext")
                 .width(w)
                 .height(lines as f32 * PILL_LINE)
                 .child(self.island_handoff(
-                    live(
-                        "words".into(),
-                        &self.shown[..self.island_room(w, &style)],
-                        style,
-                        hex(WHITE),
-                    ),
+                    live("words".into(), shown, style, hex(WHITE)),
                     &style,
                     w,
                 ));
+            let tail = model_signals::TailText { style, width: w, rows: lines };
+            let text = self.signal_marks_in(text, shown, &tail, (0.0, 0.0), hex(WHITE));
             return at(self.with_hearing(text, &style, w, hex(WHITE), hex(BLUE)), x, y)
                 .opacity(opacity)
                 .presence(Transition::NONE, Transition::fade())
@@ -1259,6 +1257,8 @@ impl Popup {
                     0.0,
                     new_y,
                 ));
+            let tail = model_signals::TailText { style, width: w, rows: lines };
+            text = self.signal_marks_in(text, words, &tail, (0.0, 0.0), hex(WHITE));
         }
         at(self.with_hearing(text, &style, w, hex(WHITE), hex(BLUE)), x, y)
             .opacity(opacity)

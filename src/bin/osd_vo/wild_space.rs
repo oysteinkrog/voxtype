@@ -271,6 +271,10 @@ fn drift_seed(key: &str) -> u32 {
     key.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619))
 }
 
+/// Adds to a depth-stack line's box, given its words and the room to the
+/// right of its start.
+pub(crate) type LineMarks<'a> = dyn Fn(Element<Msg>, &[Word], f32) -> Element<Msg> + 'a;
+
 impl Popup {
     pub(crate) fn wild_reduced(&self) -> bool {
         self.look.on("reduced-motion") || kit::reduced()
@@ -492,7 +496,9 @@ impl Popup {
     /// box `w` wide and `rows` lines tall: the newest line flat at the
     /// bottom, the older ones receding on glass sheets above it. `newest`
     /// wraps the newest line's live text, for the look's typographic
-    /// channels (`Popup::typo_words`). `hold` keeps the line just behind
+    /// channels (`Popup::typo_words`), and `marks` adds to the newest line's
+    /// box, given its words and the room from its start to the sheet's
+    /// right edge (the ghost tail). `hold` keeps the line just behind
     /// the newest flat for a moment ([`HOLD_SECS`], [`GLIDE_SECS`]).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn depth_stack_lines(
@@ -505,6 +511,7 @@ impl Popup {
         text: Color,
         glow: Color,
         newest: &dyn Fn(Element<Msg>) -> Element<Msg>,
+        marks: &LineMarks,
         hold: Option<&Hold>,
     ) -> Element<Msg> {
         let reduced = self.wild_reduced();
@@ -544,8 +551,13 @@ impl Popup {
                 // own on top breaks the reading line's envelope (6ofh).
                 .word_enter(Transition::NONE)
                 .word_change(Transition::fade().opacity(0.7));
+            // Every line sits in a layer of its own, so the newest can carry
+            // marks and keep its nodes when it moves back.
+            let line = Element::layer("line")
+                .size(lw, line_h)
+                .child(if d == 0 { newest(live) } else { live });
             kit::at(
-                if d == 0 { newest(live) } else { live },
+                if d == 0 { marks(line, words, (sheet.w + lw) / 2.0) } else { line },
                 ((sheet.w - lw) / 2.0).max(0.0),
                 4.0 * k,
             )

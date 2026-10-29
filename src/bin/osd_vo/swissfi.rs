@@ -532,7 +532,7 @@ impl Popup {
             .opacity(dim)
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(Transition::fade().opacity(0.0).offset(0.0, WORD_RISE))
+            .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, WORD_RISE)))
             .wild_motion(self);
         let words = self.typo_words(words);
         let words = self.handoff_or(
@@ -542,7 +542,7 @@ impl Popup {
             hex(PAPER),
             hex(ORANGE),
         );
-        Element::column("text")
+        let text = Element::column("text")
             .height(self.lines.min(MAX_LINES) as f32 * TEXT_LINE)
             .margin_edges(TEXT_TOP, 0.0, TEXT_BOTTOM, TEXT_INSET)
             .child(words)
@@ -555,7 +555,8 @@ impl Popup {
                     faint: hex(GREY),
                 },
                 endings::Cancel::Unthread,
-            ))
+            ));
+        self.signal_marks(text, &self.shown, l.text_width(), (0.0, 0.0), hex(PAPER))
     }
 
     /// The hairline over the status row, running from left to right.

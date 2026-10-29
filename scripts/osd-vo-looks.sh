@@ -78,10 +78,22 @@ check() {
     fi
 }
 
+# Karaoke's centred block lifts a new line while the line rises in: sampled
+# at 10 fps the two land in one step and the envelope tracker cannot follow
+# the block, so karaoke's envelope is sampled at 30 fps at least (RD-09).
+look_fps() {
+    if [[ $1 == karaoke && $envelope_fps -lt 30 ]]; then
+        echo 30
+    else
+        echo "$envelope_fps"
+    fi
+}
+
 for look in "${looks[@]}"; do
-    check "$look" envelope -- --envelope --fps "$envelope_fps"
-    check "$look" "envelope --cancel" -- --envelope --cancel --fps "$envelope_fps"
-    check "$look" "envelope reduced" VO_REDUCED_MOTION=1 -- --envelope --fps "$envelope_fps"
+    fps=$(look_fps "$look")
+    check "$look" envelope -- --envelope --fps "$fps"
+    check "$look" "envelope --cancel" -- --envelope --cancel --fps "$fps"
+    check "$look" "envelope reduced" VO_REDUCED_MOTION=1 -- --envelope --fps "$fps"
     check "$look" exit-check -- --exit-check --fps "$exit_fps"
     check "$look" "exit-check --cancel" -- --exit-check --cancel --fps "$exit_fps"
     check "$look" "exit-check reduced" VO_REDUCED_MOTION=1 -- --exit-check --fps "$exit_fps"

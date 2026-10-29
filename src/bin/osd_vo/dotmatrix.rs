@@ -599,7 +599,7 @@ impl Popup {
             .opacity(dim)
             .motion(Prop::Opacity, Spring::critical_to_98(fade))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(enter);
+            .word_enter(self.ghost_enter(enter));
         // Tentative words at lower ink (MO-24).
         let words = self.typo_words(words);
         let words = self.handoff_or(
@@ -642,6 +642,7 @@ impl Popup {
                 color: hex(DOT),
             },
         );
+        let text = self.signal_marks(text, &self.shown, l.text_width(), (0.0, 0.0), hex(INK));
         // The text area clips to its own box, as in Popup::text_area, so a line that leaves
         // as the text scrolls slides behind the top edge instead of over the waveform. The
         // box reaches into the left margin for the "…" and into the gap above the status row

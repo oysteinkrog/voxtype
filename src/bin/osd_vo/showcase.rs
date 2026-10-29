@@ -957,7 +957,7 @@ impl Popup {
             // ribbon above.
             .motion(Prop::Opacity, Spring::critical_to_98(0.10))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(Transition::fade().opacity(0.15).offset(0.0, -10.0));
+            .word_enter(self.ghost_enter(Transition::fade().opacity(0.15).offset(0.0, -10.0)));
         // While listening, each new word forms from particles; a revision
         // scatters and re-forms only the glyphs that changed. Not in the
         // theme wall: word ids repeat from cell to cell, and the wall keeps
@@ -1041,7 +1041,22 @@ impl Popup {
                 live.text_blur(p.blur)
                     .motion(Prop::TextFx, stack.motion(d, reduced))
             };
-            at(live.size(l.text_width(), line_h), pad_x, pad_y)
+            // Every line sits in a layer of its own, so the newest can carry
+            // the ghost tail and keep its nodes when it moves back.
+            let line = Element::layer("line")
+                .size(l.text_width(), line_h)
+                .child(live.size(l.text_width(), line_h));
+            let line = if d == 0 {
+                let tail = model_signals::TailText {
+                    style: l.text_style(),
+                    width: l.text_width(),
+                    rows: 1,
+                };
+                self.signal_marks_in(line, ws, &tail, (0.0, 0.0), c(ICE))
+            } else {
+                line
+            };
+            at(line, pad_x, pad_y)
         };
         let rows = self.lines.max(1) as f32;
         // In the flow at the strip's content box, so the stack sits in the

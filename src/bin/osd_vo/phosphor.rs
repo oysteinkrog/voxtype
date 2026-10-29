@@ -953,7 +953,7 @@ impl Popup {
                 .word_change(Transition::NONE)
         } else {
             words
-                .word_enter(Transition::NONE.wipe(1.0))
+                .word_enter(self.ghost_enter(Transition::NONE.wipe(1.0)))
                 .word_change(Transition::NONE)
         };
         if self.phos.ended_at.is_some() {
@@ -997,7 +997,7 @@ impl Popup {
                 .presence(Transition::fade().scale(0.0), Transition::fade()),
             );
         }
-        layer
+        self.signal_marks(layer, &self.shown, self.look.text_width(), (0.0, 0.0), hex(GREEN, 1.0))
     }
 
     /// The italic status line under the lower rule.

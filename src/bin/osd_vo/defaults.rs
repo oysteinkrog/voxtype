@@ -53,6 +53,15 @@ pub(crate) fn defaults(theme: OsdTheme) -> &'static [&'static str] {
     }
 }
 
+/// Features in every look's set (LAT-1): the lookahead tail's words follow
+/// the live text dim, so the newest words show about 0.56 s sooner.
+const EVERY_LOOK: &[&str] = &[super::model_signals::GHOST_TAIL];
+
+/// Whether `name` is in `theme`'s own set or in every look's.
+pub(crate) fn in_set(theme: OsdTheme, name: &str) -> bool {
+    defaults(theme).contains(&name) || EVERY_LOOK.contains(&name)
+}
+
 /// Names that change how features draw rather than being one: they never
 /// replace the look's set.
 fn modifier(name: &str) -> bool {

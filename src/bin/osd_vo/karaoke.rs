@@ -949,7 +949,7 @@ impl Popup {
                 .color(hex(WHITE))
                 .motion(Prop::Opacity, Motion::Snap)
                 .motion(Prop::Offset, Spring::POP)
-                .word_enter(Transition::fade().offset(0.0, 8.0));
+                .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 8.0)));
             let text = self.karaoke_channels(text, words, age == 0);
             // The words sit in a box of their own, with the lit newest word in it, so the
             // two move as one when the line re-centres.
@@ -965,6 +965,16 @@ impl Popup {
             }
             if !hot.is_empty() {
                 inline = inline.child(hot.remove(0));
+            }
+            if age == 0 && !hidden {
+                // The ghost tail after the newest line, inside the line's
+                // box: the line is centred, so that is half the free room.
+                let tail = model_signals::TailText {
+                    style,
+                    width: WRAP.min((LINE_BOX + lines[i].1) / 2.0),
+                    rows: 1,
+                };
+                inline = self.signal_marks_in(inline, words, &tail, (0.0, 0.0), hex(WHITE));
             }
             let column = Element::column(key)
                 .size(LINE_BOX, LINE)

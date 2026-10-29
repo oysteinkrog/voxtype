@@ -588,7 +588,7 @@ impl Popup {
             .width(self.look.text_width())
             .motion(Prop::Opacity, Spring::critical_to_98(0.22))
             .motion(Prop::Offset, Spring::critical_to_98(0.22))
-            .word_enter(Transition::fade().wipe(1.0));
+            .word_enter(self.ghost_enter(Transition::fade().wipe(1.0)));
         if self.amber.ended_at.is_some() {
             words = words.opacity(0.4);
         }
@@ -608,6 +608,7 @@ impl Popup {
             .size(width, self.lines.max(1) as f32 * style.line_height)
             .child(words.rewind_hide(self.rewinding()));
         let text = self.typo_marks(text, width);
+        let text = self.signal_marks(text, &self.shown, width, (0.0, 0.0), hex(TEXT, 1.0));
         let text = self.with_hearing(text, &style, width, hex(TEXT, 1.0), hex(AMBER, 1.0));
         at(text, TEXT_X * k, TEXT_TOP * k)
     }
