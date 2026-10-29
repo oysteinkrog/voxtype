@@ -35,6 +35,10 @@ const GREY: u32 = 0x5E6672;
 
 /// The panel is this much wider than the configured popup.
 const WIDEN: f32 = 760.0 / 600.0;
+/// The narrowest configured width the panel is laid out for. The tiles are
+/// drawn for 600 px; a config with no `[osd]` section falls back to 400 px,
+/// which squeezed them until their labels truncated.
+const MIN_WIDTH: f32 = 600.0;
 const RADIUS: f32 = 10.0;
 const PAD: f32 = 13.0;
 const PAD_BOTTOM: f32 = 8.0;
@@ -87,7 +91,7 @@ fn fonts(reg: &FontRegistry) -> Fonts {
 }
 
 fn panel_w(look: &Look) -> f32 {
-    (look.width * WIDEN).round()
+    (look.width.max(MIN_WIDTH) * WIDEN).round()
 }
 
 pub(crate) fn text_style(look: &Look) -> TextStyle {
@@ -1150,5 +1154,24 @@ impl Popup {
             .child(left.margin_edges(0.0, 0.0, 0.0, 14.0))
             .child(Element::row("spacer").grow(1.0))
             .child(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn narrow_config_keeps_the_designed_width() {
+        let design = (MIN_WIDTH * WIDEN).round();
+        let cfg = OsdConfig { width_px: 400, ..OsdConfig::default() };
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        assert_eq!(panel_w(&look), design);
+        look.width = 600.0;
+        assert_eq!(panel_w(&look), design);
+        look.width = 800.0;
+        assert!(panel_w(&look) > design);
     }
 }
