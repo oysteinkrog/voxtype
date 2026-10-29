@@ -33,10 +33,15 @@
 //!   as typed), fading to each new probability over 0.3 s and pulling
 //!   back when the model drops it. The ghost words then leave their own
 //!   full stop out.
+//!
 //! - `pre-echo-letters`: when a frame of the newest step came within
 //!   10^-2.5 of a token, the first letters of the model's top guess there
 //!   flash at 25 % ink after the text, about one frame before the piece
 //!   commits. (Not `pre-echo`, the hearing caret of MO-11.)
+//!
+//! - `twin-spelling`: when a word commits with its top two guesses less
+//!   than 0.2 apart, the runner-up shows small above it for 0.4 s and
+//!   fades over 0.8 s: the other word the model nearly wrote.
 //!
 //! Nothing shows once the recording stops, so the signals end with the
 //! dictation and nothing moves at room tone. Under reduced motion the ghosts
@@ -57,9 +62,11 @@ pub(crate) const COMMIT_CURSOR: &str = "commit-cursor";
 pub(crate) const GRADED_DOUBT: &str = "graded-doubt";
 pub(crate) const BREATHING_STOP: &str = "breathing-stop";
 pub(crate) const PRE_ECHO_LETTERS: &str = "pre-echo-letters";
+pub(crate) const TWIN_SPELLING: &str = "twin-spelling";
 
 /// Every model signal feature.
-const ALL: [&str; 7] = [
+const ALL: [&str; 8] = [
+    TWIN_SPELLING,
     PRE_ECHO_LETTERS,
     GHOST_TAIL,
     THREE_TIER,
@@ -104,6 +111,13 @@ const ECHO_GATE: f32 = -2.5;
 const STEP_FRAMES: usize = 7;
 const ECHO_LETTERS: usize = 2;
 const ECHO_INK: f32 = 0.25;
+/// Twin spelling: the margin under which the runner-up shows, how long it
+/// holds and fades, its ink at birth and its size against the text.
+const TWIN_MARGIN: f32 = 0.2;
+const TWIN_HOLD: f64 = 0.4;
+const TWIN_FADE: f64 = 0.8;
+const TWIN_INK: f32 = 0.55;
+const TWIN_SCALE: f32 = 0.55;
 
 /// One word of the tail.
 #[derive(Debug, PartialEq)]
@@ -191,6 +205,9 @@ impl Popup {
         }
         let mut text = text;
         for e in self.graded_doubt(words, width, origin) {
+            text = text.child(e);
+        }
+        for e in self.twin_spelling(words, width, origin, ink) {
             text = text.child(e);
         }
         if let Some(s) = self.live_signals() {
@@ -343,6 +360,76 @@ impl Popup {
                 .presence(Transition::fade(), Transition::fade());
             let y = first.pos.y + 0.16 * style.size;
             out.push(kit::at(line, origin.0 + first.pos.x, origin.1 + y));
+        }
+        out
+    }
+
+    /// `twin-spelling`: the runner-up above each newly committed word the
+    /// model nearly wrote another way.
+    fn twin_spelling(
+        &self,
+        words: &[Word],
+        width: f32,
+        origin: (f32, f32),
+        ink: Color,
+    ) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(TWIN_SPELLING) || self.status().finishing || self.ending().is_some() {
+            return Vec::new();
+        }
+        let now = self.extra.now;
+        let born = |id| {
+            self.tally
+                .arrived
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|a| now - a.1)
+                .filter(|age| (0.0..TWIN_HOLD + TWIN_FADE).contains(age))
+        };
+        let style = l.text_style();
+        let mut small = style;
+        small.size *= TWIN_SCALE;
+        small.line_height *= TWIN_SCALE;
+        let joined = words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let laid = self.measure.layout(&joined, &style, Some(width));
+        let reduced = self.signals_reduced();
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        for (i, w) in words.iter().enumerate() {
+            let range = start..start + w.text.len();
+            start = range.end + 1;
+            let Some(age) = born(w.id) else { continue };
+            let Some(d) = self.word_detail(i) else { continue };
+            let Some(twin) = d.runner_up.as_deref().map(str::trim) else {
+                continue;
+            };
+            if d.margin >= TWIN_MARGIN || twin.is_empty() {
+                continue;
+            }
+            let Some(first) = laid
+                .glyphs
+                .iter()
+                .find(|g| range.contains(&(g.cluster as usize)))
+            else {
+                continue;
+            };
+            // Under reduced motion the twin holds still, then goes at once.
+            let fade = if reduced {
+                1.0
+            } else {
+                1.0 - ((age - TWIN_HOLD) / TWIN_FADE).max(0.0) as f32
+            };
+            let e = Element::label(format!("twin-{}", w.id), twin.to_string())
+                .text_style(small)
+                .color(ink)
+                .opacity(TWIN_INK * fade);
+            // Its baseline sits just above the word's ascenders.
+            let y = first.pos.y - style.size * 0.95 - small.line_height * 0.8;
+            out.push(kit::at(e, origin.0 + first.pos.x, origin.1 + y));
         }
         out
     }
