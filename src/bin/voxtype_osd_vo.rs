@@ -139,6 +139,8 @@ mod hearing;
 mod channels;
 #[path = "osd_vo/glyph_paths.rs"]
 mod glyph_paths;
+#[path = "osd_vo/app_icon.rs"]
+mod app_icon;
 #[path = "osd_vo/lifecycle.rs"]
 mod lifecycle;
 #[path = "osd_vo/ruler.rs"]
@@ -1808,6 +1810,12 @@ impl App for Popup {
         }
         let had_delivery = self.life.delivered.is_some();
         self.sync_lifecycle(t);
+        if !had_delivery {
+            // The receipt's app icon (EG-24) joins the view when the receipt starts.
+            if let Some(wait) = self.receipt_wake(t) {
+                cx.after(wait + 0.01, Msg::Loop);
+            }
+        }
         if let Some(ending) = self.ending() {
             // The idle check runs again when the linger ends; a delivery seen later
             // lengthens it to the end of the hand-off.

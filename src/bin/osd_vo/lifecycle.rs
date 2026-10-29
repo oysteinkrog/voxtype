@@ -7,13 +7,15 @@
 //! complete. The hand-off replays it at the rate the daemon reports (its
 //! characters over `output_ms`), squeezed into `HANDOFF_MAX_SECS` for long
 //! text. The receipt says what the daemon reports and nothing more: typed,
-//! pasted or copied, and whether Enter was sent.
+//! pasted or copied, and whether Enter was sent. When the app is known and its icon found
+//! (`app_icon`, EG-24), the receipt shows the icon at text height before the words.
 
 use std::sync::{Arc, Mutex};
 
 use vo::scene::canvas::Painter;
 use vo::scene::display::{GlyphInstance, Paint, ShapeInstance, NO_WORD};
 use vo::scene::geom::{Affine, Point, RRect};
+use vo::scene::image::ImageSource;
 use vo::scene::path::{Contour, StrokeStyle};
 use vo::scene::text::ShapedText;
 use voxtype::osd::outcome::Delivery;
@@ -42,6 +44,8 @@ const TICK_SECS: f64 = 0.18;
 const RECEIPT_SECS: f64 = 0.22;
 /// Reduced motion: the text fades over this instead.
 const FADE_SECS: f64 = 0.12;
+/// The room the app icon takes before the receipt's words, in receipt font sizes.
+const ICON_ROOM: f32 = 1.35;
 
 /// How the text reached the app, as far as the daemon's driver name tells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +153,15 @@ impl Delivered {
         }
     }
 
+    /// When the receipt starts to fold in, relative to `at`.
+    fn receipt_starts(&self, letters: usize) -> f64 {
+        if self.reduced {
+            return FADE_SECS;
+        }
+        let tick = if self.enter { TICK_SECS } else { 0.0 };
+        self.text_gone(letters) + tick * 0.5
+    }
+
     /// When the hand-off and the receipt's fold are complete, relative to `at`.
     fn settled(&self, letters: usize) -> f64 {
         let tick = if self.enter { TICK_SECS } else { 0.0 };
@@ -216,6 +229,20 @@ impl Popup {
             .sum()
     }
 
+    /// Seconds from `t` until the receipt starts, while a delivery's receipt is still to
+    /// come: the view must be built again then to show the app icon.
+    pub(crate) fn receipt_wake(&self, t: f64) -> Option<f64> {
+        let d = self.delivered()?;
+        self.receipt_icon_source()?;
+        let start = d.at + d.receipt_starts(self.letters());
+        (start > t).then_some(start - t)
+    }
+
+    /// The icon of the app the text went to, once found.
+    fn receipt_icon_source(&self) -> Option<Arc<ImageSource>> {
+        app_icon::get(self.delivered()?.app.as_deref()?)
+    }
+
     /// Keeps the app name and notes a delivery, after the files changed at `t`.
     pub(crate) fn sync_lifecycle(&mut self, t: f64) {
         if self.busy() {
@@ -224,6 +251,8 @@ impl Popup {
         }
         if let Some(app) = self.kit_target() {
             if self.life.app.as_deref() != Some(app) {
+                // Off the render thread; the receipt shows the icon once it is found.
+                app_icon::request(app);
                 self.life.app = Some(app.to_string());
             }
         }
@@ -263,10 +292,15 @@ impl Popup {
             return words;
         }
         let key = width.unwrap_or(-1.0);
+        let icon = self.receipt_icon_source();
         let h = {
             let mut cache = self.life.cache.lock().unwrap_or_else(|e| e.into_inner());
             match cache.as_ref() {
-                Some((t, w, h)) if *t == text && *w == key && h.delivered == *d => h.clone(),
+                Some((t, w, h))
+                    if *t == text && *w == key && h.delivered == *d && h.icon == icon.is_some() =>
+                {
+                    h.clone()
+                }
                 _ => {
                     let shaped = self.measure.layout(&text, style, width);
                     let small = TextStyle::new(MONO, (style.size * 0.62).max(10.0), style.size);
@@ -279,6 +313,7 @@ impl Popup {
                         ink,
                         accent,
                         reduced: d.reduced,
+                        icon: icon.is_some(),
                     });
                     *cache = Some((text, key, h.clone()));
                     h
@@ -288,8 +323,13 @@ impl Popup {
         let (w, hgt) = (h.shaped.size.w, h.shaped.size.h);
         let until = d.at + d.settled(self.letters()) + 0.05;
         let draw = h.clone();
-        Element::canvas("handoff", until, move |t, rect, p| draw.paint(t, rect, p))
-            .size(width.unwrap_or(w).max(w), hgt)
+        let canvas = Element::canvas("handoff", until, move |t, rect, p| draw.paint(t, rect, p))
+            .size(width.unwrap_or(w).max(w), hgt);
+        let Some(src) = icon else {
+            return canvas;
+        };
+        let start = d.at + d.receipt_starts(self.letters());
+        receipt_with_icon(canvas, &h, src, self.extra.now >= start - 1e-6)
     }
 }
 
@@ -303,6 +343,32 @@ pub(crate) struct Handoff {
     ink: Color,
     accent: Color,
     reduced: bool,
+    /// The receipt leaves room for the app icon before its words.
+    icon: bool,
+}
+
+/// The hand-off's canvas in a box of the same size, with the app icon over the receipt
+/// once `shown`. The icon fades in as the receipt folds in.
+fn receipt_with_icon(
+    canvas: Element<Msg>,
+    h: &Handoff,
+    src: Arc<ImageSource>,
+    shown: bool,
+) -> Element<Msg> {
+    let b = h.icon_box();
+    let mut wrap = Element::column("handoff-receipt").child(canvas);
+    if shown {
+        let icon = Element::image("receipt-icon", src)
+            .size(b.w, b.h)
+            .layout(|s| {
+                s.position = vo::scene::taffy::style::Position::Absolute;
+                s.inset.left = vo::scene::taffy::style::LengthPercentageAuto::length(b.x);
+                s.inset.top = vo::scene::taffy::style::LengthPercentageAuto::length(b.y);
+            })
+            .presence(Transition::fade(), Transition::NONE);
+        wrap = wrap.child(icon);
+    }
+    wrap
 }
 
 fn clamp01(x: f64) -> f32 {
@@ -535,7 +601,10 @@ impl Handoff {
                 Paint::solid(self.accent.fade(0.35 + 0.45 * k)),
             ));
         }
-        let lx = o.x + x0 + notch + self.size * 0.4;
+        let mut lx = o.x + x0 + notch + self.size * 0.4;
+        if self.icon {
+            lx += self.receipt_size() * ICON_ROOM;
+        }
         let a = k * k;
         let own = self.receipt.lines.first().map_or(0.0, |l| l.baseline);
         for g in &self.receipt.glyphs {
@@ -553,6 +622,15 @@ impl Handoff {
 
     fn receipt_size(&self) -> f32 {
         (self.size * 0.62).max(10.0)
+    }
+
+    /// The app icon's box in the hand-off's box: at text height, where the receipt's words
+    /// would start, sitting on their baseline.
+    fn icon_box(&self) -> Rect {
+        let (base, x0, _) = self.reading_line();
+        let s = self.receipt_size();
+        let x = x0 + self.size * 0.9 + self.size * 0.4;
+        Rect::new(x, base - s * 0.82, s, s)
     }
 }
 
@@ -617,6 +695,16 @@ mod tests {
         let d = delivery("wtype", 400, 8000, false);
         let total = 400.0 * d.char_secs(400) + LETTER_SECS;
         assert!(total <= HANDOFF_MAX_SECS + 1e-9, "{total}");
+    }
+
+    #[test]
+    fn the_receipt_and_its_icon_start_after_the_text_has_gone() {
+        let d = delivery("wtype", 20, 400, true);
+        let start = d.receipt_starts(20);
+        assert!(start >= d.text_gone(20) && start < d.settled(20));
+        let mut r = d.clone();
+        r.reduced = true;
+        assert_eq!(r.receipt_starts(20), FADE_SECS);
     }
 
     #[test]

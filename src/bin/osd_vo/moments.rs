@@ -562,6 +562,13 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             k.scenario(look, shown + 1.5)
         }
         Moment::FinalPass | Moment::Typed | Moment::PastedEnter => {
+            if moment == Moment::Typed {
+                // The daemon names the focused app during the dictation, so the receipt
+                // can say where the text went and show the app's icon (EG-24).
+                k.doc.target = Some(voxtype::osd::live::LiveTarget {
+                    app: "org.kde.konsole".into(),
+                });
+            }
             k.record(s0);
             // The live text keeps three mistakes for the final pass to fix.
             let words = [
