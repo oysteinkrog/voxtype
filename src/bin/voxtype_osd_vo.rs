@@ -781,7 +781,7 @@ impl Look {
     fn asked_or_set(&self, name: &str) -> bool {
         self.asked(name)
             || (self.look_set
-                && defaults::defaults(self.theme).contains(&name)
+                && defaults::in_set(self.theme, name)
                 && !self.removed(name))
     }
 

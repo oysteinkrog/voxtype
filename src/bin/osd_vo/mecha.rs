@@ -1332,16 +1332,25 @@ impl Popup {
             // It jumps there, so the newest line arrives on the box's last line
             // and stays (RD-09).
             .motion(Prop::Position, Motion::Snap)
-            .word_enter(Transition::fade().offset(10.0 * s, 0.0));
+            .word_enter(self.ghost_enter(Transition::fade().offset(10.0 * s, 0.0)));
+        // Anchored to the bottom, so the newest line always sits on the
+        // last line of the box.
+        let box_h = MAX_LINES as f32 * TEXT_LINE * s;
+        let text = Element::column("text")
+            .justify(JustifyContent::FLEX_END)
+            .width(text_width(l))
+            .height(box_h)
+            .child(words.rewind_hide(self.rewinding()))
+            .children(self.mecha_rewind(text_color, s));
+        // The ghost tail starts where the block's first line is now, and has
+        // room down to the box's last line only.
+        let (style, wrap) = (text_style(l), text_width(l));
+        let joined = self.shown.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        let rows = ((self.measure.layout(&joined, &style, Some(wrap)).size.h / style.line_height).round() as u32).max(1);
+        let tail = model_signals::TailText { style, width: wrap, rows };
+        let top = box_h - rows as f32 * style.line_height;
         let text = at(
-            // Anchored to the bottom, so the newest line always sits on the
-            // last line of the box.
-            Element::column("text")
-                .justify(JustifyContent::FLEX_END)
-                .width(text_width(l))
-                .height(MAX_LINES as f32 * TEXT_LINE * s)
-                .child(words.rewind_hide(self.rewinding()))
-                .children(self.mecha_rewind(text_color, s)),
+            self.signal_marks_in(text, &self.shown, &tail, (0.0, top), text_color),
             TEXT_X * s,
             TEXT_Y * s,
         );

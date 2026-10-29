@@ -545,7 +545,7 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.2))
             .motion(Prop::Offset, Spring::critical_to_98(0.25))
             .motion(Prop::TextFx, Spring::critical_to_98(0.22))
-            .word_enter(Transition::fade().offset(0.0, 7.0 * k));
+            .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 7.0 * k)));
         if self.radial.ended_at.is_some() {
             words = words.opacity(0.4);
         }
@@ -556,7 +556,12 @@ impl Popup {
             hex(TEXT, 1.0),
             hex(ICE, 1.0),
         );
-        at(words, TEXT_X * k, TEXT_TOP * k)
+        let (style, width) = (self.look.text_style(), self.look.text_width());
+        let text = Element::layer("text")
+            .size(width, self.lines.max(1) as f32 * style.line_height)
+            .child(words);
+        let text = self.signal_marks(text, &self.shown, width, (0.0, 0.0), hex(TEXT, 1.0));
+        at(text, TEXT_X * k, TEXT_TOP * k)
     }
 
     /// The status line: a level icon, a spinner, a check or a cross, then

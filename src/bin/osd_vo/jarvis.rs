@@ -1228,6 +1228,10 @@ impl Popup {
                 hex(TEXT, 1.0),
                 hex(CYAN, 1.0),
                 &|words| self.typo_words(words),
+                &|line, words, room| {
+                    let tail = model_signals::TailText { style, width: room, rows: 1 };
+                    self.signal_marks_in(line, words, &tail, (0.0, 0.0), hex(TEXT, 1.0))
+                },
                 self.jarvis.hold.as_ref(),
             ));
         }
@@ -1263,8 +1267,20 @@ impl Popup {
                         .size(w, style.line_height)
                         .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                         .motion(Prop::Offset, Spring::POP)
-                        .word_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k)),
+                        .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k))),
                 );
+            // The ghost tail after the newest line, as far as the text's
+            // right edge: the line is centred, so that is half the free room.
+            let line = if i == newest {
+                let tail = model_signals::TailText {
+                    style,
+                    width: (text_width(&self.look) + w) / 2.0,
+                    rows: 1,
+                };
+                self.signal_marks_in(line, words, &tail, (0.0, 0.0), hex(TEXT, 1.0))
+            } else {
+                line
+            };
             column = column.child(line);
         }
         if self.jarvis.lines.is_empty() && status.loading {

@@ -1,13 +1,14 @@
 //! The live model's own signals on the live text (ASR-05), from
 //! `preview-signals.json` (`voxtype::osd::live::ModelSignals`), each behind a
-//! motion feature (`--motion`, `VOXTYPE_OSD_VO_MOTION`). All are off unless
-//! asked for.
+//! motion feature (`--motion`, `VOXTYPE_OSD_VO_MOTION`). `ghost-tail` is in
+//! every look's set (`defaults.rs`, LAT-1; `no-ghost-tail` turns it off);
+//! the others are off unless asked for.
 //!
 //! - `ghost-tail`: the words the model hears in its lookahead (the newest
 //!   0.56 s, decoded but not committed) follow the live text at 45 % ink,
-//!   where the committed words will land. When a word commits, the real word
-//!   takes its place and the ghost fades; when the guess changes, the old
-//!   ghost fades out as the new one fades in.
+//!   where the committed words will land. They show at once, with no fade
+//!   or rise, and each step replaces them whole; when a word commits, the
+//!   real word takes its place and the ghost goes in the same frame.
 //! - `three-tier-ink`: the tail in two tiers below the committed text's full
 //!   ink. A pending word, 3 or more frames from the window edge, is about
 //!   99 % right and sits at 70 % ink; an edge guess, closer than that, is
@@ -64,6 +65,7 @@
 
 use super::*;
 
+use vo::scene::text::Align;
 use voxtype::osd::live::{ModelSignals, TailToken};
 
 pub(crate) const GHOST_TAIL: &str = "ghost-tail";
@@ -254,6 +256,16 @@ struct TailLayout {
     /// With `breathing-stop`: the likeliest full stop in the tail, which is
     /// then left out of the tail words.
     stop: Option<f32>,
+    /// The style the text is laid out in.
+    style: TextStyle,
+}
+
+/// The live text a ghost tail follows: its style, the width it wraps at and
+/// how many lines it has room for.
+pub(crate) struct TailText {
+    pub(crate) style: TextStyle,
+    pub(crate) width: f32,
+    pub(crate) rows: u32,
 }
 
 impl Popup {
@@ -307,6 +319,18 @@ impl Popup {
         self.model_signals.as_ref().filter(|_| listening)
     }
 
+    /// The look's entry for a new word, or none while the model sends a
+    /// ghost tail: a word that commits then takes the place its ghost held,
+    /// at full ink, with no rise or fade.
+    pub(crate) fn ghost_enter(&self, enter: Transition) -> Transition {
+        let ghosts = self.look.on(GHOST_TAIL) || self.look.on(THREE_TIER);
+        if ghosts && self.live_signals().is_some() {
+            Transition::NONE
+        } else {
+            enter
+        }
+    }
+
     /// The look's text column with the model signals its features ask for:
     /// the ghost tail after `words` (the live text as laid out at `width`)
     /// and the listening floor under it. `origin` is where the live text
@@ -319,6 +343,27 @@ impl Popup {
         origin: (f32, f32),
         ink: Color,
     ) -> Element<Msg> {
+        let tail = TailText {
+            style: self.look.text_style(),
+            width,
+            rows: self.lines,
+        };
+        self.signal_marks_in(text, words, &tail, origin, ink)
+    }
+
+    /// [`Popup::signal_marks`] for live text that is not the look's own text
+    /// block: a single line of a look that sets each line apart, or text in
+    /// another style. The ghost tail follows `tail`; the other signals keep
+    /// the look's style.
+    pub(crate) fn signal_marks_in(
+        &self,
+        text: Element<Msg>,
+        words: &[Word],
+        tail: &TailText,
+        origin: (f32, f32),
+        ink: Color,
+    ) -> Element<Msg> {
+        let width = tail.width;
         if !self.signals_on() {
             return text;
         }
@@ -330,7 +375,7 @@ impl Popup {
             text = text.child(e);
         }
         if let Some(s) = self.live_signals() {
-            let laid = self.tail_layout(s, words, width);
+            let laid = self.tail_layout(s, words, tail);
             for e in self.ghosts(laid.as_ref(), words, origin, ink) {
                 text = text.child(e);
             }
@@ -359,12 +404,18 @@ impl Popup {
     /// Lays out `words` and the tail of `s` together. None when the tail
     /// does not belong to the text on screen: then one of the two files is
     /// newer than the other.
-    fn tail_layout(&self, s: &ModelSignals, words: &[Word], width: f32) -> Option<TailLayout> {
+    fn tail_layout(&self, s: &ModelSignals, words: &[Word], text: &TailText) -> Option<TailLayout> {
+        // On room tone the tail is empty: with only the ghost tail on there
+        // is nothing to lay out.
+        let ends = [COMMIT_CURSOR, BREATHING_STOP, PRE_ECHO_LETTERS];
+        if s.tail.is_empty() && !ends.iter().any(|f| self.look.on(f)) {
+            return None;
+        }
         let committed = self.files.preview.trim();
         if !s.with_tail.starts_with(committed) {
             return None;
         }
-        let style = self.look.text_style();
+        let (style, width) = (text.style, text.width);
         let line_h = style.line_height;
         let mut full = words
             .iter()
@@ -389,22 +440,14 @@ impl Popup {
             full.push_str(&w.text);
             ranges.push(start..full.len());
         }
-        let laid = self.measure.layout(&full, &style, Some(width));
-        let room = self.lines as f32 * line_h - 0.5;
+        // Laid out from the left edge; centred text is moved across below.
+        let flat = TextStyle {
+            align: Align::Start,
+            ..style
+        };
+        let laid = self.measure.layout(&full, &flat, Some(width));
+        let room = text.rows as f32 * line_h - 0.5;
         let top_of = |y: f32| (y / line_h).floor() * line_h;
-        let at = ranges
-            .iter()
-            .map(|range| {
-                let g = laid
-                    .glyphs
-                    .iter()
-                    .find(|g| range.contains(&(g.cluster as usize)))?;
-                let top = top_of(g.pos.y);
-                // A guess that would open a line the text has no room for
-                // yet waits until the text gets there.
-                (top < room).then_some((g.pos.x, top))
-            })
-            .collect();
         // The end of a run of text: after its last glyph.
         let end_of = |len: usize| -> (f32, f32) {
             match laid.glyphs.iter().rfind(|g| (g.cluster as usize) < len) {
@@ -412,19 +455,66 @@ impl Popup {
                 None => (0.0, 0.0),
             }
         };
+        let committed_end = end_of(committed_len);
+        // How far `style.align` moves the line of glyph `i` across. The line
+        // the committed text ends on sits where the live text centres it, so
+        // its guesses follow the committed words; a line of guesses alone
+        // centres on its own width.
+        let k = style.align.factor();
+        let shift = |i: usize| -> f32 {
+            if k == 0.0 {
+                return 0.0;
+            }
+            let top = top_of(laid.glyphs[i].pos.y);
+            let w = if committed_len > 0 && (top - committed_end.1).abs() < 0.5 {
+                committed_end.0
+            } else {
+                laid.lines
+                    .iter()
+                    .find(|l| l.glyphs.contains(&i))
+                    .map_or(0.0, |l| l.width)
+            };
+            k * (width - w).max(0.0)
+        };
+        let at = ranges
+            .iter()
+            .map(|range| {
+                let i = laid
+                    .glyphs
+                    .iter()
+                    .position(|g| range.contains(&(g.cluster as usize)))?;
+                let g = &laid.glyphs[i];
+                let top = top_of(g.pos.y);
+                let x = g.pos.x + shift(i);
+                let end = laid
+                    .glyphs
+                    .iter()
+                    .filter(|g| range.contains(&(g.cluster as usize)))
+                    .fold(x, |e, g| e.max(g.pos.x + shift(i) + g.advance));
+                // A guess that would open a line the text has no room for
+                // yet, or run past the edge of centred text, waits until the
+                // text gets there.
+                (top < room && end <= width + 0.5).then_some((x, top))
+            })
+            .collect();
+        let shifted = |(x, top): (f32, f32), len: usize| {
+            let i = laid.glyphs.iter().rposition(|g| (g.cluster as usize) < len);
+            (x + i.map_or(0.0, shift), top)
+        };
         // A tail that runs onto a line with no room yet ends, as far as the
         // screen goes, at the right edge of the last line there is.
-        let mut tail_end = end_of(full.len());
+        let mut tail_end = shifted(end_of(full.len()), full.len());
         if tail_end.1 >= room {
             tail_end = (width - CURSOR_GAP - CURSOR_PX, top_of(room - 1.0));
         }
         Some(TailLayout {
             tail,
             at,
-            committed_end: end_of(committed_len),
+            committed_end: shifted(committed_end, committed_len),
             tail_end,
             line_h,
             stop,
+            style,
         })
     }
 
@@ -729,16 +819,13 @@ impl Popup {
         let Some(laid) = laid.filter(|_| l.on(GHOST_TAIL) || tiers) else {
             return Vec::new();
         };
-        let style = l.text_style();
-        let reduced = self.signals_reduced();
-        let presence = if reduced {
-            (Transition::NONE, Transition::NONE)
-        } else {
-            (Transition::fade(), Transition::fade())
+        let style = TextStyle {
+            align: Align::Start,
+            ..laid.style
         };
-        // A ghost's key is the word's place in the dictation and its text:
-        // the same guess keeps its element, a new guess at that place
-        // fades in over the old one.
+        // A ghost's key is the word's place in the dictation and its text: a
+        // new guess at a place is a new element. Ghosts come and go at once,
+        // so the newest words cost no entry time.
         let first = self.cut + words.len();
         let mut out = Vec::new();
         for (i, (w, at)) in laid.tail.iter().zip(&laid.at).enumerate() {
@@ -749,20 +836,16 @@ impl Popup {
                 (false, _) => GHOST_INK,
             };
             let place = first + i - usize::from(w.joins);
+            // Its own width, so a narrow parent box cannot wrap it.
+            let gw = self.measure.layout(&w.text, &style, None).size.w.ceil() + 1.0;
             let ghost = Element::label(format!("ghost-{place}-{}", w.text), w.text.as_str())
                 .text_style(style)
+                .size(gw, laid.line_h)
                 .color(ink)
                 .opacity(alpha)
-                .motion(
-                    Prop::Opacity,
-                    if reduced {
-                        Spring::SNAP
-                    } else {
-                        Spring::critical_to_98(0.2)
-                    },
-                )
+                .motion(Prop::Opacity, Motion::Snap)
                 .motion(Prop::Position, Motion::Snap)
-                .presence(presence.0, presence.1);
+                .presence(Transition::NONE, Transition::NONE);
             out.push(kit::at(ghost, origin.0 + x, origin.1 + top));
         }
         out

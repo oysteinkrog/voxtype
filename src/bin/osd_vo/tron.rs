@@ -718,7 +718,7 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.18))
             .motion(Prop::Offset, Spring::critical_to_98(0.22))
             .motion(Prop::TextFx, Spring::critical_to_98(0.22))
-            .word_enter(Transition::fade().offset(0.0, 5.0 * k).blur(3.0 * k));
+            .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 5.0 * k).blur(3.0 * k)));
         if self.tron.ended_at.is_some() {
             words = words.opacity(0.35);
         }
@@ -729,7 +729,12 @@ impl Popup {
             hex(TEXT, 1.0),
             hex(CYAN, 1.0),
         );
-        at(words.rewind_hide(self.rewinding()), TEXT_X * k, TEXT_TOP * k)
+        let (style, width) = (self.look.text_style(), self.look.text_width());
+        let text = Element::layer("text")
+            .size(width, self.lines.max(1) as f32 * style.line_height)
+            .child(words.rewind_hide(self.rewinding()));
+        let text = self.signal_marks(text, &self.shown, width, (0.0, 0.0), hex(TEXT, 1.0));
+        at(text, TEXT_X * k, TEXT_TOP * k)
     }
 
     /// MO-50: a cancel takes the words back into the caret, drawn over

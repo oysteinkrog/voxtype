@@ -1027,7 +1027,7 @@ impl Popup {
                         .text_style(style)
                         .color(colour)
                         .motion(Prop::Opacity, Spring::critical_to_98(0.08))
-                        .word_enter(Transition::fade()),
+                        .word_enter(self.ghost_enter(Transition::fade())),
                     o + TEXT_X,
                     o + TEXT_TOP + i as f32 * LINE,
                 )
@@ -1038,6 +1038,12 @@ impl Popup {
                 // reading line's 70 % ink floor (RD-09).
                 .presence(Transition::NONE, Transition::fade()),
             );
+        }
+        // The ghost tail after the newest line, which it does not wrap past.
+        if let Some((words, _)) = lines.last() {
+            let tail = model_signals::TailText { style, width: WRAP, rows: 1 };
+            let y = o + TEXT_TOP + (lines.len() - 1) as f32 * LINE;
+            panel = self.signal_marks_in(panel, words, &tail, (o + TEXT_X, y), colour);
         }
         // MO-50: a cancel takes the words back into the caret.
         if rw {

@@ -929,23 +929,35 @@ impl Popup {
             .justify(JustifyContent::FLEX_END)
             .opacity(dim)
             .motion(Prop::Opacity, Spring::critical_to_98(0.4));
-        for (i, words) in lines.iter().enumerate() {
-            let words = Element::live_text(format!("line-{i}"), words)
+        let newest = lines.len().saturating_sub(1);
+        for (i, line) in lines.iter().enumerate() {
+            let words = Element::live_text(format!("line-{i}"), line)
                 .text_style(style)
                 .color(hex(WHITE))
                 .text_halo(Color::hex(0x6a5cff, 0.9), 11.0 * s)
                 .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                 .motion(Prop::Offset, Spring::POP)
                 .motion(Prop::Position, Spring::critical_to_98(0.2))
-                .word_enter(Transition::fade().offset(0.0, 8.0 * s));
-            column = column.child(
-                Element::row(format!("row-{i}"))
-                    .width(l.width)
-                    .height(style.line_height)
-                    .justify(JustifyContent::CENTER)
-                    .motion(Prop::Position, Spring::critical_to_98(GROW_SECS))
-                    .child(words),
-            );
+                .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 8.0 * s)));
+            let mut row = Element::row(format!("row-{i}"))
+                .width(l.width)
+                .height(style.line_height)
+                .justify(JustifyContent::CENTER)
+                .motion(Prop::Position, Spring::critical_to_98(GROW_SECS))
+                .child(words);
+            if i == newest {
+                // The ghost tail after the newest line, where its centred
+                // words end, as far as the text's right edge.
+                let joined = line.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+                let lw = self.measure.layout(&joined, &style, None).size.w;
+                let tail = model_signals::TailText {
+                    style,
+                    width: (width + lw) / 2.0,
+                    rows: 1,
+                };
+                row = self.signal_marks_in(row, line, &tail, ((l.width - lw) / 2.0, 0.0), hex(WHITE));
+            }
+            column = column.child(row);
         }
         column
     }

@@ -435,7 +435,7 @@ impl Popup {
                     .motion(Prop::TextColor, Spring::critical_to_98(0.15))
                     .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                     .motion(Prop::Offset, Spring::POP)
-                    .word_enter(Transition::fade().offset(0.0, 6.0));
+                    .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 6.0)));
                 // MO-14 and the other word channels.
                 self.typo_words(text)
             };
@@ -461,6 +461,16 @@ impl Popup {
                     bw,
                     0.0,
                 ));
+            }
+            if age == 0 {
+                // The ghost tail after the newest line, as far as the text's
+                // right edge: the line is centred, so that is half the free room.
+                let tail = model_signals::TailText {
+                    style,
+                    width: (WRAP + w) / 2.0,
+                    rows: 1,
+                };
+                row = self.signal_marks_in(row, words, &tail, (0.0, 0.0), hex(WHITE));
             }
             if fold {
                 row = row

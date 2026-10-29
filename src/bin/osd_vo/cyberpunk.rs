@@ -1460,7 +1460,7 @@ impl Popup {
             .motion(Prop::TextColor, Spring::critical_to_98(0.2))
             .motion(Prop::Opacity, Spring::critical_to_98(0.10))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(Transition::fade().offset(0.0, 6.0))
+            .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 6.0)))
             .word_revise(Revise::Roll)
             .text_halo(Color::WHITE.fade(if cancelled { 0.0 } else { 0.12 }), 3.0);
         let words = self.handoff_or(
@@ -1515,7 +1515,7 @@ impl Popup {
                 ));
             }
         }
-        text
+        self.signal_marks(text, &self.shown, l.text_width(), (0.0, 0.0), colour)
     }
 
     /// MO-50: a cancel takes the words back into the caret.

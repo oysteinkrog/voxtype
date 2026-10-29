@@ -318,7 +318,7 @@ impl Popup {
             words = words
                 .motion(Prop::Opacity, Spring::SNAP)
                 .motion(Prop::Offset, Spring::SNAP)
-                .word_enter(Transition::fade().offset(0.0, 3.0));
+                .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 3.0)));
         }
         let words = self.typo_words(words);
         let words = self.handoff_or(
