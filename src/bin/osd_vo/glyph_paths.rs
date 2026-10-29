@@ -24,11 +24,12 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use vo::scene::canvas::Painter;
+use vo::scene::centreline;
 use vo::scene::geom::{Affine, Point};
 use vo::scene::glyph_morph::{GlyphMorph, MorphFrom, MorphStyle, WordOutline};
 use vo::scene::path::{Contour, StrokeStyle};
 use vo::scene::snap::{snapped, Snap};
-use vo::scene::stroke_write::{PenParams, PenPhase, PenSchedule, PenSlot, WriteStyle, Writing};
+use vo::scene::stroke_write::{PenParams, PenSchedule, PenSlot, StrokeSource, WetInk, Writing};
 use vo::scene::text::ShapedText;
 
 pub(crate) const MORPH: &str = "glyph-morph";
@@ -36,8 +37,10 @@ pub(crate) const BREATH: &str = "breath-line";
 pub(crate) const BROKEN: &str = "broken-frame";
 pub(crate) const WRITE: &str = "stroke-write";
 
-/// How long a word's strokes stay once it is written or swept.
-const WRITE_FADE: f64 = 0.22;
+/// Letters whose pen strokes are analysed on the worker when stroke
+/// writing first shows, so a live word rarely waits for its centre lines.
+const PEN_PREFETCH: &str =
+    "abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 æøåÆØÅéüöä.,?!'-";
 /// Pen speed in text sizes per second. At 22.7 px text, "the" is 135 px
 /// of pen path (about 170 ms) and "dictation" 334 px (the 260 ms cap).
 const PEN_SPEED: f32 = 35.0;
@@ -539,7 +542,12 @@ impl Popup {
     /// The pen writing each new word by its strokes (MO-80), over the live
     /// text, which arrives at the reading-line ink and fills as the pen
     /// passes. One pen for the popup, a word at a time (SW-01): a word the
-    /// pen cannot start within 250 ms is swept in instead.
+    /// pen cannot start within 250 ms is swept in instead. The pen follows
+    /// each letter's own centre lines in wet ink (SW-03): the text colour
+    /// lifted toward white at the letter's stem width, drying back into the
+    /// type 180 ms after the letter is done, with the dots, crossbars and
+    /// marks written at the end of the word and only the nib light in the
+    /// accent.
     fn writing_overlay(&self, laid: &[Laid], w: f32, h: f32) -> Option<Element<Msg>> {
         if self.paths_reduced() {
             return None;
@@ -548,6 +556,8 @@ impl Popup {
         let size = l.text_style().size;
         let now = self.extra.now;
         let popup = self.paths_popup();
+        let wet = WetInk::new(l.foreground, l.accent);
+        self.pen_prefetch();
         let mut plays: Vec<(Arc<Writing>, PenSlot)> = Vec::new();
         let mut books = pens().lock().unwrap_or_else(|e| e.into_inner());
         if books.len() > 64 {
@@ -568,7 +578,7 @@ impl Popup {
                 .get(&word.id)
                 .and_then(|&i| book.schedule.slot(i))
                 .copied();
-            if known.is_some_and(|x| x.end + WRITE_FADE < now - 0.05) {
+            if known.is_some_and(|x| wet.until(&x) < now - 0.05) {
                 continue;
             }
             let writing = self.writing(word, size);
@@ -581,7 +591,7 @@ impl Popup {
                     book.schedule.slots()[i]
                 }
             };
-            if slot.end + WRITE_FADE < now - 0.05 {
+            if wet.until(&slot) < now - 0.05 {
                 continue;
             }
             plays.push((writing, slot));
@@ -590,43 +600,39 @@ impl Popup {
         if plays.is_empty() {
             return None;
         }
-        let until = plays
-            .iter()
-            .map(|p| p.1.end + WRITE_FADE)
-            .fold(0.0, f64::max);
-        let (accent, head) = (l.accent, l.foreground);
+        let until = plays.iter().map(|p| wet.until(&p.1)).fold(0.0, f64::max);
         let draw = move |t: f64, r: Rect, p: &mut Painter| {
             p.layer(Affine::translate(r.x, r.y), 1.0, |p| {
                 for (writing, slot) in &plays {
-                    let style = |fade: f32, pen_head: f32| WriteStyle {
-                        pen: StrokeStyle::solid(1.4, accent.fade(fade)),
-                        head: pen_head,
-                        head_color: head,
-                        ink: head.fade(0.0),
-                        ink_floor: 0.0,
-                    };
-                    match slot.phase(t) {
-                        PenPhase::Waiting => {}
-                        PenPhase::Writing(u) => {
-                            let (done, along) = writing.pen_at(u);
-                            writing.draw_from(p, done, along, &style(1.0, 3.0));
-                        }
-                        PenPhase::Sweeping(k) => writing.draw_swept(p, k, &style(1.0, 0.0)),
-                        PenPhase::Done => {
-                            let fade = (1.0 - (t - slot.end) / WRITE_FADE).clamp(0.0, 1.0) as f32;
-                            if fade > 0.0 {
-                                let all = writing.strokes().count();
-                                writing.draw_from(p, all, 0.0, &style(fade, 0.0));
-                            }
-                        }
-                    }
+                    writing.draw_wet(p, t, slot, &wet);
                 }
             })
         };
         Some(kit::at(Element::canvas("stroke-write", until, draw), 0.0, 0.0).size(w, h))
     }
 
-    /// `word`'s pen strokes, built once and shared like the morphs.
+    /// Queues the pen strokes of the text face's common letters on the
+    /// centre-line worker, once per face.
+    fn pen_prefetch(&self) {
+        static DONE: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+        let style = self.look.text_style();
+        {
+            let mut done = DONE.lock().unwrap_or_else(|e| e.into_inner());
+            if done.contains(&style.font) {
+                return;
+            }
+            done.push(style.font);
+        }
+        let shaped = self.measure.layout(PEN_PREFETCH, &style, None);
+        let outline = WordOutline::new(self.measure.fonts(), &shaped, style.size, Point::ZERO);
+        centreline::prefetch(self.measure.fonts(), &outline);
+    }
+
+    /// `word`'s pen strokes, built once and shared like the morphs. Live,
+    /// a glyph whose centre lines are still being analysed is traced by its
+    /// outline and the writing is built again next frame; a scripted popup
+    /// (offline renders, tests) analyses them at once, so its frames repeat
+    /// exactly.
     fn writing(&self, word: &Laid, size: f32) -> Arc<Writing> {
         let key: WriteKey = (
             word.id,
@@ -636,27 +642,35 @@ impl Popup {
             size.to_bits(),
         );
         let mut c = write_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(w) = c.get(&key) {
+            return w.clone();
+        }
         if c.len() > 256 {
             c.clear();
         }
-        c.entry(key)
-            .or_insert_with(|| {
-                let mut outline =
-                    WordOutline::new(self.measure.fonts(), &word.shaped, size, Point::ZERO);
-                // The laid glyph clusters index the joined text: rebase them
-                // onto the word's own text.
-                let base = word.shaped.glyphs.first().map_or(0, |g| g.cluster);
-                for g in &mut outline.glyphs {
-                    g.cluster -= base;
-                }
-                Arc::new(Writing::new(
-                    self.measure.fonts(),
-                    &word.text,
-                    outline,
-                    0.15 * size,
-                ))
-            })
-            .clone()
+        let mut outline = WordOutline::new(self.measure.fonts(), &word.shaped, size, Point::ZERO);
+        // The laid glyph clusters index the joined text: rebase them onto
+        // the word's own text.
+        let base = word.shaped.glyphs.first().map_or(0, |g| g.cluster);
+        for g in &mut outline.glyphs {
+            g.cluster -= base;
+        }
+        let source = if self.scripted {
+            StrokeSource::FontNow
+        } else {
+            StrokeSource::Font
+        };
+        let writing = Arc::new(Writing::with_source(
+            self.measure.fonts(),
+            &word.text,
+            outline,
+            0.15 * size,
+            source,
+        ));
+        if !writing.pending() {
+            c.insert(key, writing.clone());
+        }
+        writing
     }
 }
 
