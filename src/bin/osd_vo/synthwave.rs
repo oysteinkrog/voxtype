@@ -388,17 +388,20 @@ impl Popup {
             .child(at(self.sw_grid_and_wave(), 0.0, 0.0))
             .child(self.sw_done_mark())
             .child(self.sw_title())
-            .child(self.sw_text())
             .child(self.sw_status(h));
         // The card's bottom stays put and it grows upward: its content's top
         // springs up as lines are added, on the same spring as the height
-        // the card and tube canvases draw.
+        // the card and tube canvases draw. The transcript hangs from the
+        // card's bottom instead, so the newest line stays put (RD-09).
         let tall = self.card_h(swiss::MAX_LINES as u32);
+        let s = self.scale();
+        let text_top = MARGIN + tall - (FOOT + swiss::MAX_LINES as f32 * TEXT_LINE) * s;
         root.child(at(self.sw_card(), 0.0, 0.0))
             .child(
                 at(card, MARGIN, MARGIN + tall - h)
                     .motion(Prop::Position, Spring::critical_to_98(GROW_SECS)),
             )
+            .child(at(self.sw_text(), MARGIN, text_top))
             .child(at(self.sw_tube(), 0.0, 0.0))
     }
 
@@ -917,8 +920,13 @@ impl Popup {
             offset += word.text.len() + 1;
         }
         let dim = if self.cancelled() { 0.3 } else { 1.0 };
+        // The rows sit on the bottom of the tallest card's text box: a new
+        // line comes in on the last row and the older ones rise with the
+        // card's top, on its spring.
         let mut column = Element::column("text")
             .width(l.width)
+            .height(swiss::MAX_LINES as f32 * style.line_height)
+            .justify(JustifyContent::FLEX_END)
             .opacity(dim)
             .motion(Prop::Opacity, Spring::critical_to_98(0.4));
         for (i, words) in lines.iter().enumerate() {
@@ -935,10 +943,11 @@ impl Popup {
                     .width(l.width)
                     .height(style.line_height)
                     .justify(JustifyContent::CENTER)
+                    .motion(Prop::Position, Spring::critical_to_98(GROW_SECS))
                     .child(words),
             );
         }
-        at(column, 0.0, HEAD * s)
+        column
     }
 
     /// Icon, state and detail, centred near the bottom edge.
