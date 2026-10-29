@@ -20,6 +20,7 @@ use std::sync::Mutex;
 
 use vo::scene::flow::Revise;
 use vo::scene::geom::Point;
+use vo::scene::text::ShapedText;
 use vo_3d::glyph_fx::{Effect, FxGlyph, GlyphFx, Ink, Light, Morph, Part, Side};
 use vo_core::words::WordId;
 
@@ -38,7 +39,12 @@ struct Inner {
     texts: HashMap<WordId, String>,
     /// Old text and the time the change came.
     morphs: HashMap<WordId, (String, f64)>,
+    /// The last layouts, by text, font, size and width: the text changes
+    /// far less often than views are built, and shaping is not free.
+    laid: Vec<(Laid, ShapedText)>,
 }
+
+type Laid = (String, u32, u32, u32);
 
 /// Pairs letters of `old` and `new` that a longest common subsequence
 /// keeps: `(old index, new index)` in order.
@@ -140,6 +146,26 @@ impl Popup {
         words
     }
 
+    /// `text` laid out in `style` at `width`, from the last few layouts.
+    fn letter_fx_laid(&self, text: &str, style: &TextStyle, width: f32) -> ShapedText {
+        let key = (
+            text.to_string(),
+            style.font,
+            style.size.to_bits(),
+            width.to_bits(),
+        );
+        let mut s = self.letter_fx.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, laid)) = s.laid.iter().find(|(k, _)| *k == key) {
+            return laid.clone();
+        }
+        let laid = self.measure.layout(text, style, Some(width));
+        if s.laid.len() >= 4 {
+            s.laid.remove(0);
+        }
+        s.laid.push((key, laid.clone()));
+        laid
+    }
+
     /// `text`, the column the live text is the first child of, with the
     /// effects under and over it. `width` is the live text's wrap width.
     pub(crate) fn letter_fx_layers(&self, text: Element<Msg>, width: f32) -> Element<Msg> {
@@ -148,15 +174,14 @@ impl Popup {
         }
         let l = &self.look;
         let mut style = l.text_style();
-        // MO-81: words set in the variable font are laid in it, each glyph
-        // in its word's instance, so the effects sit on the drawn letters.
-        let breath = if l.on(super::wild_motion::VARIABLE_BREATH) {
-            self.breath_fonts(style.size, false)
-        } else {
-            None
-        };
-        if let Some((base, _)) = &breath {
-            style.font = *base;
+        // MO-81: words set in the variable font are laid in it, so the
+        // effects sit on the drawn letters. In its default instance: each
+        // word's own instance is a new font, and a new font's glyph fields
+        // cost the light a fresh field each time the word breathes.
+        if l.on(super::wild_motion::VARIABLE_BREATH) {
+            if let Ok(flex) = l.fonts.asset("flex") {
+                style.font = flex;
+            }
         }
         let height = self.lines as f32 * l.text_line;
         let reduced = self.letter_fx_reduced();
@@ -172,7 +197,7 @@ impl Popup {
             .map(|w| w.text.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        let laid = self.measure.layout(&joined, &style, Some(width));
+        let laid = self.letter_fx_laid(&joined, &style, width);
         let mut starts = Vec::with_capacity(self.shown.len());
         let mut at = 0usize;
         for w in &self.shown {
@@ -180,14 +205,8 @@ impl Popup {
             at += w.text.len() + 1;
         }
         let word_of = |cluster: u32| starts.iter().rposition(|&s| s <= cluster as usize);
-        let font = |g: &vo::scene::text::PlacedGlyph| match &breath {
-            Some((base, fonts)) if g.font == *base => word_of(g.cluster)
-                .and_then(|i| fonts.iter().find(|f| f.0 == self.shown[i].id))
-                .map_or(g.font, |f| f.1),
-            _ => g.font,
-        };
         let glyph = |g: &vo::scene::text::PlacedGlyph, start: f64| {
-            FxGlyph::new(font(g), g.glyph, g.pos, style.size, l.foreground, start)
+            FxGlyph::new(g.font, g.glyph, g.pos, style.size, l.foreground, start)
         };
         let fx = |effect, glyphs| {
             GlyphFx::new(effect, glyphs)
@@ -215,27 +234,13 @@ impl Popup {
                     .map(|w| w.text.as_str())
                     .collect::<Vec<_>>()
                     .join(" ");
-                let laid = self.measure.layout(&text, &style, Some(width));
-                let mut starts = Vec::with_capacity(line.len());
-                let mut at = 0usize;
-                for w in line {
-                    starts.push(at);
-                    at += w.text.len() + 1;
-                }
                 let dy = self.lines.saturating_sub(1) as f32 * l.text_line;
-                laid.glyphs
+                self.letter_fx_laid(&text, &style, width)
+                    .glyphs
                     .iter()
                     .map(|g| {
-                        let font = match &breath {
-                            Some((base, fonts)) if g.font == *base => starts
-                                .iter()
-                                .rposition(|&s| s <= g.cluster as usize)
-                                .and_then(|i| fonts.iter().find(|f| f.0 == line[i].id))
-                                .map_or(g.font, |f| f.1),
-                            _ => g.font,
-                        };
                         let pos = Point::new(g.pos.x, g.pos.y + dy);
-                        FxGlyph::new(font, g.glyph, pos, style.size, l.foreground, 0.0)
+                        FxGlyph::new(g.font, g.glyph, pos, style.size, l.foreground, 0.0)
                     })
                     .collect()
             } else {

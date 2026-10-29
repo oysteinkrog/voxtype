@@ -118,7 +118,12 @@ pub struct Extra {
     stack_newest: Option<(vo_core::words::WordId, u32)>,
     /// The line that just left the reading place, held flat for a moment.
     stack_hold: Option<Hold>,
+    /// The shown words and their boxes in the strip at a width (MO-69).
+    boxes: std::sync::Mutex<Option<ShownBoxes>>,
 }
+
+/// Shown words, the width they wrap at, and their boxes.
+type ShownBoxes = (Vec<Word>, f32, Vec<sounding::WordBox>);
 
 /// Reach of the card's glow. Its falloff is exp(-d / GLOW_PX), so it is
 /// gone well inside the surface's transparent margin.
@@ -762,6 +767,20 @@ impl Popup {
             .unwrap_or(Glass { tint, ..glass })
     }
 
+    /// The header's title: "VOICE DICTATION", "DICTATION" or none, the
+    /// longest that keeps clear of the dot word count (narrow popups run
+    /// out of room). Sized for the widest count, so it does not change as
+    /// the count grows.
+    fn header_title(&self, style: &TextStyle) -> Option<&'static str> {
+        let cols = (self.look.text_width() / DOT_PITCH).floor() as i32;
+        let (large, small) = (DotFont::LARGE, DotFont::SMALL);
+        let count_x = cols - large.width("00:00", 1) - DOT_GAP - small.width(&count_text(999), 1);
+        let room = count_x as f32 * DOT_PITCH - ICON - 10.0 - 8.0;
+        ["VOICE DICTATION", "DICTATION"]
+            .into_iter()
+            .find(|t| self.measure.layout(t, style, None).size.w <= room)
+    }
+
     fn sc_header(&self, phase: Phase) -> Element<Msg> {
         let l = &self.look;
         let big = l.value_px * 1.25;
@@ -792,16 +811,19 @@ impl Popup {
         } else {
             self.mic_icon(phase)
         };
-        let title = Element::label("title", "VOICE DICTATION")
-            .text_style(l.mono(l.caption_px).tracking(2.4))
-            .color(c(ICE).fade(0.55))
-            .margin_edges(0.0, 0.0, 0.0, 10.0);
+        let title_style = l.mono(l.caption_px).tracking(2.4);
+        let title = self.header_title(&title_style).map(|t| {
+            Element::label("title", t)
+                .text_style(title_style)
+                .color(c(ICE).fade(0.55))
+                .margin_edges(0.0, 0.0, 0.0, 10.0)
+        });
         let words = format!("{} words", self.word_count);
         let row = Element::row("header")
             .height(Self::header_h(l))
             .align_items(AlignItems::CENTER)
             .child(icon)
-            .child(title)
+            .children(title)
             .child(Element::row("spacer").grow(1.0));
         if let Some(dots) = self.dot_header() {
             return row.child(dots);
@@ -1306,6 +1328,20 @@ impl Popup {
         .presence(Transition::fade(), Transition::fade())
     }
 
+    /// Where the shown words sit, laid out again only when they change.
+    fn shown_boxes(&self, style: &TextStyle, width: f32) -> Vec<sounding::WordBox> {
+        let mut cache = self.extra.boxes.lock().unwrap_or_else(|e| e.into_inner());
+        match cache.as_ref() {
+            Some((words, w, boxes)) if *w == width && *words == self.shown => boxes.clone(),
+            _ => {
+                let (boxes, _) =
+                    sounding::word_boxes(&self.measure, &self.shown, style, Some(width));
+                *cache = Some((self.shown.clone(), width, boxes.clone()));
+                boxes
+            }
+        }
+    }
+
     /// The negative impressions of the newest two words, drawn in the strip
     /// over the words' box (MO-69).
     fn negatives(&self, phase: Phase) -> Option<Element<Msg>> {
@@ -1314,8 +1350,7 @@ impl Popup {
             return None;
         }
         let style = l.text_style();
-        let (boxes, _) =
-            sounding::word_boxes(&self.measure, &self.shown, &style, Some(l.text_width()));
+        let boxes = self.shown_boxes(&style, l.text_width());
         // Under the depth stack only the reading line lies on the strip.
         let stacked = l.on(wild_space::DEPTH_STACK);
         let last_y = boxes.last().map_or(0.0, |b| b.rect.y);

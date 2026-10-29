@@ -116,7 +116,7 @@ impl Popup {
     }
 
     /// The flex font and each shown word's instance of it.
-    pub(crate) fn breath_fonts(&self, size: f32, free: bool) -> Option<(u32, Vec<(WordId, u32)>)> {
+    fn breath_fonts(&self, size: f32, free: bool) -> Option<(u32, Vec<(WordId, u32)>)> {
         let fonts = &self.look.fonts;
         let base = fonts.asset("flex").ok()?;
         let words = self
