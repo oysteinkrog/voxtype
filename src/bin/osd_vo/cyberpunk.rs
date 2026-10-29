@@ -1320,15 +1320,17 @@ impl Popup {
                 .presence(Transition::fade(), Transition::fade()),
             )
             .child(self.cyber_wave(mode, progress, ox, oy));
-        // The transcript rides with the body but is cut at the status bar's
-        // top, so a new line rises from behind the bar while the panel grows
-        // instead of overlapping it.
+        // The transcript hangs from the panel's bottom: it takes the place
+        // of the grown panel at once, so the newest line stays put and the
+        // older ones step up a line while the panel's top follows (RD-09).
+        // It is still cut at the status bar's top.
+        let text_dy = tall_h() - panel_h(c.lines as f32);
         let text = at(Element::layer("textclip"), 0.0, 0.0)
             .size(size.w, oy + sy - 2.0)
             .clip()
             .child(
-                at(Element::column("textmove"), 0.0, dy)
-                    .size(size.w, size.h - dy)
+                at(Element::column("textmove"), 0.0, text_dy)
+                    .size(size.w, size.h - text_dy)
                     .motion(Prop::Position, Motion::Snap)
                     .child(self.cyber_text(mode, ox, oy)),
             );
