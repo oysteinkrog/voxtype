@@ -153,6 +153,17 @@ fn fonts(reg: &FontRegistry) -> Fonts {
     })
 }
 
+/// MO-50 with the lattice: a cancel takes the words back into the caret, so
+/// the strands under them fade out over the rewind instead of staying behind
+/// on an empty line. Reduced motion shows the end state at once.
+fn lattice_rewind(e: Element<Msg>, rewinding: bool, reduced: bool) -> Element<Msg> {
+    match (rewinding, reduced) {
+        (false, _) => e,
+        (true, true) => e.opacity(0.0).motion(Prop::Opacity, Motion::Snap),
+        (true, false) => e.opacity(0.0).motion(Prop::Opacity, Spring::critical_to_98(0.3)),
+    }
+}
+
 fn reduced() -> bool {
     static R: OnceLock<bool> = OnceLock::new();
     *R.get_or_init(|| {
@@ -824,6 +835,7 @@ impl Popup {
 
         // The transcript lines, one live text each so a line keeps its place.
         let colour = if mode == Mode::Cancelled { hex(DIM) } else { hex(TEXT) };
+        let rw = self.rewinding();
         if l.on(wild_space::KINETIC_LATTICE) {
             // The kinetic lattice under each line, the times on the newest.
             for (i, (words, _)) in lines.iter().enumerate() {
@@ -839,7 +851,7 @@ impl Popup {
                     label_color: hex(LABEL).fade(0.8),
                     ..Default::default()
                 };
-                panel = panel.child(at(
+                panel = panel.child(lattice_rewind(at(
                     self.lattice_line(
                         format!("lattice-{}", words[0].id),
                         words,
@@ -854,10 +866,9 @@ impl Popup {
                     ),
                     o + TEXT_X,
                     o + TEXT_TOP + i as f32 * LINE,
-                ));
+                ), rw, reduced() || l.on("reduced-motion")));
             }
         }
-        let rw = self.rewinding();
         for (i, (words, _)) in lines.iter().enumerate() {
             panel = panel.child(
                 at(
