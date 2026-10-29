@@ -47,6 +47,9 @@ const GAP: f32 = 10.0;
 const TILES_H: f32 = 72.0;
 const TILE_GAP: f32 = 9.0;
 const TILE_W: [f32; 5] = [226.0, 195.0, 172.0, 197.0, 145.0];
+/// Where the model text starts in its tile, and the room kept right of it.
+const MODEL_X: f32 = 38.0;
+const TILE_RIGHT: f32 = 10.0;
 /// The transcript tile.
 const LABEL_Y: f32 = 15.0;
 const TEXT_X: f32 = 23.0;
@@ -569,6 +572,21 @@ impl Popup {
     }
 
     /// The row of telemetry tiles.
+    /// `s` cut with an ellipsis until it is at most `room` px wide, so no
+    /// tile text crosses its tile's edge.
+    fn fitted(&self, s: &str, style: &TextStyle, room: f32) -> String {
+        let wide = |t: &str| self.measure.layout(t, style, None).size.w;
+        if wide(s) <= room {
+            return s.to_string();
+        }
+        let chars: Vec<char> = s.chars().collect();
+        (1..chars.len())
+            .rev()
+            .map(|n| format!("{}\u{2026}", chars[..n].iter().collect::<String>().trim_end()))
+            .find(|t| wide(t) <= room)
+            .unwrap_or_else(|| "\u{2026}".to_string())
+    }
+
     fn mission_tiles(&self, mode: Mode, inner: f32) -> Element<Msg> {
         let f = fonts(&self.look.fonts);
         let k = (inner - 4.0 * TILE_GAP) / TILE_W.iter().sum::<f32>();
@@ -618,15 +636,18 @@ impl Popup {
         } else {
             facts.model.clone()
         };
+        let room = (TILE_W[0] * k).floor() - MODEL_X - TILE_RIGHT;
+        let model = self.fitted(&model, &value, room);
+        let about = self.fitted(&format!("{} \u{b7} Local", facts.engine), &small, room);
         let mut model_tile = tile(
             "model",
             0,
             "MODEL",
             icon("icon", glyphs.model.clone(), 20.0, orange),
         )
-        .child(at(text("value", model, value, INK), 38.0, 30.0))
+        .child(at(text("value", model, value, INK), MODEL_X, 30.0))
         .child(at(
-            text("about", format!("{} \u{b7} Local", facts.engine), small, SOFT),
+            text("about", about, small, SOFT),
             38.0,
             50.0,
         ));
@@ -1173,5 +1194,20 @@ mod tests {
         assert_eq!(panel_w(&look), design);
         look.width = 800.0;
         assert!(panel_w(&look) > design);
+    }
+
+    #[test]
+    fn long_model_name_is_cut_to_its_tile() {
+        let cfg = OsdConfig::default();
+        let plasma = PlasmaTheme::default();
+        let reg = load_fonts(&plasma).unwrap();
+        let look = Look::new(&cfg, &plasma, String::new(), &reg);
+        let popup = Popup::new(look, &reg);
+        let style = TextStyle::new(fonts(&popup.look.fonts).bold, 13.5, 17.0);
+        let room = 120.0;
+        let w = |t: &str| popup.measure.layout(t, &style, None).size.w;
+        let long = popup.fitted("cohere-transcribe-q4f1-long", &style, room);
+        assert!(long.ends_with('\u{2026}') && w(&long) <= room, "{long}");
+        assert_eq!(popup.fitted("Cohere", &style, room), "Cohere");
     }
 }
