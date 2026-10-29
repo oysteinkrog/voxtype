@@ -12,10 +12,16 @@
 //!   ink. A pending word, 3 or more frames from the window edge, is about
 //!   99 % right and sits at 70 % ink; an edge guess, closer than that, is
 //!   right only 17 to 38 % of the time and sits at 30 %.
-//! - `listening-floor`: a thin ribbon under the text, one bar per 80 ms
+//! - `listening-floor`: a thin ribbon just under the text box (below the
+//!   descenders), one bar per 80 ms
 //!   frame of the last 5.6 s, its height log10(1 - P(blank)) clipped to
 //!   [-6, 0]: flat in silence, rising where the model nearly heard a token.
 //!   The bars ease to each step's values and slide as new frames come.
+//!
+//! - `commit-cursor`: a hairline where the committed text ends and a
+//!   fainter one where the model has heard to (the end of the tail), with a
+//!   faint thread between them on one line: the window the model is still
+//!   thinking about, 0.56 s of audio today.
 //!
 //! Nothing shows once the recording stops, so the signals end with the
 //! dictation and nothing moves at room tone. Under reduced motion the ghosts
@@ -32,6 +38,10 @@ use voxtype::osd::live::{ModelSignals, TailToken};
 pub(crate) const GHOST_TAIL: &str = "ghost-tail";
 pub(crate) const THREE_TIER: &str = "three-tier-ink";
 pub(crate) const FLOOR: &str = "listening-floor";
+pub(crate) const COMMIT_CURSOR: &str = "commit-cursor";
+
+/// Every model signal feature.
+const ALL: [&str; 4] = [GHOST_TAIL, THREE_TIER, FLOOR, COMMIT_CURSOR];
 
 /// Ink of a tail word with `ghost-tail` alone.
 const GHOST_INK: f32 = 0.45;
@@ -46,6 +56,11 @@ const FLOOR_MIN: f32 = -6.0;
 /// The floor's tallest bar and its resting height, in px.
 const FLOOR_PX: f32 = 4.0;
 const FLOOR_REST_PX: f32 = 0.5;
+/// The commit cursor's hairlines: width, height as a share of the line, and
+/// the gap after the last glyph, in px.
+const CURSOR_PX: f32 = 1.5;
+const CURSOR_HEIGHT: f32 = 0.7;
+const CURSOR_GAP: f32 = 2.0;
 
 /// One word of the tail.
 #[derive(Debug, PartialEq)]
@@ -83,11 +98,23 @@ fn tail_words(tail: &[TailToken], has_committed: bool) -> Vec<TailWord> {
     words
 }
 
+/// The live text and the tail laid out together, as the look lays out its
+/// live text: where each tail word sits and where the text ends.
+struct TailLayout {
+    tail: Vec<TailWord>,
+    /// Top left of each tail word's first glyph, or None when it has no room.
+    at: Vec<Option<(f32, f32)>>,
+    /// Where the next glyph after the committed text would go (x, line top).
+    committed_end: (f32, f32),
+    /// The same after the tail.
+    tail_end: (f32, f32),
+    /// The text's line height and how many lines it has room for.
+    line_h: f32,
+}
+
 impl Popup {
     fn signals_on(&self) -> bool {
-        [GHOST_TAIL, THREE_TIER, FLOOR]
-            .iter()
-            .any(|f| self.look.on(f))
+        ALL.iter().any(|f| self.look.on(f))
     }
 
     fn signals_reduced(&self) -> bool {
@@ -118,42 +145,36 @@ impl Popup {
         }
         let mut text = text;
         if let Some(s) = self.live_signals() {
-            for e in self.ghosts(s, words, width, origin, ink) {
+            let laid = self.tail_layout(s, words, width);
+            for e in self.ghosts(laid.as_ref(), words, origin, ink) {
                 text = text.child(e);
             }
             for e in self.floor(s, width, origin) {
+                text = text.child(e);
+            }
+            for e in self.commit_cursor(laid.as_ref(), origin) {
                 text = text.child(e);
             }
         }
         text
     }
 
-    fn ghosts(
-        &self,
-        s: &ModelSignals,
-        words: &[Word],
-        width: f32,
-        origin: (f32, f32),
-        ink: Color,
-    ) -> Vec<Element<Msg>> {
-        let l = &self.look;
-        let tiers = l.on(THREE_TIER);
-        if !(l.on(GHOST_TAIL) || tiers) || s.tail.is_empty() {
-            return Vec::new();
-        }
-        // The tail belongs to the text on screen only if that text is where
-        // the model's text starts; otherwise one of the two files is newer.
+    /// Lays out `words` and the tail of `s` together. None when the tail
+    /// does not belong to the text on screen: then one of the two files is
+    /// newer than the other.
+    fn tail_layout(&self, s: &ModelSignals, words: &[Word], width: f32) -> Option<TailLayout> {
         let committed = self.files.preview.trim();
         if !s.with_tail.starts_with(committed) {
-            return Vec::new();
+            return None;
         }
-        let style = l.text_style();
+        let style = self.look.text_style();
         let line_h = style.line_height;
         let mut full = words
             .iter()
             .map(|w| w.text.as_str())
             .collect::<Vec<_>>()
             .join(" ");
+        let committed_len = full.len();
         let tail = tail_words(&s.tail, !words.is_empty());
         let mut ranges = Vec::with_capacity(tail.len());
         for w in &tail {
@@ -165,6 +186,56 @@ impl Popup {
             ranges.push(start..full.len());
         }
         let laid = self.measure.layout(&full, &style, Some(width));
+        let room = self.lines as f32 * line_h - 0.5;
+        let top_of = |y: f32| (y / line_h).floor() * line_h;
+        let at = ranges
+            .iter()
+            .map(|range| {
+                let g = laid
+                    .glyphs
+                    .iter()
+                    .find(|g| range.contains(&(g.cluster as usize)))?;
+                let top = top_of(g.pos.y);
+                // A guess that would open a line the text has no room for
+                // yet waits until the text gets there.
+                (top < room).then_some((g.pos.x, top))
+            })
+            .collect();
+        // The end of a run of text: after its last glyph.
+        let end_of = |len: usize| -> (f32, f32) {
+            match laid.glyphs.iter().filter(|g| (g.cluster as usize) < len).last() {
+                Some(g) => (g.pos.x + g.advance, top_of(g.pos.y)),
+                None => (0.0, 0.0),
+            }
+        };
+        // A tail that runs onto a line with no room yet ends, as far as the
+        // screen goes, at the right edge of the last line there is.
+        let mut tail_end = end_of(full.len());
+        if tail_end.1 >= room {
+            tail_end = (width - CURSOR_GAP - CURSOR_PX, top_of(room - 1.0));
+        }
+        Some(TailLayout {
+            tail,
+            at,
+            committed_end: end_of(committed_len),
+            tail_end,
+            line_h,
+        })
+    }
+
+    fn ghosts(
+        &self,
+        laid: Option<&TailLayout>,
+        words: &[Word],
+        origin: (f32, f32),
+        ink: Color,
+    ) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        let tiers = l.on(THREE_TIER);
+        let Some(laid) = laid.filter(|_| l.on(GHOST_TAIL) || tiers) else {
+            return Vec::new();
+        };
+        let style = l.text_style();
         let reduced = self.signals_reduced();
         let presence = if reduced {
             (Transition::NONE, Transition::NONE)
@@ -176,20 +247,8 @@ impl Popup {
         // fades in over the old one.
         let first = self.cut + words.len();
         let mut out = Vec::new();
-        for (i, (w, range)) in tail.iter().zip(&ranges).enumerate() {
-            let Some(g) = laid
-                .glyphs
-                .iter()
-                .find(|g| range.contains(&(g.cluster as usize)))
-            else {
-                continue;
-            };
-            let top = (g.pos.y / line_h).floor() * line_h;
-            // A guess that would open a line the text has no room for yet
-            // waits until the text gets there.
-            if top >= self.lines as f32 * line_h - 0.5 {
-                continue;
-            }
+        for (i, (w, at)) in laid.tail.iter().zip(&laid.at).enumerate() {
+            let Some((x, top)) = *at else { continue };
             let alpha = match (tiers, w.edge >= PENDING_FRAMES) {
                 (true, true) => PENDING_INK,
                 (true, false) => EDGE_INK,
@@ -210,7 +269,48 @@ impl Popup {
                 )
                 .motion(Prop::Position, Motion::Snap)
                 .presence(presence.0, presence.1);
-            out.push(kit::at(ghost, origin.0 + g.pos.x, origin.1 + top));
+            out.push(kit::at(ghost, origin.0 + x, origin.1 + top));
+        }
+        out
+    }
+
+    /// `commit-cursor`: a hairline where the committed text ends and a
+    /// fainter one where the tail ends, what the model has heard to. The gap
+    /// is the window it is still thinking about.
+    fn commit_cursor(&self, laid: Option<&TailLayout>, origin: (f32, f32)) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        let Some(laid) = laid.filter(|_| l.on(COMMIT_CURSOR)) else {
+            return Vec::new();
+        };
+        let spring = if self.signals_reduced() {
+            Spring::SNAP
+        } else {
+            Spring::critical_to_98(0.25)
+        };
+        let h = laid.line_h * CURSOR_HEIGHT;
+        let inset = 0.5 * (laid.line_h - h);
+        let mark = |key: &str, (x, top): (f32, f32), alpha: f32| {
+            let e = Element::shape(key.to_string(), ShapeKind::RRect)
+                .size(CURSOR_PX, h)
+                .fill(l.accent.fade(alpha))
+                .motion(Prop::Position, spring)
+                .presence(Transition::fade(), Transition::fade());
+            kit::at(e, origin.0 + x + CURSOR_GAP, origin.1 + top + inset)
+        };
+        let mut out = vec![
+            mark("cursor-committed", laid.committed_end, 0.9),
+            mark("cursor-heard", laid.tail_end, 0.45),
+        ];
+        // On one line, a faint thread between the two shows the window.
+        let ((x0, t0), (x1, t1)) = (laid.committed_end, laid.tail_end);
+        if t0 == t1 && x1 > x0 {
+            let e = Element::shape("cursor-window", ShapeKind::RRect)
+                .size(x1 - x0, 1.0)
+                .fill(l.accent.fade(0.25))
+                .motion(Prop::Position, spring)
+                .motion(Prop::Size, spring)
+                .presence(Transition::fade(), Transition::fade());
+            out.push(kit::at(e, origin.0 + x0 + CURSOR_GAP, origin.1 + t0 + inset + h));
         }
         out
     }
@@ -222,7 +322,9 @@ impl Popup {
         }
         let slots = voxtype::osd::live::SIGNALS_KEEP_FRAMES;
         let bar = width / slots as f32;
-        let base = origin.1 + self.lines as f32 * l.text_style().line_height - 1.0;
+        // Below the text box, so a bar never meets a descender: the bars hang
+        // from 1 px under the last line into the gap above the status row.
+        let base = origin.1 + self.lines as f32 * l.text_style().line_height + 1.0 + FLOOR_PX;
         let spring = if self.signals_reduced() {
             Spring::SNAP
         } else {

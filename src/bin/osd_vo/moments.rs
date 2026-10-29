@@ -144,23 +144,63 @@ const LATTICE_SCRIPT: &[(&str, f64)] = &[
     ("key.", 0.45),
 ];
 
-/// The lookahead moment (ASR-05): the steps of parakeet-unified-en-0.6b-int8 on
-/// `tests/fixtures/vad/speech_long.wav` as the live worker streams them (dumped
-/// with parakeet-rs's `unified_signals` example): the committed text after
-/// each step, the lookahead tail as (token, frames to the window edge), and
-/// each new frame's log10(1 - P(blank)). The last step is the flush. Its
-/// words are the fixture's, not the demo sentence's, because the tail is the
-/// model's own.
-type LookaheadStep = (&'static str, &'static [(&'static str, u32)], &'static [f32]);
+/// The lookahead moment (ASR-05, ASR-06): what parakeet-unified-en-0.6b-int8
+/// streams on `tests/fixtures/vad/speech_long.wav` (dumped with parakeet-rs's
+/// `unified_signals` example). Its words are the fixture's, not the demo
+/// sentence's, because the tail and the doubt are the model's own.
+type LookaheadToken = (&'static str, u32, f32, f32, f32, Option<&'static str>);
+type LookaheadFrame = (f32, Option<(&'static str, f32)>);
+type LookaheadStep = (usize, &'static [(&'static str, u32, f32)], &'static [LookaheadFrame]);
+
+/// Its committed tokens, in order: (piece, frame, p, entropy,
+/// top-2 margin, runner-up). A leading space starts a word.
+const LOOKAHEAD_TOKENS: &[LookaheadToken] = &[
+    (" Th", 7, 0.998, 0.017, 0.998, Some(" It")),
+    ("is", 7, 0.999, 0.007, 0.999, None),
+    (" is", 7, 0.948, 0.211, 0.896, None),
+    (" a", 8, 0.993, 0.044, 0.988, None),
+    (" l", 9, 0.998, 0.016, 0.997, None),
+    ("ong", 9, 0.998, 0.015, 0.996, None),
+    ("er", 10, 0.874, 0.390, 0.749, None),
+    (" t", 13, 0.998, 0.025, 0.997, None),
+    ("est", 13, 0.999, 0.007, 0.999, None),
+    (" of", 16, 0.530, 0.724, 0.063, Some(" on")),
+    (" v", 18, 0.998, 0.020, 0.997, None),
+    ("o", 18, 0.999, 0.009, 0.999, None),
+    ("ice", 18, 0.999, 0.010, 0.998, Some("ices")),
+    (" act", 21, 0.941, 0.237, 0.883, None),
+    ("iv", 23, 0.998, 0.018, 0.997, None),
+    ("ity", 23, 0.991, 0.055, 0.983, None),
+    (" det", 29, 0.999, 0.012, 0.998, None),
+    ("ect", 30, 0.999, 0.010, 0.998, None),
+    ("ion", 31, 0.992, 0.061, 0.987, None),
+    (" w", 36, 0.995, 0.034, 0.991, None),
+    ("ith", 36, 0.995, 0.033, 0.991, None),
+    (" m", 38, 0.999, 0.010, 0.998, None),
+    ("ult", 38, 0.999, 0.008, 0.998, None),
+    ("i", 39, 0.998, 0.018, 0.997, None),
+    ("ple", 39, 0.999, 0.011, 0.998, None),
+    (" wor", 43, 1.000, 0.004, 1.000, None),
+    ("ds", 43, 0.999, 0.005, 0.999, Some("d")),
+    (" and", 51, 0.994, 0.040, 0.990, Some(",")),
+    (" ph", 53, 0.998, 0.018, 0.998, None),
+    ("r", 53, 1.000, 0.003, 1.000, Some("ases")),
+    ("ases", 53, 1.000, 0.002, 1.000, None),
+    (".", 57, 0.636, 0.657, 0.272, None),
+];
+/// Its steps: committed tokens so far, the tail as
+/// (piece, frames to the window edge, p), and each new frame's
+/// log10(1 - P(blank)) with its top non-blank guess (piece, ln p) where the
+/// level is above -3. The last step is the flush.
 const LOOKAHEAD_STEPS: &[LookaheadStep] = &[
-    ("", &[(" Th", 7), ("is", 7), (" is", 7), (" a", 6), (" l", 5), ("ong", 5), ("er", 4), (" t", 2), ("est", 2), (" on", 1)], &[-5.09, -5.09, -5.05, -5.04, -5.10, -4.76, -2.32]),
-    ("This is a longer test", &[(" of", 5), (" v", 4), ("o", 3), ("ice", 3), (" act", 1), ("ing", 0), (".", 0)], &[-2.90, -3.27, -3.41, -3.65, -3.67, -0.99, -3.61]),
-    ("This is a longer test of voice", &[(" act", 7), ("iv", 6), ("ity", 5), (" det", 1), ("ect", 0), ("ion", 0), (".", 0)], &[-4.07, -2.47, -3.145, -1.50, -4.12, -3.97, -4.28]),
-    ("This is a longer test of voice activity", &[(" det", 6), ("ect", 5), ("ion", 4), (" w", 2), ("ith", 2)], &[-3.17, -1.81, -4.05, -3.96, -4.30, -4.50, -4.53]),
-    ("This is a longer test of voice activity detection", &[(" w", 6), ("ith", 6), (" m", 4), ("ult", 4), ("i", 3), ("ple", 3), (" wor", 1), ("ds", 1), (".", 0)], &[-4.65, -2.02, -0.66, -4.30, -3.92, -3.96, -3.95]),
-    ("This is a longer test of voice activity detection with multiple", &[(" wor", 6), ("ds", 6), (",", 1), (" and", 1)], &[-4.01, -3.73, -3.51, -1.62, -4.52, -4.46, -4.46]),
-    ("This is a longer test of voice activity detection with multiple words", &[(" and", 5), (" ph", 4), ("r", 3), ("ases", 3), (".", 0)], &[-4.64, -4.15, -4.04, -4.13, -4.03, -3.97, -3.56]),
-    ("This is a longer test of voice activity detection with multiple words and phrases.", &[], &[-1.91, -1.04, -3.76, -0.93, -4.60, -2.11, -1.16, -0.53, -5.40, -5.34, -6.00]),
+    (0, &[(" Th", 7, 0.997), ("is", 7, 0.998), (" is", 7, 0.952), (" a", 6, 0.990), (" l", 5, 0.998), ("ong", 5, 0.999), ("er", 4, 0.983), (" t", 2, 0.990), ("est", 2, 0.998), (" on", 1, 0.887)], &[(-5.092, None), (-5.092, None), (-5.047, None), (-5.037, None), (-5.100, None), (-4.761, None), (-2.324, Some((" Th", -5.50)))]),
+    (9, &[(" of", 5, 0.639), (" v", 4, 0.960), ("o", 3, 0.998), ("ice", 3, 0.995), (" act", 1, 0.995), ("ing", 0, 0.489), (".", 0, 0.994)], &[(-2.897, Some((" th", -7.60))), (-3.265, None), (-3.409, None), (-3.649, None), (-3.675, None), (-0.989, Some((" t", -2.30))), (-3.613, None)]),
+    (13, &[(" act", 7, 0.995), ("iv", 6, 0.523), ("ity", 5, 0.988), (" det", 1, 0.957), ("ect", 0, 0.726), ("ion", 0, 0.331), (".", 0, 0.988)], &[(-4.071, None), (-2.474, Some((" of", -6.16))), (-3.145, None), (-1.500, Some((" v", -3.48))), (-4.117, None), (-3.974, None), (-4.279, None)]),
+    (16, &[(" det", 6, 0.999), ("ect", 5, 0.999), ("ion", 4, 0.990), (" w", 2, 0.828), ("ith", 2, 0.939)], &[(-3.170, None), (-1.808, Some(("iv", -4.18))), (-4.052, None), (-3.962, None), (-4.296, None), (-4.500, None), (-4.527, None)]),
+    (19, &[(" w", 6, 0.997), ("ith", 6, 0.995), (" m", 4, 0.999), ("ult", 4, 0.999), ("i", 3, 0.998), ("ple", 3, 0.998), (" wor", 1, 0.995), ("ds", 1, 0.870), (".", 0, 0.972)], &[(-4.645, None), (-2.017, Some(("ect", -4.67))), (-0.658, Some(("ion", -1.52))), (-4.304, None), (-3.923, None), (-3.955, None), (-3.951, None)]),
+    (25, &[(" wor", 6, 1.000), ("ds", 6, 0.999), (",", 1, 0.793), (" and", 1, 0.922)], &[(-4.014, None), (-3.731, None), (-3.509, None), (-1.620, Some(("i", -3.73))), (-4.520, None), (-4.460, None), (-4.462, None)]),
+    (27, &[(" and", 5, 0.991), (" ph", 4, 0.986), ("r", 3, 0.999), ("ases", 3, 1.000), (".", 0, 0.997)], &[(-4.635, None), (-4.149, None), (-4.036, None), (-4.132, None), (-4.035, None), (-3.969, None), (-3.558, None)]),
+    (32, &[], &[(-1.913, Some((",", -4.41))), (-1.043, Some((" and", -2.64))), (-3.762, None), (-0.927, Some((" ph", -2.15))), (-4.604, None), (-2.106, Some((".", -4.86))), (-1.163, Some((".", -2.68))), (-0.527, Some((".", -1.21))), (-5.398, None), (-5.338, None), (-6.0, None)]),
 ];
 
 /// Seconds of audio per live model step, and per encoder frame.
@@ -347,45 +387,83 @@ impl Take {
         self.files_at(t);
     }
 
-    /// One step of the live model at `t`: its new frames' levels and its
-    /// tail, as `preview-signals.json` gets them.
-    fn signals_step(&mut self, t: f64, tail: &[(&str, u32)], levels: &[f32]) {
-        use voxtype::osd::live::{FrameLevel, SignalsStep, TailToken};
-        let audio_s = (t - self.rec_start) as f32;
-        let first = self.signals.frames_total as usize;
-        let frames = levels
+    /// The live text at `t` is the first `n` committed tokens of the lookahead
+    /// moment, with their own timing, confidence and detail.
+    fn say_tokens(&mut self, t: f64, n: usize) {
+        use voxtype::osd::live::WordDetail;
+        let words = voxtype::transcribe::revisions::words_with_details(
+            LOOKAHEAD_TOKENS[..n].iter().map(|&(text, frame, p, entropy, margin, runner_up)| {
+                let start = frame as f32 * FRAME_SECS;
+                let detail = WordDetail {
+                    entropy,
+                    margin,
+                    runner_up: runner_up.map(str::to_string),
+                };
+                (text, start, start + FRAME_SECS, Some(p), Some(detail))
+            }),
+        );
+        let text = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        let timed: Vec<TimedWord> = words
             .iter()
-            .enumerate()
-            .map(|(i, &level)| FrameLevel {
-                t: (first + i) as f32 * FRAME_SECS,
-                level,
-                top: Vec::new(),
+            .map(|w| TimedWord {
+                text: w.text.clone(),
+                start: w.start,
+                end: w.end,
+                conf: w.conf,
             })
             .collect();
-        let end = (first + levels.len()) as u32;
+        let details: Vec<_> = words.iter().map(|w| w.detail.clone()).collect();
+        self.doc.apply_preview_with_details(&text, Some(&timed), Some(&details));
+        self.timed = timed;
+        self.files.preview = text;
+        self.files.live = Some(self.doc.clone());
+        self.files_at(t);
+    }
+
+    /// One step of the live model at `t`: its new frames and its tail, as
+    /// `preview-signals.json` gets them.
+    fn signals_step(&mut self, t: f64, tail: &[(&str, u32, f32)], frames: &[LookaheadFrame]) {
+        use voxtype::osd::live::{FrameLevel, Guess, SignalsStep, TailToken};
+        let audio_s = (t - self.rec_start) as f32;
+        let first = self.signals.frames_total as usize;
+        let levels = frames
+            .iter()
+            .enumerate()
+            .map(|(i, &(level, top))| FrameLevel {
+                t: (first + i) as f32 * FRAME_SECS,
+                level,
+                top: top
+                    .map(|(text, logp)| Guess {
+                        text: text.into(),
+                        logp,
+                    })
+                    .into_iter()
+                    .collect(),
+            })
+            .collect();
+        let end = (first + frames.len()) as u32;
         let tail: Vec<TailToken> = tail
             .iter()
-            .map(|&(text, edge)| {
+            .map(|&(text, edge, conf)| {
                 let frame = (end + 7).saturating_sub(edge + 1);
                 TailToken {
                     text: text.into(),
                     start: frame as f32 * FRAME_SECS,
                     end: (frame + 1) as f32 * FRAME_SECS,
                     edge,
-                    conf: if edge >= 3 { 0.99 } else { 0.3 },
+                    conf,
                     detail: None,
                 }
             })
             .collect();
-        let committed = self.files.preview.clone();
-        let mut with_tail = committed;
+        let mut with_tail = self.files.preview.clone();
         for tk in &tail {
             with_tail.push_str(&tk.text);
         }
         self.signals.apply(SignalsStep {
             step: self.signals.step + 1,
             audio_s,
-            frames,
+            frames: levels,
             tail,
             with_tail: with_tail.trim().to_string(),
         });
@@ -721,19 +799,21 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             let speech_end = s0 + 4.75;
             k.sound(s0, speech_end, Sound::Speech);
             let mut t = s0;
-            for (i, (text, tail, levels)) in LOOKAHEAD_STEPS.iter().enumerate() {
+            let mut said = 0;
+            for (i, (committed, tail, frames)) in LOOKAHEAD_STEPS.iter().enumerate() {
                 // The flush comes when the recording stops.
                 t = if i + 1 == n { speech_end + 0.05 } else { step_at(i) };
                 if i + 1 == n {
                     k.stop(t - 0.01);
                 }
-                if !text.is_empty() && *text != k.files.preview {
-                    k.say(t, text);
+                if *committed != said {
+                    k.say_tokens(t, *committed);
+                    said = *committed;
                 }
-                k.signals_step(t, tail, levels);
+                k.signals_step(t, tail, frames);
             }
-            let (text, _, _) = LOOKAHEAD_STEPS[n - 1];
-            let shown = k.finish(t, 0.6, text);
+            let text = k.files.preview.clone();
+            let shown = k.finish(t, 0.6, &text);
             k.pump(t + 0.03, shown);
             k.end(shown + 0.2, Outcome::Done);
             k.scenario(look, shown + 1.4)
