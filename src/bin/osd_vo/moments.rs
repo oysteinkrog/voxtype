@@ -151,10 +151,11 @@ const LATTICE_SCRIPT: &[(&str, f64)] = &[
 /// each new frame's log10(1 - P(blank)). The last step is the flush. Its
 /// words are the fixture's, not the demo sentence's, because the tail is the
 /// model's own.
-const LOOKAHEAD_STEPS: &[(&str, &[(&str, u32)], &[f32])] = &[
+type LookaheadStep = (&'static str, &'static [(&'static str, u32)], &'static [f32]);
+const LOOKAHEAD_STEPS: &[LookaheadStep] = &[
     ("", &[(" Th", 7), ("is", 7), (" is", 7), (" a", 6), (" l", 5), ("ong", 5), ("er", 4), (" t", 2), ("est", 2), (" on", 1)], &[-5.09, -5.09, -5.05, -5.04, -5.10, -4.76, -2.32]),
     ("This is a longer test", &[(" of", 5), (" v", 4), ("o", 3), ("ice", 3), (" act", 1), ("ing", 0), (".", 0)], &[-2.90, -3.27, -3.41, -3.65, -3.67, -0.99, -3.61]),
-    ("This is a longer test of voice", &[(" act", 7), ("iv", 6), ("ity", 5), (" det", 1), ("ect", 0), ("ion", 0), (".", 0)], &[-4.07, -2.47, -3.14, -1.50, -4.12, -3.97, -4.28]),
+    ("This is a longer test of voice", &[(" act", 7), ("iv", 6), ("ity", 5), (" det", 1), ("ect", 0), ("ion", 0), (".", 0)], &[-4.07, -2.47, -3.145, -1.50, -4.12, -3.97, -4.28]),
     ("This is a longer test of voice activity", &[(" det", 6), ("ect", 5), ("ion", 4), (" w", 2), ("ith", 2)], &[-3.17, -1.81, -4.05, -3.96, -4.30, -4.50, -4.53]),
     ("This is a longer test of voice activity detection", &[(" w", 6), ("ith", 6), (" m", 4), ("ult", 4), ("i", 3), ("ple", 3), (" wor", 1), ("ds", 1), (".", 0)], &[-4.65, -2.02, -0.66, -4.30, -3.92, -3.96, -3.95]),
     ("This is a longer test of voice activity detection with multiple", &[(" wor", 6), ("ds", 6), (",", 1), (" and", 1)], &[-4.01, -3.73, -3.51, -1.62, -4.52, -4.46, -4.46]),

@@ -296,9 +296,10 @@ struct Args {
     #[arg(long)]
     cancel: bool,
 
-    /// Check the scripted dictation of `--offline` against the reading-line
-    /// envelope and measure its GPU time per frame, then exit. Fails when
-    /// either is breached. Needs a GPU but no display and no daemon.
+    /// Check the scripted dictation of `--offline` (or `--moment NAME`)
+    /// against the reading-line envelope and measure its GPU time per frame,
+    /// then exit. Fails when either is breached. Needs a GPU but no display
+    /// and no daemon.
     #[arg(long)]
     envelope: bool,
 
@@ -2458,7 +2459,7 @@ fn main() -> anyhow::Result<()> {
         return run_wall(&args, &cfg, &theme, stop_hint(&hotkey), fonts);
     }
     if args.envelope {
-        return envelope::run(look, fonts, args.fps, args.cancel);
+        return envelope::run(look, fonts, args.fps, args.cancel, args.moment.as_deref());
     }
     if args.exit_check {
         return exit_check(look, fonts, args.fps, args.cancel, args.moment.as_deref());

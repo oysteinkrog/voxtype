@@ -85,7 +85,9 @@ fn tail_words(tail: &[TailToken], has_committed: bool) -> Vec<TailWord> {
 
 impl Popup {
     fn signals_on(&self) -> bool {
-        [GHOST_TAIL, THREE_TIER, FLOOR].iter().any(|f| self.look.on(f))
+        [GHOST_TAIL, THREE_TIER, FLOOR]
+            .iter()
+            .any(|f| self.look.on(f))
     }
 
     fn signals_reduced(&self) -> bool {
@@ -95,8 +97,7 @@ impl Popup {
     /// The signals to draw now: while the recording runs and before the
     /// final pass.
     fn live_signals(&self) -> Option<&ModelSignals> {
-        let listening =
-            self.files.recording && !self.status().finishing && self.ending().is_none();
+        let listening = self.files.recording && !self.status().finishing && self.ending().is_none();
         self.model_signals.as_ref().filter(|_| listening)
     }
 
@@ -196,12 +197,16 @@ impl Popup {
             };
             let place = first + i - usize::from(w.joins);
             let ghost = Element::label(format!("ghost-{place}-{}", w.text), w.text.as_str())
-                .text_style(style.clone())
+                .text_style(style)
                 .color(ink)
                 .opacity(alpha)
                 .motion(
                     Prop::Opacity,
-                    if reduced { Spring::SNAP } else { Spring::critical_to_98(0.2) },
+                    if reduced {
+                        Spring::SNAP
+                    } else {
+                        Spring::critical_to_98(0.2)
+                    },
                 )
                 .motion(Prop::Position, Motion::Snap)
                 .presence(presence.0, presence.1);
@@ -262,10 +267,23 @@ mod tests {
 
     #[test]
     fn tail_tokens_group_into_words_with_their_nearest_edge() {
-        let tail = [tok(" of", 5), tok(" v", 4), tok("o", 3), tok("ice", 3), tok(" act", 1), tok("ing", 0)];
+        let tail = [
+            tok(" of", 5),
+            tok(" v", 4),
+            tok("o", 3),
+            tok("ice", 3),
+            tok(" act", 1),
+            tok("ing", 0),
+        ];
         let words = tail_words(&tail, true);
-        let got: Vec<(&str, u32, bool)> = words.iter().map(|w| (w.text.as_str(), w.edge, w.joins)).collect();
-        assert_eq!(got, [("of", 5, false), ("voice", 3, false), ("acting", 0, false)]);
+        let got: Vec<(&str, u32, bool)> = words
+            .iter()
+            .map(|w| (w.text.as_str(), w.edge, w.joins))
+            .collect();
+        assert_eq!(
+            got,
+            [("of", 5, false), ("voice", 3, false), ("acting", 0, false)]
+        );
     }
 
     #[test]
