@@ -1283,6 +1283,18 @@ impl Popup {
             };
             column = column.child(line);
         }
+        if self.jarvis.lines.is_empty() && !status.loading {
+            // No line yet: the forming cue where the first one goes, from
+            // the middle of the frame.
+            let tw = text_width(&self.look);
+            let tail = model_signals::TailText {
+                style,
+                width: tw / 2.0,
+                rows: 1,
+            };
+            let slot = Element::layer("forming-slot").size(tw, style.line_height);
+            column = column.child(self.signal_marks_in(slot, &[], &tail, (tw / 2.0, 0.0), hex(TEXT, 1.0)));
+        }
         if self.jarvis.lines.is_empty() && status.loading {
             // Nothing heard yet while the model loads: say so in the frame.
             let what = status.detail.trim_start_matches(['·', ' ']);

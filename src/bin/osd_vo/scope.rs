@@ -1040,11 +1040,11 @@ impl Popup {
             );
         }
         // The ghost tail after the newest line, which it does not wrap past.
-        if let Some((words, _)) = lines.last() {
-            let tail = model_signals::TailText { style, width: WRAP, rows: 1 };
-            let y = o + TEXT_TOP + (lines.len() - 1) as f32 * LINE;
-            panel = self.signal_marks_in(panel, words, &tail, (o + TEXT_X, y), colour);
-        }
+        // With no line yet, the forming cue where the first one goes.
+        let tail = model_signals::TailText { style, width: WRAP, rows: 1 };
+        let (words, row) = lines.last().map_or((&[][..], 0), |(w, _)| (w.as_slice(), lines.len() - 1));
+        let y = o + TEXT_TOP + row as f32 * LINE;
+        panel = self.signal_marks_in(panel, words, &tail, (o + TEXT_X, y), colour);
         // MO-50: a cancel takes the words back into the caret.
         if rw {
             let at_line: Vec<(&[Word], Point)> = lines

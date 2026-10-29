@@ -364,10 +364,31 @@ impl Popup {
         ink: Color,
     ) -> Element<Msg> {
         let width = tail.width;
-        if !self.signals_on() {
+        let forming = self.forming_on() && self.hearing.voice.active();
+        if !self.signals_on() && !forming {
             return text;
         }
         let mut text = text;
+        if forming {
+            // After the ghost tail when there is one, else after the words.
+            let none = ModelSignals {
+                with_tail: self.files.preview.trim().to_string(),
+                ..ModelSignals::default()
+            };
+            let s = self.live_signals().unwrap_or(&none);
+            // A tail that is out of step with the words is left out.
+            let (laid, tail_end) = match self.tail_layout(s, words, tail) {
+                Some(l) => (Some(l), s.tail.last().map(|t| t.end as f64)),
+                None => (self.tail_layout(&none, words, tail), None),
+            };
+            let end = laid.map_or((0.0, 0.0), |l| l.tail_end);
+            if let Some(e) = self.forming_mark(words, end, tail_end, tail, origin, ink) {
+                text = text.child(e);
+            }
+        }
+        if !self.signals_on() {
+            return text;
+        }
         for e in self.graded_doubt(words, width, origin) {
             text = text.child(e);
         }
@@ -408,7 +429,8 @@ impl Popup {
         // On room tone the tail is empty: with only the ghost tail on there
         // is nothing to lay out.
         let ends = [COMMIT_CURSOR, BREATHING_STOP, PRE_ECHO_LETTERS];
-        if s.tail.is_empty() && !ends.iter().any(|f| self.look.on(f)) {
+        let forming = self.forming_on() && self.hearing.voice.active();
+        if s.tail.is_empty() && !forming && !ends.iter().any(|f| self.look.on(f)) {
             return None;
         }
         let committed = self.files.preview.trim();

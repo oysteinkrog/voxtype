@@ -149,6 +149,8 @@ mod lifecycle;
 mod ruler;
 #[path = "osd_vo/model_signals.rs"]
 mod model_signals;
+#[path = "osd_vo/forming.rs"]
+mod forming;
 #[path = "osd_vo/correction_note.rs"]
 mod correction_note;
 
@@ -313,6 +315,12 @@ struct Args {
     /// `--motion` and `VO_REDUCED_MOTION=1`. Needs no GPU, display or daemon.
     #[arg(long, hide = true)]
     entry_latency: bool,
+
+    /// As `--entry-latency`, for the forming cue: how long after each voice
+    /// onset it first shows, its glyph overlaps and its frames past the
+    /// 150 ms quiet fade.
+    #[arg(long, hide = true)]
+    forming_latency: bool,
 
     /// Run the scripted dictation of `--offline` (or `--moment NAME`) with
     /// no PNGs and check that the popup's exit settles before vo's exit
@@ -2504,6 +2512,9 @@ fn main() -> anyhow::Result<()> {
     }
     if args.entry_latency {
         return entry_latency::run(look, fonts, args.fps, args.moment.as_deref());
+    }
+    if args.forming_latency {
+        return entry_latency::forming(look, fonts, args.fps, args.moment.as_deref());
     }
     if args.exit_check {
         return exit_check(look, fonts, args.fps, args.cancel, args.moment.as_deref());

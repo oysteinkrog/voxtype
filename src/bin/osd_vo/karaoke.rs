@@ -999,7 +999,14 @@ impl Popup {
             panel = panel.child(line);
         }
         let Some((_, lw)) = lines.last() else {
-            return panel;
+            // No line yet: the forming cue in the newest slot, from its middle.
+            let tail = model_signals::TailText {
+                style,
+                width: WRAP / 2.0,
+                rows: 1,
+            };
+            let at = (ox + CARD_W / 2.0, oy + SLOTS[0].0 - LINE / 2.0);
+            return self.signal_marks_in(panel, &[], &tail, at, hex(WHITE));
         };
         let line_y = oy + SLOTS[0].0 - LINE / 2.0;
         let under_y = line_y + LINE * 0.86;

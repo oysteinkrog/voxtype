@@ -507,6 +507,18 @@ impl Popup {
             }
         }
 
+        if lines.is_empty() {
+            // No line yet: the forming cue in the newest slot, from its middle.
+            let tail = model_signals::TailText {
+                style,
+                width: WRAP / 2.0,
+                rows: 1,
+            };
+            let slot = Element::layer("forming-slot").size(WRAP / 2.0, LINE);
+            let slot = self.signal_marks_in(slot, &[], &tail, (0.0, 0.0), hex(WHITE));
+            texts.push(at(slot, x + BAND_W / 2.0, y + SLOTS[0].0 - LINE / 2.0));
+        }
+
         let status = self.status();
         let ui = TextStyle::new(f.ui, 14.0, 18.0).tracking(0.1);
         let (label, colour) = match mode {

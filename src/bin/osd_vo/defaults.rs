@@ -53,9 +53,10 @@ pub(crate) fn defaults(theme: OsdTheme) -> &'static [&'static str] {
     }
 }
 
-/// Features in every look's set (LAT-1): the lookahead tail's words follow
-/// the live text dim, so the newest words show about 0.56 s sooner.
-const EVERY_LOOK: &[&str] = &[super::model_signals::GHOST_TAIL];
+/// Features in every look's set: the lookahead tail's words follow the live
+/// text dim, so the newest words show about 0.56 s sooner (LAT-1), and the
+/// forming cue shows that a word is coming as soon as you speak (LAT-5).
+const EVERY_LOOK: &[&str] = &[super::model_signals::GHOST_TAIL, super::forming::FORMING];
 
 /// Whether `name` is in `theme`'s own set or in every look's.
 pub(crate) fn in_set(theme: OsdTheme, name: &str) -> bool {
