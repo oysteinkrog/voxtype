@@ -1224,6 +1224,7 @@ impl Voice {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // Audio carries frames inline; boxing would add an allocation per capture batch
 enum Msg {
     /// Frames read from the socket in one go, with their voice features when
     /// the daemon sends them. One message per capture batch, so the view is
@@ -1647,7 +1648,7 @@ impl Popup {
             (h / style.line_height).round() as u32
         };
         let inline = !self.look.margin_ellipsis();
-        let (cut, shown) = cut_lines(&words, self.cut, self.look.max_lines(), inline, lines_of);
+        let (cut, shown) = cut_lines(words, self.cut, self.look.max_lines(), inline, lines_of);
         self.cut = cut;
         self.lines = self
             .lines
@@ -3120,7 +3121,7 @@ mod tests {
         for n in 1..=all.len() {
             model.update(&all[..n].join(" "));
             let words = model.words();
-            let (next, shown) = cut_lines(&words, cut, 3, true, lines_of);
+            let (next, shown) = cut_lines(words, cut, 3, true, lines_of);
             assert!(lines_of(&shown) <= 3, "fits in three lines");
             if next != cut {
                 moves += 1;
@@ -3149,7 +3150,7 @@ mod tests {
         for n in 1..=all.len() {
             model.update(&all[..n].join(" "));
             let words = model.words();
-            let (next, shown) = cut_lines(&words, cut, 3, false, lines_of);
+            let (next, shown) = cut_lines(words, cut, 3, false, lines_of);
             assert!(shown.iter().all(|w| !w.text.contains('…')));
             if next != cut {
                 moves += 1;

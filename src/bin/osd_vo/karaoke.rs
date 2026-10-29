@@ -905,8 +905,8 @@ impl Popup {
                 hex(BLUE),
             ));
         }
-        match mode {
-            Mode::Finishing => {
+        if matches!(mode, Mode::Finishing) {
+            {
                 {
                     let (a, b, at_t) = self.karaoke.prog;
                     let f = a + (b - a) * ease_out((self.extra.now - at_t) / 0.35);
@@ -946,7 +946,6 @@ impl Popup {
                         );
                 }
             }
-            _ => {}
         }
         panel
     }

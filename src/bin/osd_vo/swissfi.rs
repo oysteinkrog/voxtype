@@ -642,11 +642,11 @@ impl Popup {
             .child(icon.margin_edges(0.0, 0.0, 0.0, 1.0))
             .child(label)
             .child(detail);
-        match self
+        if let Some(fraction) = self
             .kit_progress()
             .filter(|_| matches!(mode, Mode::Loading | Mode::Finishing))
         {
-            Some(fraction) => {
+            {
                 let progress = Progress {
                     fraction: Some(fraction),
                     track: hex(RULE),
@@ -661,7 +661,6 @@ impl Popup {
                         .margin_edges(0.0, 0.0, 0.0, 18.0),
                 );
             }
-            None => {}
         }
         row = row.child(Element::row("spacer").grow(1.0));
         if mode == Mode::Done {

@@ -472,7 +472,7 @@ impl Popup {
         let ui = TextStyle::new(f.ui, 14.0, 18.0).tracking(0.1);
         let (label, colour) = match mode {
             Mode::Finishing => (
-                format!("{}{}", status.state, status.detail.replace("  ·  ", "  ·  ")),
+                format!("{}{}", status.state, status.detail),
                 hex(HINT),
             ),
             Mode::Loading => (

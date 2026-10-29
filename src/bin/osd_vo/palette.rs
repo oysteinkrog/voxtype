@@ -677,7 +677,7 @@ impl Popup {
             Mode::Cancelled => "nothing was typed".to_string(),
             _ => status
                 .detail
-                .trim_start_matches(|c| c == ' ' || c == '·')
+                .trim_start_matches([' ', '·'])
                 .trim()
                 .to_string(),
         };

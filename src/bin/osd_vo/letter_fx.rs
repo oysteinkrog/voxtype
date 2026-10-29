@@ -69,6 +69,9 @@ fn kept_letters(old: &[char], new: &[char]) -> Vec<(usize, usize)> {
     out
 }
 
+/// A word flowing into a new text: its id, old text and start time.
+type FlowingWord = (WordId, String, f64);
+
 impl Popup {
     fn letter_fx_on(&self) -> bool {
         let l = &self.look;
@@ -81,7 +84,7 @@ impl Popup {
 
     /// Notes arrivals and revisions of the words on screen, and returns
     /// the words flowing into a new text now, with their old text and start.
-    fn letter_fx_sync(&self) -> (HashMap<WordId, f64>, Vec<(WordId, String, f64)>) {
+    fn letter_fx_sync(&self) -> (HashMap<WordId, f64>, Vec<FlowingWord>) {
         let t = self.extra.now;
         let secs = Morph::default().secs as f64;
         let mut s = self.letter_fx.0.lock().unwrap_or_else(|e| e.into_inner());

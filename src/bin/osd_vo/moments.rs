@@ -438,7 +438,7 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
     let mut k = Take::new(s0);
     let per = 0.32;
     match moment {
-        Moment::Dictation => return super::scenario(look, false),
+        Moment::Dictation => super::scenario(look, false),
         Moment::Cancel => {
             k.record(s0);
             let t = k.speak(s0, &sentence_words(0, 9), per);
