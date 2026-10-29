@@ -36,6 +36,9 @@ pub enum WorkerResponse {
         /// parents that ignore the field simply skip the hint.
         #[serde(skip_serializing_if = "Option::is_none")]
         language: Option<String>,
+        /// The final engine's text of each spoken correction (live worker).
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        corrections: Vec<crate::osd::correction::FinalClip>,
     },
     Error {
         ok: bool,
@@ -49,6 +52,7 @@ impl WorkerResponse {
             ok: true,
             text,
             language,
+            corrections: Vec::new(),
         }
     }
 
@@ -249,8 +253,122 @@ fn free_vram_mib() -> Option<u64> {
 enum EngineMsg {
     /// A part is done: seconds of audio, seconds it took.
     Part(f32, f32),
-    /// All parts done (joined text, language), or the first error.
-    Done(Result<(String, Option<String>), String>),
+    /// All parts done (joined text, language, the correction clips' texts
+    /// in order), or the first error.
+    Done(Result<(String, Option<String>, Vec<String>), String>),
+}
+
+/// Work for the engine thread.
+#[cfg(feature = "parakeet")]
+enum Job {
+    /// Part of the clip, for the final text.
+    Part(Vec<f32>),
+    /// A spoken correction's audio, with the words it replaces pushed down.
+    Clip(Vec<f32>, String),
+}
+
+/// Sends the parts of the final text with the spoken corrections' audio cut
+/// out, as the daemon lists the holds in `correction-windows.json`. A part
+/// that reaches into a hold still held waits for the key to come up.
+#[cfg(feature = "parakeet")]
+#[derive(Default)]
+struct PartCuts {
+    waiting: Vec<std::ops::Range<usize>>,
+    /// Each part sent, with the holds that were cut from it.
+    sent: Vec<(std::ops::Range<usize>, SampleRanges)>,
+}
+
+/// Holds as `(start, end)` sample indices.
+#[cfg(feature = "parakeet")]
+type SampleRanges = Vec<(usize, usize)>;
+
+#[cfg(feature = "parakeet")]
+use crate::osd::correction::WindowSpec;
+
+#[cfg(feature = "parakeet")]
+impl PartCuts {
+    /// The holds as sample ranges, a hold still held running to `end`, and
+    /// where a hold still held began.
+    fn holds(specs: &[WindowSpec], end: usize) -> (Vec<(usize, usize)>, Option<usize>) {
+        let at = |t: f32| ((t.max(0.0) * 16000.0) as usize).min(end);
+        let open_from = specs
+            .iter()
+            .filter(|w| w.t1.is_none())
+            .map(|w| at(w.t0))
+            .min();
+        let ranges = specs
+            .iter()
+            .map(|w| (at(w.t0), w.t1.map_or(end, at)))
+            .filter(|(a, b)| a < b)
+            .collect();
+        (ranges, open_from)
+    }
+
+    /// `range` of `samples` is a part: send it now, or later if a hold
+    /// still held may reach into it. `specs`: the holds so far.
+    fn offer(
+        &mut self,
+        range: std::ops::Range<usize>,
+        samples: &[f32],
+        specs: &[WindowSpec],
+        tx: &std::sync::mpsc::Sender<Job>,
+    ) {
+        self.waiting.push(range);
+        self.retry(samples, specs, tx, false);
+    }
+
+    /// Sends the waiting parts that no held hold reaches into; all of them
+    /// when `last` (the recording ended).
+    fn retry(
+        &mut self,
+        samples: &[f32],
+        specs: &[WindowSpec],
+        tx: &std::sync::mpsc::Sender<Job>,
+        last: bool,
+    ) {
+        if self.waiting.is_empty() {
+            return;
+        }
+        let (holds, open_from) = Self::holds(specs, samples.len());
+        let mut keep = Vec::new();
+        for range in std::mem::take(&mut self.waiting) {
+            let blocked = !last && open_from.is_some_and(|from| range.end > from);
+            if blocked {
+                keep.push(range);
+                continue;
+            }
+            let cuts: Vec<(usize, usize)> = holds
+                .iter()
+                .copied()
+                .filter(|&(a, b)| a < range.end && b > range.start)
+                .collect();
+            let part: Vec<f32> = range
+                .clone()
+                .filter(|i| !cuts.iter().any(|&(a, b)| (a..b).contains(i)))
+                .map(|i| samples[i])
+                .collect();
+            if !part.is_empty() {
+                let _ = tx.send(Job::Part(part));
+            }
+            self.sent.push((range, cuts));
+        }
+        self.waiting = keep;
+    }
+
+    fn waiting(&self) -> bool {
+        !self.waiting.is_empty()
+    }
+
+    /// Whether every part that reaches into `hold` had it cut out.
+    fn cut(&self, hold: (usize, usize)) -> bool {
+        self.sent
+            .iter()
+            .filter(|(r, _)| hold.0 < r.end && hold.1 > r.start)
+            .all(|(r, cuts)| {
+                cuts.iter()
+                    .any(|&(a, b)| a <= hold.0.max(r.start) && b >= hold.1.min(r.end))
+            })
+    }
 }
 
 /// Clips shorter than this use the preview model's final text when the
@@ -595,7 +713,7 @@ fn live_session(
     let engine_model = engine_config.model_name().to_string();
     // Parts of the clip go in on part_tx; progress and then the joined
     // text (or the first error) come back on msg_rx.
-    let (part_tx, part_rx) = mpsc::channel::<Vec<f32>>();
+    let (part_tx, part_rx) = mpsc::channel::<Job>();
     let (msg_tx, msg_rx) = mpsc::channel::<EngineMsg>();
     let engine_loaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let loaded_flag = engine_loaded.clone();
@@ -625,7 +743,21 @@ fn live_session(
             );
             loaded_flag.store(true, std::sync::atomic::Ordering::SeqCst);
             let mut texts: Vec<String> = Vec::new();
-            for part in part_rx {
+            let mut clips: Vec<String> = Vec::new();
+            for job in part_rx {
+                let part = match job {
+                    Job::Part(part) => part,
+                    Job::Clip(clip, avoid) => {
+                        // A clip that fails gives no correction text; the
+                        // live words stand in for it.
+                        let text = transcriber.transcribe_avoiding(&clip, &avoid);
+                        if let Err(e) = &text {
+                            eprintln!("[worker] Correction clip failed: {}", e);
+                        }
+                        clips.push(text.map(|t| t.trim().to_string()).unwrap_or_default());
+                        continue;
+                    }
+                };
                 let start = std::time::Instant::now();
                 match transcriber.transcribe(&part) {
                     Ok(text) => {
@@ -647,6 +779,7 @@ fn live_session(
             let _ = msg_tx.send(EngineMsg::Done(Ok((
                 texts.join(" "),
                 transcriber.last_detected_language(),
+                clips,
             ))));
         });
     });
@@ -657,6 +790,7 @@ fn live_session(
     let mut samples: Vec<f32> = Vec::new();
     let mut splitter = PauseSplitter::new();
     let mut parts_sent = 0usize;
+    let mut cuts = PartCuts::default();
     let mut any_speech = false;
     let mut progress = Progress::default();
     let mut early_done = None;
@@ -693,9 +827,15 @@ fn live_session(
                 // A send error means the engine failed to load; the error
                 // is waiting on done_rx.
                 progress.pending.push_back(range.len() as f32 / 16000.0);
-                let _ = part_tx.send(samples[range].to_vec());
+                let specs = crate::osd::correction::read_windows();
+                cuts.offer(range, &samples, &specs, &part_tx);
                 parts_sent += 1;
             }
+        }
+        // A part waiting for a correction key to come up.
+        if cuts.waiting() {
+            let specs = crate::osd::correction::read_windows();
+            cuts.retry(&samples, &specs, &part_tx, false);
         }
         while let Ok(msg) = msg_rx.try_recv() {
             match msg {
@@ -859,8 +999,52 @@ fn live_session(
     }
     if let Some(range) = splitter.tail(samples.len()) {
         progress.pending.push_back(range.len() as f32 / 16000.0);
-        let _ = part_tx.send(samples[range].to_vec());
+        let specs = crate::osd::correction::read_windows();
+        cuts.offer(range, &samples, &specs, &part_tx);
     }
+    let specs = crate::osd::correction::read_windows();
+    cuts.retry(&samples, &specs, &part_tx, true);
+    // Each spoken correction's audio alone, with the live words it replaces
+    // pushed down, so the final engine does not repeat the mistake.
+    let clip_holds: Vec<crate::osd::correction::FinalClip> = {
+        let end = samples.len() as f32 / 16000.0;
+        let specs = crate::osd::correction::read_windows();
+        let holds: Vec<(f32, f32)> = specs.iter().map(|w| (w.t0, w.t1.unwrap_or(end))).collect();
+        let live: Vec<crate::osd::correction::Word> = unified
+            .as_ref()
+            .map(|u| preview_words(u, vocab))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|w| {
+                let word = crate::osd::live::TimedWord {
+                    text: w.text,
+                    start: w.start,
+                    end: w.end,
+                    conf: w.conf,
+                };
+                (word, w.detail)
+            })
+            .collect();
+        let wrong = crate::osd::correction::wrong_spans(live, &holds);
+        holds
+            .iter()
+            .zip(wrong)
+            .filter_map(|(&(t0, t1), wrong)| {
+                let at = |t: f32| ((t.max(0.0) * 16000.0) as usize).min(samples.len());
+                let (a, b) = (at(t0), at(t1));
+                (a < b).then(|| {
+                    let _ =
+                        part_tx.send(Job::Clip(samples[a..b].to_vec(), wrong.unwrap_or_default()));
+                    crate::osd::correction::FinalClip {
+                        t0,
+                        t1,
+                        text: String::new(),
+                        cut: cuts.cut((a, b)),
+                    }
+                })
+            })
+            .collect()
+    };
     drop(part_tx);
     let start = std::time::Instant::now();
     let result = loop {
@@ -880,13 +1064,21 @@ fn live_session(
         }
     };
     let response = match result {
-        Some(Ok((text, language))) => {
+        Some(Ok((text, language, clip_texts))) => {
             eprintln!(
                 "[worker] Final transcription in {:.2}s ({} parts sent while recording)",
                 start.elapsed().as_secs_f32(),
                 parts_sent
             );
-            WorkerResponse::success(text, language)
+            let mut response = WorkerResponse::success(text, language);
+            if let WorkerResponse::Success { corrections, .. } = &mut response {
+                *corrections = clip_holds
+                    .into_iter()
+                    .zip(clip_texts)
+                    .map(|(clip, text)| crate::osd::correction::FinalClip { text, ..clip })
+                    .collect();
+            }
+            response
         }
         Some(Err(e)) if !preview_final.is_empty() => {
             eprintln!("[worker] Engine model failed, using preview: {}", e);
@@ -1331,5 +1523,44 @@ mod tests {
     #[test]
     fn test_ready_signal() {
         assert_eq!(READY_SIGNAL, "READY");
+    }
+
+    #[cfg(feature = "parakeet")]
+    fn sent_parts(rx: &std::sync::mpsc::Receiver<Job>) -> Vec<usize> {
+        rx.try_iter()
+            .map(|job| match job {
+                Job::Part(p) => p.len(),
+                Job::Clip(..) => panic!("no clips here"),
+            })
+            .collect()
+    }
+
+    /// A correction's audio stays out of the final text's parts, and a part
+    /// that reaches into a hold still held waits for the key to come up.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn parts_leave_out_the_correction_holds() {
+        let samples = vec![0.1f32; 16000 * 4];
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut cuts = PartCuts::default();
+        let held = [WindowSpec { t0: 1.5, t1: None }];
+        cuts.offer(0..16000, &samples, &held, &tx);
+        // A part before the hold goes at once.
+        assert_eq!(sent_parts(&rx), [16000]);
+        cuts.offer(16000..32000, &samples, &held, &tx);
+        // A part reaching into the hold waits.
+        assert!(sent_parts(&rx).is_empty());
+        let done = [WindowSpec {
+            t0: 1.5,
+            t1: Some(2.5),
+        }];
+        cuts.retry(&samples, &done, &tx, false);
+        // It goes once the key is up, without the hold's half second.
+        assert_eq!(sent_parts(&rx), [8000]);
+        cuts.offer(32000..64000, &samples, &done, &tx);
+        assert_eq!(sent_parts(&rx), [32000 - 8000]);
+        assert!(cuts.cut((24000, 40000)));
+        // A part sent before the hold was known kept its audio.
+        assert!(!cuts.cut((8000, 12000)));
     }
 }

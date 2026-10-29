@@ -41,6 +41,9 @@ struct WorkerResponse {
     /// Older workers that do not emit this field deserialize to `None`.
     #[serde(default)]
     language: Option<String>,
+    /// The final engine's text of each spoken correction (live worker).
+    #[serde(default)]
+    corrections: Vec<crate::osd::correction::FinalClip>,
 }
 
 /// A prepared worker process ready to receive audio
@@ -647,6 +650,8 @@ impl StreamingTranscriber for SubprocessTranscriber {
                             *guard = r.language.clone();
                         }
                         answered = true;
+                        // Before the text, which the daemon corrects with them.
+                        crate::osd::correction::final_clips(r.corrections);
                         let text = r.text.unwrap_or_default();
                         if !text.trim().is_empty() {
                             send(StreamingEvent::Final {

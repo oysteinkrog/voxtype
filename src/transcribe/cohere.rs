@@ -255,7 +255,47 @@ impl CohereTranscriber {
         })
     }
 
-    fn transcribe_samples(&self, samples: &[f32]) -> Result<String, TranscribeError> {
+    /// The token sequences of `text` as the decoder could write it: as
+    /// given, in lower case and with a capital first letter, each both
+    /// after a space (the word marker the decoder writes) and without.
+    fn token_variants(&self, text: &str) -> Vec<Vec<i64>> {
+        let text = text.trim();
+        let lower = text.to_lowercase();
+        let capital: String = lower
+            .chars()
+            .enumerate()
+            .flat_map(|(i, c)| {
+                let up: Vec<char> = if i == 0 {
+                    c.to_uppercase().collect()
+                } else {
+                    vec![c]
+                };
+                up
+            })
+            .collect();
+        let mut out: Vec<Vec<i64>> = Vec::new();
+        let spelled = [text.to_string(), lower, capital];
+        let spaced = spelled.iter().map(|v| format!(" {v}"));
+        for variant in spelled.iter().cloned().chain(spaced) {
+            if variant.trim().is_empty() {
+                continue;
+            }
+            if let Ok(enc) = self.tokenizer.encode(variant.as_str(), false) {
+                let ids: Vec<i64> = enc.get_ids().iter().map(|&i| i as i64).collect();
+                if !ids.is_empty() && !out.contains(&ids) {
+                    out.push(ids);
+                }
+            }
+        }
+        out
+    }
+
+    fn transcribe_samples(
+        &self,
+        samples: &[f32],
+        avoid: &[Vec<i64>],
+        push_down: f32,
+    ) -> Result<String, TranscribeError> {
         // 1. Feature extraction.
         let features_2d = self.fbank.extract(samples);
         let n_frames = features_2d.nrows();
@@ -391,7 +431,8 @@ impl CohereTranscriber {
                     TranscribeError::InferenceFailed(format!("decoder step {step}: {e}"))
                 })?;
 
-                let best = argmax_logits(&outputs["logits"], self.float_dtype)?;
+                let pushed = pushed_down(&generated, avoid);
+                let best = argmax_logits(&outputs["logits"], self.float_dtype, &pushed, push_down)?;
 
                 let mut present_dec: Vec<DynValue> = Vec::with_capacity(N_LAYERS * 2);
                 let mut present_enc: Vec<DynValue> = Vec::with_capacity(N_LAYERS * 2);
@@ -466,29 +507,51 @@ fn empty_kv(dtype: TensorElementType) -> Result<DynValue, TranscribeError> {
     Ok(t.into_dyn())
 }
 
+/// How far a pushed-down token's logit is lowered: about a 50th of its
+/// probability, so a clearly heard word still wins.
+const PUSH_DOWN_LOGIT: f32 = 4.0;
+
+/// The tokens to push down after `generated`: for each sequence to avoid,
+/// the token that would continue the longest part of it `generated` ends
+/// with. Its first token is always pushed down, so the sequence cannot
+/// start anywhere.
+fn pushed_down(generated: &[i64], avoid: &[Vec<i64>]) -> Vec<i64> {
+    avoid
+        .iter()
+        .filter_map(|seq| {
+            (0..seq.len())
+                .rev()
+                .find(|&k| generated.ends_with(&seq[..k]))
+                .map(|k| seq[k])
+        })
+        .collect()
+}
+
 /// Argmax over the last logit row, working in either Float32 or Float16
-/// per the model variant. f16 values are widened to f32 for the
-/// comparison so we don't have to depend on `half`'s `Ord` impl across
-/// versions.
-fn argmax_logits(logits: &DynValue, dtype: TensorElementType) -> Result<i64, TranscribeError> {
-    fn pick<F: Copy + PartialOrd, I: Iterator<Item = F>>(it: I) -> i64 {
+/// per the model variant, with the `pushed` tokens' logits lowered by
+/// `by`. f16 values are widened to f32 for the comparison.
+fn argmax_logits(
+    logits: &DynValue,
+    dtype: TensorElementType,
+    pushed: &[i64],
+    by: f32,
+) -> Result<i64, TranscribeError> {
+    let pick = |it: &mut dyn Iterator<Item = f32>| -> i64 {
         let mut best_idx = 0_i64;
-        let mut best_val: Option<F> = None;
+        let mut best_val: Option<f32> = None;
         for (i, v) in it.enumerate() {
-            match best_val {
-                None => {
-                    best_val = Some(v);
-                    best_idx = i as i64;
-                }
-                Some(b) if v > b => {
-                    best_val = Some(v);
-                    best_idx = i as i64;
-                }
-                _ => {}
+            let v = if pushed.contains(&(i as i64)) {
+                v - by
+            } else {
+                v
+            };
+            if best_val.is_none_or(|b| v > b) {
+                best_val = Some(v);
+                best_idx = i as i64;
             }
         }
         best_idx
-    }
+    };
 
     match dtype {
         TensorElementType::Float32 => {
@@ -496,7 +559,7 @@ fn argmax_logits(logits: &DynValue, dtype: TensorElementType) -> Result<i64, Tra
                 .try_extract_tensor::<f32>()
                 .map_err(|e| TranscribeError::InferenceFailed(format!("logits f32: {e}")))?;
             check_logits_shape(shape)?;
-            Ok(pick(data.iter().copied()))
+            Ok(pick(&mut data.iter().copied()))
         }
         TensorElementType::Float16 => {
             let (shape, data) = logits
@@ -505,7 +568,7 @@ fn argmax_logits(logits: &DynValue, dtype: TensorElementType) -> Result<i64, Tra
             check_logits_shape(shape)?;
             // Widen to f32 for the comparison; the relative ordering is
             // the same and we already pay one allocation worth of work.
-            Ok(pick(data.iter().map(|h| h.to_f32())))
+            Ok(pick(&mut data.iter().map(|h| h.to_f32())))
         }
         other => Err(TranscribeError::InferenceFailed(format!(
             "unsupported logits dtype {:?}",
@@ -527,11 +590,22 @@ fn check_logits_shape(shape: &[i64]) -> Result<(), TranscribeError> {
 impl Transcriber for CohereTranscriber {
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         let start = std::time::Instant::now();
-        let text = self.transcribe_samples(samples)?;
+        let text = self.transcribe_samples(samples, &[], 0.0)?;
         tracing::info!(
             "Cohere transcription completed in {:.2}s: {:?}",
             start.elapsed().as_secs_f32(),
             text.chars().take(80).collect::<String>(),
+        );
+        Ok(text)
+    }
+
+    fn transcribe_avoiding(&self, samples: &[f32], avoid: &str) -> Result<String, TranscribeError> {
+        let avoid = self.token_variants(avoid);
+        let text = self.transcribe_samples(samples, &avoid, PUSH_DOWN_LOGIT)?;
+        tracing::info!(
+            "Cohere correction clip, avoiding {} spellings: {:?}",
+            avoid.len(),
+            text
         );
         Ok(text)
     }
@@ -572,4 +646,61 @@ fn build_session(
             path
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pushed_down_continues_the_longest_started_sequence() {
+        let avoid = vec![vec![10, 11, 12], vec![20]];
+        assert_eq!(pushed_down(&[], &avoid), vec![10, 20]);
+        assert_eq!(pushed_down(&[5, 10], &avoid), vec![11, 20]);
+        assert_eq!(pushed_down(&[10, 11], &avoid), vec![12, 20]);
+        // A finished sequence starts over: only its first token again.
+        assert_eq!(pushed_down(&[10, 11, 12], &avoid), vec![10, 20]);
+        assert_eq!(pushed_down(&[1, 2], &[]), Vec::<i64>::new());
+    }
+
+    fn fixture(name: &str) -> Vec<f32> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/vad")
+            .join(name);
+        let reader = hound::WavReader::open(&path).expect("fixture opens");
+        let max = (1 << (reader.spec().bits_per_sample - 1)) as f32;
+        reader
+            .into_samples::<i32>()
+            .filter_map(Result::ok)
+            .map(|s| s as f32 / max)
+            .collect()
+    }
+
+    /// Needs the cohere-transcribe-q4f16 model in the models folder:
+    /// `cargo test --features cohere -- --ignored pushing_down`.
+    #[test]
+    #[ignore]
+    fn pushing_down_the_heard_words_changes_the_text() {
+        let config = CohereConfig {
+            model: "cohere-transcribe-q4f16".into(),
+            ..CohereConfig::default()
+        };
+        let cohere = CohereTranscriber::new(&config).expect("model loads");
+        for name in ["speech_hello.wav", "speech_long.wav"] {
+            let samples = fixture(name);
+            let plain = cohere.transcribe(&samples).unwrap();
+            assert!(!plain.is_empty());
+            let first = plain.split_whitespace().next().unwrap().to_string();
+            let pushed = cohere.transcribe_avoiding(&samples, &first).unwrap();
+            let firmly = cohere
+                .transcribe_samples(&samples, &cohere.token_variants(&first), 30.0)
+                .unwrap();
+            eprintln!(
+                "{name}: plain {plain:?}, {first:?} pushed down {pushed:?}, firmly {firmly:?}"
+            );
+            assert_ne!(pushed.to_lowercase(), plain.to_lowercase());
+            // The decoder honours the push: firmly, the word never starts it.
+            assert!(!firmly.starts_with(&first), "{firmly:?}");
+        }
+    }
 }

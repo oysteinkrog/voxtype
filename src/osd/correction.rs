@@ -62,13 +62,48 @@ enum State {
     Open,
     /// The key came up at this moment.
     Pending(Instant),
-    /// Words timed `from..=to` are replaced by `right`.
+    /// Words timed `from..=to` (`wrong`) are replaced by `right`.
     Placed {
         from: f32,
         to: f32,
+        wrong: String,
         right: Vec<String>,
     },
     Dropped,
+}
+
+/// A hold as the live worker reads it from [`windows_path`]: seconds into
+/// the recording, `t1` None while the key is still down.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindowSpec {
+    pub t0: f32,
+    pub t1: Option<f32>,
+}
+
+/// What the final engine made of one hold, in the worker's response.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FinalClip {
+    pub t0: f32,
+    pub t1: f32,
+    /// The hold's audio alone, decoded with the replaced words pushed down.
+    pub text: String,
+    /// The hold's audio was cut out of every part of the final text, so the
+    /// final text has no copy of the respoken words.
+    pub cut: bool,
+}
+
+/// `correction-windows.json` in the runtime folder: the holds of the
+/// current dictation, for the live worker.
+pub fn windows_path() -> std::path::PathBuf {
+    crate::config::Config::runtime_dir().join("correction-windows.json")
+}
+
+/// The holds in [`windows_path`]; none when there is no file.
+pub fn read_windows() -> Vec<WindowSpec> {
+    std::fs::read_to_string(windows_path())
+        .ok()
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +122,8 @@ pub struct Corrections {
     raw: Vec<Word>,
     notes: u32,
     note: Option<CorrectionNote>,
+    /// The final engine's text of each hold, when the worker gave them.
+    clips: Vec<FinalClip>,
 }
 
 fn middle(w: &TimedWord) -> f32 {
@@ -131,6 +168,17 @@ impl Corrections {
         self.windows.iter_mut().find(|w| w.state == State::Open)
     }
 
+    /// The holds, for the live worker.
+    pub fn specs(&self) -> Vec<WindowSpec> {
+        self.windows
+            .iter()
+            .map(|w| WindowSpec {
+                t0: w.t0,
+                t1: (w.state != State::Open).then_some(w.t1),
+            })
+            .collect()
+    }
+
     /// A new live word list: the words to show, with the corrections made.
     /// Holds that ended `SETTLE` before `now`, or that the live model has
     /// heard past, are placed now.
@@ -162,7 +210,10 @@ impl Corrections {
                     self.windows[i].state = self.place(&out, t0, t1);
                 }
             }
-            if let State::Placed { from, to, right } = &self.windows[i].state {
+            if let State::Placed {
+                from, to, right, ..
+            } = &self.windows[i].state
+            {
                 replace_by_time(&mut out, *from, *to, right);
             }
         }
@@ -207,6 +258,7 @@ impl Corrections {
                 State::Placed {
                     from: before[span.start].start,
                     to: before[span.end - 1].end,
+                    wrong: note.from.clone(),
                     right: heard,
                 }
             }
@@ -252,19 +304,34 @@ impl Corrections {
         })
     }
 
-    /// The final text with the corrections made. The final engine heard the
-    /// respoken words as well, so each correction first takes out that copy
-    /// (the newest match before the hold's end), then replaces the words it
-    /// was placed on (the newest match before the hold's start). The final
+    /// The final text with the corrections made. Each correction replaces
+    /// the words it was placed on (the newest match before the hold's
+    /// start). Its words are the final engine's own text of the hold when
+    /// the worker gave one ([`FinalClip`]) that differs from the replaced
+    /// words, else the live words. When the hold's audio was not cut out of
+    /// the final text, the engine heard the respoken words as well, so that
+    /// copy (the newest match before the hold's end) goes first. The final
     /// text has no timing: the live word counts say how far to look. A
     /// text with no placed correction comes back unchanged.
     pub fn apply_final(&mut self, text: &str) -> String {
         self.render_with(None, true);
-        let placed: Vec<(f32, f32, Vec<String>)> = self
+        let placed: Vec<(f32, f32, Vec<String>, bool)> = self
             .windows
             .iter()
             .filter_map(|w| match &w.state {
-                State::Placed { right, .. } => Some((w.t0, w.t1, right.clone())),
+                State::Placed { wrong, right, .. } => {
+                    let clip = self.clips.iter().find(|c| (c.t0 - w.t0).abs() < 0.05);
+                    let cut = clip.is_some_and(|c| c.cut);
+                    let words = clip
+                        .map(|c| clip_words(&c.text, wrong))
+                        .filter(|words| !same_words(&words.join(" "), wrong))
+                        .unwrap_or_else(|| right.clone());
+                    if same_words(&words.join(" "), wrong) {
+                        tracing::info!(%wrong, "Correction heard as the same words: spell it");
+                        return None;
+                    }
+                    Some((w.t0, w.t1, words, cut))
+                }
                 _ => None,
             })
             .collect();
@@ -279,8 +346,11 @@ impl Corrections {
             let n = self.raw.iter().filter(|(w, _)| middle(w) < t).count() as isize;
             (n + shift).max(0) as usize + FINAL_SLACK_WORDS
         };
-        for (t0, t1, right) in placed {
-            if let Ok(copy) = align::place_before(&words, before(t1, shift), &right) {
+        for (t0, t1, right, cut) in placed {
+            if cut {
+                // The live count includes the respoken words; the text not.
+                shift -= self.raw.iter().filter(|(w, _)| inside(w, t0, t1)).count() as isize;
+            } else if let Ok(copy) = align::place_before(&words, before(t1, shift), &right) {
                 words.drain(copy.start..copy.end);
                 shift -= (copy.end - copy.start) as isize;
             }
@@ -292,6 +362,63 @@ impl Corrections {
         }
         words.join(" ")
     }
+}
+
+/// Whether `a` and `b` are the same words, ignoring case and punctuation.
+/// "FrankenTerm" and "franken term" are not: joining words is a fix.
+fn same_words(a: &str, b: &str) -> bool {
+    let key = |s: &str| -> Vec<String> {
+        s.split_whitespace()
+            .map(|w| {
+                w.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .flat_map(char::to_lowercase)
+                    .collect::<String>()
+            })
+            .filter(|w| !w.is_empty())
+            .collect()
+    };
+    key(a) == key(b)
+}
+
+/// The words of a hold's final text, fitted into the sentence: the final
+/// engine writes a clip alone as a sentence ("Popup."), so the full stop
+/// goes, and the first word's capital too when the words it replaces were
+/// lower case and the capital is only the sentence's (not "FrankenTerm").
+fn clip_words(text: &str, wrong: &str) -> Vec<String> {
+    let text = text.trim().trim_end_matches(['.', '!', '?']);
+    let mut words: Vec<String> = text.split_whitespace().map(str::to_string).collect();
+    let wrong_lower = wrong.chars().next().is_some_and(char::is_lowercase);
+    if let Some(first) = words.first_mut() {
+        let mut chars = first.chars();
+        let sentence_capital =
+            chars.next().is_some_and(char::is_uppercase) && chars.all(|c| !c.is_uppercase());
+        if wrong_lower && sentence_capital {
+            *first = first.to_lowercase();
+        }
+    }
+    words
+}
+
+/// The words each hold replaces in `raw`, the live words with no correction
+/// made: what the final pass pushes down when it decodes the hold. None for
+/// a hold that places nowhere.
+pub fn wrong_spans(raw: Vec<Word>, holds: &[(f32, f32)]) -> Vec<Option<String>> {
+    let mut c = Corrections::default();
+    let now = Instant::now();
+    for &(t0, t1) in holds {
+        c.start(t0);
+        c.end(t1, now);
+    }
+    c.raw = raw;
+    c.render_with(None, true);
+    c.windows
+        .iter()
+        .map(|w| match &w.state {
+            State::Placed { wrong, .. } => Some(wrong.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Replaces the words whose middle falls in `from..=to` with `right`,
@@ -325,24 +452,51 @@ fn with<T>(f: impl FnOnce(&mut Corrections) -> T) -> T {
     f(guard.get_or_insert_with(Corrections::default))
 }
 
+/// Writes the holds to [`windows_path`] for the live worker, which cuts them
+/// out of the final text's audio.
+fn write_windows(c: &Corrections) {
+    let path = windows_path();
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(json) = serde_json::to_string(&c.specs()) {
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
 /// A hold began `t0` seconds into the recording.
 pub fn start(t0: f32) {
-    with(|c| c.start(t0));
+    with(|c| {
+        c.start(t0);
+        write_windows(c);
+    });
 }
 
 /// The hold ended `t1` seconds into the recording.
 pub fn end(t1: f32) {
-    with(|c| c.end(t1, Instant::now()));
+    with(|c| {
+        c.end(t1, Instant::now());
+        write_windows(c);
+    });
 }
 
 /// The hold was dropped.
 pub fn cancel() {
-    with(Corrections::cancel);
+    with(|c| {
+        c.cancel();
+        write_windows(c);
+    });
+}
+
+/// The final engine's text of each hold, from the worker's response.
+pub fn final_clips(clips: Vec<FinalClip>) {
+    with(|c| c.clips = clips);
 }
 
 /// The dictation ended.
 pub fn clear() {
     *CORRECTIONS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let _ = std::fs::remove_file(windows_path());
 }
 
 /// A new live word list, with the corrections made.
@@ -547,6 +701,83 @@ mod tests {
         assert_eq!(
             c.apply_final("use franken term here FrankenTerm"),
             "use FrankenTerm here"
+        );
+    }
+
+    fn placed_hold() -> Corrections {
+        let lists = steps(&[
+            (0.0, "use franken term here"),
+            (1.3, "FrankenTerm"),
+            (2.4, "and run it"),
+        ]);
+        let t = Instant::now();
+        let mut c = Corrections::default();
+        c.start(1.2);
+        c.end(2.0, t);
+        c.overlay(lists[2].clone(), t);
+        c
+    }
+
+    #[test]
+    fn the_final_engines_own_clip_replaces_the_words_in_a_cut_final_text() {
+        let mut c = placed_hold();
+        c.clips = vec![FinalClip {
+            t0: 1.2,
+            t1: 2.0,
+            text: "Franken-Term.".into(),
+            cut: true,
+        }];
+        assert_eq!(
+            c.apply_final("Use franken term here and run it."),
+            "Use Franken-Term here and run it."
+        );
+    }
+
+    #[test]
+    fn a_clip_heard_as_the_same_words_falls_back_to_the_live_words() {
+        let mut c = placed_hold();
+        c.clips = vec![FinalClip {
+            t0: 1.2,
+            t1: 2.0,
+            text: "Franken term.".into(),
+            cut: true,
+        }];
+        assert_eq!(
+            c.apply_final("Use franken term here and run it."),
+            "Use FrankenTerm here and run it."
+        );
+    }
+
+    #[test]
+    fn clip_words_drop_the_sentence_marks_of_a_clip_alone() {
+        assert_eq!(clip_words("Popup.", "pop up"), ["popup"]);
+        assert_eq!(clip_words("FrankenTerm.", "franken term"), ["FrankenTerm"]);
+        assert_eq!(clip_words("Oslo!", "Oslo"), ["Oslo"]);
+        assert_eq!(clip_words("Paris", "parish"), ["paris"]);
+    }
+
+    #[test]
+    fn wrong_spans_name_the_words_each_hold_replaces() {
+        let mut raw = spoken(0.0, "use franken term here");
+        raw.extend(spoken(1.3, "FrankenTerm"));
+        raw.extend(spoken(2.4, "the cat sat"));
+        raw.extend(spoken(3.4, "Kubernetes"));
+        let spans = wrong_spans(raw, &[(1.2, 2.0), (3.3, 4.0)]);
+        assert_eq!(spans, [Some("franken term".to_string()), None]);
+    }
+
+    #[test]
+    fn specs_leave_an_open_hold_without_an_end() {
+        let mut c = Corrections::default();
+        c.start(1.0);
+        assert_eq!(c.specs(), [WindowSpec { t0: 1.0, t1: None }]);
+        c.end(2.0, Instant::now());
+        assert_eq!(
+            c.specs(),
+            [WindowSpec {
+                t0: 1.0,
+                t1: Some(2.0)
+            }]
         );
     }
 

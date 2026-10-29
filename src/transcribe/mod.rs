@@ -105,6 +105,14 @@ pub trait Transcriber: Send + Sync {
     /// Input: f32 samples, mono, 16kHz
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError>;
 
+    /// Transcribe a respoken correction, steering the decoder away from
+    /// `avoid`, the words it replaces, so the same mistake is less likely
+    /// to come back. Backends that cannot steer transcribe as usual.
+    fn transcribe_avoiding(&self, samples: &[f32], avoid: &str) -> Result<String, TranscribeError> {
+        let _ = avoid;
+        self.transcribe(samples)
+    }
+
     /// Transcribe with word-level timestamps.
     /// Default implementation falls back to transcribe() with a single segment.
     fn transcribe_timed(&self, samples: &[f32]) -> Result<Vec<TimedSegment>, TranscribeError> {
