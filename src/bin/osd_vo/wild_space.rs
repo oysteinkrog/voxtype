@@ -44,8 +44,8 @@ pub(crate) const SOUND_SCULPTURE: &str = "sound-sculpture";
 pub(crate) const LATTICE_DRIFT: &str = "lattice-drift";
 
 /// The deepest a letter of the sculpture goes, in logical pixels, for the
-/// loudest word. With the shear below the back face sits at most about 4 by
-/// 6 px from the glyph, so the walls read as depth and not as a second copy
+/// loudest word. With the shear below the back face sits at most about 3 by
+/// 4 px from the glyph, so the walls read as depth and not as a second copy
 /// of the word (7b8x: at 34 px it was 10 by 15 px away).
 const SCULPT_DEPTH: f32 = 12.0;
 /// How far the back face moves across and up per pixel of depth.
@@ -54,6 +54,7 @@ const SCULPT_SHEAR: (f32, f32) = (0.24, 0.36);
 /// 15 % of the text's contrast on the reading line.
 const SCULPT_COLOR: u32 = 0x7d8696;
 const SCULPT_ALPHA: f32 = 0.1;
+/// The light's strength on the bodies (the framework's is 1).
 const SCULPT_LIGHT: f32 = 0.6;
 /// Seconds a new word lies flat before its body grows: about its fade in.
 const SCULPT_WAIT: f64 = 0.2;
