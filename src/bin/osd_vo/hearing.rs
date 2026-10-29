@@ -27,7 +27,9 @@
 
 use super::*;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use vo::scene::hearing::{self, Hearing, HearingLook, HearingTune, Mark, Pause};
 use vo_core::words::WordId;
@@ -72,6 +74,10 @@ pub(crate) struct State {
     /// When speech stopped before the current exhale: the word it stopped
     /// after, for the bookmark.
     stopped_after: Option<WordId>,
+    /// The shown words laid out at the last view, kept while the words, the
+    /// style and the width stay the same: on room tone every view would lay
+    /// out the same text again.
+    laid: RefCell<Option<Rc<Laid>>>,
 }
 
 impl Default for State {
@@ -86,6 +92,7 @@ impl Default for State {
             next_pause: 0,
             placed: Vec::new(),
             stopped_after: None,
+            laid: RefCell::new(None),
         }
     }
 }
@@ -290,7 +297,7 @@ impl Popup {
         }
         let x = &self.hearing;
         let look = HearingLook::for_text(style.size, ink);
-        let laid = Laid::new(self, style, width);
+        let laid = self.laid(style, width);
         let mut out = Vec::new();
 
         if self.hearing_on(PRE_ECHO) && listening {
@@ -372,6 +379,23 @@ impl Popup {
     }
 }
 
+impl Popup {
+    /// The shown words laid out in `style` at `width`, from the last view
+    /// when nothing it reads has changed.
+    fn laid(&self, style: &TextStyle, width: f32) -> Rc<Laid> {
+        let mut kept = self.hearing.laid.borrow_mut();
+        if let Some(l) = kept
+            .as_ref()
+            .filter(|l| l.is_for(&self.shown, style, width))
+        {
+            return l.clone();
+        }
+        let l = Rc::new(Laid::new(self, style, width));
+        *kept = Some(l.clone());
+        l
+    }
+}
+
 fn read_ids(h: &Hearing) -> Vec<u64> {
     h.blobs()
         .iter()
@@ -404,6 +428,10 @@ struct Laid {
     space: f32,
     line_height: f32,
     first_baseline: f32,
+    /// What it was laid out from: the words' texts, the style and the width.
+    words: Vec<String>,
+    style: TextStyle,
+    width: f32,
 }
 
 impl Laid {
@@ -429,7 +457,23 @@ impl Laid {
             space: space.max(style.size * 0.25),
             line_height: style.line_height,
             first_baseline,
+            words: p.shown.iter().map(|w| w.text.clone()).collect(),
+            style: *style,
+            width,
         }
+    }
+
+    /// Whether it was laid out from these words, style and width.
+    fn is_for(&self, shown: &[Word], style: &TextStyle, width: f32) -> bool {
+        self.style == *style
+            && self.width == width
+            && self.ranges.len() == shown.len()
+            && self
+                .ranges
+                .iter()
+                .zip(&self.words)
+                .zip(shown)
+                .all(|(((id, _), text), w)| *id == w.id && *text == w.text)
     }
 
     fn glyphs(&self, id: WordId) -> impl Iterator<Item = &vo::scene::text::PlacedGlyph> + '_ {

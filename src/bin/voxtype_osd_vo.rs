@@ -2415,21 +2415,29 @@ fn main() -> anyhow::Result<()> {
 
 /// Frames of a scripted dictation, four per second, for the start-up
 /// warm-up: drawing them once builds the shaders and glyphs a real
-/// dictation needs.
+/// dictation needs. The long-silence moment adds what only a long pause
+/// draws, such as the gathered pause marks, so their pipelines are not
+/// built in the middle of a dictation.
 fn warm_frames(look: Look, fonts: FontRegistry) -> vo::WarmFrames {
-    let scenario = scenario(&look, false);
     let size = look.surface();
-    let options = Options {
+    let options = || Options {
         fonts: fonts.clone(),
         default_motion: default_motion(&look),
         ..Options::default()
     };
     let mut lists = Vec::new();
     vo::envelope::sample_scenario(
-        Popup::new(look, &fonts),
-        &scenario,
+        Popup::new(look.clone(), &fonts),
+        &scenario(&look, false),
         4.0,
-        options,
+        options(),
+        &mut |_, _, list| lists.push(list.clone()),
+    );
+    vo::envelope::sample_scenario(
+        Popup::scripted(look.clone(), &fonts),
+        &moments::scenario(&look, moments::Moment::LongSilence),
+        4.0,
+        options(),
         &mut |_, _, list| lists.push(list.clone()),
     );
     vo::WarmFrames {
