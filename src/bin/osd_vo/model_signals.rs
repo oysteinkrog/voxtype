@@ -30,8 +30,13 @@
 //!
 //! - `breathing-stop`: when the tail expects a full stop, it sits after the
 //!   text at its probability's ink (60 % at certainty, so it never reads
-//!   as typed), fading to each new probability over 0.3 s and pulling back when the model drops it. The
-//!   ghost words then leave their own full stop out.
+//!   as typed), fading to each new probability over 0.3 s and pulling
+//!   back when the model drops it. The ghost words then leave their own
+//!   full stop out.
+//! - `pre-echo-letters`: when a frame of the newest step came within
+//!   10^-2.5 of a token, the first letters of the model's top guess there
+//!   flash at 25 % ink after the text, about one frame before the piece
+//!   commits. (Not `pre-echo`, the hearing caret of MO-11.)
 //!
 //! Nothing shows once the recording stops, so the signals end with the
 //! dictation and nothing moves at room tone. Under reduced motion the ghosts
@@ -51,9 +56,11 @@ pub(crate) const FLOOR: &str = "listening-floor";
 pub(crate) const COMMIT_CURSOR: &str = "commit-cursor";
 pub(crate) const GRADED_DOUBT: &str = "graded-doubt";
 pub(crate) const BREATHING_STOP: &str = "breathing-stop";
+pub(crate) const PRE_ECHO_LETTERS: &str = "pre-echo-letters";
 
 /// Every model signal feature.
-const ALL: [&str; 6] = [
+const ALL: [&str; 7] = [
+    PRE_ECHO_LETTERS,
     GHOST_TAIL,
     THREE_TIER,
     FLOOR,
@@ -91,6 +98,12 @@ const DOUBT_MAX_PX: f32 = 2.4;
 /// takes to reach a new probability.
 const STOP_INK: f32 = 0.6;
 const STOP_FADE_SECS: f64 = 0.3;
+/// Pre-echo letters: the level a frame must pass, the frames of one step
+/// (0.56 s of 80 ms frames), the letters shown and their ink.
+const ECHO_GATE: f32 = -2.5;
+const STEP_FRAMES: usize = 7;
+const ECHO_LETTERS: usize = 2;
+const ECHO_INK: f32 = 0.25;
 
 /// One word of the tail.
 #[derive(Debug, PartialEq)]
@@ -192,6 +205,9 @@ impl Popup {
                 text = text.child(e);
             }
             if let Some(e) = self.breathing_stop(laid.as_ref(), origin, ink) {
+                text = text.child(e);
+            }
+            if let Some(e) = self.pre_echo_letters(s, laid.as_ref(), origin, ink) {
                 text = text.child(e);
             }
         }
@@ -456,6 +472,51 @@ impl Popup {
             .motion(Prop::Opacity, spring)
             .motion(Prop::Position, Motion::Snap)
             .presence(Transition::fade(), Transition::fade());
+        Some(kit::at(e, origin.0 + x, origin.1 + top))
+    }
+
+    /// `pre-echo-letters`: the first letters of the top guess of the newest
+    /// step's latest frame that came close to a token.
+    fn pre_echo_letters(
+        &self,
+        s: &ModelSignals,
+        laid: Option<&TailLayout>,
+        origin: (f32, f32),
+        ink: Color,
+    ) -> Option<Element<Msg>> {
+        let l = &self.look;
+        let laid = laid.filter(|_| l.on(PRE_ECHO_LETTERS))?;
+        let newest = s.frames.len().saturating_sub(STEP_FRAMES);
+        let guess = s.frames[newest..]
+            .iter()
+            .rev()
+            .filter(|f| f.level > ECHO_GATE)
+            .find_map(|f| f.top.first())?;
+        let letters: String = guess.text.trim_start().chars().take(ECHO_LETTERS).collect();
+        if letters.is_empty() {
+            return None;
+        }
+        let (mut x, top) = if l.on(GHOST_TAIL) || l.on(THREE_TIER) {
+            laid.tail_end
+        } else {
+            laid.committed_end
+        };
+        // A guess that starts a word starts after a space.
+        let style = l.text_style();
+        if guess.text.starts_with(' ') && x > 0.0 {
+            x += self.measure.layout(" ", &style, None).size.w;
+        }
+        let presence = if self.signals_reduced() {
+            (Transition::NONE, Transition::NONE)
+        } else {
+            (Transition::fade(), Transition::fade())
+        };
+        // Each step's echo is its own element, so it flashes in.
+        let e = Element::label(format!("pre-echo-{}", s.frames_total), letters)
+            .text_style(style)
+            .color(ink)
+            .opacity(ECHO_INK)
+            .presence(presence.0, presence.1);
         Some(kit::at(e, origin.0 + x, origin.1 + top))
     }
 
