@@ -371,7 +371,7 @@ impl Popup {
             .collect();
         // The end of a run of text: after its last glyph.
         let end_of = |len: usize| -> (f32, f32) {
-            match laid.glyphs.iter().filter(|g| (g.cluster as usize) < len).last() {
+            match laid.glyphs.iter().rfind(|g| (g.cluster as usize) < len) {
                 Some(g) => (g.pos.x + g.advance, top_of(g.pos.y)),
                 None => (0.0, 0.0),
             }
