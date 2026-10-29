@@ -32,6 +32,8 @@ const MARGIN: f32 = 10.0;
 
 // Layout in concept pixels.
 const FRAME: f32 = 12.0;
+/// The outer frame's stroke width.
+const FRAME_W: f32 = 1.6;
 const CHAMFER: f32 = 16.0;
 const MIC_X: f32 = 52.0;
 const MIC_Y: f32 = 44.0;
@@ -200,6 +202,9 @@ struct Panel {
     rate: f32,
     /// The waveform's clock during a rewind cancel (MO-50).
     scrub: endings::Scrub,
+    /// The outer frame's stroke width in concept pixels, thinner as the
+    /// chrome exhales (MO-12).
+    frame_w: f32,
 }
 
 impl Panel {
@@ -253,7 +258,7 @@ impl Panel {
         let len = edge.length();
         p.stroke(
             &edge.trim(0.0, len * open),
-            &line(1.6, AMBER, 0.95).glow(4.0 * k),
+            &line(self.frame_w, AMBER, 0.95).glow(4.0 * k),
         );
 
         // Corner brackets just inside the frame.
@@ -437,10 +442,11 @@ impl Popup {
                 .then(|| self.files.fraction.map(|f| f as f32))
                 .flatten(),
             loading: status.loading,
-            wave: self.wave.clone(),
+            wave: self.exhale_levels(&self.wave),
             newest_at: self.newest_at,
             rate: FRAME_HZ as f32,
             scrub: self.scrub(),
+            frame_w: self.exhale_width(FRAME_W),
         };
         let until = match (self.extra.final_at, self.amber.ended_at) {
             (Some(f), _) => f + JOIN_SECS + 0.1,
@@ -567,9 +573,11 @@ impl Popup {
     }
 
     /// The transcript: words wipe in from the left like a projector
-    /// catching them.
+    /// catching them. Onset ink (MO-13) weighs the live words, and the
+    /// pause marks (MO-30) sit along their baseline.
     fn amber_text(&self, g: &Geo) -> Element<Msg> {
         let k = g.k;
+        let (style, width) = (self.look.text_style(), self.look.text_width());
         let mut words = Element::live_text("words", &self.shown)
             .line_motion(&self.look)
             .text_style(self.look.text_style())
@@ -582,14 +590,14 @@ impl Popup {
         if self.amber.ended_at.is_some() {
             words = words.opacity(0.4);
         }
-        let words = self.handoff_or(
-            words,
-            &self.look.text_style(),
-            Some(self.look.text_width()),
-            hex(TEXT, 1.0),
-            hex(AMBER, 1.0),
-        );
-        at(words.rewind_hide(self.rewinding()), TEXT_X * k, TEXT_TOP * k)
+        let words = self.typo_words(words);
+        let words = self.handoff_or(words, &style, Some(width), hex(TEXT, 1.0), hex(AMBER, 1.0));
+        let text = Element::column("text")
+            .size(width, self.lines.max(1) as f32 * style.line_height)
+            .child(words.rewind_hide(self.rewinding()));
+        let text = self.typo_marks(text, width);
+        let text = self.with_hearing(text, &style, width, hex(TEXT, 1.0), hex(AMBER, 1.0));
+        at(text, TEXT_X * k, TEXT_TOP * k)
     }
 
     /// MO-50: a cancel takes the words back into the caret, drawn over
@@ -768,6 +776,7 @@ mod tests {
             newest_at: 2.0,
             rate: 100.0,
             scrub: endings::Scrub::default(),
+            frame_w: FRAME_W,
         }
     }
 
