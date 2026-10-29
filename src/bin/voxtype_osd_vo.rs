@@ -965,7 +965,11 @@ impl Look {
     fn margin_ellipsis(&self) -> bool {
         matches!(
             self.theme,
-            OsdTheme::Default | OsdTheme::Swiss | OsdTheme::Type | OsdTheme::Dotmatrix
+            OsdTheme::Default
+                | OsdTheme::Swiss
+                | OsdTheme::Type
+                | OsdTheme::Dotmatrix
+                | OsdTheme::Palette
         )
     }
 

@@ -528,6 +528,18 @@ impl Popup {
                 },
                 endings::Cancel::Unthread,
             ));
+        // Once earlier lines are cut, the "…" hangs in the left margin, so the
+        // cut moves the text by exactly one line and no row reflows.
+        if self.cut > 0 && !self.shown.is_empty() && self.delivered().is_none() {
+            let w = self.measure.layout("…", &style, None).size.w.ceil();
+            text = text.child(at(
+                Element::label("ellipsis", "…")
+                    .text_style(style)
+                    .color(hex(INK)),
+                -w,
+                0.0,
+            ));
+        }
         // Lay the words out as the live text does, to place the wavy lines
         // and the caret.
         let joined = self
