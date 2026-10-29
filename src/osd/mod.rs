@@ -19,9 +19,11 @@
 //! - [`showcase`] — palette and geometry of the vo frontend's `showcase` look.
 //! - [`watch`]: wakes the popups when the daemon changes a runtime file.
 //! - [`look_step`]: the keyboard chord that switches the vo popup's look.
+//! - [`correction`]: spoken corrections, applied to the live and final text.
 //! - [`gtk_env`] — environment workarounds for GTK4 bugs (GTK frontend only).
 
 pub mod config;
+pub mod correction;
 pub mod gtk_env;
 pub mod ipc;
 pub mod live;

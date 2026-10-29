@@ -59,6 +59,17 @@ pub enum Refused {
 /// The span of `text` that `correction` most likely replaces, from the
 /// last [`MATCH_WINDOW_WORDS`] words. Indices are into all of `text`.
 pub fn place<S: AsRef<str>, C: AsRef<str>>(text: &[S], correction: &[C]) -> Result<Span, Refused> {
+    place_before(text, text.len(), correction)
+}
+
+/// [`place`] as if `text` ended before word `end`: the search covers the
+/// [`MATCH_WINDOW_WORDS`] words before it, and age counts back from it.
+pub fn place_before<S: AsRef<str>, C: AsRef<str>>(
+    text: &[S],
+    end: usize,
+    correction: &[C],
+) -> Result<Span, Refused> {
+    let text = &text[..end.min(text.len())];
     let wanted = Key::of(correction);
     if wanted.letters.is_empty() || text.is_empty() {
         return Err(Refused::Empty);
@@ -238,6 +249,15 @@ mod tests {
         text.extend(std::iter::repeat_n("cat", MATCH_WINDOW_WORDS));
         let got = place(&text, &["FrankenTerm"]);
         assert!(matches!(got, Err(Refused::NoMatch { .. })), "{got:?}");
+    }
+
+    #[test]
+    fn place_before_ignores_the_words_after_its_end() {
+        let text = words("use franken term here then say FrankenTerm again");
+        let span = place_before(&text, 4, &["FrankenTerm"]).unwrap();
+        assert_eq!((span.start, span.end), (1, 3));
+        let span = place_before(&text, 99, &["FrankenTerm"]).unwrap();
+        assert_eq!((span.start, span.end), (6, 7));
     }
 
     #[test]
