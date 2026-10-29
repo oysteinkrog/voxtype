@@ -247,7 +247,13 @@ impl Popup {
     /// tentative word (MO-24). `width` is the live text's wrap width; the
     /// marks are placed from the same layout the live text uses.
     pub(crate) fn typo_marks(&self, text: Element<Msg>, width: f32) -> Element<Msg> {
-        if !self.look.on(CONFIDENCE) || self.shown.is_empty() {
+        self.typo_marks_for(text, &self.shown, width)
+    }
+
+    /// [`Popup::typo_marks`] for a live text that holds only `words`, such as
+    /// one of karaoke's lines.
+    pub(crate) fn typo_marks_for(&self, text: Element<Msg>, words: &[Word], width: f32) -> Element<Msg> {
+        if !self.look.on(CONFIDENCE) || words.is_empty() {
             return text;
         }
         let l = &self.look;
@@ -255,16 +261,16 @@ impl Popup {
         let seen = self.channels_sync(t);
         let reduced = self.channels_reduced();
         let style = l.text_style();
-        let joined = self.shown.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        let joined = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
         let laid = self.measure.layout(&joined, &style, Some(width));
-        let mut starts = Vec::with_capacity(self.shown.len());
+        let mut starts = Vec::with_capacity(words.len());
         let mut at = 0usize;
-        for w in &self.shown {
+        for w in words {
             starts.push(at);
             at += w.text.len() + 1;
         }
         let mut text = text;
-        for (i, w) in self.shown.iter().enumerate() {
+        for (i, w) in words.iter().enumerate() {
             let Some(seen) = seen.get(&w.id) else { continue };
             let closing = seen.stable_at.map(|a| t - a);
             if closing.is_some_and(|c| c > SEAM_CLOSE_SECS) {
