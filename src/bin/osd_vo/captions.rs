@@ -477,10 +477,10 @@ impl Popup {
                     .motion(Prop::Position, roll)
                     .motion(Prop::Opacity, roll)
                     .motion(Prop::Size, Motion::Snap)
-                    .presence(
-                        Transition::fade().offset(0.0, 10.0),
-                        Transition::fade().offset(0.0, -18.0),
-                    ),
+                    // A new row comes in through its words' own entry: a fade
+                    // and rise of the whole row put the newest words 10 px low
+                    // at 4 % ink, past the reading-line envelope (RD-09).
+                    .presence(Transition::NONE, Transition::fade().offset(0.0, -18.0)),
             );
             // Unsure words on this line get the underline.
             if live && !leaving {
