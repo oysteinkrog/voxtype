@@ -656,12 +656,31 @@ pub(crate) fn live(
         ..Options::default()
     };
     let spec = live_spec(cfg, &look);
+    // Warm up as the daemon does at start, so the moment shows what a
+    // dictation after the first shows: no pipeline built mid-moment.
+    let mut resident = vo::Resident::new();
+    let warm = Options::<Msg> {
+        fonts: fonts.clone(),
+        renderer_setup: Some(Arc::new(vo_3d::install)),
+        ..Options::default()
+    };
+    let (warm_look, warm_fonts) = (look.clone(), fonts.clone());
+    resident
+        .warm_up(&warm, move || warm_frames(warm_look, warm_fonts))
+        .map_err(|e| anyhow::anyhow!("live moment: {e}"))?;
+    // The moment's times start with the show, so start it once warm.
+    let waited = std::time::Instant::now();
+    while !resident.warm_up_done() && waited.elapsed() < Duration::from_secs(30) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let played = Played {
         name: m.name(),
         popup: Popup::scripted(look, &fonts),
         inputs,
     };
-    vo::run_overlay_with(played, spec, options).map_err(|e| anyhow::anyhow!("live moment: {e}"))
+    resident
+        .run(played, spec, options)
+        .map_err(|e| anyhow::anyhow!("live moment: {e}"))
 }
 
 /// A popup fed one moment's messages by timers (`--live-moment`).
