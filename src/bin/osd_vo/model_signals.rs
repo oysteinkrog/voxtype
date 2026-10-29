@@ -152,6 +152,20 @@ const FLICKER_INK: f32 = 0.2;
 const FLICKER_MAX: f32 = 0.7;
 const EDGE_BAR_PX: f32 = 2.0;
 
+/// The runner-up's text style, for text in `style`.
+fn twin_style(style: &TextStyle) -> TextStyle {
+    let mut small = *style;
+    small.size *= TWIN_SCALE;
+    small.line_height *= TWIN_SCALE;
+    small
+}
+
+/// How far above a word's baseline the runner-up's box starts: its
+/// baseline sits just above the word's ascenders.
+fn twin_lift(style: &TextStyle) -> f32 {
+    style.size * 0.95 + twin_style(style).line_height * 0.8
+}
+
 /// What the features keep between model steps.
 #[derive(Default)]
 pub(crate) struct State {
@@ -254,6 +268,21 @@ impl Popup {
         st.flickers.retain(|&f| t - f < FLICKER_SECS);
         st.last = words;
         st.last_committed = committed;
+    }
+
+    /// How far the runner-up of `twin-spelling` reaches above the first
+    /// line of text, for looks that clip the text at its top. 0 when the
+    /// feature is off.
+    pub(crate) fn twin_headroom(&self) -> f32 {
+        if !self.look.on(TWIN_SPELLING) {
+            return 0.0;
+        }
+        let style = self.look.text_style();
+        let laid = self.measure.layout("Ag", &style, None);
+        let Some(g) = laid.glyphs.first() else {
+            return 0.0;
+        };
+        (twin_lift(&style) - g.pos.y).max(0.0).ceil() + 1.0
     }
 
     fn signals_on(&self) -> bool {
@@ -476,9 +505,7 @@ impl Popup {
                 .filter(|age| (0.0..TWIN_HOLD + TWIN_FADE).contains(age))
         };
         let style = l.text_style();
-        let mut small = style;
-        small.size *= TWIN_SCALE;
-        small.line_height *= TWIN_SCALE;
+        let small = twin_style(&style);
         let joined = words
             .iter()
             .map(|w| w.text.as_str())
@@ -516,8 +543,7 @@ impl Popup {
                 .text_style(small)
                 .color(ink)
                 .opacity(TWIN_INK * fade);
-            // Its baseline sits just above the word's ascenders.
-            let y = first.pos.y - style.size * 0.95 - small.line_height * 0.8;
+            let y = first.pos.y - twin_lift(&style);
             out.push(kit::at(e, origin.0 + first.pos.x, origin.1 + y));
         }
         out

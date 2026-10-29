@@ -408,10 +408,14 @@ impl Popup {
         // and rising words on the last line are not cut; the negative margin
         // keeps the layout as it was.
         let below = TEXT_MARGIN_BOTTOM + STATUS_MARGIN_TOP - 4.0;
+        // It reaches above the text only as far as a runner-up of
+        // `twin-spelling` needs (0 when that is off).
+        let above = self.twin_headroom();
         Element::layer("textclip")
             .clip()
-            .margin_edges(0.0, 0.0, TEXT_MARGIN_BOTTOM - below, -w)
+            .margin_edges(-above, 0.0, TEXT_MARGIN_BOTTOM - below, -w)
             .layout(|s| {
+                s.padding.top = LengthPercentage::length(above);
                 s.padding.left = LengthPercentage::length(w);
                 s.padding.bottom = LengthPercentage::length(below);
             })
