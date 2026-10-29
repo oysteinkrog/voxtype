@@ -4,6 +4,7 @@
 
 use super::*;
 
+use vo::scene::glass::GlassShape;
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
 
@@ -279,4 +280,85 @@ pub(crate) fn detail_words(state: &str, detail: &str) -> Vec<Word> {
             text: w.to_string(),
         })
         .collect()
+}
+
+/// Turns on compositor blur behind a look's panel (EG-07): where the compositor
+/// can blur, the desktop shows blurred through the panel's translucent fill,
+/// inside `shape` in the panel's box. [`GlassShape::Rounded`] follows the
+/// panel's corner radius; a chamfered or notched look passes its own corners
+/// (`GlassShape::chamfer`, `GlassShape::Corners`). The region follows the
+/// outline to within one physical pixel, on a rotated or tilted layer too, and
+/// holds the panel only once it is half opaque. Where the compositor has no
+/// blur the panel draws its plain fill and the host logs "no compositor blur"
+/// once. Call it on the panel element, not the root: the root fills the whole
+/// surface.
+// No look calls it yet: each look adopts it in its own look or R2 bead.
+#[allow(dead_code)]
+pub(crate) fn frosted<M>(panel: Element<M>, shape: GlassShape) -> Element<M> {
+    panel.blur_behind(shape)
+}
+
+#[cfg(test)]
+mod frosted_tests {
+    use super::*;
+    use vo::scene::display::IRect;
+    use vo::scene::glass::blur_rects;
+    use vo::scene::scene::Scene;
+
+    /// The swiss popup's panel, frosted with `shape`, sampled at 2 s: its blur
+    /// region and the panel's box from the region's bounds.
+    fn swiss_region(shape: GlassShape) -> (Vec<IRect>, [f32; 4]) {
+        let cfg = OsdConfig {
+            theme: OsdTheme::Swiss,
+            width_px: 600,
+            ..OsdConfig::default()
+        };
+        let theme = PlasmaTheme::default();
+        let fonts = load_fonts(&theme).unwrap();
+        let look = Look::new(&cfg, &theme, String::new(), &fonts);
+        let popup = Popup::new(look, &fonts);
+        let mut scene: Scene<Msg> = Scene::new();
+        scene.set_viewport(0.0, Size::new(700.0, 400.0), 1.0);
+        scene.apply(
+            Element::column("root").child(frosted(popup.panel(), shape)),
+            0.0,
+        );
+        let rects = scene.sample(2.0).blur_region().rects;
+        assert!(!rects.is_empty(), "the frosted panel asks for blur");
+        let x0 = rects.iter().map(|r| r.x).min().unwrap();
+        let y0 = rects.iter().map(|r| r.y).min().unwrap();
+        let x1 = rects.iter().map(|r| r.x + r.w).max().unwrap();
+        let y1 = rects.iter().map(|r| r.y + r.h).max().unwrap();
+        (
+            rects,
+            [x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32],
+        )
+    }
+
+    #[test]
+    fn a_frosted_swiss_panel_blurs_its_rounded_rect() {
+        let (rects, rect) = swiss_region(GlassShape::Rounded);
+        assert_eq!(rect[..3], [0.0, 0.0, 600.0], "the panel's box: {rect:?}");
+        let mut want = Vec::new();
+        blur_rects(rect, RADIUS, &mut want);
+        assert_eq!(rects, want);
+    }
+
+    #[test]
+    fn a_frosted_swiss_panel_follows_a_chamfered_outline() {
+        let (rects, rect) = swiss_region(GlassShape::chamfer(12.0));
+        let (w, h) = (rect[2] as i32, rect[3] as i32);
+        assert!(rects.len() > 3, "{} rects", rects.len());
+        for r in &rects {
+            // Inside the octagon: a rect whose outer edge is `dy` from the
+            // panel's top or bottom is inset by the chamfer left there, less
+            // the one pixel the region may round out.
+            let dy = r.y.min(h - (r.y + r.h)).max(0);
+            let inset = (11 - dy).max(0);
+            assert!(
+                r.x >= inset && r.x + r.w <= w - inset,
+                "{r:?} leaves the octagon"
+            );
+        }
+    }
 }
