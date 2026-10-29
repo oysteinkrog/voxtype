@@ -26,6 +26,9 @@ const TICK_HZ: f64 = 60.0;
 /// even narrow words under the envelope's 5 % tracking change.
 const SPOKEN_INK: f32 = 0.72;
 const SPOKEN_LOOSE: f32 = 0.018;
+/// The same under the variable font (MO-81): its narrower instances make
+/// the same em a larger share of a word.
+const SPOKEN_LOOSE_FLEX: f32 = 0.013;
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -161,8 +164,13 @@ impl Popup {
         let at = ((global - start) / share.max(1e-3)).clamp(0.0, 1.0);
         let reduced = self.set_type_reduced();
         let light = self.look.background.r + self.look.background.g + self.look.background.b > 1.5;
+        let loose = if self.look.on(super::wild_motion::VARIABLE_BREATH) {
+            SPOKEN_LOOSE_FLEX
+        } else {
+            SPOKEN_LOOSE
+        };
         let mut pass = FinalPass::new(at)
-            .spoken(SPOKEN_INK, SPOKEN_LOOSE)
+            .spoken(SPOKEN_INK, loose)
             .line(if reduced { Color::TRANSPARENT } else { self.look.accent.fade(0.85) })
             .lift(if light { 0.0 } else { 0.25 })
             .bracket(self.look.accent.fade(0.6))
