@@ -30,7 +30,8 @@ use vo::scene::depth_stack::{DepthStack, Place, Sheet};
 use vo::scene::geom::Point;
 use vo::scene::emitter::LevelTrack;
 use vo::scene::lattice::{
-    anchors, Boundary, LatticeDrift, LatticeLook, LatticeWord, LiveStrand, Pluck, Quiet,
+    anchors, Boundary, LatticeDrift, LatticeLook, LatticeStyle, LatticeWord, LineGutter, LiveStrand,
+    Pluck, Quiet,
 };
 use vo_3d::{Letter, SculptLook, Sculpture};
 use vo_core::words::WordId;
@@ -57,6 +58,82 @@ const LEVEL_STEP: f32 = 0.04;
 const LEVEL_RATE: f32 = 14.0;
 /// Seconds of level history the lattice keeps.
 const LEVEL_KEEP: f64 = 2.0;
+/// How far a line's glyphs reach under the baseline and over it (ascenders),
+/// as a share of the font size, for the gutters between lines (LT-07).
+const DESCENT: f32 = 0.25;
+const ASCENT: f32 = 0.74;
+/// How much of its colour an older line's lattice keeps.
+const OLDER_FADE: f32 = 0.5;
+
+/// How a look runs the kinetic lattice under its wrapped transcript (LT-07):
+/// a preset in the look's two colours, at a scale, with the room under the
+/// newest line its strands may use.
+#[derive(Clone, Copy)]
+pub(crate) struct LatticeSet {
+    pub(crate) preset: LatticeStyle,
+    /// Strands, and the newest node and strands.
+    pub(crate) color: Color,
+    pub(crate) accent: Color,
+    /// Lengths and widths times this.
+    pub(crate) scale: f32,
+    /// The pause labels on the newest line, for presets that show them.
+    pub(crate) label: Option<TextStyle>,
+    /// Pixels under the newest line's box that its strands may use: the
+    /// gutter LT-09's exhale needs.
+    pub(crate) gutter: f32,
+    /// The lattice's opacity while it stays (a look dims its words on a
+    /// cancel); it fades to 0 as it leaves.
+    pub(crate) opacity: f32,
+}
+
+/// The gutters of one line of the lattice (LT-07), in its own box with the
+/// line's `baseline`: the newest line's strip runs from its descenders to
+/// `gutter` under its box and bows down only; an older line's is the gap
+/// between its descenders and the next line's ascenders.
+fn line_gutter(style: &TextStyle, baseline: f32, newest: bool, gutter: f32) -> LineGutter {
+    let descent = style.size * DESCENT;
+    let top = baseline + descent;
+    let height = if newest {
+        (style.line_height - top).max(0.0) + gutter
+    } else {
+        (style.line_height - style.size * (ASCENT + DESCENT)).max(0.0)
+    };
+    LineGutter { top, height, newest, descent }
+}
+
+/// `look` fitted to `g`: on an older line the drop lines and ticks stay in
+/// half the gutter; on the newest a label shows only when it fits under its
+/// drop line, which shortens to make room.
+fn fit_look(mut look: LatticeLook, g: &LineGutter) -> LatticeLook {
+    let half = (g.height * 0.5 - 1.0).max(0.0);
+    if !g.newest {
+        // An older line stays quiet: fainter, finer, no accent, so only the
+        // newest line's lattice reads as live.
+        look.color = look.color.fade(OLDER_FADE);
+        look.accent = look.color;
+        look.width = (look.width.0 * 0.7, look.width.1 * 0.7);
+        look.node_radius *= 0.7;
+        look.stem = look.stem.min(half);
+        look.tick = look.tick.min(half);
+        look.label = None;
+        return look;
+    }
+    let node = g.top + look.drop;
+    let room = g.top + g.height - node;
+    look.tick = look.tick.min((node - g.top).max(0.0));
+    if let Some(label) = look.label {
+        let stem = look.stem.min(room - label.line_height - 1.0);
+        if stem >= 2.0 {
+            look.stem = stem;
+        } else {
+            look.label = None;
+        }
+    }
+    if look.label.is_none() {
+        look.stem = look.stem.min(room.max(0.0));
+    }
+    look
+}
 
 /// What the wildcard studies keep between views.
 #[derive(Default)]
@@ -277,6 +354,93 @@ impl Popup {
                 .child(view),
             None => view,
         }
+    }
+
+    /// The words of `words` line by line as `style` wraps them at `wrap`,
+    /// as a live text of the same words lays them out.
+    pub(crate) fn wrap_lines(&self, words: &[Word], style: &TextStyle, wrap: f32) -> Vec<Vec<Word>> {
+        let text = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        let shaped = self.measure.layout(&text, style, Some(wrap));
+        let line_of = |gi: usize| shaped.lines.iter().position(|l| l.glyphs.contains(&gi));
+        let mut out: Vec<(usize, Vec<Word>)> = Vec::new();
+        let mut start = 0usize;
+        for w in words {
+            let range = start..start + w.text.len();
+            start = range.end + 1;
+            let line = shaped
+                .glyphs
+                .iter()
+                .position(|g| range.contains(&(g.cluster as usize)))
+                .and_then(line_of);
+            match (out.last_mut(), line) {
+                (Some((l, ws)), Some(n)) if *l == n => ws.push(w.clone()),
+                (Some((_, ws)), None) => ws.push(w.clone()),
+                (_, n) => out.push((n.unwrap_or(0), vec![w.clone()])),
+            }
+        }
+        out.into_iter().map(|(_, ws)| ws).collect()
+    }
+
+    /// LT-07: the kinetic lattice under a wrapped transcript of `words` set
+    /// in `style` at `wrap`, for a look with no lattice of its own (mission,
+    /// tron, swiss), as one layer laid from the text's top left: one lattice
+    /// per line, each in its gutter (`set`), labels on the newest only. While
+    /// the popup listens a live strand runs from the newest word to where the
+    /// next word will start. Older lines drift with `lattice-drift`. It fades
+    /// out while a cancel rewinds the words or the text is handed off.
+    /// `None` without words.
+    pub(crate) fn lattice_lines(
+        &self,
+        key: &str,
+        words: &[Word],
+        style: &TextStyle,
+        wrap: f32,
+        set: &LatticeSet,
+    ) -> Option<Element<Msg>> {
+        if words.is_empty() {
+            return None;
+        }
+        let lines = self.wrap_lines(words, style, wrap);
+        let lh = style.line_height;
+        let listening = self.files.recording && !self.files.transcribing && self.ending().is_none();
+        let box_w = wrap + 4.0 * style.size;
+        let mut layer = Element::layer(format!("{key}-lattice"))
+            .size(box_w, lines.len() as f32 * lh + set.gutter);
+        for (i, line) in lines.iter().enumerate() {
+            let newest = i + 1 == lines.len();
+            let text = line.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+            let shaped = self.measure.layout(&text, style, None);
+            let baseline = shaped.lines.first().map_or(style.size, |l| l.baseline);
+            let g = line_gutter(style, baseline, newest, set.gutter);
+            let label = set.label.filter(|_| newest);
+            let mut look = set.preset.look(set.color, set.accent, set.scale, label);
+            look.gutters = vec![g];
+            let look = fit_look(look, &g);
+            // The live strand ends a space past the line's ink, where the
+            // next word will start.
+            let caret = (newest && listening).then_some(shaped.size.w + 0.3 * style.size);
+            let h = if newest { lh + set.gutter } else { lh };
+            layer = layer.child(kit::at(
+                self.lattice_line(
+                    format!("{key}-{}", line[0].id),
+                    line,
+                    style,
+                    Size::new(box_w, h),
+                    &look,
+                    caret,
+                    (!newest).then_some(lh),
+                ),
+                0.0,
+                i as f32 * lh,
+            ));
+        }
+        // The lattice leaves with the words: a rewind or a handoff.
+        let leaving = self.rewinding() || self.delivered().is_some();
+        Some(match (leaving, self.wild_reduced()) {
+            (false, _) => layer.opacity(set.opacity),
+            (true, true) => layer.opacity(0.0).motion(Prop::Opacity, Motion::Snap),
+            (true, false) => layer.opacity(0.0).motion(Prop::Opacity, Spring::critical_to_98(0.3)),
+        })
     }
 
     /// Whether older lines' lattices drift: `lattice-drift` is on, the
@@ -515,6 +679,46 @@ mod tests {
         assert_eq!(l.exhale(8.3, false), 1.3);
         let back = LatticeLook { quiet: lattice_quiet(&look, &words, 8.3), ..look };
         assert_eq!(back.exhale(8.3, false), 1.0, "snaps back when the voice returns");
+    }
+
+    #[test]
+    fn the_newest_gutter_reaches_under_the_box_and_older_ones_sit_between_lines() {
+        let style = TextStyle::new(0, 24.0, 30.0);
+        let newest = line_gutter(&style, 22.0, true, 10.0);
+        assert!(newest.newest);
+        assert_eq!(newest.top, 22.0 + 6.0);
+        assert_eq!(newest.top + newest.height, 30.0 + 10.0, "ends `gutter` under the box");
+        let older = line_gutter(&style, 22.0, false, 10.0);
+        assert!(!older.newest);
+        // From the descenders to the next line's ascenders.
+        assert!((older.top + older.height - (30.0 + 22.0 - 24.0 * ASCENT)).abs() < 1e-4);
+        // Lines set tighter than their type leave no gutter, not a negative one.
+        let tight = line_gutter(&TextStyle::new(0, 38.4, 30.0), 30.0, false, 10.0);
+        assert_eq!(tight.height, 0.0);
+    }
+
+    #[test]
+    fn a_look_fits_its_gutter() {
+        let label = Some(TextStyle::new(0, 8.0, 10.0));
+        let look = LatticeStyle::Blueprint.look(Color::WHITE, Color::hex(0xff7a1a, 1.0), 1.0, label);
+        // Room for the label under a shortened drop line.
+        let g = LineGutter { top: 30.0, height: 30.0, newest: true, descent: 6.0 };
+        let fit = fit_look(look.clone(), &g);
+        assert!(fit.label.is_some());
+        let label_bottom = g.top + fit.drop + fit.stem + 1.0 + 10.0;
+        assert!(label_bottom <= g.top + g.height + 1.0, "label ends at {label_bottom}");
+        // No room: no label, and the drop line stays in the gutter.
+        let g = LineGutter { height: 12.0, ..g };
+        let fit = fit_look(look.clone(), &g);
+        assert_eq!(fit.label, None);
+        assert!(g.top + fit.drop + fit.stem <= g.top + g.height);
+        // An older line: fainter, no accent, no label, its marks in half the gutter.
+        let g = LineGutter { top: 30.0, height: 8.0, newest: false, descent: 6.0 };
+        let fit = fit_look(look.clone(), &g);
+        assert_eq!(fit.label, None);
+        assert_eq!(fit.accent, fit.color);
+        assert!(fit.color.a < look.color.a);
+        assert!(fit.stem <= 3.0 && fit.tick <= 3.0);
     }
 
     #[test]

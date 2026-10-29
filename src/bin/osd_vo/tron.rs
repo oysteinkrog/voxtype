@@ -595,6 +595,7 @@ impl Popup {
             .presence(Transition::fade().opacity(1.0), exit)
             .child(canvas)
             .child(self.tron_badge(&g, &status))
+            .children(self.tron_lattice(&g))
             .child(self.tron_text(&g))
             .children(self.tron_rewind(&g))
             .children(self.joint_ticks_element(
@@ -682,6 +683,27 @@ impl Popup {
             .presence(Transition::fade(), Transition::fade().scale(0.6)),
             if stopped { side * 0.7 } else { side },
         ))
+    }
+
+    /// LT-07: with `kinetic-lattice`, the lattice in the light style under
+    /// the words, its newest gutter the gap down to the rule.
+    fn tron_lattice(&self, g: &Geo) -> Option<Element<Msg>> {
+        if !self.look.on(wild_space::KINETIC_LATTICE) {
+            return None;
+        }
+        let k = g.k;
+        let set = wild_space::LatticeSet {
+            preset: vo::scene::lattice::LatticeStyle::Light,
+            color: hex(DETAIL, 0.5),
+            accent: hex(BRIGHT, 1.0),
+            scale: 0.9 * k,
+            label: Some(TextStyle::new(fonts(&self.look).status, 9.0 * k, 11.0 * k)),
+            gutter: (RULE_GAP - 4.0) * k,
+            opacity: if self.tron.ended_at.is_some() { 0.35 } else { 1.0 },
+        };
+        let style = self.look.text_style();
+        let e = self.lattice_lines("tron", &self.shown, &style, self.look.text_width(), &set)?;
+        Some(at(e, TEXT_X * k, TEXT_TOP * k))
     }
 
     /// The transcript: words fade up out of a blur.

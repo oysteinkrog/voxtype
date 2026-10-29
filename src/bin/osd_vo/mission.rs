@@ -20,6 +20,7 @@ use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
+use vo::scene::lattice::LatticeStyle;
 use vo::scene::roll::digit_roll;
 
 /// Colours sampled from the mock-up.
@@ -111,7 +112,22 @@ fn panel_h(lines: u32) -> f32 {
 }
 
 pub(crate) fn surface(look: &Look) -> Size {
-    Size::new(panel_w(look) + 24.0, (panel_h(MAX_LINES) + 24.0).ceil())
+    Size::new(
+        panel_w(look) + 24.0,
+        (panel_h(MAX_LINES) + lattice_room(look) + 24.0).ceil(),
+    )
+}
+
+/// LT-07: with `kinetic-lattice` the transcript tile grows by this under the
+/// newest line, the gutter its strands use; without it, 0.
+const LATTICE_GUTTER: f32 = 22.0;
+
+fn lattice_room(look: &Look) -> f32 {
+    if look.on(wild_space::KINETIC_LATTICE) {
+        LATTICE_GUTTER
+    } else {
+        0.0
+    }
 }
 
 /// GPU memory in use and in all, in GB, read at most every three seconds
@@ -699,7 +715,7 @@ impl Popup {
     fn mission_transcript(&self, mode: Mode, inner: f32, accent: Color) -> Element<Msg> {
         let l = &self.look;
         let f = fonts(&l.fonts);
-        let h = transcript_h(self.lines.min(MAX_LINES));
+        let h = transcript_h(self.lines.min(MAX_LINES)) + lattice_room(l);
         let dim = if mode == Mode::Cancelled { 0.45 } else { 1.0 };
         let words = Element::live_text("words", &self.shown[..self.room()])
             .line_motion(&self.look)
@@ -811,6 +827,23 @@ impl Popup {
                 pace_x,
                 LABEL_Y - 2.0,
             ));
+        }
+        // LT-07: the kinetic lattice in blueprint style under the words.
+        if l.on(wild_space::KINETIC_LATTICE) {
+            let set = wild_space::LatticeSet {
+                preset: LatticeStyle::Blueprint,
+                color: hex(LABEL).fade(0.55),
+                accent,
+                scale: 1.0,
+                label: Some(TextStyle::new(f.caps, 9.0, 11.0).tracking(0.6)),
+                gutter: LATTICE_GUTTER,
+                opacity: dim,
+            };
+            let style = l.text_style();
+            tile = tile.children(
+                self.lattice_lines("mission", &self.shown[..self.room()], &style, text_width(l), &set)
+                    .map(|e| at(e, TEXT_X, TEXT_TOP)),
+            );
         }
         tile.children(self.limit_line(
             Point::new(TEXT_X, TEXT_TOP),

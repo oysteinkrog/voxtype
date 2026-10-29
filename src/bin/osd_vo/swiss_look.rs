@@ -159,6 +159,7 @@ impl Popup {
         );
         let text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
+            .children(self.swiss_lattice())
             .child(words)
             .children(self.line_marks(
                 l.text_style(),
@@ -175,6 +176,28 @@ impl Popup {
             l.accent,
         );
         self.text_area(text)
+    }
+
+    /// LT-07: with `kinetic-lattice` on the swiss look, the lattice in the
+    /// hairline style under the words. Its newest gutter reaches as far
+    /// under the text as the text area's clip does.
+    fn swiss_lattice(&self) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !matches!(l.theme, OsdTheme::Swiss | OsdTheme::Default) || !l.on(wild_space::KINETIC_LATTICE) {
+            return None;
+        }
+        let set = wild_space::LatticeSet {
+            preset: vo::scene::lattice::LatticeStyle::Hairline,
+            color: l.inactive.fade(0.7),
+            accent: l.accent,
+            scale: 0.7,
+            label: None,
+            gutter: TEXT_MARGIN_BOTTOM + STATUS_MARGIN_TOP - 4.0 - 1.0,
+            opacity: 1.0,
+        };
+        let style = l.text_style();
+        self.lattice_lines("swiss", &self.shown, &style, l.text_width(), &set)
+            .map(|e| kit::at(e, 0.0, 0.0))
     }
 
     /// The text area. For the looks whose [`Look::margin_ellipsis`] is on,
