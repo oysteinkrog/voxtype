@@ -207,16 +207,35 @@ impl Popup {
                 Vec::new()
             } else if l.on(super::wild_space::DEPTH_STACK) {
                 // Under a depth stack only the reading line lies on the
-                // panel; the older lines sit on sheets in front of it.
-                // The stack keeps its reading line in the box's last row.
-                let last = laid.lines.last().map_or(0..0, |line| line.glyphs.clone());
-                let dy = (self.lines as f32 - laid.lines.len() as f32) * l.text_line;
-                laid.glyphs[last]
+                // panel, in the box's last row; the older lines sit on
+                // sheets in front of it.
+                let line = self.stack_reading_line();
+                let text = line
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let laid = self.measure.layout(&text, &style, Some(width));
+                let mut starts = Vec::with_capacity(line.len());
+                let mut at = 0usize;
+                for w in line {
+                    starts.push(at);
+                    at += w.text.len() + 1;
+                }
+                let dy = self.lines.saturating_sub(1) as f32 * l.text_line;
+                laid.glyphs
                     .iter()
                     .map(|g| {
-                        let mut fx = glyph(g, 0.0);
-                        fx.pos.y += dy;
-                        fx
+                        let font = match &breath {
+                            Some((base, fonts)) if g.font == *base => starts
+                                .iter()
+                                .rposition(|&s| s <= g.cluster as usize)
+                                .and_then(|i| fonts.iter().find(|f| f.0 == line[i].id))
+                                .map_or(g.font, |f| f.1),
+                            _ => g.font,
+                        };
+                        let pos = Point::new(g.pos.x, g.pos.y + dy);
+                        FxGlyph::new(font, g.glyph, pos, style.size, l.foreground, 0.0)
                     })
                     .collect()
             } else {

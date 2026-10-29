@@ -110,7 +110,7 @@ pub struct Extra {
     /// Words the engine was unsure of, with when it became sure (`None`
     /// while still unsure), for the `type` look's wavy underlines.
     pub doubtful: std::collections::HashMap<vo_core::words::WordId, Option<f64>>,
-    /// MO-86: the shown words line by line for the depth stack, and the
+    /// MO-86: the transcript line by line for the depth stack, and the
     /// words they were broken from.
     stack_lines: Vec<Vec<Word>>,
     stack_words: Vec<Word>,
@@ -295,6 +295,9 @@ impl EmitterSource for VoiceRing {
 const DOT_PITCH: f32 = 2.2;
 /// Columns between the word count and the clock.
 const DOT_GAP: i32 = 14;
+/// Words the depth stack lays out at most, from a start that only moves in
+/// steps of half this, so its line breaks stay put while words arrive.
+const STACK_WORDS: usize = 120;
 /// Ids per dot text in the shared field.
 const DOT_SPAN: u32 = 4096;
 /// Size of the dot check in cells.
@@ -453,17 +456,35 @@ impl Popup {
         self.sync_stack(t);
     }
 
-    /// MO-86: breaks the shown words into lines for the depth stack when
-    /// they change, and holds the line that leaves the reading place flat a
+    /// The depth stack's reading line (MO-86): the light of MO-84 shines
+    /// through it alone.
+    pub(crate) fn stack_reading_line(&self) -> &[Word] {
+        self.extra.stack_lines.last().map_or(&[], |l| l.as_slice())
+    }
+
+    /// MO-86: breaks the transcript into lines for the depth stack when
+    /// it changes, and holds the line that leaves the reading place flat a
     /// line pitch above the new one before it moves back, as jarvis does.
     fn sync_stack(&mut self, t: f64) {
         if !self.look.on(wild_space::DEPTH_STACK) {
             return;
         }
-        if self.shown != self.extra.stack_words {
+        // From the whole transcript rather than the shown words, so a top
+        // line cut off with an ellipsis breaks no line below it again.
+        if self.model.words() != self.extra.stack_words.as_slice() {
+            let words = self.model.words().to_vec();
+            let step = STACK_WORDS / 2;
+            let start = words.len().saturating_sub(STACK_WORDS).div_ceil(step) * step;
             let style = self.look.text_style();
-            self.extra.stack_lines = self.wrap_lines(&self.shown, &style, self.look.text_width());
-            self.extra.stack_words = self.shown.clone();
+            let mut lines = self.wrap_lines(
+                &words[start.min(words.len())..],
+                &style,
+                self.look.text_width(),
+            );
+            let keep = lines.len().saturating_sub(swiss::MAX_LINES as usize);
+            lines.drain(..keep);
+            self.extra.stack_lines = lines;
+            self.extra.stack_words = words;
         }
         let lines = &self.extra.stack_lines;
         let first = |l: &Vec<Word>| l.first().map(|w| w.id);
@@ -972,16 +993,12 @@ impl Popup {
             })
             .collect();
         let content = |ws: &&Vec<Word>, d: usize, p: &Place| {
-            let live = if d == 0 {
-                self.strip_words(ws, phase)
-            } else {
-                Element::live_text("words", ws.as_slice())
-                    .text_style(l.text_style())
-                    .color(c(ICE))
-                    .text_halo(c(TEAL).fade(0.22), 4.0)
-                    .word_enter(Transition::NONE)
-                    .wild_motion(self)
-            };
+            // Every line keeps the reading line's dress, particles too, so
+            // nothing about a line changes but its place as it moves back.
+            // A word lands in place at full ink: the sheet of a new line
+            // already rises 3 px from 70 % ink, and the flat text's rise and
+            // fade on top breaks the reading line's envelope (as on jarvis).
+            let live = self.strip_words(ws, phase).word_enter(Transition::NONE);
             // The reading line keeps its halo's soft motion; older lines
             // blur on the sheets' springs.
             let live = if d == 0 {
