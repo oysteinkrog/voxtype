@@ -34,6 +34,11 @@
 //! "runner_up": " the"}` when the live model gives it (see [`WordDetail`]);
 //! it is left out otherwise.
 //!
+//! While the user makes a spoken correction, the doc also carries
+//! `"correction": {"hearing": "FrankenTerm", "pending": false, "note": null}`
+//! ([`crate::osd::correction::CorrectionView`]) and its words already have
+//! the corrections made; it is left out of dictations without one.
+//!
 //! The live model's own signals go to a second file, `preview-signals.json`
 //! ([`ModelSignals`]), written once per streaming step. It never changes
 //! `preview.json`, so the text and its words are the same with or without
@@ -99,6 +104,10 @@ pub struct LiveDoc {
     pub target: Option<LiveTarget>,
     #[serde(default)]
     pub meta: Option<LiveMeta>,
+    /// Spoken corrections ([`crate::osd::correction`]); left out when the
+    /// dictation has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction: Option<crate::osd::correction::CorrectionView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -344,8 +353,16 @@ struct Live {
     timed: Option<Vec<TimedWord>>,
     /// The words' details, beside `timed`.
     details: Option<Vec<Option<WordDetail>>>,
+    /// The newest preview as the live model gave it, before corrections.
+    raw: Option<RawPreview>,
     signals: ModelSignals,
 }
+
+type RawPreview = (
+    String,
+    Option<Vec<TimedWord>>,
+    Option<Vec<Option<WordDetail>>>,
+);
 
 static LIVE: Mutex<Live> = Mutex::new(Live {
     doc: LiveDoc {
@@ -356,10 +373,12 @@ static LIVE: Mutex<Live> = Mutex::new(Live {
         status: None,
         target: None,
         meta: None,
+        correction: None,
     },
     session: 0,
     timed: None,
     details: None,
+    raw: None,
     signals: ModelSignals {
         version: SIGNALS_VERSION,
         step: 0,
@@ -422,8 +441,8 @@ pub fn preview(text: &str) {
     with_live(|live| {
         let timed = live.timed.take();
         let details = live.details.take();
-        live.doc
-            .apply_preview_with_details(text, timed.as_deref(), details.as_deref());
+        live.raw = Some((text.to_string(), timed, details));
+        render(live, true);
         first = (live.doc.rev == 1).then_some(live.session);
     });
     if let Some(session) = first {
@@ -433,6 +452,55 @@ pub fn preview(text: &str) {
             }
         });
     }
+}
+
+/// Puts the newest preview in the doc with the spoken corrections made.
+/// `fresh`: it is a new preview, so corrections waiting for it are placed.
+/// Without timed words the text goes in as it is.
+fn render(live: &mut Live, fresh: bool) {
+    use crate::osd::correction;
+    let Some((text, timed, details)) = live.raw.clone() else {
+        live.doc.correction = correction::view();
+        return;
+    };
+    let matching = timed
+        .as_ref()
+        .filter(|t| t.iter().map(|w| w.text.as_str()).eq(text.split_whitespace()));
+    if let Some(words) = matching {
+        let n = words.len();
+        let details = details.clone().filter(|d| d.len() == n);
+        let raw = words
+            .iter()
+            .cloned()
+            .zip(details.unwrap_or_else(|| vec![None; n]))
+            .collect();
+        let shown = if fresh {
+            correction::overlay(raw)
+        } else {
+            correction::current()
+        };
+        if correction::active() {
+            let (words, details): (Vec<_>, Vec<_>) = shown.into_iter().unzip();
+            let text = words
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            live.doc
+                .apply_preview_with_details(&text, Some(&words), Some(&details));
+            live.doc.correction = correction::view();
+            return;
+        }
+    }
+    live.doc
+        .apply_preview_with_details(&text, timed.as_deref(), details.as_deref());
+    live.doc.correction = None;
+}
+
+/// A spoken correction started, ended or was dropped: show the text and
+/// the correction afresh.
+pub fn refresh_correction() {
+    with_live(|live| render(live, false));
 }
 
 pub fn status(phase: Phase, fraction: Option<f64>, text: &str) {
@@ -486,6 +554,8 @@ pub fn clear() {
     };
     live.timed = None;
     live.details = None;
+    live.raw = None;
+    crate::osd::correction::clear();
     live.signals = ModelSignals {
         version: SIGNALS_VERSION,
         ..ModelSignals::default()
