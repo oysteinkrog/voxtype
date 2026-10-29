@@ -28,6 +28,11 @@
 //!   the final pass. It replaces the type look's on/off doubt line, which
 //!   fires only under 60 % confidence, where it is on.
 //!
+//! - `breathing-stop`: when the tail expects a full stop, it sits after the
+//!   text at its probability's ink (60 % at certainty, so it never reads
+//!   as typed), fading to each new probability over 0.3 s and pulling back when the model drops it. The
+//!   ghost words then leave their own full stop out.
+//!
 //! Nothing shows once the recording stops, so the signals end with the
 //! dictation and nothing moves at room tone. Under reduced motion the ghosts
 //! swap at once (no fades) and the floor jumps between steps: the ink tiers
@@ -45,9 +50,17 @@ pub(crate) const THREE_TIER: &str = "three-tier-ink";
 pub(crate) const FLOOR: &str = "listening-floor";
 pub(crate) const COMMIT_CURSOR: &str = "commit-cursor";
 pub(crate) const GRADED_DOUBT: &str = "graded-doubt";
+pub(crate) const BREATHING_STOP: &str = "breathing-stop";
 
 /// Every model signal feature.
-const ALL: [&str; 5] = [GHOST_TAIL, THREE_TIER, FLOOR, COMMIT_CURSOR, GRADED_DOUBT];
+const ALL: [&str; 6] = [
+    GHOST_TAIL,
+    THREE_TIER,
+    FLOOR,
+    COMMIT_CURSOR,
+    GRADED_DOUBT,
+    BREATHING_STOP,
+];
 
 /// Ink of a tail word with `ghost-tail` alone.
 const GHOST_INK: f32 = 0.45;
@@ -74,6 +87,10 @@ const DOUBT_FULL: f32 = 1.0;
 /// The underline's weight at the lightest and heaviest, in px.
 const DOUBT_MIN_PX: f32 = 0.6;
 const DOUBT_MAX_PX: f32 = 2.4;
+/// The breathing full stop: its ink at probability 1, and how long it
+/// takes to reach a new probability.
+const STOP_INK: f32 = 0.6;
+const STOP_FADE_SECS: f64 = 0.3;
 
 /// One word of the tail.
 #[derive(Debug, PartialEq)]
@@ -123,6 +140,9 @@ struct TailLayout {
     tail_end: (f32, f32),
     /// The text's line height and how many lines it has room for.
     line_h: f32,
+    /// With `breathing-stop`: the likeliest full stop in the tail, which is
+    /// then left out of the tail words.
+    stop: Option<f32>,
 }
 
 impl Popup {
@@ -171,6 +191,9 @@ impl Popup {
             for e in self.commit_cursor(laid.as_ref(), origin) {
                 text = text.child(e);
             }
+            if let Some(e) = self.breathing_stop(laid.as_ref(), origin, ink) {
+                text = text.child(e);
+            }
         }
         text
     }
@@ -191,7 +214,14 @@ impl Popup {
             .collect::<Vec<_>>()
             .join(" ");
         let committed_len = full.len();
-        let tail = tail_words(&s.tail, !words.is_empty());
+        let is_stop = |t: &TailToken| t.text.trim() == ".";
+        let (stops, kept): (Vec<TailToken>, Vec<TailToken>) = if self.look.on(BREATHING_STOP) {
+            s.tail.iter().cloned().partition(is_stop)
+        } else {
+            (Vec::new(), s.tail.clone())
+        };
+        let stop = stops.iter().map(|t| t.conf).reduce(f32::max);
+        let tail = tail_words(&kept, !words.is_empty());
         let mut ranges = Vec::with_capacity(tail.len());
         for w in &tail {
             if !w.joins && !full.is_empty() {
@@ -236,6 +266,7 @@ impl Popup {
             committed_end: end_of(committed_len),
             tail_end,
             line_h,
+            stop,
         })
     }
 
@@ -390,6 +421,42 @@ impl Popup {
             out.push(kit::at(e, origin.0 + x0 + CURSOR_GAP, origin.1 + t0 + inset + h));
         }
         out
+    }
+
+    /// `breathing-stop`: the full stop the tail expects, after the text at
+    /// its probability's ink. It fades in over 0.3 s and pulls back when the
+    /// model drops it.
+    fn breathing_stop(
+        &self,
+        laid: Option<&TailLayout>,
+        origin: (f32, f32),
+        ink: Color,
+    ) -> Option<Element<Msg>> {
+        let l = &self.look;
+        let laid = laid.filter(|_| l.on(BREATHING_STOP))?;
+        if self.files.preview.trim_end().ends_with('.') {
+            return None;
+        }
+        // After the ghost words when they show, else after the committed text.
+        let (x, top) = if l.on(GHOST_TAIL) || l.on(THREE_TIER) {
+            laid.tail_end
+        } else {
+            laid.committed_end
+        };
+        let spring = if self.signals_reduced() {
+            Spring::SNAP
+        } else {
+            Spring::critical_to_98(STOP_FADE_SECS)
+        };
+        let alpha = laid.stop.unwrap_or(0.0) * STOP_INK;
+        let e = Element::label("breath-stop", ".")
+            .text_style(l.text_style())
+            .color(ink)
+            .opacity(alpha)
+            .motion(Prop::Opacity, spring)
+            .motion(Prop::Position, Motion::Snap)
+            .presence(Transition::fade(), Transition::fade());
+        Some(kit::at(e, origin.0 + x, origin.1 + top))
     }
 
     fn floor(&self, s: &ModelSignals, width: f32, origin: (f32, f32)) -> Vec<Element<Msg>> {
