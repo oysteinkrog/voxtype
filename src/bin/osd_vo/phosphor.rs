@@ -943,7 +943,9 @@ impl Popup {
             .motion(Prop::Offset, Spring::critical_to_98(0.1))
             .motion(Prop::TextFx, Spring::critical_to_98(0.16));
         // The beam writes new and changed letters itself; without it, as
-        // under reduced motion, words type in with a wipe.
+        // under reduced motion, new words type in with a wipe. A changed
+        // word stays as it is: it is already being read, and a wipe from 1
+        // would hide it (RD-09).
         let beam = self.phosphor_beam(g);
         words = if beam.is_some() {
             words
@@ -952,7 +954,7 @@ impl Popup {
         } else {
             words
                 .word_enter(Transition::NONE.wipe(1.0))
-                .word_change(Transition::NONE.wipe(1.0))
+                .word_change(Transition::NONE)
         };
         if self.phos.ended_at.is_some() {
             words = words.opacity(0.35);
@@ -1041,7 +1043,9 @@ impl Popup {
             .split_whitespace()
             .enumerate()
             .map(|(i, w)| Word {
-                id: (state.len() as u32) << 8 | i as u32,
+                // Above the transcript's word ids (bit 24 set), so the status
+                // row is never taken for the reading line (RD-09).
+                id: 1 << 24 | (state.len() as u32) << 8 | i as u32,
                 text: w.to_string(),
             })
             .collect();
