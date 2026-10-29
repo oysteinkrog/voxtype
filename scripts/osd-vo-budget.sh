@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # CPU, frame rate and GPU budget per vo popup look (RD-02).
 #
-#   scripts/osd-vo-budget.sh [BINARY]
+#   scripts/osd-vo-budget.sh [BINARY]   (default target/measure, the optimised
+#   build: cargo build --profile measure --features osd-vo --bin voxtype-osd-vo)
 #
 # For each look in OsdTheme::VO_LOOKS (read from src/osd/config.rs), with its
 # default motion and the default [osd] config (an empty config file, so the
@@ -51,7 +52,7 @@
 set -uo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-bin=${1:-$root/target/debug/voxtype-osd-vo}
+bin=${1:-$root/target/measure/voxtype-osd-vo}
 out=${VOXTYPE_BUDGET_DIR:-/var/tmp/claude/vo-budget}
 # Its own folder: the framework's budget.sh uses the same parent.
 work=$out/looks
