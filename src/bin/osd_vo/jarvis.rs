@@ -24,7 +24,6 @@ use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::Point;
 use vo::scene::path::{icons, make, Contour, Morph, Outline, StrokeStyle};
-use vo::scene::roll::digit_roll;
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
 use vo::scene::{Bands, Spectrum, Ticks};
@@ -94,6 +93,63 @@ fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
     })
 }
 
+/// `vo::scene::roll::digit_roll` (counting up) with each digit's ten figures
+/// in one label of ten lines instead of ten labels, as mission does. It
+/// draws the same, and the view, rebuilt every frame on room tone, has two
+/// nodes per digit instead of twelve.
+fn digit_roll(
+    key: &str,
+    text: &str,
+    style: TextStyle,
+    color: Color,
+    spring: Spring,
+) -> Element<Msg> {
+    const FIGURES: &str = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9";
+    let lh = style.line_height;
+    let n = text.chars().count();
+    let cells: Vec<Element<Msg>> = text
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            // Keyed by place from the right, and a column by the text to its
+            // left, so a carry rolls a new column in as in `digit_roll`.
+            let place = n - 1 - i;
+            match c.to_digit(10) {
+                Some(d) => {
+                    let prefix: String = text.chars().take(i).collect();
+                    let figures = Element::label(format!("{key}-c{place}-{prefix}"), FIGURES)
+                        .text_style(style)
+                        .color(color)
+                        .height(10.0 * lh)
+                        .shrink(0.0)
+                        .offset(0.0, -(d as f32) * lh)
+                        .motion(Prop::Offset, spring)
+                        .presence(
+                            Transition::NONE.offset(0.0, lh),
+                            Transition::NONE
+                                .offset(0.0, -(d as f32 + 1.0) * lh)
+                                .opacity(0.0),
+                        )
+                        .motion(Prop::Opacity, Spring::SNAP);
+                    Element::layer(format!("{key}-d{place}"))
+                        .height(lh)
+                        .align_items(AlignItems::FLEX_START)
+                        .fade_edges(0.0, 0.2 * lh, 0.0, 0.2 * lh)
+                        .child(figures)
+                }
+                None if c.is_whitespace() => Element::row(format!("{key}-s{place}"))
+                    .width(0.26 * style.size)
+                    .height(lh),
+                None => Element::label(format!("{key}-s{place}"), c.to_string())
+                    .text_style(style)
+                    .color(color)
+                    .height(lh),
+            }
+        })
+        .collect();
+    Element::row(key.to_string()).children(cells)
+}
+
 /// Fonts for the transcript, the captions and the status.
 #[derive(Clone, Copy)]
 struct Fonts {
@@ -161,6 +217,13 @@ pub struct Extra {
     words: Vec<Word>,
     /// The newest lines of the transcript, each with its width.
     lines: Vec<(Vec<Word>, f32)>,
+    /// For each of `lines`, each word's id and the middle of the word from
+    /// the line's left end. Shaped once when the lines change, so the ring's
+    /// eye (MO-62) costs no text shaping per view.
+    centres: Vec<Vec<(vo_core::words::WordId, f32)>>,
+    /// Widths of the pill's texts by text, font and size, so a view (one a
+    /// frame on room tone) shapes none of them again.
+    widths: std::sync::Mutex<Vec<(String, u32, u32, f32)>>,
 }
 
 /// Words laid out at most, from a start that only moves in steps of half
@@ -197,7 +260,11 @@ impl Eye {
             return a + (b - a) * f.clamp(0.0, 1.0);
         }
         if self.reduced || t <= self.at {
-            return if self.reduced || t > self.at { self.to } else { self.from };
+            return if self.reduced || t > self.at {
+                self.to
+            } else {
+                self.from
+            };
         }
         let (y, _) = Spring::critical_to_98(EYE_SETTLE).eval(1.0, 0.0, t - self.at);
         self.to + (self.from - self.to) * y as f32
@@ -616,6 +683,7 @@ impl Popup {
             let mut lines = self.jarvis_lines(&words[start.min(words.len())..]);
             let keep = lines.len().saturating_sub(swiss::MAX_LINES as usize);
             lines.drain(..keep);
+            self.jarvis.centres = lines.iter().map(|(w, _)| self.jarvis_centres(w)).collect();
             self.jarvis.lines = lines;
             self.jarvis.words = words;
         }
@@ -828,7 +896,10 @@ impl Popup {
         }
         let to = deg(newest);
         let from = words.len().checked_sub(2).map_or(to, |i| deg(words[i].1));
-        let at = self.heard.word(newest_id).map_or(f64::NEG_INFINITY, |h| h.born);
+        let at = self
+            .heard
+            .word(newest_id)
+            .map_or(f64::NEG_INFINITY, |h| h.born);
         Some(Eye {
             from,
             to,
@@ -844,21 +915,39 @@ impl Popup {
         let style = self.look.text_style();
         let rows = self.lines.max(1) as usize;
         let skip = self.jarvis.lines.len().saturating_sub(rows);
-        let width = |text: &str| self.measure.layout(text, &style, None).size.w;
         let mut out = Vec::new();
-        for (i, (words, line_w)) in self.jarvis.lines.iter().skip(skip).enumerate() {
+        let lines = self
+            .jarvis
+            .lines
+            .iter()
+            .zip(&self.jarvis.centres)
+            .skip(skip);
+        for (i, ((_, line_w), centres)) in lines.enumerate() {
             let x0 = MARGIN + (g.w - line_w) / 2.0;
             let y = g.frame_top + FRAME_PAD_TOP * g.k + (i as f32 + 0.5) * style.line_height;
-            let mut before = String::new();
-            for w in words {
-                let left = if before.is_empty() { 0.0 } else { width(&format!("{before} ")) };
-                let x = x0 + left + width(&w.text) / 2.0;
-                out.push((w.id, Point::new(x, y)));
-                if !before.is_empty() {
-                    before.push(' ');
-                }
-                before.push_str(&w.text);
+            out.extend(centres.iter().map(|&(id, x)| (id, Point::new(x0 + x, y))));
+        }
+        out
+    }
+
+    /// Each word's id and the middle of the word from the left end of a
+    /// line of `words`.
+    fn jarvis_centres(&self, words: &[Word]) -> Vec<(vo_core::words::WordId, f32)> {
+        let style = self.look.text_style();
+        let width = |text: &str| self.measure.layout(text, &style, None).size.w;
+        let mut before = String::new();
+        let mut out = Vec::with_capacity(words.len());
+        for w in words {
+            let left = if before.is_empty() {
+                0.0
+            } else {
+                width(&format!("{before} "))
+            };
+            out.push((w.id, left + width(&w.text) / 2.0));
+            if !before.is_empty() {
+                before.push(' ');
             }
+            before.push_str(&w.text);
         }
         out
     }
@@ -1010,7 +1099,7 @@ impl Popup {
                         ),
                     );
                 let figure = digit_roll(
-                    format!("value-{caption}"),
+                    &format!("value-{caption}"),
                     &value,
                     TextStyle::new(f.status, 21.0 * k, 26.0 * k),
                     hex(CYAN, 1.0),
@@ -1106,6 +1195,7 @@ impl Popup {
                 k,
                 hex(TEXT, 1.0),
                 hex(CYAN, 1.0),
+                &|words| self.typo_words(words),
             ));
         }
         let stacked = if self.look.on(wild_space::DEPTH_STACK) {
@@ -1113,14 +1203,22 @@ impl Popup {
         } else {
             skip
         };
-        for (words, width) in self.jarvis.lines.iter().skip(stacked) {
+        let newest = self.jarvis.lines.len().saturating_sub(1);
+        for (i, (words, width)) in self.jarvis.lines.iter().enumerate().skip(stacked) {
             let key = words.first().map_or(0, |w| w.id);
             let w = width.ceil() + 2.0;
+            let live = Element::live_text("words", words);
+            // MO-13 (`onset-ink`) on the newest line.
+            let live = if i == newest {
+                self.typo_words(live)
+            } else {
+                live
+            };
             let line = Element::layer(format!("line{key}"))
                 .size(w, style.line_height)
                 .presence(Transition::fade(), Transition::fade())
                 .child(
-                    at(Element::live_text("words", words), 0.0, 0.0)
+                    at(live, 0.0, 0.0)
                         .text_style(style)
                         .revision_motion(revision::motion(&self.look))
                         .word_revise(revision::revise(&self.look))
@@ -1182,12 +1280,7 @@ impl Popup {
         };
         let state_style = TextStyle::new(f.status, 20.0 * k, 26.0 * k);
         let detail_style = TextStyle::new(f.text, 17.0 * k, 26.0 * k);
-        let state_w = self
-            .measure
-            .layout(&state, &state_style, None)
-            .size
-            .w
-            .ceil();
+        let state_w = self.jarvis_text_w(&state, &state_style).ceil();
         let label = Element::layer("state")
             .clip()
             .size(state_w + 2.0, 26.0 * k)
@@ -1217,12 +1310,7 @@ impl Popup {
                 text: w.to_string(),
             })
             .collect();
-        let detail_w = self
-            .measure
-            .layout(&detail, &detail_style, None)
-            .size
-            .w
-            .ceil();
+        let detail_w = self.jarvis_text_w(&detail, &detail_style).ceil();
         let detail_el = Element::live_text(format!("detail-{state}"), &words)
             .text_style(detail_style)
             .color(hex(CYAN, 0.78))
@@ -1249,6 +1337,24 @@ impl Popup {
             .width(g.w + 2.0 * MARGIN)
             .align_items(AlignItems::CENTER)
             .child(row)
+    }
+
+    /// The width of `text` set in `style` on one line, shaped once.
+    fn jarvis_text_w(&self, text: &str, style: &TextStyle) -> f32 {
+        let mut cache = self.jarvis.widths.lock().unwrap();
+        let size = style.size.to_bits();
+        if let Some(w) = cache
+            .iter()
+            .find(|(t, f, s, _)| t == text && *f == style.font && *s == size)
+        {
+            return w.3;
+        }
+        let w = self.measure.layout(text, style, None).size.w;
+        if cache.len() >= 32 {
+            cache.remove(0);
+        }
+        cache.push((text.to_string(), style.font, size, w));
+        w
     }
 
     /// A radio dot while listening, a hollow ring while loading, finishing
@@ -1316,7 +1422,14 @@ mod tests {
         assert!(mid > 60.0 && mid < 100.0, "{mid}");
         assert!((eye.angle(1.0 + EYE_SETTLE) - 100.0).abs() < 1.0);
         // Reduced motion: straight to the newest word.
-        assert_eq!(Eye { reduced: true, ..eye }.angle(1.01), 100.0);
+        assert_eq!(
+            Eye {
+                reduced: true,
+                ..eye
+            }
+            .angle(1.01),
+            100.0
+        );
         // The final pass sweeps from the first word to the last.
         let sweep = Eye {
             sweep: Some((50.0, 130.0, 0.5)),

@@ -478,7 +478,9 @@ impl Popup {
 
     /// The depth stack of `lines` (oldest first, each with its width) in a
     /// box `w` wide and `rows` lines tall: the newest line flat at the
-    /// bottom, the older ones receding on glass sheets above it.
+    /// bottom, the older ones receding on glass sheets above it. `newest`
+    /// wraps the newest line's live text, for the look's typographic
+    /// channels (`Popup::typo_words`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn depth_stack_lines(
         &self,
@@ -489,6 +491,7 @@ impl Popup {
         k: f32,
         text: Color,
         glow: Color,
+        newest: &dyn Fn(Element<Msg>) -> Element<Msg>,
     ) -> Element<Msg> {
         let reduced = self.wild_reduced();
         let line_h = style.line_height;
@@ -516,16 +519,17 @@ impl Popup {
         let content = |line: &&(Vec<Word>, f32), d: usize, p: &Place| {
             let (words, width) = *line;
             let lw = width.ceil() + 2.0;
+            let live = Element::live_text("words", words)
+                .text_style(style)
+                .color(text)
+                .text_halo(glow.fade(0.45), 7.0 * k)
+                .text_blur(p.blur)
+                .motion(Prop::TextFx, stack.motion(d, reduced))
+                .size(lw, line_h)
+                .word_enter(Transition::fade().opacity(0.7).offset(0.0, 3.0))
+                .word_change(Transition::fade().opacity(0.7));
             kit::at(
-                Element::live_text("words", words)
-                    .text_style(style)
-                    .color(text)
-                    .text_halo(glow.fade(0.45), 7.0 * k)
-                    .text_blur(p.blur)
-                    .motion(Prop::TextFx, stack.motion(d, reduced))
-                    .size(lw, line_h)
-                    .word_enter(Transition::fade().opacity(0.7).offset(0.0, 3.0))
-                    .word_change(Transition::fade().opacity(0.7)),
+                if d == 0 { newest(live) } else { live },
                 ((sheet.w - lw) / 2.0).max(0.0),
                 4.0 * k,
             )
