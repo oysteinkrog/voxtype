@@ -26,6 +26,7 @@ fn main() -> Result<(), Error> {
     // Before the man-page early return: the version must be stamped for
     // every build, not just release builds.
     expose_build_version();
+    register_station_exhibits()?;
 
     // Only generate man pages for release builds or when explicitly requested
     let profile = env::var("PROFILE").unwrap_or_default();
@@ -83,6 +84,49 @@ fn main() -> Result<(), Error> {
     expose_cuda_build_major();
 
     Ok(())
+}
+
+/// Registers the motion station's exhibits: one `mo_*.rs` file each in
+/// `src/bin/osd_vo/station/`. Writes `$OUT_DIR/station_exhibits.rs` with a
+/// module per file and `EXHIBITS`, their `exhibit` functions in file-name
+/// order, for `station/mod.rs` to include. Found here rather than listed by
+/// hand so adding an exhibit touches no shared file.
+fn register_station_exhibits() -> Result<(), Error> {
+    let dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into()))
+        .join("src/bin/osd_vo/station");
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| {
+                    n.starts_with("mo_")
+                        && n.ends_with(".rs")
+                        && n[..n.len() - 3]
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    let mut out = String::new();
+    for n in &names {
+        let path = dir.join(n);
+        out.push_str(&format!(
+            "#[path = {:?}]\nmod {};\n",
+            path.display().to_string(),
+            &n[..n.len() - 3]
+        ));
+    }
+    out.push_str("pub(crate) const EXHIBITS: &[fn() -> Exhibit] = &[\n");
+    for n in &names {
+        out.push_str(&format!("    {}::exhibit,\n", &n[..n.len() - 3]));
+    }
+    out.push_str("];\n");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap_or_else(|_| "target".to_string()));
+    fs::write(out_dir.join("station_exhibits.rs"), out)
 }
 
 /// Make untagged builds distinguishable in `--version` output.

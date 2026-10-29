@@ -28,11 +28,15 @@ use gtk4::{Application, ApplicationWindow, DrawingArea};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use voxtype::audio::levels::{AudioFrame, FRAME_HZ};
-use voxtype::config::{ActivationMode, Config as VoxtypeConfig, HotkeyConfig};
-use voxtype::osd::config::{OsdConfig, OsdPosition, OsdTheme};
+use voxtype::config::{Config as VoxtypeConfig, HotkeyConfig};
+use voxtype::osd::config::{OsdAnchor, OsdConfig, OsdPosition, OsdTheme};
 use voxtype::osd::gtk_env;
 use voxtype::osd::ipc::{resolve_socket_path, run_ipc_loop, FrameRing};
+use voxtype::osd::outcome::Outcome;
 use voxtype::osd::plasma::{self, PlasmaTheme};
+use voxtype::osd::swiss::{
+    self, smooth_levels, stop_hint, tick_level, wave_hues, wave_stops, StatusLine,
+};
 use voxtype::osd::theme::ThemeWatcher;
 use voxtype::osd::visual::{
     peak_meter_fraction, project_envelope, Color, MeterZone, Palette, PeakHold,
@@ -98,14 +102,15 @@ const RENDER_TICK_MS: u32 = 16;
 /// hiding the surface. Matches the BRIEF's "Idle: surface destroyed" rule.
 const IDLE_TIMEOUT_SECS: f32 = 0.15;
 
-/// True while the daemon's state file says a recording is running. Audio
-/// frames can stall for more than IDLE_TIMEOUT_SECS on a loaded machine,
-/// and the surface must not hide and come back then.
-fn daemon_recording() -> bool {
+/// The daemon's state file: "recording", "transcribing", "idle" and so on.
+/// Audio frames can stall for more than IDLE_TIMEOUT_SECS on a loaded
+/// machine, and the surface must not hide and come back then.
+fn daemon_state() -> String {
     let base = std::env::var("XDG_RUNTIME_DIR")
         .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
     std::fs::read_to_string(std::path::Path::new(&base).join("voxtype/state"))
-        .is_ok_and(|s| matches!(s.trim(), "recording" | "streaming"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// True while the daemon has marked the in-flight recording as OSD-suppressed
@@ -170,6 +175,18 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_MARGIN")]
     margin_px: Option<u32>,
 
+    /// What the centered positions place: "top" puts the panel's top edge
+    /// at `top_margin` and grows it downward; "reading-line" puts the newest
+    /// text line at `--reading-line` and grows the panel upward, so the line
+    /// you read stays put.
+    #[arg(long, env = "VOXTYPE_OSD_ANCHOR", value_parser = parse_anchor)]
+    anchor: Option<OsdAnchor>,
+
+    /// Height of the newest text line as a fraction of the screen, with
+    /// `--anchor reading-line`. 0.5 is the middle.
+    #[arg(long, env = "VOXTYPE_OSD_READING_LINE")]
+    reading_line: Option<f32>,
+
     /// Visual gain applied to audio samples before drawing the waveform.
     /// Higher = waveform fills more of the vertical for quiet inputs.
     /// Reduce for hot mics (e.g. 4.0); raise for quiet sources (e.g. 14.0).
@@ -183,8 +200,14 @@ struct Args {
     theme: Option<OsdTheme>,
 }
 
+fn parse_anchor(s: &str) -> Result<OsdAnchor, String> {
+    OsdAnchor::from_name(s)
+        .ok_or_else(|| format!("unknown anchor '{s}' (expected top or reading-line)"))
+}
+
 fn parse_theme(s: &str) -> Result<OsdTheme, String> {
-    OsdTheme::parse_str(s).ok_or_else(|| format!("unknown theme '{s}' (expected default or swiss)"))
+    OsdTheme::parse_str(s)
+        .ok_or_else(|| format!("unknown theme '{s}' (expected default, swiss, showcase or type)"))
 }
 
 /// State shared between the IPC worker and the GTK redraw timer.
@@ -270,6 +293,12 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(t) = args.theme {
         osd_cfg.theme = t;
+    }
+    if let Some(a) = args.anchor {
+        osd_cfg.anchor = a;
+    }
+    if let Some(r) = args.reading_line {
+        osd_cfg.reading_line = r;
     }
     // peak_decay_db_per_sec has a clap default value, so this always
     // overrides whatever the file said. That's intentional: if the user
@@ -455,8 +484,26 @@ fn build_window(
         cfg.position,
         OsdPosition::BottomCenter | OsdPosition::TopCenter
     );
+    // With anchor = "reading-line": the line's height as a fraction of the
+    // monitor, and the monitor's height.
+    let mut reading_line = None;
 
-    if centered {
+    if centered && cfg.anchor == OsdAnchor::ReadingLine {
+        // Anchored to the bottom edge, the window grows upward. The tick
+        // sets the margin once it can measure how far the newest line sits
+        // above the window's bottom edge; this first guess centres the
+        // window on the line.
+        let monitor_height = focused_monitor_height_px().unwrap_or(1080);
+        let fraction = cfg.reading_line.clamp(0.0, 1.0);
+        let bottom_px =
+            ((1.0 - fraction) * monitor_height as f32) as i32 - cfg.height_px as i32 / 2;
+        window.set_anchor(Edge::Top, false);
+        window.set_anchor(Edge::Bottom, true);
+        window.set_anchor(Edge::Left, false);
+        window.set_anchor(Edge::Right, false);
+        window.set_margin(Edge::Bottom, bottom_px.max(0));
+        reading_line = Some((fraction, monitor_height));
+    } else if centered {
         // Resolve monitor height to translate the fractional offset into
         // pixels. Falls back to a conservative 1080 if the display can't be
         // queried (extremely rare on Wayland-only systems where layer-shell
@@ -545,12 +592,33 @@ fn build_window(
             window.set_child(Some(&column));
             redraw_every_frame(&drawing_area);
             Chrome::Default {
+                drawing_area,
                 status_box,
                 status_bar,
                 status_label,
             }
         }
-        OsdTheme::Swiss => {
+        // Only the vo frontend draws showcase; here it gets the swiss look.
+        OsdTheme::Swiss
+        | OsdTheme::Showcase
+        | OsdTheme::Type
+        | OsdTheme::Amber
+        | OsdTheme::Radial
+        | OsdTheme::Tron
+        | OsdTheme::Phosphor
+        | OsdTheme::Mission
+        | OsdTheme::Palette
+        | OsdTheme::Dotmatrix
+        | OsdTheme::Swissfi
+        | OsdTheme::Scope
+        | OsdTheme::Captions
+        | OsdTheme::Karaoke
+        | OsdTheme::Island
+        | OsdTheme::Jarvis
+        | OsdTheme::Particles
+        | OsdTheme::Synthwave
+        | OsdTheme::Mecha
+        | OsdTheme::Cyberpunk => {
             let theme = plasma::load();
             install_swiss_css(&theme, cfg.opacity, cfg.preview_font_pt);
             let view = SwissView::build(cfg, &theme, stop_hint, &preview, state.clone());
@@ -583,9 +651,17 @@ fn build_window(
     // audio frames have stopped, but the OSD stays up to show it.
     let finishing = Cell::new(false);
     let recording = Cell::new(false);
+    // Stopped, with the final text still to come.
+    let transcribing = Cell::new(false);
+    // A recording ran since the window appeared, and whether its final text
+    // was made: in the moment between the daemon going idle and the window
+    // hiding, the status line says "Done" or "Stopped", not "Listening".
+    let was_recording = Cell::new(false);
+    let finished = Cell::new(false);
     // When the surface last appeared: the start of the recording.
     let shown_at = Cell::new(Instant::now());
     let default_size = (cfg.width_px as i32, cfg.height_px as i32);
+    let mut watch = voxtype::osd::watch::RuntimeWatch::new(voxtype::config::Config::runtime_dir());
 
     glib::timeout_add_local(Duration::from_millis(RENDER_TICK_MS as u64), move || {
         let cur_seq = redraw_state.last_seq.lock().map(|s| *s).unwrap_or(0);
@@ -594,9 +670,11 @@ fn build_window(
             .lock()
             .map(|t| *t)
             .unwrap_or_else(|_| Instant::now() - Duration::from_secs(3600));
-        // About 10 Hz is plenty for text; the files live on tmpfs.
+        // The files live on tmpfs: read them when inotify reports a change,
+        // and at about 10 Hz in case it does not.
         ticks.set(ticks.get().wrapping_add(1));
-        let poll = ticks.get().is_multiple_of(6);
+        let changed = watch.changed();
+        let poll = changed || ticks.get().is_multiple_of(6);
         if poll {
             // A status older than 30 s is left over from a crash; ignore it.
             let fresh = std::fs::metadata(&status_path)
@@ -605,16 +683,27 @@ fn build_window(
                 .and_then(|t| t.elapsed().ok())
                 .is_some_and(|age| age < Duration::from_secs(30));
             finishing.set(fresh);
-            recording.set(daemon_recording());
+            let state = daemon_state();
+            recording.set(matches!(state.as_str(), "recording" | "streaming"));
+            transcribing.set(state == "transcribing");
+            was_recording.set(was_recording.get() || recording.get());
+        }
+        // Before the idle check, so the window's first mapping at startup
+        // already sets the margin for the first recording.
+        if let (Some((fraction, monitor_height)), true) = (reading_line, visible.get()) {
+            place_reading_line(&redraw_window, &chrome, &preview, fraction, monitor_height);
         }
         let stalled = last_at.elapsed().as_secs_f32() > IDLE_TIMEOUT_SECS;
-        let idle = (stalled && !finishing.get() && !recording.get()) || osd_suppressed();
+        let idle = (stalled && !finishing.get() && !recording.get() && !transcribing.get())
+            || osd_suppressed();
 
         if idle {
             if visible.get() {
                 tracing::info!("hiding (idle for {:.2}s)", last_at.elapsed().as_secs_f32());
                 redraw_window.set_visible(false);
                 visible.set(false);
+                was_recording.set(false);
+                finished.set(false);
                 preview.set_text("");
                 match &chrome {
                     Chrome::Default { status_box, .. } => {
@@ -639,7 +728,9 @@ fn build_window(
             shown_at.set(Instant::now());
         }
 
-        if poll {
+        // Also on the tick that shows the window, so it opens with the
+        // current text.
+        if poll || !visible.get() {
             let full = std::fs::read_to_string(&preview_path).unwrap_or_default();
             // The daemon empties the file when the recording ends; keep the
             // last words on screen until the window hides.
@@ -660,6 +751,7 @@ fn build_window(
                     status_box,
                     status_bar,
                     status_label,
+                    ..
                 } => {
                     match fraction {
                         Some(f) => status_bar.set_fraction(f.clamp(0.0, 1.0)),
@@ -676,7 +768,30 @@ fn build_window(
                     // stops there too.
                     let elapsed = last_at.saturating_duration_since(shown_at.get());
                     let words = full.split_whitespace().count();
-                    view.update(elapsed, words, fraction, label);
+                    finished.set(
+                        finished.get()
+                            || transcribing.get()
+                            || StatusLine::new(label, "").finishing,
+                    );
+                    // Stopped, before the daemon writes how far the final
+                    // text is.
+                    let label = if label.is_empty() && transcribing.get() {
+                        "Finishing"
+                    } else {
+                        label
+                    };
+                    let busy = recording.get() || transcribing.get() || !label.is_empty();
+                    let ended = (was_recording.get() && !busy).then(|| {
+                        match voxtype::osd::outcome::read() {
+                            Some(Outcome::Done) => "Done",
+                            Some(Outcome::Cancelled) => "Cancelled",
+                            Some(Outcome::Empty) => "No speech",
+                            Some(Outcome::Failed) => "Failed",
+                            None if finished.get() => "Done",
+                            None => "Stopped",
+                        }
+                    });
+                    view.update(elapsed, words, fraction, label, ended);
                 }
             }
         }
@@ -1019,6 +1134,7 @@ fn redraw_every_frame(area: &DrawingArea) {
 /// The widgets around the preview text that differ between themes.
 enum Chrome {
     Default {
+        drawing_area: DrawingArea,
         status_box: gtk4::Box,
         status_bar: gtk4::ProgressBar,
         status_label: gtk4::Label,
@@ -1026,18 +1142,59 @@ enum Chrome {
     Swiss(SwissView),
 }
 
-/// Height of the `swiss` waveform strip.
-const SWISS_WAVE_HEIGHT_PX: i32 = 40;
+impl Chrome {
+    /// The centre of the newest text line, in pixels below the window's top
+    /// edge, once GTK has laid the window out.
+    fn newest_line_y(&self, preview: &gtk4::Label, window: &ApplicationWindow) -> Option<f32> {
+        let line = preview.create_pango_layout(Some("Ag")).pixel_size().1 as f32;
+        // The text's bottom line, or where the first line will appear.
+        let (widget, first): (gtk4::Widget, bool) = match self {
+            Chrome::Swiss(view) => (view.text_area.clone().upcast(), false),
+            Chrome::Default { drawing_area, .. } if !preview.is_visible() => {
+                (drawing_area.clone().upcast(), true)
+            }
+            Chrome::Default { .. } => (preview.clone().upcast(), false),
+        };
+        let b = widget.compute_bounds(window)?;
+        if b.height() <= 0.0 {
+            return None;
+        }
+        let bottom = b.y() + b.height();
+        Some(if first {
+            bottom + line / 2.0
+        } else {
+            bottom - line / 2.0
+        })
+    }
+}
 
-/// Transcript size in the `swiss` theme when `preview_font_pt` is unset.
-const SWISS_TEXT_PT: f32 = 18.0;
-
-/// Most transcript lines in the `swiss` panel. The text area grows a line at
-/// a time up to this, and never shrinks during one dictation.
-const SWISS_MAX_LINES: i32 = 5;
-
-/// Left plus right padding and border of `.swiss-panel`.
-const SWISS_PANEL_INSET_PX: i32 = 46;
+/// Keep the newest text line at `fraction` of the monitor's height. The
+/// window is anchored to the bottom edge, so as it grows the line stays.
+/// Kept on the monitor when the window is taller than the room below.
+fn place_reading_line(
+    window: &ApplicationWindow,
+    chrome: &Chrome,
+    preview: &gtk4::Label,
+    fraction: f32,
+    monitor_height: i32,
+) {
+    let height = window.height();
+    if height <= 0 {
+        return;
+    }
+    let Some(y) = chrome.newest_line_y(preview, window) else {
+        return;
+    };
+    let below = height as f32 - y;
+    let margin = ((1.0 - fraction) * monitor_height as f32 - below).round() as i32;
+    let margin = margin.min(monitor_height - height).max(0);
+    if window.margin(Edge::Bottom) != margin {
+        tracing::info!(
+            "reading line: bottom margin {margin} (line {below:.1} px above the window's bottom)"
+        );
+        window.set_margin(Edge::Bottom, margin);
+    }
+}
 
 /// The `swiss` panel: a label row with elapsed time and word count, a
 /// filled gradient waveform, the transcript, and a status line with a thin
@@ -1101,7 +1258,7 @@ impl SwissView {
         header.append(&words_box);
 
         let wave = DrawingArea::new();
-        wave.set_content_height(SWISS_WAVE_HEIGHT_PX);
+        wave.set_content_height(swiss::WAVE_HEIGHT_PX);
         wave.set_margin_top(10);
         wave.set_margin_bottom(10);
         let colors = (theme.inactive, theme.accent, theme.border);
@@ -1168,11 +1325,7 @@ impl SwissView {
         panel.append(&bottom_rule);
         panel.append(&status);
 
-        let listening_detail = if stop_hint.is_empty() {
-            String::new()
-        } else {
-            format!("  ·  {stop_hint}")
-        };
+        let listening_detail = stop_hint.to_string();
         let view = Self {
             panel,
             time,
@@ -1187,7 +1340,7 @@ impl SwissView {
             preview: preview.clone(),
             text_area,
             lines: Cell::new(0),
-            text_width_px: cfg.width_px as i32 - SWISS_PANEL_INSET_PX,
+            text_width_px: cfg.width_px as i32 - swiss::PANEL_INSET_PX,
         };
         view.reset();
         view
@@ -1203,7 +1356,7 @@ impl SwissView {
         self.reserve_lines(1);
     }
 
-    /// Show the end of the transcript in at most SWISS_MAX_LINES lines.
+    /// Show the end of the transcript in at most swiss::MAX_LINES lines.
     /// Empty text keeps what is on screen.
     fn show_text(&self, full: &str) {
         if full.is_empty() {
@@ -1230,11 +1383,11 @@ impl SwissView {
         if start > 0 {
             text = format!("…{text}");
         }
-        while line_count(&text) > SWISS_MAX_LINES && start + 1 < words.len() {
+        while line_count(&text) > swiss::MAX_LINES && start + 1 < words.len() {
             start += 1;
             text = format!("…{}", words[start..].join(" "));
         }
-        let lines = line_count(&text).min(SWISS_MAX_LINES);
+        let lines = line_count(&text).min(swiss::MAX_LINES);
         self.reserve_lines(lines);
         set_text_if_changed(&self.preview, &text);
     }
@@ -1254,10 +1407,19 @@ impl SwissView {
         self.text_area.set_size_request(-1, height);
     }
 
-    fn update(&self, elapsed: Duration, words: usize, fraction: Option<f64>, status: &str) {
+    /// `ended` is "Done" or "Stopped" once the daemon is idle and the window
+    /// is about to hide.
+    fn update(
+        &self,
+        elapsed: Duration,
+        words: usize,
+        fraction: Option<f64>,
+        status: &str,
+        ended: Option<&str>,
+    ) {
         // The silence pump keeps frames coming while finishing; the clock
         // stops at the end of the recording.
-        if status.is_empty() || status.starts_with("Loading") {
+        if ended.is_none() && (status.is_empty() || status.starts_with("Loading")) {
             let secs = elapsed.as_secs();
             set_text_if_changed(&self.time, &format!("{:02}:{:02}", secs / 60, secs % 60));
         }
@@ -1266,26 +1428,36 @@ impl SwissView {
             set_text_if_changed(&self.words, &words.to_string());
         }
         self.fraction.set(fraction.map(|f| f.clamp(0.0, 1.0)));
-        self.show_status(status);
+        match ended {
+            // The waveform stays grey and the progress bar goes.
+            Some(state) => self.show_line(
+                &StatusLine {
+                    state: state.into(),
+                    detail: String::new(),
+                    loading: false,
+                    finishing: true,
+                },
+                false,
+            ),
+            None => self.show_status(status),
+        }
     }
 
     /// `status` is the daemon's line such as "Finishing: 4 s of audio
     /// left", or empty while recording.
     fn show_status(&self, status: &str) {
-        let (state, detail) = if status.is_empty() {
-            ("Listening".to_string(), self.listening_detail.clone())
-        } else {
-            match status.split_once(": ") {
-                Some((head, rest)) => (head.to_string(), format!("  ·  {rest}")),
-                None => (status.to_string(), String::new()),
-            }
-        };
-        set_text_if_changed(&self.state_label, &state);
-        set_text_if_changed(&self.detail, &detail);
+        self.show_line(
+            &StatusLine::new(status, &self.listening_detail),
+            !status.is_empty(),
+        );
+    }
+
+    fn show_line(&self, line: &StatusLine, progress: bool) {
+        set_text_if_changed(&self.state_label, &line.state);
+        set_text_if_changed(&self.detail, &line.detail);
         // "Loading: live text model" comes while still recording.
-        let loading = status.starts_with("Loading");
-        let finishing = !status.is_empty() && !loading;
-        self.progress.set_visible(!status.is_empty());
+        let finishing = line.finishing;
+        self.progress.set_visible(progress);
         self.live.set(!finishing);
         if finishing {
             self.dot.add_css_class("finishing");
@@ -1342,7 +1514,7 @@ fn install_swiss_css(theme: &PlasmaTheme, opacity: f32, font_pt: Option<f32>) {
         Some(f) => format!("\"{f}\", monospace"),
         None => "monospace".to_string(),
     };
-    let text_pt = font_pt.unwrap_or(SWISS_TEXT_PT);
+    let text_pt = font_pt.unwrap_or(swiss::TEXT_PT);
     let css = format!(
         "window {{ background: transparent; }}\n\
          .swiss-panel {{ background-color: {bg}; border: 1px solid {border}; border-radius: 3px; \
@@ -1405,19 +1577,7 @@ fn draw_swiss_wave(
         .iter()
         .map(|f| tick_level(f.max.max(-f.min) as f64, gain))
         .collect();
-    let window = |v: &[f64], i: usize, r: usize| (i.saturating_sub(r), (i + r).min(v.len() - 1));
-    let peak: Vec<f64> = (0..raw.len())
-        .map(|i| {
-            let (lo, hi) = window(&raw, i, 2);
-            raw[lo..=hi].iter().fold(0.0_f64, |a, b| a.max(*b))
-        })
-        .collect();
-    let levels: Vec<f64> = (0..peak.len())
-        .map(|i| {
-            let (lo, hi) = window(&peak, i, 1);
-            peak[lo..=hi].iter().sum::<f64>() / (hi - lo + 1) as f64
-        })
-        .collect();
+    let levels = smooth_levels(&raw);
     let points: Vec<(f64, f64)> = levels
         .iter()
         .enumerate()
@@ -1447,94 +1607,16 @@ fn draw_swiss_wave(
     cr.close_path();
 
     let (left, center, right_c) = if live {
-        (
-            shift_hue(loud, -40.0, 0.12),
-            lighten(loud, 0.12),
-            shift_hue(loud, 45.0, 0.12),
-        )
+        wave_hues(loud)
     } else {
         (quiet, quiet, quiet)
     };
     let grad = cairo::LinearGradient::new(0.0, 0.0, w, 0.0);
-    let stop = |pos: f64, c: Color, a: f64| {
-        grad.add_color_stop_rgba(pos, c.r as f64, c.g as f64, c.b as f64, a)
-    };
-    stop(0.0, left, 0.0);
-    stop(0.2, left, 0.95);
-    stop(0.6, center, 1.0);
-    stop(1.0, right_c, 1.0);
+    for (pos, c, a) in wave_stops(left, center, right_c) {
+        grad.add_color_stop_rgba(pos as f64, c.r as f64, c.g as f64, c.b as f64, a as f64);
+    }
     cr.set_source(&grad).ok();
     cr.fill().ok();
-}
-
-/// Mix `c` toward white by `amount` (0..1).
-fn lighten(c: Color, amount: f32) -> Color {
-    Color::rgb(
-        c.r + (1.0 - c.r) * amount,
-        c.g + (1.0 - c.g) * amount,
-        c.b + (1.0 - c.b) * amount,
-    )
-}
-
-/// Rotate the hue of `c` by `degrees` and lighten it, keeping saturation.
-fn shift_hue(c: Color, degrees: f32, amount: f32) -> Color {
-    let (r, g, b) = (c.r, c.g, c.b);
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
-    let d = max - min;
-    if d <= f32::EPSILON {
-        return lighten(c, amount);
-    }
-    let s = if l > 0.5 {
-        d / (2.0 - max - min)
-    } else {
-        d / (max + min)
-    };
-    let mut hue = if max == r {
-        (g - b) / d + if g < b { 6.0 } else { 0.0 }
-    } else if max == g {
-        (b - r) / d + 2.0
-    } else {
-        (r - g) / d + 4.0
-    } * 60.0;
-    hue = (hue + degrees).rem_euclid(360.0);
-    let q = if l < 0.5 {
-        l * (1.0 + s)
-    } else {
-        l + s - l * s
-    };
-    let p = 2.0 * l - q;
-    let channel = |t: f32| {
-        let t = t.rem_euclid(1.0);
-        if t < 1.0 / 6.0 {
-            p + (q - p) * 6.0 * t
-        } else if t < 0.5 {
-            q
-        } else if t < 2.0 / 3.0 {
-            p + (q - p) * (2.0 / 3.0 - t) * 6.0
-        } else {
-            p
-        }
-    };
-    let h = hue / 360.0;
-    lighten(
-        Color::rgb(channel(h + 1.0 / 3.0), channel(h), channel(h - 1.0 / 3.0)),
-        amount,
-    )
-}
-
-/// Tick height, 0.0..=1.0, from a sample peak. Uses a -60..0 dBFS scale
-/// raised to 1.5, so speech fills the strip and room noise stays near the line.
-/// `waveform_gain` scales relative to its default of 10.
-fn tick_level(amp: f64, gain: f64) -> f64 {
-    let amp = amp * gain / 10.0;
-    if amp <= 0.0 {
-        return 0.0;
-    }
-    let dbfs = 20.0 * amp.log10();
-    let level = peak_meter_fraction(dbfs as f32, METER_FLOOR_DBFS) as f64;
-    level.powf(1.5)
 }
 
 /// A 1 px progress line. With no fraction (the model is still loading) a
@@ -1569,85 +1651,4 @@ fn draw_hairline_progress(
 
 fn set_source(cr: &Context, c: Color, alpha: f64) {
     cr.set_source_rgba(c.r as f64, c.g as f64, c.b as f64, alpha);
-}
-
-/// "tap Right Ctrl to stop" from `[hotkey]`, or empty when the hotkey is
-/// off (compositor bindings call `voxtype record` instead).
-fn stop_hint(hotkey: &HotkeyConfig) -> String {
-    if !hotkey.enabled {
-        return String::new();
-    }
-    let key = hotkey
-        .modifiers
-        .iter()
-        .chain(std::iter::once(&hotkey.key))
-        .map(|k| key_label(k))
-        .collect::<Vec<_>>()
-        .join("+");
-    match hotkey.mode {
-        ActivationMode::PushToTalk => format!("release {key} to stop"),
-        ActivationMode::Toggle if hotkey.double_tap => format!("double tap {key} to stop"),
-        ActivationMode::Toggle => format!("tap {key} to stop"),
-    }
-}
-
-/// "RIGHTCTRL" -> "Right Ctrl", "KEY_SCROLLLOCK" -> "Scrolllock".
-fn key_label(name: &str) -> String {
-    let upper = name.trim().to_ascii_uppercase();
-    let upper = upper.strip_prefix("KEY_").unwrap_or(&upper);
-    let (side, rest) = match (upper.strip_prefix("RIGHT"), upper.strip_prefix("LEFT")) {
-        (Some(r), _) if !r.is_empty() => ("Right ", r),
-        (_, Some(r)) if !r.is_empty() => ("Left ", r),
-        _ => ("", upper),
-    };
-    let rest = match rest {
-        "CTRL" | "CONTROL" => "Ctrl".to_string(),
-        "META" | "SUPER" => "Super".to_string(),
-        other => {
-            let mut chars = other.chars();
-            chars
-                .next()
-                .map(|c| c.to_string() + &chars.as_str().to_ascii_lowercase())
-                .unwrap_or_default()
-        }
-    };
-    format!("{side}{rest}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn key_labels_read_like_keycaps() {
-        assert_eq!(key_label("RIGHTCTRL"), "Right Ctrl");
-        assert_eq!(key_label("KEY_LEFTALT"), "Left Alt");
-        assert_eq!(key_label("SCROLLLOCK"), "Scrolllock");
-        assert_eq!(key_label("RIGHT"), "Right");
-        assert_eq!(key_label("leftmeta"), "Left Super");
-    }
-
-    #[test]
-    fn stop_hint_follows_mode() {
-        let mut hk = HotkeyConfig {
-            key: "RIGHTCTRL".into(),
-            ..HotkeyConfig::default()
-        };
-        hk.mode = ActivationMode::PushToTalk;
-        assert_eq!(stop_hint(&hk), "release Right Ctrl to stop");
-        hk.mode = ActivationMode::Toggle;
-        assert_eq!(stop_hint(&hk), "tap Right Ctrl to stop");
-        hk.double_tap = true;
-        assert_eq!(stop_hint(&hk), "double tap Right Ctrl to stop");
-        hk.enabled = false;
-        assert_eq!(stop_hint(&hk), "");
-    }
-
-    #[test]
-    fn tick_level_maps_speech_high_and_silence_low() {
-        assert_eq!(tick_level(0.0, 10.0), 0.0);
-        assert!(tick_level(0.001, 10.0) < 0.05);
-        assert!(tick_level(0.3, 10.0) > 0.6);
-        assert!(tick_level(0.03, 20.0) > tick_level(0.03, 10.0));
-    }
 }

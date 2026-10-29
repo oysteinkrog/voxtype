@@ -39,6 +39,8 @@ pub struct EvdevListener {
     double_tap_alt: Option<Key>,
     /// Double-tap key that cancels (`HotkeyConfig::double_tap_cancel_key`)
     double_tap_cancel: Option<Key>,
+    /// Watch for the popup's look chord (`HotkeyConfig::look_chord`)
+    look_chord: bool,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -119,6 +121,7 @@ impl EvdevListener {
                 .as_ref()
                 .map(|k| parse_key_name(k))
                 .transpose()?,
+            look_chord: config.look_chord,
             stop_signal: None,
         })
     }
@@ -144,6 +147,7 @@ impl HotkeyListener for EvdevListener {
         let double_tap = self.double_tap;
         let double_tap_alt = self.double_tap_alt;
         let double_tap_cancel = self.double_tap_cancel;
+        let look_chord = self.look_chord;
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
@@ -157,6 +161,7 @@ impl HotkeyListener for EvdevListener {
                 double_tap,
                 double_tap_alt,
                 double_tap_cancel,
+                look_chord,
                 tx,
                 stop_rx,
             ) {
@@ -548,6 +553,35 @@ impl DoubleTap {
     }
 }
 
+/// Left Ctrl and Right Ctrl held, then Down or Up: the popup's next or
+/// previous look (`crate::osd::look_step`).
+///
+/// It needs no special care to keep Right Ctrl, the usual hotkey, from
+/// counting as a tap: the Up or Down press is another key pressed while the
+/// Ctrl key is down, which `DoubleTap` already treats as a shortcut. The
+/// focused app sees Ctrl+Up or Ctrl+Down as well; nothing is grabbed.
+#[derive(Default)]
+struct LookChord {
+    left: bool,
+    right: bool,
+}
+
+impl LookChord {
+    /// Feed one key event; returns `Some(forward)` when it completes the
+    /// chord: `true` for Down, `false` for Up. Key repeats do not step.
+    fn event(&mut self, key: Key, value: i32) -> Option<bool> {
+        match key {
+            Key::KEY_LEFTCTRL => self.left = value != 0,
+            Key::KEY_RIGHTCTRL => self.right = value != 0,
+            Key::KEY_DOWN | Key::KEY_UP if value == 1 && self.left && self.right => {
+                return Some(key == Key::KEY_DOWN);
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
 /// Main listener loop running in a blocking task
 #[allow(clippy::too_many_arguments)]
 fn evdev_listener_loop(
@@ -560,6 +594,7 @@ fn evdev_listener_loop(
     double_tap: Option<Duration>,
     double_tap_alt: Option<Key>,
     double_tap_cancel: Option<Key>,
+    look_chord: bool,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -596,6 +631,8 @@ fn evdev_listener_loop(
         }
         _ => None,
     };
+
+    let mut look_chord = look_chord.then(LookChord::default);
 
     if let Some(cancel) = cancel_key {
         tracing::info!(
@@ -651,6 +688,9 @@ fn evdev_listener_loop(
                     return Ok(()); // Channel closed
                 }
             }
+            if let Some(chord) = look_chord.as_mut() {
+                *chord = LookChord::default();
+            }
             manager.handle_device_changes();
         }
 
@@ -663,6 +703,9 @@ fn evdev_listener_loop(
                 held_profile_modifiers.clear();
                 last_pressed_profile = None;
                 is_pressed = false;
+                if let Some(chord) = look_chord.as_mut() {
+                    *chord = LookChord::default();
+                }
                 tracing::debug!("Stale devices removed during validation");
             }
             manager.last_validation = Instant::now();
@@ -719,6 +762,13 @@ fn evdev_listener_loop(
                     }
                     _ => {}
                 }
+            }
+
+            // Never `continue` here: the Up or Down press must still reach
+            // the double tap detectors below, where it spoils the tap.
+            if let Some(forward) = look_chord.as_mut().and_then(|c| c.event(key, value)) {
+                tracing::debug!("Look chord ({})", if forward { "next" } else { "previous" });
+                crate::osd::look_step::write(forward);
             }
 
             // Check cancel key first (if configured)
@@ -1072,6 +1122,157 @@ mod tests {
     fn release_ends_recording_after_modifier_released_first() {
         assert_eq!(target_key_action(0, true, false), TargetKeyAction::Release);
         assert_eq!(target_key_action(0, true, true), TargetKeyAction::Release);
+    }
+
+    /// The keys as the listener loop feeds them with the user's setup:
+    /// Right Ctrl double tap dictates, Right Shift is the alt key, Right Alt
+    /// the cancel key, and the look chord is on.
+    struct Keys {
+        chord: LookChord,
+        main: DoubleTap,
+        alt: DoubleTap,
+        cancel: DoubleTap,
+        t: Instant,
+        /// Look steps (`true` = next) and double taps fired, in order.
+        fired: Vec<String>,
+    }
+
+    impl Keys {
+        fn new() -> Keys {
+            let w = Duration::from_millis(300);
+            Keys {
+                chord: LookChord::default(),
+                main: DoubleTap::new(w),
+                alt: DoubleTap::new(w),
+                cancel: DoubleTap::new(w),
+                t: Instant::now(),
+                fired: Vec::new(),
+            }
+        }
+
+        /// One key event `ms` after the start, in the loop's order.
+        fn key(&mut self, ms: u64, key: Key, value: i32) -> &mut Keys {
+            let now = self.t + Duration::from_millis(ms);
+            if let Some(forward) = self.chord.event(key, value) {
+                self.fired
+                    .push(if forward { "next" } else { "prev" }.into());
+            }
+            if self.main.event(key == Key::KEY_RIGHTCTRL, value, now) {
+                self.fired.push("main".into());
+            }
+            if self.alt.event(key == Key::KEY_RIGHTSHIFT, value, now) {
+                self.fired.push("alt".into());
+            }
+            if self.cancel.event(key == Key::KEY_RIGHTALT, value, now) {
+                self.fired.push("cancel".into());
+            }
+            self
+        }
+    }
+
+    #[test]
+    fn look_chord_steps_and_fires_no_tap() {
+        // Left Ctrl first, two steps down and one up, all within the tap
+        // window, then a release in any order.
+        let mut k = Keys::new();
+        k.key(0, Key::KEY_LEFTCTRL, 1)
+            .key(20, Key::KEY_RIGHTCTRL, 1)
+            .key(60, Key::KEY_DOWN, 1)
+            .key(80, Key::KEY_DOWN, 0)
+            .key(100, Key::KEY_DOWN, 1)
+            .key(110, Key::KEY_DOWN, 2)
+            .key(120, Key::KEY_DOWN, 0)
+            .key(140, Key::KEY_UP, 1)
+            .key(150, Key::KEY_UP, 0)
+            .key(170, Key::KEY_RIGHTCTRL, 0)
+            .key(180, Key::KEY_LEFTCTRL, 0);
+        assert_eq!(k.fired, ["next", "next", "prev"]);
+
+        // Right Ctrl first.
+        let mut k = Keys::new();
+        k.key(0, Key::KEY_RIGHTCTRL, 1)
+            .key(20, Key::KEY_LEFTCTRL, 1)
+            .key(60, Key::KEY_UP, 1)
+            .key(80, Key::KEY_UP, 0)
+            .key(100, Key::KEY_LEFTCTRL, 0)
+            .key(120, Key::KEY_RIGHTCTRL, 0);
+        assert_eq!(k.fired, ["prev"]);
+    }
+
+    #[test]
+    fn look_chord_right_after_a_tap_is_not_the_second_tap() {
+        // A clean Right Ctrl tap, then the chord's Right Ctrl press within
+        // the window: the arrow spoils it, so nothing dictates.
+        let mut k = Keys::new();
+        k.key(0, Key::KEY_RIGHTCTRL, 1)
+            .key(60, Key::KEY_RIGHTCTRL, 0)
+            .key(120, Key::KEY_LEFTCTRL, 1)
+            .key(140, Key::KEY_RIGHTCTRL, 1)
+            .key(180, Key::KEY_DOWN, 1)
+            .key(200, Key::KEY_DOWN, 0)
+            .key(220, Key::KEY_RIGHTCTRL, 0)
+            .key(240, Key::KEY_LEFTCTRL, 0);
+        assert_eq!(k.fired, ["next"]);
+        // A tap, then Right Ctrl+Down alone: a shortcut, not the second tap
+        // and not a step.
+        let mut k = Keys::new();
+        k.key(0, Key::KEY_RIGHTCTRL, 1)
+            .key(60, Key::KEY_RIGHTCTRL, 0)
+            .key(100, Key::KEY_RIGHTCTRL, 1)
+            .key(140, Key::KEY_DOWN, 1)
+            .key(160, Key::KEY_RIGHTCTRL, 0);
+        assert_eq!(k.fired, Vec::<String>::new());
+    }
+
+    #[test]
+    fn taps_still_work_beside_the_look_chord() {
+        // Right Ctrl double tap.
+        let mut k = Keys::new();
+        k.key(0, Key::KEY_RIGHTCTRL, 1)
+            .key(60, Key::KEY_RIGHTCTRL, 0)
+            .key(150, Key::KEY_RIGHTCTRL, 1)
+            .key(200, Key::KEY_RIGHTCTRL, 0);
+        assert_eq!(k.fired, ["main"]);
+        // Right Shift and Right Alt double taps.
+        let mut k = Keys::new();
+        k.key(0, Key::KEY_RIGHTSHIFT, 1)
+            .key(50, Key::KEY_RIGHTSHIFT, 0)
+            .key(100, Key::KEY_RIGHTSHIFT, 1)
+            .key(150, Key::KEY_RIGHTSHIFT, 0)
+            .key(1000, Key::KEY_RIGHTALT, 1)
+            .key(1050, Key::KEY_RIGHTALT, 0)
+            .key(1100, Key::KEY_RIGHTALT, 1)
+            .key(1150, Key::KEY_RIGHTALT, 0);
+        assert_eq!(k.fired, ["alt", "cancel"]);
+        // A double tap after the chord.
+        let mut k = Keys::new();
+        k.key(0, Key::KEY_LEFTCTRL, 1)
+            .key(20, Key::KEY_RIGHTCTRL, 1)
+            .key(60, Key::KEY_DOWN, 1)
+            .key(80, Key::KEY_DOWN, 0)
+            .key(100, Key::KEY_RIGHTCTRL, 0)
+            .key(120, Key::KEY_LEFTCTRL, 0)
+            .key(500, Key::KEY_RIGHTCTRL, 1)
+            .key(550, Key::KEY_RIGHTCTRL, 0)
+            .key(650, Key::KEY_RIGHTCTRL, 1)
+            .key(700, Key::KEY_RIGHTCTRL, 0);
+        assert_eq!(k.fired, ["next", "main"]);
+    }
+
+    #[test]
+    fn arrows_alone_or_with_one_ctrl_do_not_step() {
+        let mut k = Keys::new();
+        k.key(0, Key::KEY_DOWN, 1)
+            .key(20, Key::KEY_DOWN, 0)
+            .key(100, Key::KEY_LEFTCTRL, 1)
+            .key(120, Key::KEY_DOWN, 1)
+            .key(140, Key::KEY_DOWN, 0)
+            .key(160, Key::KEY_LEFTCTRL, 0)
+            .key(200, Key::KEY_RIGHTCTRL, 1)
+            .key(220, Key::KEY_UP, 1)
+            .key(240, Key::KEY_UP, 0)
+            .key(260, Key::KEY_RIGHTCTRL, 0);
+        assert_eq!(k.fired, Vec::<String>::new());
     }
 
     #[test]

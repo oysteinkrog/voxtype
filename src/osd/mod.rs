@@ -9,18 +9,32 @@
 //! ## Module layout
 //!
 //! - [`ipc`] — Unix-socket connection, frame decode, ring buffer, reconnect.
+//! - [`live`]: the live preview as JSON (`preview.json`), with word timing.
+//! - [`target`]: the app that has keyboard focus, for the paste toast.
 //! - [`visual`] — peak-hold decay, waveform envelope helpers, palette types.
 //! - [`config`] — `[osd]` config block (`OsdConfig`).
 //! - [`theme`] — Omarchy theme parsing + change watcher.
 //! - [`plasma`] — KDE Plasma colors and fonts for the `swiss` gtk4 theme.
+//! - [`swiss`] — the `swiss` look shared by the gtk4 and vo frontends.
+//! - [`showcase`] — palette and geometry of the vo frontend's `showcase` look.
+//! - [`watch`]: wakes the popups when the daemon changes a runtime file.
+//! - [`look_step`]: the keyboard chord that switches the vo popup's look.
 //! - [`gtk_env`] — environment workarounds for GTK4 bugs (GTK frontend only).
 
 pub mod config;
 pub mod gtk_env;
 pub mod ipc;
+pub mod live;
+pub mod look_step;
+pub mod outcome;
 pub mod plasma;
 pub mod recipe;
+pub mod showcase;
 pub mod style;
 pub mod supervisor;
+pub mod swiss;
+pub mod target;
 pub mod theme;
 pub mod visual;
+#[cfg(target_os = "linux")]
+pub mod watch;

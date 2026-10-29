@@ -631,6 +631,10 @@ impl Config {
     }
 }
 
+fn default_live_preview_final() -> String {
+    "engine".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::hotkey::default_hotkey_key;
@@ -754,8 +758,4 @@ mod tests {
         config.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v3");
         assert!(config.parakeet.as_ref().unwrap().model_type.is_none());
     }
-}
-
-fn default_live_preview_final() -> String {
-    "engine".to_string()
 }

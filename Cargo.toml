@@ -141,6 +141,13 @@ cairo-rs = { version = "0.22", optional = true }
 glib = { version = "0.22", optional = true }
 rubato = "0.16"
 
+# OSD on the vo GPU overlay framework (gated on `osd-vo`). Pinned to a commit
+# of the framework repo; nothing in the default build pulls it in.
+vo = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "d1aaec9666037c699a17ffdb3aa3b592bcdc82d9", optional = true }
+vo-core = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "d1aaec9666037c699a17ffdb3aa3b592bcdc82d9", optional = true }
+vo-dots = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "d1aaec9666037c699a17ffdb3aa3b592bcdc82d9", optional = true }
+vo-3d = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "d1aaec9666037c699a17ffdb3aa3b592bcdc82d9", optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 tao = "0.32"
 core-graphics = "0.24"
@@ -188,6 +195,12 @@ osd-native = [
     "dep:bytemuck",
 ]
 osd-gtk4 = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:cairo-rs", "dep:glib"]
+# The Swiss popup on the vo GPU overlay framework. Opt-in; pick it with
+# `[osd] frontend = "vo"`.
+osd-vo = ["dep:vo", "dep:vo-core", "dep:vo-dots", "dep:vo-3d", "vo/record"]
+# The popup in the vo preview window: `voxtype-osd-vo --preview [--theme T]
+# [--replay FILE]`. Development only; the installed popup leaves it out.
+osd-vo-preview = ["osd-vo", "vo/preview"]
 gpu-vulkan = ["whisper-rs/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
@@ -281,6 +294,15 @@ codegen-units = 1
 strip = true
 opt-level = 3
 
+# Optimised like release but without LTO, for CPU and frame budget numbers
+# that match what users run (scripts/osd-vo-budget.sh). Builds far faster.
+[profile.measure]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+strip = false
+
 [profile.dev]
 opt-level = 1  # Faster dev builds, whisper still usable
 
@@ -297,6 +319,11 @@ required-features = ["osd-native"]
 name = "voxtype-osd-gtk4"
 path = "src/bin/voxtype_osd_gtk4.rs"
 required-features = ["osd-gtk4"]
+
+[[bin]]
+name = "voxtype-osd-vo"
+path = "src/bin/voxtype_osd_vo.rs"
+required-features = ["osd-vo"]
 
 # Tiny launcher that picks between voxtype-osd-gtk4, voxtype-osd-native,
 # and voxtype-osd-quickshell at runtime based on config/env/CLI. Always

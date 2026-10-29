@@ -204,6 +204,10 @@ fn run_worker_with(
 /// Prefix of a live-preview line: `P <json string>\n`, the running transcript.
 pub const PARTIAL_PREFIX: &str = "P ";
 
+/// Prefix of a word timing line, sent just before the partial line it
+/// belongs to: `W [{"text": "hello", "start": 0.32, "end": 0.56, "conf": 0.9}]`.
+pub const WORDS_PREFIX: &str = "W ";
+
 /// Prefix of a status line sent after recording stops, while the engine
 /// model finishes: `S {"text": "...", "fraction": 0.8}`. `fraction` is the
 /// share of the recording's audio transcribed so far, or null while the
@@ -211,10 +215,12 @@ pub const PARTIAL_PREFIX: &str = "P ";
 pub const STATUS_PREFIX: &str = "S ";
 
 /// Error text from the engine thread when the GPU has too little free memory.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 const GPU_BUSY: &str = "GPU busy";
 
 /// Free memory on the first GPU in MiB, from nvidia-smi. `None` if it
 /// cannot be read, so a missing nvidia-smi never blocks the engine.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 fn free_vram_mib() -> Option<u64> {
     let out = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
@@ -229,6 +235,7 @@ fn free_vram_mib() -> Option<u64> {
 }
 
 /// What the engine thread reports to the live worker's main loop.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 enum EngineMsg {
     /// A part is done: seconds of audio, seconds it took.
     Part(f32, f32),
@@ -238,6 +245,7 @@ enum EngineMsg {
 
 /// Clips shorter than this use the preview model's final text when the
 /// engine model has not finished loading yet, instead of waiting for it.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 const LIVE_MIN_WAIT_SECS: f32 = 2.5;
 
 /// Splits a recording at pauses, so the engine model can transcribe each
@@ -348,7 +356,7 @@ impl PauseSplitter {
     fn tail(&self, total: usize) -> Option<std::ops::Range<usize>> {
         let n = self.frames.len();
         let speech = n > 0 && self.has_speech(0, n);
-        (speech && total > self.start).then(|| self.start..total)
+        (speech && total > self.start).then_some(self.start..total)
     }
 }
 
@@ -367,6 +375,7 @@ pub fn speech_parts(samples: &[f32]) -> Vec<std::ops::Range<usize>> {
 }
 
 /// How far the engine model has got through the parts sent to it.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 struct Progress {
     /// Seconds of audio in each part sent but not done, oldest first.
     pending: std::collections::VecDeque<f32>,
@@ -374,6 +383,7 @@ struct Progress {
     done_took: f32,
 }
 
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 impl Default for Progress {
     fn default() -> Self {
         Self {
@@ -384,6 +394,7 @@ impl Default for Progress {
     }
 }
 
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 impl Progress {
     fn part_done(&mut self, audio: f32, took: f32) {
         self.pending.pop_front();
@@ -395,8 +406,8 @@ impl Progress {
     /// the parts done so far, or 0.1 s per second of audio before that.
     fn status(&self, loaded: bool) -> String {
         let left: f32 = self.pending.iter().sum();
-        let (text, fraction) = if !loaded {
-            ("Finishing: loading the model".to_string(), None)
+        let (text, fraction, eta) = if !loaded {
+            ("Finishing: loading the model".to_string(), None, None)
         } else {
             let rate = if self.done_audio > 0.0 {
                 self.done_took / self.done_audio
@@ -415,9 +426,16 @@ impl Progress {
                 } else {
                     1.0
                 }),
+                Some(left * rate),
             )
         };
-        serde_json::json!({ "text": text, "fraction": fraction }).to_string()
+        serde_json::json!({
+            "text": text,
+            "fraction": fraction,
+            "audio_left_s": left,
+            "eta_s": eta,
+        })
+        .to_string()
     }
 }
 
@@ -639,10 +657,12 @@ fn live_session(
             Ok(delta) if !delta.is_empty() => {
                 last_partial.push_str(&delta);
                 let shown = last_partial.trim_start();
+                let words = preview_words(u);
+                writeln!(out, "{}{}", WORDS_PREFIX, serde_json::to_string(&words)?)?;
                 writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(shown)?)?;
                 out.flush()?;
                 if let Some(log) = revlog.as_mut() {
-                    log.preview(samples.len() as f32 / 16000.0, shown, preview_words(u));
+                    log.preview(samples.len() as f32 / 16000.0, shown, words);
                 }
             }
             Ok(_) => {}
@@ -668,6 +688,14 @@ fn live_session(
         if !tail.is_empty() {
             last_partial.push_str(&tail);
             // Show the last words too; the OSD stays up while finishing.
+            if let Some(u) = unified.as_ref() {
+                writeln!(
+                    out,
+                    "{}{}",
+                    WORDS_PREFIX,
+                    serde_json::to_string(&preview_words(u))?
+                )?;
+            }
             writeln!(
                 out,
                 "{}{}",
@@ -919,6 +947,7 @@ pub fn run_live_worker(_config: &crate::config::Config, _live_model: &str) -> an
 }
 
 /// Read one `[u32 count][f32 samples]` block. `Ok(None)` at a clean EOF.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 fn read_block<R: Read>(reader: &mut R) -> io::Result<Option<Vec<f32>>> {
     let mut count_buf = [0u8; 4];
     match reader.read_exact(&mut count_buf) {
@@ -937,8 +966,9 @@ fn read_block<R: Read>(reader: &mut R) -> io::Result<Option<Vec<f32>>> {
     reader.read_exact(&mut bytes)?;
     Ok(Some(
         bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>().0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect(),
     ))
 }

@@ -4,9 +4,9 @@
 //!
 //! The user's preference comes from (in priority order):
 //!
-//! 1. `--frontend gtk4|native|quickshell` on the command line
-//! 2. `VOXTYPE_OSD_FRONTEND=gtk4|native|quickshell` env var
-//! 3. `[osd] frontend = "gtk4|native|quickshell"` in `~/.config/voxtype/config.toml`
+//! 1. `--frontend gtk4|native|quickshell|vo` on the command line
+//! 2. `VOXTYPE_OSD_FRONTEND=gtk4|native|quickshell|vo` env var
+//! 3. `[osd] frontend = "gtk4|native|quickshell|vo"` in `~/.config/voxtype/config.toml`
 //! 4. Default: `gtk4`
 //!
 //! That preference is then reconciled with what's actually installed: the
@@ -44,11 +44,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use voxtype::config::Config as VoxtypeConfig;
-use voxtype::osd::config::{OsdConfig, OsdFrontend};
+use voxtype::osd::config::{OsdConfig, OsdFrontend, OsdTheme};
 
 const NATIVE_BIN: &str = "voxtype-osd-native";
 const GTK4_BIN: &str = "voxtype-osd-gtk4";
 const QUICKSHELL_BIN: &str = "voxtype-osd-quickshell";
+const VO_BIN: &str = "voxtype-osd-vo";
 
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
@@ -80,19 +81,31 @@ fn main() -> ExitCode {
                 .ok()
                 .and_then(|s| OsdFrontend::parse_str(&s))
         })
-        .unwrap_or_else(|| load_frontend_from_config(config_path.as_deref()));
+        .unwrap_or_else(|| load_osd_config(config_path.as_deref()).frontend);
+
+    // The vo popup draws the swiss and showcase looks; the default theme
+    // gets the GTK4 popup.
+    let preferred = if preferred == OsdFrontend::Vo
+        && !vo_draws(resolve_theme(&rest, config_path.as_deref()))
+    {
+        tracing::info!("the vo frontend draws only the swiss and showcase themes; using gtk4");
+        OsdFrontend::Gtk4
+    } else {
+        preferred
+    };
 
     let chosen = match resolve_installed(preferred) {
         Some(c) => c,
         None => {
             eprintln!(
-                "voxtype-osd: none of '{GTK4_BIN}', '{NATIVE_BIN}', or '{QUICKSHELL_BIN}' \
-                 was found on PATH or next to this binary.\n\
+                "voxtype-osd: none of '{GTK4_BIN}', '{NATIVE_BIN}', '{QUICKSHELL_BIN}' \
+                 or '{VO_BIN}' was found on PATH or next to this binary.\n\
                  \n\
                  If you built from source, enable at least one OSD feature:\n\
                    cargo build --release --features osd-gtk4       # GTK4 frontend\n\
                    cargo build --release --features osd-native     # SCTK + wgpu + egui\n\
                    cargo build --release --bin voxtype-osd-quickshell  # Quickshell launcher\n\
+                   cargo build --release --features osd-vo     # vo GPU overlay\n\
                  \n\
                  If you installed a package, the OSD binaries may be a separate\n\
                  optional dependency."
@@ -133,10 +146,10 @@ fn print_help() {
         "voxtype-osd {} — launcher for the on-screen mic visualizer\n\
          \n\
          USAGE:\n    \
-             voxtype-osd [--frontend gtk4|native|quickshell] [FRONTEND ARGS...]\n\
+             voxtype-osd [--frontend gtk4|native|quickshell|vo] [FRONTEND ARGS...]\n\
          \n\
          OPTIONS:\n    \
-             --frontend <gtk4|native|quickshell>\n    \
+             --frontend <gtk4|native|quickshell|vo>\n    \
                                           Which frontend to launch. Falls back to\n\
                                           whatever is installed if the preferred\n\
                                           frontend isn't found on PATH.\n    \
@@ -149,7 +162,7 @@ fn print_help() {
          \n\
          CONFIG:\n    \
              [osd]\n    \
-             frontend = \"gtk4\"  # or \"native\", \"quickshell\"\n\
+             frontend = \"gtk4\"  # or \"native\", \"quickshell\", \"vo\"\n\
          \n\
          ENV:\n    \
              VOXTYPE_OSD_FRONTEND   Same as --frontend.\n    \
@@ -221,30 +234,63 @@ fn build_child_args(frontend: OsdFrontend, supervised: bool, rest: &[String]) ->
     out
 }
 
-/// Load the `[osd] frontend` value from the voxtype config file, falling
-/// back to the default when the file is missing, unreadable, or doesn't
-/// contain a usable value.
-fn load_frontend_from_config(explicit: Option<&Path>) -> OsdFrontend {
-    let path = explicit
-        .map(Path::to_path_buf)
-        .or_else(VoxtypeConfig::default_path);
-    let Some(path) = path else {
-        return OsdFrontend::default();
-    };
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return OsdFrontend::default();
-    };
-
+/// Load the `[osd]` section from the voxtype config file, falling back to
+/// the defaults when the file is missing, unreadable, or doesn't contain a
+/// usable section.
+fn load_osd_config(explicit: Option<&Path>) -> OsdConfig {
     #[derive(serde::Deserialize, Default)]
     struct PartialConfig {
         #[serde(default)]
         osd: Option<OsdConfig>,
     }
 
-    match toml::from_str::<PartialConfig>(&content) {
-        Ok(p) => p.osd.map(|o| o.frontend).unwrap_or_default(),
-        Err(_) => OsdFrontend::default(),
-    }
+    explicit
+        .map(Path::to_path_buf)
+        .or_else(VoxtypeConfig::default_path)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|content| toml::from_str::<PartialConfig>(&content).ok())
+        .and_then(|p| p.osd)
+        .unwrap_or_default()
+}
+
+/// Whether the vo frontend draws `theme`.
+fn vo_draws(theme: OsdTheme) -> bool {
+    matches!(
+        theme,
+        OsdTheme::Swiss
+            | OsdTheme::Showcase
+            | OsdTheme::Type
+            | OsdTheme::Amber
+            | OsdTheme::Radial
+            | OsdTheme::Tron
+            | OsdTheme::Phosphor
+            | OsdTheme::Mission
+            | OsdTheme::Palette
+            | OsdTheme::Dotmatrix
+            | OsdTheme::Swissfi
+            | OsdTheme::Scope
+            | OsdTheme::Captions
+            | OsdTheme::Karaoke
+            | OsdTheme::Island
+            | OsdTheme::Jarvis
+            | OsdTheme::Particles
+            | OsdTheme::Synthwave
+            | OsdTheme::Mecha
+            | OsdTheme::Cyberpunk
+    )
+}
+
+/// The theme the frontend will draw, by the frontends' own precedence:
+/// `--theme`, then `VOXTYPE_OSD_THEME`, then `[osd] theme`.
+fn resolve_theme(args: &[String], config: Option<&Path>) -> OsdTheme {
+    let flag = args.iter().enumerate().find_map(|(i, a)| {
+        a.strip_prefix("--theme=")
+            .map(str::to_string)
+            .or_else(|| (a == "--theme").then(|| args.get(i + 1).cloned()).flatten())
+    });
+    flag.or_else(|| env::var("VOXTYPE_OSD_THEME").ok())
+        .and_then(|s| OsdTheme::parse_str(&s))
+        .unwrap_or_else(|| load_osd_config(config).theme)
 }
 
 struct ResolvedFrontend {
@@ -258,24 +304,33 @@ struct ResolvedFrontend {
 /// don't have `qs` installed; conversely a Quickshell user who's missing
 /// their launcher falls back to Gtk4 (the default) before Native.
 fn resolve_installed(preferred: OsdFrontend) -> Option<ResolvedFrontend> {
-    let chain: [OsdFrontend; 3] = match preferred {
-        OsdFrontend::Gtk4 => [
+    let chain: &[OsdFrontend] = match preferred {
+        OsdFrontend::Gtk4 => &[
             OsdFrontend::Gtk4,
             OsdFrontend::Native,
             OsdFrontend::Quickshell,
         ],
-        OsdFrontend::Native => [
+        OsdFrontend::Native => &[
             OsdFrontend::Native,
             OsdFrontend::Gtk4,
             OsdFrontend::Quickshell,
         ],
-        OsdFrontend::Quickshell => [
+        OsdFrontend::Quickshell => &[
             OsdFrontend::Quickshell,
             OsdFrontend::Gtk4,
             OsdFrontend::Native,
+        ],
+        // Opt-in: only a user who asked for vo gets it, and a missing vo
+        // binary falls back to the GTK4 popup, which draws the same Swiss
+        // theme.
+        OsdFrontend::Vo => &[
+            OsdFrontend::Vo,
+            OsdFrontend::Gtk4,
+            OsdFrontend::Native,
+            OsdFrontend::Quickshell,
         ],
     };
-    chain.into_iter().find_map(|f| {
+    chain.iter().copied().find_map(|f| {
         find_binary(f.binary_name()).map(|path| ResolvedFrontend { frontend: f, path })
     })
 }
@@ -298,6 +353,28 @@ fn find_binary(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_flag_wins_in_both_forms() {
+        let none = Some(Path::new("/nonexistent/config.toml"));
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            resolve_theme(&args(&["--theme", "default"]), none),
+            OsdTheme::Default
+        );
+        assert_eq!(
+            resolve_theme(&args(&["--width-px", "400", "--theme=swiss"]), none),
+            OsdTheme::Swiss
+        );
+    }
+
+    #[test]
+    fn vo_keeps_swiss_and_showcase() {
+        assert!(vo_draws(OsdTheme::Swiss));
+        assert!(vo_draws(OsdTheme::Showcase));
+        assert!(vo_draws(OsdTheme::Type));
+        assert!(!vo_draws(OsdTheme::Default));
+    }
 
     #[test]
     fn parse_strips_frontend_flag_space_form() {

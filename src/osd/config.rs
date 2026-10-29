@@ -21,6 +21,34 @@ pub enum OsdPosition {
     TopRight,
 }
 
+/// How the centered anchors place the popup vertically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OsdAnchor {
+    /// The popup's top edge sits at `top_margin` of the monitor height, and
+    /// the popup grows downward as the text gets longer.
+    #[default]
+    Top,
+    /// The newest text line, the one being read, sits at `reading_line` of
+    /// the monitor height, and the popup grows upward as the text gets
+    /// longer, so the line being read stays put.
+    ReadingLine,
+    /// The middle of the popup at its full height sits at `reading_line` of
+    /// the monitor height, so every look is centred on the same spot.
+    Center,
+}
+
+impl OsdAnchor {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "top" => Some(OsdAnchor::Top),
+            "reading-line" => Some(OsdAnchor::ReadingLine),
+            "center" => Some(OsdAnchor::Center),
+            _ => None,
+        }
+    }
+}
+
 /// Selects which OSD frontend the `voxtype-osd` wrapper launches.
 ///
 /// The wrapper treats this as a *preference*: if the chosen frontend's
@@ -37,6 +65,9 @@ pub enum OsdFrontend {
     Gtk4,
     Native,
     Quickshell,
+    /// The Swiss popup on the vo GPU overlay framework (feature `osd-vo`).
+    /// Opt-in only: no other preference falls back to it.
+    Vo,
 }
 
 impl OsdFrontend {
@@ -47,6 +78,7 @@ impl OsdFrontend {
             OsdFrontend::Gtk4 => "voxtype-osd-gtk4",
             OsdFrontend::Native => "voxtype-osd-native",
             OsdFrontend::Quickshell => "voxtype-osd-quickshell",
+            OsdFrontend::Vo => "voxtype-osd-vo",
         }
     }
 
@@ -55,6 +87,7 @@ impl OsdFrontend {
             "gtk4" | "gtk" => Some(OsdFrontend::Gtk4),
             "native" | "wgpu" | "egui" => Some(OsdFrontend::Native),
             "quickshell" | "qml" | "qs" => Some(OsdFrontend::Quickshell),
+            "vo" => Some(OsdFrontend::Vo),
             _ => None,
         }
     }
@@ -71,13 +104,155 @@ pub enum OsdTheme {
     /// large transcript text and a status line. Colors and font come from
     /// the KDE Plasma color scheme (`~/.config/kdeglobals`).
     Swiss,
+    /// A rich look that shows off the vo GPU overlay: glowing ribbon
+    /// waveform, rim light, a tilted ring of dots and drifting orbs around
+    /// the swiss popup's layout. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Showcase,
+    /// The swiss popup's layout led by type and line: the frame draws
+    /// itself on, the clock and word count roll their digits, the icon
+    /// morphs from microphone to stop to check, and words rise into place.
+    /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
+    Type,
+    /// An amber hologram panel: thin geometric frames that draw on, vertical
+    /// micro-labels, a fine-line waveform and the transcript in a condensed
+    /// face. Drawn by the vo frontend only; the gtk4 frontend draws `swiss`
+    /// for it.
+    Amber,
+    /// A radial spectrum: bars round a microphone in a blue to violet ring
+    /// over a soft bloom, and the transcript in a wide card below. Drawn by
+    /// the vo frontend only; the gtk4 frontend draws `swiss` for it.
+    Radial,
+    /// Tron light lines: a black glass panel traced by cyan light lines that
+    /// run round its border, the waveform as one luminous line, and the
+    /// transcript in a thin geometric face. Drawn by the vo frontend only;
+    /// the gtk4 frontend draws `swiss` for it.
+    Tron,
+    /// A green CRT terminal: a bowed screen with scanlines, a block meter,
+    /// the transcript in a monospaced face typed in behind a block caret, and
+    /// an italic status line. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Phosphor,
+    /// A mission-control telemetry panel: tiles for the model, VRAM,
+    /// latency, microphone and elapsed time, a large transcript tile with
+    /// corner brackets, a waveform strip with a LIVE meter, orange and white
+    /// on dark slate. Drawn by the vo frontend only; the gtk4 frontend draws
+    /// `swiss` for it.
+    Mission,
+    /// A command palette: a crisp dark card with chips for the engine, the
+    /// output and the latency, the transcript as input text with a caret,
+    /// unsure words softly underlined and key badges in the status. Drawn by
+    /// the vo frontend only; the gtk4 frontend draws `swiss` for it.
+    Palette,
+    /// A dot-matrix look: white dots on black, a waveform built from dots,
+    /// the status in a dot-matrix face, the transcript in a clean grotesk and
+    /// one red dot while recording. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Dotmatrix,
+    /// Swiss type meets sci-fi: off-black and off-white with one orange
+    /// accent, huge grotesk words, a hairline waveform of ticks with an
+    /// orange centre, and small mono numerals that roll. Drawn by the vo
+    /// frontend only; the gtk4 frontend draws `swiss` for it.
+    Swissfi,
+    /// A green oscilloscope instrument: a vector trace over a graticule, a
+    /// readout column with level, time and words per minute, and the words
+    /// in a monospaced readout panel with a block caret. Drawn by the vo
+    /// frontend only; the gtk4 frontend draws `swiss` for it.
+    Scope,
+    /// Cinema subtitles: the words in two large centred lines on a soft
+    /// dark backdrop, the newest word in accent blue, lines that roll up, and
+    /// a small red dot that pulses while the mic is live. Drawn by the vo
+    /// frontend only; the gtk4 frontend draws `swiss` for it.
+    Captions,
+    /// A teleprompter in a dark navy glass card: large centred words, older
+    /// lines that roll up, shrink and fade, the newest word lit in a cyan to
+    /// violet gradient with an underline that hops from word to word, and a
+    /// thin mirrored waveform. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Karaoke,
+    /// A black capsule in the style of a phone's dynamic island: it opens
+    /// as a dot, springs out to a pill with a red recording dot, a clock, a
+    /// blue to violet bar waveform and up to three lines of words, and grows
+    /// into a card when the words need more room. Drawn by the vo frontend
+    /// only; the gtk4 frontend draws `swiss` for it.
+    Island,
+    /// A holographic HUD in cyan: arcs, ticks and thin ring segments that
+    /// turn round a radial waveform with the microphone in the middle, small
+    /// level readouts, and the transcript centred in a chamfered frame. Drawn
+    /// by the vo frontend only; the gtk4 frontend draws `swiss` for it.
+    Jarvis,
+    /// Mock-up 09, particle words: a navy glass card with a swirl of dotted
+    /// light round the microphone that follows the voice, and large centred
+    /// words that form out of particles. Drawn by the vo frontend only; the
+    /// gtk4 frontend draws `swiss` for it.
+    Particles,
+    /// Retro synthwave neon: a magenta to cyan neon tube round a dark card,
+    /// a chrome title that names the state, a neon bar waveform over a
+    /// scrolling perspective grid, and white centred words. Drawn by the vo
+    /// frontend only; the gtk4 frontend draws `swiss` for it.
+    Synthwave,
+    /// An anime mecha cockpit: an orange angular frame with hexagon plates,
+    /// a Japanese and English title, hazard stripes, a big mirrored bar
+    /// waveform, a level meter and the transcript in heavy condensed type.
+    /// Drawn by the vo frontend only; the gtk4 frontend draws `swiss` for it.
+    Mecha,
+    /// A cyberpunk HUD: a chamfered black panel in a yellow and red frame, a
+    /// yellow tag that types "VOICE LINK ACTIVE", hazard slashes, yellow and
+    /// red bars between brackets, and bold white words. Glitch slices fire on
+    /// a revised word or a change of state. Drawn by the vo frontend only;
+    /// the gtk4 frontend draws `swiss` for it.
+    Cyberpunk,
 }
 
 impl OsdTheme {
+    /// Every look the vo frontend draws, in declaration order. `Default`
+    /// is left out: vo draws it as `Swiss`.
+    pub const VO_LOOKS: [OsdTheme; 20] = [
+        OsdTheme::Swiss,
+        OsdTheme::Showcase,
+        OsdTheme::Type,
+        OsdTheme::Amber,
+        OsdTheme::Radial,
+        OsdTheme::Tron,
+        OsdTheme::Phosphor,
+        OsdTheme::Mission,
+        OsdTheme::Palette,
+        OsdTheme::Dotmatrix,
+        OsdTheme::Swissfi,
+        OsdTheme::Scope,
+        OsdTheme::Captions,
+        OsdTheme::Karaoke,
+        OsdTheme::Island,
+        OsdTheme::Jarvis,
+        OsdTheme::Particles,
+        OsdTheme::Synthwave,
+        OsdTheme::Mecha,
+        OsdTheme::Cyberpunk,
+    ];
+
     pub fn parse_str(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "default" => Some(OsdTheme::Default),
             "swiss" => Some(OsdTheme::Swiss),
+            "showcase" => Some(OsdTheme::Showcase),
+            "type" => Some(OsdTheme::Type),
+            "amber" => Some(OsdTheme::Amber),
+            "radial" => Some(OsdTheme::Radial),
+            "tron" => Some(OsdTheme::Tron),
+            "phosphor" => Some(OsdTheme::Phosphor),
+            "mission" => Some(OsdTheme::Mission),
+            "palette" => Some(OsdTheme::Palette),
+            "dotmatrix" => Some(OsdTheme::Dotmatrix),
+            "swissfi" => Some(OsdTheme::Swissfi),
+            "scope" => Some(OsdTheme::Scope),
+            "captions" => Some(OsdTheme::Captions),
+            "karaoke" => Some(OsdTheme::Karaoke),
+            "island" => Some(OsdTheme::Island),
+            "jarvis" => Some(OsdTheme::Jarvis),
+            "particles" => Some(OsdTheme::Particles),
+            "cyberpunk" => Some(OsdTheme::Cyberpunk),
+            "synthwave" => Some(OsdTheme::Synthwave),
+            "mecha" => Some(OsdTheme::Mecha),
             _ => None,
         }
     }
@@ -320,6 +495,90 @@ impl Default for OsdPackageManifest {
     }
 }
 
+/// Which motion features the vo popup turns on (`[osd] motion`).
+///
+/// In the config file this is `"look"` (the default: each look's own set),
+/// `"none"` (no features unless asked for) or a list of feature names. A
+/// list with any plain name replaces the look's set; `no-<name>` takes a
+/// name out; a list of only `no-` entries is the look's set minus those.
+/// Which names count as features is the popup's business: an unknown name
+/// is kept here and ignored there, never an error.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OsdMotion {
+    /// The look's own motion set.
+    #[default]
+    Look,
+    /// No motion features unless a name asks for one.
+    None,
+    /// These names, as written (trimmed, empty ones dropped).
+    Names(Vec<String>),
+}
+
+impl OsdMotion {
+    /// From names as the CLI or the environment give them: one `look` or
+    /// `none` is that mode, anything else is a list.
+    pub fn from_names<I, S>(names: I) -> OsdMotion
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let names: Vec<String> = names
+            .into_iter()
+            .flat_map(|n| {
+                n.as_ref()
+                    .split(',')
+                    .map(|p| p.trim().to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|n| !n.is_empty())
+            .collect();
+        match names.as_slice() {
+            [] => OsdMotion::Look,
+            [one] if one == "look" => OsdMotion::Look,
+            [one] if one == "none" => OsdMotion::None,
+            _ => OsdMotion::Names(names),
+        }
+    }
+
+    /// The setting in force: `over` (the CLI flag, or else the environment
+    /// variable, as clap already resolved them) when it names anything,
+    /// otherwise the config file's.
+    pub fn layered(over: &[String], config: &OsdMotion) -> OsdMotion {
+        if over.iter().all(|n| n.trim().is_empty()) {
+            config.clone()
+        } else {
+            OsdMotion::from_names(over)
+        }
+    }
+}
+
+impl Serialize for OsdMotion {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            OsdMotion::Look => s.serialize_str("look"),
+            OsdMotion::None => s.serialize_str("none"),
+            OsdMotion::Names(n) => n.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OsdMotion {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            One(String),
+            Many(Vec<String>),
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::One(s) => OsdMotion::from_names([s]),
+            // An empty list asks for nothing: no defaults either.
+            Raw::Many(v) if v.iter().all(|n| n.trim().is_empty()) => OsdMotion::None,
+            Raw::Many(v) => OsdMotion::from_names(v),
+        })
+    }
+}
+
 /// All user-facing OSD options. Defaults match BRIEF.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -347,6 +606,14 @@ pub struct OsdConfig {
     /// applied when `position` is `bottom-center` or `top-center` —
     /// corner anchors keep using `margin_px`.
     pub top_margin: f32,
+    /// What the centered anchors place: the popup's top edge (`top`, the
+    /// default, at `top_margin`) or its newest text line (`reading-line`,
+    /// at `reading_line`). Corner anchors ignore it.
+    pub anchor: OsdAnchor,
+    /// Height of the newest text line's centre (`anchor = "reading-line"`)
+    /// or of the popup's middle (`anchor = "center"`) as a fraction of the
+    /// monitor's height. 0.5 is the middle of the screen.
+    pub reading_line: f32,
     /// Font size of the live preview text in points (gtk4 OSD). `None`
     /// keeps the GTK theme's size.
     pub preview_font_pt: Option<f32>,
@@ -354,6 +621,16 @@ pub struct OsdConfig {
     pub opacity: f32,
     /// Look of the gtk4 OSD panel. `default` keeps the original look.
     pub theme: OsdTheme,
+    /// Fade new live words in (vo OSD only). Off by default: words appear
+    /// at once, as in the gtk4 OSD.
+    pub word_fade: bool,
+    /// Show the active look's place in the look chord's list and its name,
+    /// such as "3/20 Type", above the vo popup's top-left corner. Off by
+    /// default.
+    pub look_badge: bool,
+    /// Motion features of the vo popup: `"look"` (each look's own set),
+    /// `"none"`, or a list of names (see [`OsdMotion`]).
+    pub motion: OsdMotion,
     /// Visible waveform window in seconds (3.0 per BRIEF).
     pub waveform_window_secs: f32,
     /// Held-peak decay rate in dB/sec (6.0 per BRIEF).
@@ -392,9 +669,14 @@ impl Default for OsdConfig {
             position: OsdPosition::BottomCenter,
             margin_px: 24,
             top_margin: 0.85,
+            anchor: OsdAnchor::Top,
+            reading_line: 0.5,
             preview_font_pt: None,
             opacity: 0.95,
             theme: OsdTheme::Default,
+            word_fade: false,
+            look_badge: false,
+            motion: OsdMotion::Look,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,
             waveform_gain: 10.0,
@@ -474,6 +756,8 @@ mod tests {
         );
         assert_eq!(OsdFrontend::parse_str("qml"), Some(OsdFrontend::Quickshell));
         assert_eq!(OsdFrontend::parse_str("QS"), Some(OsdFrontend::Quickshell));
+        assert_eq!(OsdFrontend::parse_str("vo"), Some(OsdFrontend::Vo));
+        assert_eq!(OsdFrontend::Vo.binary_name(), "voxtype-osd-vo");
         assert_eq!(OsdFrontend::parse_str("nope"), None);
     }
 
@@ -494,6 +778,101 @@ mod tests {
         assert_eq!(OsdTheme::parse_str(" Swiss "), Some(OsdTheme::Swiss));
         assert_eq!(OsdTheme::parse_str("default"), Some(OsdTheme::Default));
         assert_eq!(OsdTheme::parse_str("glass"), None);
+    }
+
+    #[test]
+    fn motion_defaults_to_the_looks_set() {
+        assert_eq!(OsdConfig::default().motion, OsdMotion::Look);
+        let c: OsdConfig = toml::from_str("width_px = 800\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::Look);
+    }
+
+    #[test]
+    fn motion_parses_the_string_forms() {
+        let c: OsdConfig = toml::from_str("motion = \"look\"\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::Look);
+        let c: OsdConfig = toml::from_str("motion = \"none\"\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::None);
+        let c: OsdConfig = toml::from_str("motion = \" None \"\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::None);
+        let c: OsdConfig = toml::from_str("motion = \"onset-ink\"\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::Names(vec!["onset-ink".into()]));
+        let c: OsdConfig = toml::from_str("motion = \"onset-ink, rewind\"\n").unwrap();
+        assert_eq!(
+            c.motion,
+            OsdMotion::Names(vec!["onset-ink".into(), "rewind".into()])
+        );
+    }
+
+    #[test]
+    fn motion_parses_the_list_form() {
+        let c: OsdConfig = toml::from_str("motion = [\"no-fold-under\"]\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::Names(vec!["no-fold-under".into()]));
+        let c: OsdConfig =
+            toml::from_str("motion = [\"onset-ink\", \"no-rewind\"]\n").unwrap();
+        assert_eq!(
+            c.motion,
+            OsdMotion::Names(vec!["onset-ink".into(), "no-rewind".into()])
+        );
+        let c: OsdConfig = toml::from_str("motion = [\"none\"]\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::None);
+        let c: OsdConfig = toml::from_str("motion = []\n").unwrap();
+        assert_eq!(c.motion, OsdMotion::None);
+    }
+
+    #[test]
+    fn motion_keeps_unknown_names_without_an_error() {
+        let c: OsdConfig =
+            toml::from_str("motion = [\"no-such-thing\", \"warp-drive\"]\nwidth_px = 500\n")
+                .unwrap();
+        assert_eq!(c.width_px, 500);
+        assert_eq!(
+            c.motion,
+            OsdMotion::Names(vec!["no-such-thing".into(), "warp-drive".into()])
+        );
+    }
+
+    #[test]
+    fn motion_round_trips_through_toml() {
+        for m in [
+            OsdMotion::Look,
+            OsdMotion::None,
+            OsdMotion::Names(vec!["onset-ink".into(), "no-fold-under".into()]),
+        ] {
+            let c = OsdConfig {
+                motion: m.clone(),
+                ..OsdConfig::default()
+            };
+            let back: OsdConfig = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+            assert_eq!(back.motion, m);
+        }
+    }
+
+    #[test]
+    fn motion_from_the_cli_or_env_wins_over_the_config() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let config = OsdMotion::Names(names(&["no-fold-under"]));
+        // Nothing on the CLI or in the environment: the config holds.
+        assert_eq!(OsdMotion::layered(&[], &config), config);
+        assert_eq!(OsdMotion::layered(&names(&[""]), &config), config);
+        // `--motion none` works over a config list.
+        assert_eq!(
+            OsdMotion::layered(&names(&["none"]), &config),
+            OsdMotion::None
+        );
+        assert_eq!(
+            OsdMotion::layered(&names(&["look"]), &OsdMotion::None),
+            OsdMotion::Look
+        );
+        assert_eq!(
+            OsdMotion::layered(&names(&["onset-ink"]), &OsdMotion::Look),
+            OsdMotion::Names(names(&["onset-ink"]))
+        );
+        // A comma list in one value, as the environment variable gives it.
+        assert_eq!(
+            OsdMotion::from_names(["onset-ink,no-rewind"]),
+            OsdMotion::Names(names(&["onset-ink", "no-rewind"]))
+        );
     }
 
     #[test]

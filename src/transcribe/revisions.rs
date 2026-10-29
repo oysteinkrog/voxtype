@@ -127,6 +127,7 @@ impl RevisionLog {
     /// `<dir>/<YYYY-MM>/<stem>.revisions.jsonl`. `final_text` is None when
     /// nothing was pasted. The directory is created with mode 0700, since
     /// the text is private speech.
+    #[allow(clippy::too_many_arguments)] // one call site; a params struct would only move the list
     pub fn write(
         self,
         dir: &Path,

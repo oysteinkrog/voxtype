@@ -409,11 +409,13 @@ fn write_live_preview(text: &str) {
     if std::fs::write(&tmp, text).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
     }
+    crate::osd::live::preview(text);
 }
 
 fn clear_live_preview() {
     let _ = std::fs::remove_file(Config::live_preview_path());
     let _ = std::fs::remove_file(Config::live_status_path());
+    crate::osd::live::clear();
 }
 
 fn discard_stale_cancel(start_at: Option<u128>) {
@@ -1286,7 +1288,43 @@ impl Daemon {
     }
 
     /// Play audio feedback sound if enabled
+    /// `meta` in preview.json: the engine, the models, the microphone and
+    /// the language, as configured.
+    fn publish_live_meta(&self) {
+        let c = &self.config;
+        let engine = serde_json::to_value(c.engine)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        crate::osd::live::meta(crate::osd::live::LiveMeta {
+            engine,
+            model: c.model_name().to_string(),
+            live_model: c
+                .live_preview_active()
+                .then(|| c.live_preview_model.clone())
+                .flatten(),
+            mic: c.audio.device.clone(),
+            language: c.active_language().map(str::to_string),
+        });
+    }
+
     fn play_feedback(&self, event: SoundEvent) {
+        // Each dictation ends with one of these sounds, so they also tell
+        // the popup how it ended, whether or not sounds are on.
+        use crate::osd::outcome::{self, Outcome};
+        match event {
+            SoundEvent::RecordingStart => {
+                outcome::clear();
+                // A dictation, not a meeting: tell the popup what makes the text.
+                if self.meeting_daemon.is_none() {
+                    self.publish_live_meta();
+                }
+            }
+            SoundEvent::TranscriptionComplete => outcome::write(Outcome::Done),
+            SoundEvent::Cancelled => outcome::write(Outcome::Cancelled),
+            SoundEvent::Error => outcome::write(Outcome::Failed),
+            SoundEvent::RecordingStop => {}
+        }
         if let Some(ref feedback) = self.audio_feedback {
             feedback.play(event);
         }
@@ -1376,6 +1414,9 @@ impl Daemon {
         // starts, so the decision has to be made before the surface is drawn.
         // The marker survives the transcribing state and is cleared on the way
         // back to idle.
+        if state_name == "transcribing" {
+            crate::osd::outcome::stopped();
+        }
         match state_name {
             "recording" | "streaming" => {
                 if read_bool_override("no_osd").unwrap_or(false) {
@@ -2306,6 +2347,8 @@ impl Daemon {
             result.rms_energy
         );
         self.play_feedback(SoundEvent::Cancelled);
+        // Not a cancel: the popup says no speech was heard.
+        crate::osd::outcome::write(crate::osd::outcome::Outcome::Empty);
         if self.config.output.notification.on_no_speech {
             send_notification(
                 "Voxtype: No speech detected",
@@ -3405,10 +3448,15 @@ impl Daemon {
         // task error). The Ok(Ok(_)) branch consults it for the language
         // layout hint before letting it drop.
         let active_transcriber = self.active_transcriber.take();
+        let audio_s = match &*state {
+            State::Transcribing { audio } => Some(audio.len() as f32 / 16000.0),
+            _ => None,
+        };
         match result {
             Ok(Ok(text)) => {
                 if text.is_empty() {
                     tracing::debug!("Transcription was empty");
+                    crate::osd::outcome::write(crate::osd::outcome::Outcome::Empty);
                     self.reset_to_idle(state).await;
                 } else {
                     tracing::info!("Transcribed: {:?}", text);
@@ -3698,12 +3746,22 @@ impl Daemon {
                         ),
                     };
 
-                    if let Err(e) =
-                        output::output_with_fallback(&output_chain, &final_text, output_options)
-                            .await
-                    {
+                    let output_started = Instant::now();
+                    let delivered =
+                        output::output_via(&output_chain, &final_text, output_options).await;
+                    if let Err(e) = &delivered {
                         tracing::error!("Output failed: {}", e);
-                    } else {
+                    } else if let Ok(method) = delivered {
+                        // Before the outcome, so a popup that sees "done" finds it.
+                        crate::osd::outcome::write_delivery(&crate::osd::outcome::Delivery {
+                            text: final_text.clone(),
+                            chars: final_text.chars().count(),
+                            method: method.to_string(),
+                            enter: output_config.auto_submit,
+                            output_ms: output_started.elapsed().as_millis() as u64,
+                            latency_ms: crate::osd::outcome::since_stop_ms(),
+                            audio_s,
+                        });
                         self.play_feedback(SoundEvent::TranscriptionComplete);
 
                         if self.config.output.notification.on_transcription {

@@ -328,6 +328,28 @@ post_process_command = "my-script.sh --formal"
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --profile <name>` instead. Avoid using the same key in both `modifiers` and `profile_modifiers` -- every hotkey press would always activate that profile.
 
+### look_chord
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Switches the look of the `vo` popup (`[osd] frontend = "vo"`) from the keyboard. Hold Left Ctrl and Right Ctrl, then press Down for the next look or Up for the previous one. The list wraps round. The chord only does something while the popup shows, during a dictation or while it lingers after one.
+
+The new look applies at once and is kept for later dictations, also after a restart, until you switch again. It is saved in `$XDG_STATE_HOME/voxtype/osd-look` (usually `~/.local/state/voxtype/osd-look`) and wins over `[osd] theme` and `--theme`. Delete that file to go back to the configured theme.
+
+Each look turns on its own motion set, so switching looks also switches the motion effects. To change or turn off those sets, see `[osd] motion` under "vo OSD" below.
+
+The chord never counts as a tap of Right Ctrl, so it does not start, stop, paste or discard a dictation when `double_tap = true`. The focused app also receives Ctrl+Up or Ctrl+Down. In plain push-to-talk or toggle mode with `key = "RIGHTCTRL"` (no `double_tap`), the Right Ctrl press of the chord still counts as a hotkey press.
+
+**Example:**
+```toml
+[hotkey]
+look_chord = false  # Ctrl+Ctrl+Up/Down never switches the popup's look
+```
+
+**Note:** This only applies when using evdev hotkey detection (`enabled = true`).
+
 ---
 
 ## [audio]
@@ -3866,6 +3888,7 @@ the `voxtype-osd` wrapper launches via `[osd] frontend`.
 frontend = "gtk4"           # Default. Uses voxtype-osd-gtk4.
 # frontend = "native"       # wgpu/egui-based (voxtype-osd-native).
 # frontend = "quickshell"   # QML/Quickshell launcher (voxtype-osd-quickshell).
+# frontend = "vo"           # Swiss popup on the vo GPU overlay (voxtype-osd-vo).
 ```
 
 If you pick `"quickshell"`, install the QML tree first so the launcher can
@@ -3929,6 +3952,168 @@ the default theme.
 
 The theme can also be set with `voxtype-osd-gtk4 --theme swiss` or
 `VOXTYPE_OSD_THEME=swiss`.
+
+### Popup position: top edge or reading line
+
+With `position = "bottom-center"` or `"top-center"`, `anchor` picks what is
+placed:
+
+- `anchor = "top"` (the default): the popup's top edge sits at `top_margin`
+  of the screen height, and the popup grows downward as the text gets
+  longer.
+- `anchor = "reading-line"`: the newest text line, the one you read, sits
+  at `reading_line` of the screen height, and the popup grows upward as the
+  text gets longer. The line you read stays in one place, by default in the
+  middle of the screen.
+
+```toml
+[osd]
+anchor = "reading-line"
+reading_line = 0.5   # 0.0 is the top of the screen, 1.0 the bottom
+```
+
+A popup that would reach past the screen edge is kept on screen. Corner
+positions ignore `anchor`. Both the `gtk4` and the `vo` popups take
+`--anchor top|reading-line` and `--reading-line 0.5`, or
+`VOXTYPE_OSD_ANCHOR` and `VOXTYPE_OSD_READING_LINE`. In the `vo` popup, the
+looks other than `swiss` center the whole popup on the line for now.
+
+### vo OSD (experimental)
+
+`frontend = "vo"` runs `voxtype-osd-vo`, which draws the `swiss` look on
+the vo GPU overlay framework instead of GTK4. It is only built with the
+`osd-vo` feature:
+
+```bash
+cargo build --release --features osd-vo
+```
+
+It reads the same `[osd]` settings as the `swiss` theme (`width_px`,
+`position`, `top_margin`, `anchor`, `reading_line`, `margin_px`,
+`preview_font_pt`, `opacity`,
+`waveform_gain`, `waveform_window_secs`) and the same Plasma colors and
+fonts, and draws the `swiss` look. Differences from the GTK4 popup:
+
+- Between dictations it holds no window and no GPU device, so it uses
+  little memory while idle. Each dictation opens a new overlay, which draws
+  its first frames on the CPU while the GPU starts.
+- `word_fade = true` in `[osd]` (or `--word-fade`, or
+  `VOXTYPE_OSD_WORD_FADE=1`) fades new words in. By default they appear at
+  once, as in the GTK4 popup.
+- The microphone icon is drawn from shapes, not taken from the icon theme.
+
+It also draws two more looks that only this frontend has (the GTK4 popup
+draws `swiss` for them). Both keep the swiss popup's layout and behaviour.
+
+`theme = "type"` keeps the Plasma colors and fonts and puts the motion in
+the type and lines: the frame draws itself on when the popup opens, the
+clock and word count roll their digits like an odometer, the microphone
+turns into a stop square when you stop and a check mark when the final
+text lands, and new words rise into place. A cancelled dictation erases the
+frame as it closes.
+
+`theme = "showcase"` adds a lot on top: a glass panel, a glowing ribbon
+waveform, a light that runs round the panel's rim while you speak, a tilted
+ring of particles that follows your voice, out-of-focus orbs around the
+panel, a dot-matrix clock and word count, words that form from particles,
+and a check mark made of dots when the final text lands. The transcript
+stays on a calm, solid strip so it reads as easily as in `swiss`. It uses
+more GPU time than `swiss` and runs frames all the time while you speak, so
+it suits a desktop more than a laptop on battery. Its colors are fixed and
+do not follow the Plasma scheme.
+
+Four more looks follow design mock-ups. Their colors are fixed and do not
+follow the Plasma scheme:
+
+- `theme = "swissfi"`: off-black and off-white with one orange accent,
+  large words, a mirrored waveform of thin ticks with an orange centre, and
+  a clock and word count in small mono digits that roll.
+- `theme = "dotmatrix"`: white dots on black. The waveform is a grid of
+  dots that lights with each syllable, the status is set in a dot-matrix
+  font, and a red dot shows while recording. It needs the Doto font (OFL,
+  from Google Fonts); without it fontconfig picks another font.
+- `theme = "palette"`: a dark card like a command palette, with chips for
+  the engine, the output and the latency, a blue to violet bar waveform, a
+  caret after the last word, and a soft wavy underline under words the
+  engine is unsure of.
+- `theme = "mission"`: a mission-control panel with tiles for the model,
+  GPU memory, latency, microphone and elapsed time, a transcript tile with
+  orange corner brackets and a waveform strip with a level meter. It is
+  wider than the other looks: 760 px at the default `width_px = 600`. GPU
+  memory comes from the amdgpu driver or `nvidia-smi`, read at most every
+  3 s while the popup shows; without either the tile reads "n/a".
+
+```toml
+[osd]
+frontend = "vo"
+theme = "type"    # or "showcase"
+```
+
+#### motion
+
+**Type:** String or list of strings
+**Default:** `"look"`
+**Required:** No
+
+The motion features of the `vo` popup. Each look turns on its own set by
+default:
+
+| Look | Default set |
+|---|---|
+| `swiss` (also `default`) | `pause-marks`, `pitch-baseline`, `audio-ruler`, `fold-under`, `pre-echo`, `exhale` |
+| `showcase` | `particle-source`, `light-letters`, `variable-breath`, `depth-stack` |
+| `type` | `onset-ink`, `confidence-ink`, `width-escrow`, `margin-bell`, `pre-echo`, `pause-marks`, `exhale` |
+| `amber` | `pause-marks`, `margin-bell`, `onset-ink`, `fold-under` |
+| `radial` | `ring-reads`, `acoustic-receipts`, `audio-ruler`, `onset-joint` |
+| `tron` | `light-line`, `stroke-write`, `overflow-spine` |
+| `phosphor` | `beam-write`, `stroke-write`, `broken-frame`, `confidence-ink` |
+| `mission` | `correction-hinge`, `limit-hairline`, `audio-ruler`, `revision-address` |
+| `palette` | `correction-hinge`, `width-escrow`, `loading-word` |
+| `dotmatrix` | `dot-sort`, `count-cast`, `empty-measure`, `confidence-ink` |
+| `swissfi` | `spoken-stagger`, `count-cast`, `pre-echo`, `pause-marks`, `exhale` |
+| `scope` | `sentence-trace`, `kinetic-lattice`, `onset-joint`, `rewind` |
+| `captions` | `sound-sculpture`, `fold-under`, `pitch-baseline`, `unthread` |
+| `karaoke` | `bowstring`, `pitch-score`, `spoken-tracking`, `margin-mark` |
+| `island` | `word-bulge`, `lean-pace`, `exhale` |
+| `jarvis` | `ring-reads`, `depth-stack`, `onset-ink` |
+| `particles` | `particle-source`, `letter-physics`, `rewind`, `pre-echo` |
+| `synthwave` | `onset-grid`, `light-line`, `pitch-baseline`, `particle-source` |
+| `mecha` | `hydraulic-chain`, `onset-joint`, `look-choice`, `broken-frame` |
+| `cyberpunk` | `look-choice`, `broken-frame`, `rewind` |
+
+Some looks also have effects built in that no setting turns off. When you
+switch looks with the look chord, the new look's set applies at once.
+
+- `"look"`: each look's own set.
+- `"none"`: no set. Only effects built into the look run.
+- A list of names. Any feature name in the list replaces the look's set
+  with the listed names. `no-<name>` takes one name out of the set, so a
+  list of only `no-` entries keeps the rest of the set. Add `"look"` to a
+  list to keep the set and add the other names to it.
+
+Unknown names are ignored, never an error. `reduced-motion` (or
+`VO_REDUCED_MOTION=1`) keeps the set on, and each effect draws its calmer
+form.
+
+```toml
+[osd]
+motion = "none"                  # no motion features
+# motion = ["no-fold-under"]     # the look's set without fold-under
+# motion = ["onset-ink"]         # only onset-ink, in every look
+```
+
+`--motion NAMES` (comma separated) and `VOXTYPE_OSD_VO_MOTION` win over the
+config and follow the same rules, so `--motion none` turns the set off for
+one run. The `--station` exhibits ignore the set and show only their own
+effect.
+
+If `voxtype-osd-vo` is not installed, the launcher falls back to the GTK4
+popup. Options: `--theme swiss|showcase|type|swissfi|dotmatrix|palette|mission`
+(also `VOXTYPE_OSD_THEME`),
+`--gpu-first-frame` (draw only on the GPU),
+`--diag` (print startup timing and memory to stderr), and
+`--offline DIR` (render a scripted dictation to PNG frames and exit;
+add `--cancel` for a dictation that is cancelled).
 
 ### Quickshell OSD customization
 
