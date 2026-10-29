@@ -14,9 +14,12 @@
 //!
 //! The words themselves stay the live text. With one of these features on
 //! they arrive at 70 % ink without a rise and fill to full, so the reading
-//! line keeps its envelope; the outlines are an overlay on top. Reduced
-//! motion keeps the hairline and the broken frame as still marks and draws
-//! no outline motion.
+//! line keeps its envelope; the outlines are an overlay on top. With
+//! `stroke-write` (SW-02) the pen does the filling: a word arrives at once,
+//! its letters at 70 % ink, and each letter goes to full ink as the pen
+//! writes it ([`Popup::pen_fills`], applied by `Popup::typo_words`).
+//! Reduced motion keeps the hairline and the broken frame as still marks
+//! and draws no outline motion and no pen, and words arrive at full ink.
 
 use super::*;
 
@@ -61,6 +64,9 @@ const SNAP_SECS: f64 = 0.15;
 const END: f32 = 10.0;
 /// The ink a word arrives at with an outline feature on.
 pub(crate) const ARRIVAL_INK: f32 = 0.7;
+/// The ink a letter waits at until the pen writes it (SW-02): the reading
+/// line's 70 % floor, a hair over so float rounding never dips under it.
+pub(crate) const PEN_FLOOR: f32 = 0.705;
 /// Points per contour in a morph.
 const MORPH_POINTS: usize = 48;
 
@@ -507,7 +513,10 @@ impl Popup {
     /// How a new word enters the type look: `normal`, or with an outline
     /// feature on, at the arrival ink with no rise.
     pub(crate) fn paths_word_enter(&self, normal: Transition) -> Transition {
-        if self.paths_on() {
+        if self.look.on(WRITE) {
+            // The pen's fill brings the ink up (SW-02), not a timed fade.
+            Transition::NONE
+        } else if self.paths_on() {
             Transition::fade().opacity(ARRIVAL_INK)
         } else {
             normal
@@ -553,12 +562,56 @@ impl Popup {
             return None;
         }
         let l = &self.look;
-        let size = l.text_style().size;
         let now = self.extra.now;
-        let popup = self.paths_popup();
         let wet = WetInk::new(l.foreground, l.accent);
         self.pen_prefetch();
-        let mut plays: Vec<(Arc<Writing>, PenSlot)> = Vec::new();
+        let plays: Vec<(Arc<Writing>, PenSlot)> = self
+            .pen_slots(laid, |slot| wet.until(slot) >= now - 0.05)
+            .into_iter()
+            .map(|(_, writing, slot)| (writing, slot))
+            .collect();
+        if plays.is_empty() {
+            return None;
+        }
+        let until = plays.iter().map(|p| wet.until(&p.1)).fold(0.0, f64::max);
+        let draw = move |t: f64, r: Rect, p: &mut Painter| {
+            p.layer(Affine::translate(r.x, r.y), 1.0, |p| {
+                for (writing, slot) in &plays {
+                    writing.draw_wet(p, t, slot, &wet);
+                }
+            })
+        };
+        Some(kit::at(Element::canvas("stroke-write", until, draw), 0.0, 0.0).size(w, h))
+    }
+
+    /// Each laid word's live fill while the pen writes it (SW-02), as fill
+    /// tracks for `Typos::fill_track`: the word's letters stay at the floor
+    /// until the pen reaches them and are full once it has written them.
+    /// Empty without `stroke-write` and under reduced motion.
+    pub(crate) fn pen_fills(&self) -> HashMap<u32, Vec<(f64, f32)>> {
+        if !self.look.on(WRITE) || self.paths_reduced() {
+            return HashMap::new();
+        }
+        let laid = self.paths_laid();
+        let now = self.extra.now;
+        self.pen_slots(&laid, |slot| slot.end >= now - 0.05)
+            .into_iter()
+            .map(|(id, writing, slot)| (id, fill_keys(&writing, &slot)))
+            .collect()
+    }
+
+    /// The laid words' writings and their slots with the popup's pen, for
+    /// the slots `keep` takes. A word seen for the first time joins the pen
+    /// here, so its slot is the same whichever asks first.
+    fn pen_slots(
+        &self,
+        laid: &[Laid],
+        keep: impl Fn(&PenSlot) -> bool,
+    ) -> Vec<(u32, Arc<Writing>, PenSlot)> {
+        let size = self.look.text_style().size;
+        let now = self.extra.now;
+        let popup = self.paths_popup();
+        let mut plays = Vec::new();
         let mut books = pens().lock().unwrap_or_else(|e| e.into_inner());
         if books.len() > 64 {
             books.retain(|_, b| now - b.used < 30.0);
@@ -578,7 +631,7 @@ impl Popup {
                 .get(&word.id)
                 .and_then(|&i| book.schedule.slot(i))
                 .copied();
-            if known.is_some_and(|x| wet.until(&x) < now - 0.05) {
+            if known.is_some_and(|x| !keep(&x)) {
                 continue;
             }
             let writing = self.writing(word, size);
@@ -591,24 +644,12 @@ impl Popup {
                     book.schedule.slots()[i]
                 }
             };
-            if wet.until(&slot) < now - 0.05 {
+            if !keep(&slot) {
                 continue;
             }
-            plays.push((writing, slot));
+            plays.push((word.id, writing, slot));
         }
-        drop(books);
-        if plays.is_empty() {
-            return None;
-        }
-        let until = plays.iter().map(|p| wet.until(&p.1)).fold(0.0, f64::max);
-        let draw = move |t: f64, r: Rect, p: &mut Painter| {
-            p.layer(Affine::translate(r.x, r.y), 1.0, |p| {
-                for (writing, slot) in &plays {
-                    writing.draw_wet(p, t, slot, &wet);
-                }
-            })
-        };
-        Some(kit::at(Element::canvas("stroke-write", until, draw), 0.0, 0.0).size(w, h))
+        plays
     }
 
     /// Queues the pen strokes of the text face's common letters on the
@@ -674,6 +715,74 @@ impl Popup {
     }
 }
 
+/// A word's fill over scene time while the pen writes it in `slot`
+/// (SW-02), as `(t, fill)` keys. Each letter's ink rises over the pen
+/// distance from its first stroke to the end of its last base stroke (its
+/// dots, crossbars and marks come at the end of the word), as the wet ink
+/// dries into it; the fill's front is the sum of those letter shares. Pen
+/// distance maps to time as the pen schedule shares it out. A swept word
+/// fills evenly over its sweep.
+fn fill_keys(writing: &Writing, slot: &PenSlot) -> Vec<(f64, f32)> {
+    let n = writing.word.glyphs.len();
+    let total = writing.length();
+    if n == 0 || slot.swept || total <= 0.0 {
+        return vec![(slot.start, 0.0), (slot.end, 1.0)];
+    }
+    // Each glyph's first stroke start, last base stroke end, last end.
+    let mut span = vec![(f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY); n];
+    for s in writing.strokes() {
+        let Some(g) = span.get_mut(s.glyph) else {
+            continue;
+        };
+        let end = s.start + s.contour.length();
+        g.0 = g.0.min(s.start);
+        if !s.delayed {
+            g.1 = g.1.max(end);
+        }
+        g.2 = g.2.max(end);
+    }
+    // A glyph with no strokes is done with the one before it.
+    let mut last = 0.0f32;
+    let spans: Vec<(f32, f32)> = span
+        .iter()
+        .map(|&(b, base, end)| {
+            let (b, e) = if b.is_finite() {
+                (b, if base.is_finite() { base } else { end })
+            } else {
+                (last, last)
+            };
+            last = last.max(e);
+            (b, e)
+        })
+        .collect();
+    let front = |d: f32| -> f32 {
+        spans
+            .iter()
+            .map(|&(b, e)| {
+                if e > b {
+                    ((d - b) / (e - b)).clamp(0.0, 1.0)
+                } else if d >= b {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .sum()
+    };
+    let mut at: Vec<f32> = spans.iter().flat_map(|&(b, e)| [b, e]).collect();
+    at.extend([0.0, total]);
+    at.retain(|d| (0.0..=total).contains(d));
+    at.sort_by(f32::total_cmp);
+    at.dedup();
+    let dur = slot.end - slot.start;
+    at.into_iter()
+        .map(|d| {
+            let t = slot.start + dur * f64::from(d / total);
+            (t, (front(d) / n as f32).clamp(0.0, 1.0))
+        })
+        .collect()
+}
+
 /// When each word was first seen and when its text last changed, by popup
 /// and word. A view sees a word the moment its message lands, so the first
 /// view that lays it out dates it.
@@ -718,5 +827,86 @@ impl Popup {
             s.changed = Some(now);
         }
         (s.born, s.changed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vo::scene::text::ShapedLayout;
+    use vo::scene::typo::Typo;
+
+    fn writing(text: &str) -> Writing {
+        let fonts = vo::FontRegistry::new();
+        let id = fonts.asset("grotesk").unwrap();
+        let shaped =
+            ShapedLayout::new(fonts.clone()).layout(text, &TextStyle::new(id, 40.0, 48.0), None);
+        let word = WordOutline::new(&fonts, &shaped, 40.0, Point::ZERO);
+        Writing::with_source(&fonts, text, word, 6.0, StrokeSource::FontNow)
+    }
+
+    #[test]
+    fn the_pen_fill_follows_the_pen_letter_by_letter() {
+        let w = writing("write");
+        let n = w.word.glyphs.len();
+        let slot = PenSlot {
+            arrive: 1.0,
+            start: 1.1,
+            end: 1.35,
+            swept: false,
+        };
+        let keys = fill_keys(&w, &slot);
+        // Empty before the pen, full when it is done, only rising between.
+        assert_eq!(keys.first().copied(), Some((1.1, 0.0)));
+        let last = *keys.last().unwrap();
+        assert!(
+            (last.0 - 1.35).abs() < 1e-9 && (last.1 - 1.0).abs() < 1e-6,
+            "{keys:?}"
+        );
+        for k in keys.windows(2) {
+            assert!(k[1].0 >= k[0].0 && k[1].1 >= k[0].1 - 1e-6, "{keys:?}");
+        }
+        // When the pen is done with the first letter's base strokes, that
+        // letter is full and the last is still at the floor.
+        let first = w
+            .strokes()
+            .filter(|s| s.glyph == 0 && !s.delayed)
+            .map(|s| s.start + s.contour.length());
+        let d = first.fold(0.0f32, f32::max);
+        let t = slot.start + (slot.end - slot.start) * f64::from(d / w.length());
+        let at = |t: f64| {
+            let i = keys.partition_point(|k| k.0 <= t);
+            if i == 0 {
+                return keys[0].1;
+            }
+            if i == keys.len() {
+                return last.1;
+            }
+            let (a, b) = (keys[i - 1], keys[i]);
+            a.1 + (b.1 - a.1) * ((t - a.0) / (b.0 - a.0)) as f32
+        };
+        let v = Typo::REST.fill(at(t));
+        assert!(
+            (v.letter_ink_over(0, n, PEN_FLOOR) - 1.0).abs() <= 0.02,
+            "{}",
+            v.fill
+        );
+        assert!(
+            (v.letter_ink_over(n - 1, n, PEN_FLOOR) - 0.70).abs() <= 0.02,
+            "{}",
+            v.fill
+        );
+    }
+
+    #[test]
+    fn a_swept_word_fills_over_its_sweep() {
+        let w = writing("swept");
+        let slot = PenSlot {
+            arrive: 1.0,
+            start: 1.0,
+            end: 1.08,
+            swept: true,
+        };
+        assert_eq!(fill_keys(&w, &slot), vec![(1.0, 0.0), (1.08, 1.0)]);
     }
 }

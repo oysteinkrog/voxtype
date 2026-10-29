@@ -18,6 +18,11 @@
 //!   loose, with a short open seam under it. After two unchanged hypotheses
 //!   it sets to full ink with a 1 px baseline settle and the seam closes.
 //!
+//! - `stroke-write` (SW-02): the pen drives each word's fill. The word's
+//!   letters wait at 70 % ink and each goes to full as the pen writes it
+//!   (`Popup::pen_fills`). Under reduced motion there is no pen and words
+//!   are at full ink at once.
+//!
 //! The newest line stays inside the reading-line envelope: the framework
 //! clamps baseline to 3 px, tracking to 5 % and ink to 70 % there. Under
 //! reduced motion the channels jump to their rest values, so only the
@@ -81,7 +86,7 @@ struct Seen {
 
 impl Popup {
     fn channels_on(&self) -> bool {
-        ALL.iter().any(|f| self.look.on(f))
+        ALL.iter().any(|f| self.look.on(f)) || self.look.on(glyph_paths::WRITE)
     }
 
     fn channels_reduced(&self) -> bool {
@@ -159,6 +164,7 @@ impl Popup {
         );
         let newest = self.shown.last().map(|w| w.id);
         let still = self.status().finishing || self.ending().is_some();
+        let pen = self.pen_fills();
         let mut typos = Typos::new();
         for w in &self.shown {
             let Some(seen) = seen.get(&w.id).copied() else { continue };
@@ -209,6 +215,11 @@ impl Popup {
                     wt = wt.arrive(Typo::REST.baseline(2.0).weight(0.3).ink(0.8));
                 }
                 wt = wt.delay(seen.delay);
+            }
+            if let Some(keys) = pen.get(&w.id) {
+                // Letters ahead of the pen keep the reading-line ink.
+                wt = wt.floor(glyph_paths::PEN_FLOOR);
+                typos.set_fill_track(w.id, keys.clone());
             }
             typos.set(w.id, wt);
         }
