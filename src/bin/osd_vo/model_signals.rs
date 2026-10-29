@@ -166,6 +166,13 @@ fn twin_lift(style: &TextStyle) -> f32 {
     style.size * 0.95 + twin_style(style).line_height * 0.8
 }
 
+/// A token's text without its word marker, and whether it starts a word:
+/// decoded tokens carry a leading space, raw SentencePiece ones a `▁`.
+fn word_piece(token: &str) -> (bool, &str) {
+    let piece = token.trim_start_matches([' ', '\u{2581}']);
+    (piece.len() < token.len(), piece)
+}
+
 /// What the features keep between model steps.
 #[derive(Default)]
 pub(crate) struct State {
@@ -342,7 +349,7 @@ impl Popup {
             if let Some(e) = self.breathing_stop(laid.as_ref(), origin, ink) {
                 text = text.child(e);
             }
-            if let Some(e) = self.pre_echo_letters(s, laid.as_ref(), origin, ink) {
+            if let Some(e) = self.pre_echo_letters(s, laid.as_ref(), width, origin, ink) {
                 text = text.child(e);
             }
         }
@@ -844,30 +851,46 @@ impl Popup {
         &self,
         s: &ModelSignals,
         laid: Option<&TailLayout>,
+        width: f32,
         origin: (f32, f32),
         ink: Color,
     ) -> Option<Element<Msg>> {
         let l = &self.look;
         let laid = laid.filter(|_| l.on(PRE_ECHO_LETTERS))?;
+        let ghosts = l.on(GHOST_TAIL) || l.on(THREE_TIER);
+        // With the tail on screen, a frame the tail already wrote a token
+        // for is no echo: its letters are there.
+        let written = if ghosts {
+            s.tail.last().map_or(f32::NEG_INFINITY, |t| t.start)
+        } else {
+            f32::NEG_INFINITY
+        };
         let newest = s.frames.len().saturating_sub(STEP_FRAMES);
         let guess = s.frames[newest..]
             .iter()
             .rev()
-            .filter(|f| f.level > ECHO_GATE)
+            .filter(|f| f.level > ECHO_GATE && f.t > written + 0.01)
             .find_map(|f| f.top.first())?;
-        let letters: String = guess.text.trim_start().chars().take(ECHO_LETTERS).collect();
+        let (starts_word, piece) = word_piece(&guess.text);
+        let letters: String = piece.chars().take(ECHO_LETTERS).collect();
         if letters.is_empty() {
             return None;
         }
-        let (mut x, top) = if l.on(GHOST_TAIL) || l.on(THREE_TIER) {
+        let (mut x, top) = if ghosts {
             laid.tail_end
         } else {
             laid.committed_end
         };
-        // A guess that starts a word starts after a space.
+        // A guess that starts a word sits one space after the text; only a
+        // guess that continues the last word touches it.
         let style = l.text_style();
-        if guess.text.starts_with(' ') && x > 0.0 {
-            x += self.measure.layout(" ", &style, None).size.w;
+        if starts_word && x > 0.0 {
+            let pair = self.measure.layout("aa", &style, None).size.w;
+            x += self.measure.layout("a a", &style, None).size.w - pair;
+        }
+        let w = self.measure.layout(&letters, &style, None).size.w;
+        if x + w > width {
+            return None;
         }
         let presence = if self.signals_reduced() {
             (Transition::NONE, Transition::NONE)
@@ -923,6 +946,13 @@ impl Popup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_token_with_a_word_marker_starts_a_word() {
+        assert_eq!(word_piece(" t"), (true, "t"));
+        assert_eq!(word_piece("\u{2581}t"), (true, "t"));
+        assert_eq!(word_piece("ion"), (false, "ion"));
+    }
 
     #[test]
     fn a_changed_guess_is_a_mind_change_and_new_or_dropped_words_are_not() {
