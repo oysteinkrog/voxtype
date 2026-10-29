@@ -219,6 +219,11 @@ pub const STATUS_PREFIX: &str = "S ";
 /// [`crate::osd::live::SignalsStep`]. It never carries text that gets typed.
 pub const SIGNALS_PREFIX: &str = "G ";
 
+/// Error text of a final response when the recording held no words, as when a
+/// dictation is started and stopped again without speaking. The daemon treats
+/// it as "no speech", not as a failure.
+pub const NO_SPEECH: &str = "No speech recognized";
+
 /// Error text from the engine thread when the GPU has too little free memory.
 #[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 const GPU_BUSY: &str = "GPU busy";
@@ -789,7 +794,7 @@ fn live_session(
 
     if config.live_preview_final == "preview" {
         let response = if preview_final.is_empty() {
-            WorkerResponse::error("No speech recognized")
+            WorkerResponse::error(NO_SPEECH)
         } else {
             WorkerResponse::success(preview_final.clone(), None)
         };

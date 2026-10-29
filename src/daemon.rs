@@ -5114,14 +5114,28 @@ impl Daemon {
                             }
                         }
                         Some(StreamingEvent::Error(err)) => {
-                            tracing::error!("Streaming backend error: {}", err);
-                            send_notification(
-                                "Streaming Error",
-                                &err.to_string(),
-                                self.config.output.notification.show_engine_icon,
-                                self.config.engine,
-                                "critical",
-                            ).await;
+                            let no_speech = matches!(
+                                &err,
+                                crate::error::TranscribeError::InferenceFailed(m)
+                                    if m == crate::transcribe::worker::NO_SPEECH
+                            );
+                            if no_speech {
+                                // A dictation started and stopped again without
+                                // speaking: the popup says so, nothing else.
+                                tracing::info!("Streaming session ended with no speech");
+                                crate::osd::outcome::write(crate::osd::outcome::Outcome::Empty);
+                            } else {
+                                tracing::error!("Streaming backend error: {}", err);
+                                // Not "critical": KDE and GNOME keep critical
+                                // notifications up until they are closed.
+                                send_notification(
+                                    "Streaming Error",
+                                    &err.to_string(),
+                                    self.config.output.notification.show_engine_icon,
+                                    self.config.engine,
+                                    "normal",
+                                ).await;
+                            }
                             self.end_streaming(
                                 &mut state,
                                 &mut audio_capture,
