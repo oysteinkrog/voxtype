@@ -668,6 +668,12 @@ fn live_session(
     // the first audio block.
     let mut revlog: Option<RevisionLog> = None;
     let mut signals = SignalsSent::default();
+    let mut ticks = TailTicks::new(
+        config
+            .parakeet
+            .as_ref()
+            .map_or(crate::config::DEFAULT_STREAMING_TAIL_SECS, |p| p.streaming_tail_secs()),
+    );
     let mut more = false;
     for msg in blocks_rx.iter() {
         let Some(block) = msg else {
@@ -712,6 +718,20 @@ fn live_session(
                 }
                 if let Some(vocab) = vocab {
                     signals.send(out, u, vocab, samples.len())?;
+                    if ticks.due(u, samples.len()) {
+                        let start = std::time::Instant::now();
+                        match u.decode_tail() {
+                            Ok(true) => {
+                                ticks.done(samples.len(), start.elapsed());
+                                signals.send_tail(out, u, vocab, samples.len())?;
+                            }
+                            Ok(false) => ticks.fresh_at = samples.len(),
+                            Err(e) => {
+                                eprintln!("[worker] Tail tick failed, stopping them: {}", e);
+                                ticks.every = 0;
+                            }
+                        }
+                    }
                 }
                 out.flush()?;
             }
@@ -723,6 +743,14 @@ fn live_session(
     }
 
     let secs = samples.len() as f32 / 16000.0;
+    if ticks.ticks > 0 {
+        eprintln!(
+            "[worker] Tail ticks: {} in {:.2}s of audio, {:.1} ms each",
+            ticks.ticks,
+            secs,
+            ticks.took.as_secs_f32() * 1000.0 / ticks.ticks as f32
+        );
+    }
     // EOF between recordings: the daemon let the worker go.
     if samples.is_empty() && !more {
         return Ok(false);
@@ -932,6 +960,78 @@ fn word_detail(
     }
 }
 
+/// Paces the tail-only decodes between streaming steps
+/// (`[parakeet] streaming_tail_secs`): one each `every` samples of audio
+/// since the tail was last new, from a step or a tick, unless the next step
+/// is less than half an interval away. Stops for the rest of
+/// the recording when two ticks in a row take more than
+/// [`TAIL_TICK_BUDGET`] of their interval, so a slow CPU falls back to one
+/// tail per step.
+#[cfg(feature = "parakeet")]
+struct TailTicks {
+    every: usize,
+    committed: usize,
+    fresh_at: usize,
+    slow: u32,
+    ticks: u32,
+    took: std::time::Duration,
+}
+
+/// The share of a tick's interval it may take.
+#[cfg(feature = "parakeet")]
+const TAIL_TICK_BUDGET: f32 = 0.6;
+
+#[cfg(feature = "parakeet")]
+impl TailTicks {
+    fn new(secs: f32) -> Self {
+        Self {
+            every: (secs * 16000.0).round() as usize,
+            committed: 0,
+            fresh_at: 0,
+            slow: 0,
+            ticks: 0,
+            took: std::time::Duration::ZERO,
+        }
+    }
+
+    /// After a `transcribe_chunk`: whether to decode a new tail now.
+    fn due(&mut self, u: &parakeet_rs::ParakeetUnified, samples: usize) -> bool {
+        if u.committed_samples() != self.committed {
+            // A step ran, and it decoded the tail.
+            self.committed = u.committed_samples();
+            self.fresh_at = samples;
+            return false;
+        }
+        // A tick just before the next step would be replaced at once.
+        let cfg = u.streaming_config();
+        let step_at = self.committed + cfg.chunk_samples() + cfg.right_context_samples();
+        self.every > 0
+            && samples >= self.fresh_at + self.every
+            && samples + self.every / 2 < step_at
+    }
+
+    /// Notes a tick that took `took`.
+    fn done(&mut self, samples: usize, took: std::time::Duration) {
+        self.fresh_at = samples;
+        self.ticks += 1;
+        self.took += took;
+        let budget = TAIL_TICK_BUDGET * self.every as f32 / 16000.0;
+        if took.as_secs_f32() > budget {
+            self.slow += 1;
+            if self.slow >= 2 {
+                eprintln!(
+                    "[worker] Tail ticks take {:.0} ms of {:.0} ms; one tail per step from now on",
+                    took.as_secs_f32() * 1000.0,
+                    self.every as f32 / 16.0
+                );
+                self.every = 0;
+            }
+        } else {
+            self.slow = 0;
+        }
+    }
+}
+
 /// What the worker has sent of the live model's signals this recording.
 #[cfg(feature = "parakeet")]
 #[derive(Default)]
@@ -951,12 +1051,34 @@ impl SignalsSent {
         vocab: &parakeet_rs::SentencePieceVocab,
         samples: usize,
     ) -> io::Result<()> {
-        use crate::osd::live::{FrameLevel, Guess, SignalsStep, TailToken};
-        let all = u.frame_signals();
-        if all.len() <= self.frames {
+        if u.frame_signals().len() <= self.frames {
             return Ok(());
         }
-        let frames = all[self.frames..]
+        self.write(out, u, vocab, samples)
+    }
+
+    /// Writes a `G` line for a tail tick ([`TailTicks`]): no new frames,
+    /// the new lookahead tail.
+    fn send_tail(
+        &mut self,
+        out: &mut impl Write,
+        u: &parakeet_rs::ParakeetUnified,
+        vocab: &parakeet_rs::SentencePieceVocab,
+        samples: usize,
+    ) -> io::Result<()> {
+        self.write(out, u, vocab, samples)
+    }
+
+    fn write(
+        &mut self,
+        out: &mut impl Write,
+        u: &parakeet_rs::ParakeetUnified,
+        vocab: &parakeet_rs::SentencePieceVocab,
+        samples: usize,
+    ) -> io::Result<()> {
+        use crate::osd::live::{FrameLevel, Guess, SignalsStep, TailToken};
+        let all = u.frame_signals();
+        let frames = all[self.frames.min(all.len())..]
             .iter()
             .map(|f| FrameLevel {
                 t: f.abs_frame as f32 * LIVE_FRAME_SECS,

@@ -18,7 +18,9 @@ pub use moonshine::MoonshineConfig;
 pub use omnilingual::OmnilingualConfig;
 pub use openvino::OpenVinoConfig;
 pub use paraformer::ParaformerConfig;
-pub use parakeet::{ParakeetConfig, ParakeetModelType, StreamingWindow};
+pub use parakeet::{
+    ParakeetConfig, ParakeetModelType, StreamingWindow, DEFAULT_STREAMING_TAIL_SECS,
+};
 pub use sensevoice::SenseVoiceConfig;
 pub use soniox::SonioxConfig;
 

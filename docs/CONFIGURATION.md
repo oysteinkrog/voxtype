@@ -1447,6 +1447,38 @@ streaming_chunk_secs = 0.56
 streaming_right_context_secs = 0.56
 ```
 
+### streaming_tail_secs
+
+**Type:** Float (seconds)
+**Default:** `0.24`
+**Required:** No
+
+How often the live preview decodes a new lookahead tail between two streaming
+steps, in seconds of audio. The tail is the dim guess the popup shows after the
+committed words (`ghost-tail`). Without ticks it changes once a step, every
+`streaming_chunk_secs`. Each tick runs the encoder once more on the audio heard
+so far and decodes everything after the committed words. The committed words
+and the final text do not change.
+
+- `0` turns the ticks off: one tail per step, as before.
+- Each tick costs about as much CPU as a step. On 7 test clips with the default
+  window, the live worker used 0.63 s of CPU per second of audio with no ticks,
+  1.23 s at `0.24` and 1.45 s at `0.16`.
+- When a tick takes more than 60 % of its interval twice in a row, the worker
+  stops the ticks for that recording and logs
+  `Tail ticks take ... ms of ... ms; one tail per step from now on`. On a slow
+  CPU this keeps the preview at the step cadence.
+- No tick runs when the next step is less than half an interval away.
+
+The worker logs the ticks of each recording, for example
+`Tail ticks: 14 in 4.75s of audio, 81.4 ms each`.
+
+**Example:**
+```toml
+[parakeet]
+streaming_tail_secs = 0     # one tail per step
+```
+
 ### Complete Example
 
 ```toml
