@@ -527,11 +527,13 @@ impl Popup {
                 .text_blur(p.blur)
                 .motion(Prop::TextFx, stack.motion(d, reduced))
                 .size(lw, line_h)
-                // A word lands in place: the sheet of a new line rises 3 px
-                // already, and a rise of its own on top breaks the reading
-                // line's envelope (6ofh).
-                .word_enter(Transition::fade().opacity(0.7))
-                .word_change(Transition::fade().opacity(0.7));
+                // A word lands in place at full ink: the sheet of a new line
+                // already rises 3 px from 70 % ink, and a rise or fade of its
+                // own on top breaks the reading line's envelope (6ofh).
+                .word_enter(Transition::NONE)
+                // Revised words move as on the look's plain lines.
+                .revision_motion(super::revision::motion(&self.look))
+                .word_revise(super::revision::revise(&self.look));
             kit::at(
                 if d == 0 { newest(live) } else { live },
                 ((sheet.w - lw) / 2.0).max(0.0),
