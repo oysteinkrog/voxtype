@@ -37,6 +37,10 @@ pub(crate) enum Moment {
     TimeLimit,
     /// A dictation with one press of the look chord in the middle.
     LookSwitch,
+    /// The live model's steps on a fixture, with its lookahead tail and
+    /// frame levels (`preview-signals.json`), for the model signal features
+    /// (ASR-05).
+    Lookahead,
 }
 
 impl Moment {
@@ -58,6 +62,7 @@ impl Moment {
         Moment::Loading,
         Moment::TimeLimit,
         Moment::LookSwitch,
+        Moment::Lookahead,
     ];
 
     /// The name on the command line.
@@ -80,6 +85,7 @@ impl Moment {
             Moment::Loading => "loading",
             Moment::TimeLimit => "time-limit",
             Moment::LookSwitch => "look-switch",
+            Moment::Lookahead => "lookahead",
         }
     }
 
@@ -138,6 +144,28 @@ const LATTICE_SCRIPT: &[(&str, f64)] = &[
     ("key.", 0.45),
 ];
 
+/// The lookahead moment (ASR-05): the steps of parakeet-unified-en-0.6b-int8 on
+/// `tests/fixtures/vad/speech_long.wav` as the live worker streams them (dumped
+/// with parakeet-rs's `unified_signals` example): the committed text after
+/// each step, the lookahead tail as (token, frames to the window edge), and
+/// each new frame's log10(1 - P(blank)). The last step is the flush. Its
+/// words are the fixture's, not the demo sentence's, because the tail is the
+/// model's own.
+const LOOKAHEAD_STEPS: &[(&str, &[(&str, u32)], &[f32])] = &[
+    ("", &[(" Th", 7), ("is", 7), (" is", 7), (" a", 6), (" l", 5), ("ong", 5), ("er", 4), (" t", 2), ("est", 2), (" on", 1)], &[-5.09, -5.09, -5.05, -5.04, -5.10, -4.76, -2.32]),
+    ("This is a longer test", &[(" of", 5), (" v", 4), ("o", 3), ("ice", 3), (" act", 1), ("ing", 0), (".", 0)], &[-2.90, -3.27, -3.41, -3.65, -3.67, -0.99, -3.61]),
+    ("This is a longer test of voice", &[(" act", 7), ("iv", 6), ("ity", 5), (" det", 1), ("ect", 0), ("ion", 0), (".", 0)], &[-4.07, -2.47, -3.14, -1.50, -4.12, -3.97, -4.28]),
+    ("This is a longer test of voice activity", &[(" det", 6), ("ect", 5), ("ion", 4), (" w", 2), ("ith", 2)], &[-3.17, -1.81, -4.05, -3.96, -4.30, -4.50, -4.53]),
+    ("This is a longer test of voice activity detection", &[(" w", 6), ("ith", 6), (" m", 4), ("ult", 4), ("i", 3), ("ple", 3), (" wor", 1), ("ds", 1), (".", 0)], &[-4.65, -2.02, -0.66, -4.30, -3.92, -3.96, -3.95]),
+    ("This is a longer test of voice activity detection with multiple", &[(" wor", 6), ("ds", 6), (",", 1), (" and", 1)], &[-4.01, -3.73, -3.51, -1.62, -4.52, -4.46, -4.46]),
+    ("This is a longer test of voice activity detection with multiple words", &[(" and", 5), (" ph", 4), ("r", 3), ("ases", 3), (".", 0)], &[-4.64, -4.15, -4.04, -4.13, -4.03, -3.97, -3.56]),
+    ("This is a longer test of voice activity detection with multiple words and phrases.", &[], &[-1.91, -1.04, -3.76, -0.93, -4.60, -2.11, -1.16, -0.53, -5.40, -5.34, -6.00]),
+];
+
+/// Seconds of audio per live model step, and per encoder frame.
+const STEP_SECS: f64 = 0.56;
+const FRAME_SECS: f32 = 0.08;
+
 /// What the microphone hears in a stretch of a moment.
 #[derive(Clone, Copy, PartialEq)]
 enum Sound {
@@ -161,6 +189,8 @@ struct Take {
     seq: u32,
     /// Timing of the words in the current hypothesis, in audio seconds.
     timed: Vec<TimedWord>,
+    /// `preview-signals.json` so far.
+    signals: voxtype::osd::live::ModelSignals,
     /// Words shown at low confidence while they are the newest.
     unsure: Vec<&'static str>,
 }
@@ -174,6 +204,7 @@ impl Take {
             rec_start,
             seq: 0,
             timed: Vec::new(),
+            signals: Default::default(),
             unsure: vec!["popup", "swish", "confi"],
         }
     }
@@ -313,6 +344,54 @@ impl Take {
         self.files.preview = text.trim().to_string();
         self.files.live = Some(self.doc.clone());
         self.files_at(t);
+    }
+
+    /// One step of the live model at `t`: its new frames' levels and its
+    /// tail, as `preview-signals.json` gets them.
+    fn signals_step(&mut self, t: f64, tail: &[(&str, u32)], levels: &[f32]) {
+        use voxtype::osd::live::{FrameLevel, SignalsStep, TailToken};
+        let audio_s = (t - self.rec_start) as f32;
+        let first = self.signals.frames_total as usize;
+        let frames = levels
+            .iter()
+            .enumerate()
+            .map(|(i, &level)| FrameLevel {
+                t: (first + i) as f32 * FRAME_SECS,
+                level,
+                top: Vec::new(),
+            })
+            .collect();
+        let end = (first + levels.len()) as u32;
+        let tail: Vec<TailToken> = tail
+            .iter()
+            .map(|&(text, edge)| {
+                let frame = (end + 7).saturating_sub(edge + 1);
+                TailToken {
+                    text: text.into(),
+                    start: frame as f32 * FRAME_SECS,
+                    end: (frame + 1) as f32 * FRAME_SECS,
+                    edge,
+                    conf: if edge >= 3 { 0.99 } else { 0.3 },
+                    detail: None,
+                }
+            })
+            .collect();
+        let committed = self.files.preview.clone();
+        let mut with_tail = committed;
+        for tk in &tail {
+            with_tail.push_str(&tk.text);
+        }
+        self.signals.apply(SignalsStep {
+            step: self.signals.step + 1,
+            audio_s,
+            frames,
+            tail,
+            with_tail: with_tail.trim().to_string(),
+        });
+        self.inputs.push((
+            t,
+            Input::Msg(Msg::ModelSignals(Box::new(self.signals.clone()))),
+        ));
     }
 
     /// Speech from `t` saying `words` one after another, `per` seconds
@@ -629,6 +708,31 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             let t = k.speak(s0 + 3.1, &sentence_words(0, 6), per);
             k.stop(t);
             let shown = k.finish(t, 0.6, &final_text(&sentence_words(0, 6)));
+            k.pump(t + 0.03, shown);
+            k.end(shown + 0.2, Outcome::Done);
+            k.scenario(look, shown + 1.4)
+        }
+        Moment::Lookahead => {
+            k.record(s0);
+            let n = LOOKAHEAD_STEPS.len();
+            // A step runs once its chunk and the right context are in.
+            let step_at = |i: usize| s0 + (i + 2) as f64 * STEP_SECS;
+            let speech_end = s0 + 4.75;
+            k.sound(s0, speech_end, Sound::Speech);
+            let mut t = s0;
+            for (i, (text, tail, levels)) in LOOKAHEAD_STEPS.iter().enumerate() {
+                // The flush comes when the recording stops.
+                t = if i + 1 == n { speech_end + 0.05 } else { step_at(i) };
+                if i + 1 == n {
+                    k.stop(t - 0.01);
+                }
+                if !text.is_empty() && *text != k.files.preview {
+                    k.say(t, text);
+                }
+                k.signals_step(t, tail, levels);
+            }
+            let (text, _, _) = LOOKAHEAD_STEPS[n - 1];
+            let shown = k.finish(t, 0.6, text);
             k.pump(t + 0.03, shown);
             k.end(shown + 0.2, Outcome::Done);
             k.scenario(look, shown + 1.4)

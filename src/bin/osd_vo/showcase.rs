@@ -915,7 +915,7 @@ impl Popup {
         let mut strip_fill = c(MATTE);
         strip_fill.a = 0.9;
         let negatives = self.negatives(phase);
-        Element::panel("strip")
+        let strip = Element::panel("strip")
             .height(self.lines as f32 * l.text_line + 2.0 * STRIP_PAD_Y)
             .pad_edges(STRIP_PAD_Y, STRIP_PAD_X, STRIP_PAD_Y, STRIP_PAD_X)
             .margin_edges(0.0, -STRIP_PAD_X, 0.0, -STRIP_PAD_X)
@@ -927,7 +927,19 @@ impl Popup {
             .rim(c(ICE).fade(0.35), 1.0, 0.12, -0.375, 0.0)
             .sheen(c(ICE).fade(0.10), 0.7)
             .child(words)
-            .children(negatives)
+            .children(negatives);
+        // The ghost tail follows the flat text only; the depth stack lays
+        // its lines out on its own.
+        if l.on(wild_space::DEPTH_STACK) {
+            return strip;
+        }
+        self.signal_marks(
+            strip,
+            &self.shown,
+            l.text_width(),
+            (STRIP_PAD_X, STRIP_PAD_Y),
+            c(ICE),
+        )
     }
 
     /// The live text of `words` as the reading line shows it: particles,

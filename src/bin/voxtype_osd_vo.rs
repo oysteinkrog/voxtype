@@ -145,6 +145,8 @@ mod app_icon;
 mod lifecycle;
 #[path = "osd_vo/ruler.rs"]
 mod ruler;
+#[path = "osd_vo/model_signals.rs"]
+mod model_signals;
 
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;

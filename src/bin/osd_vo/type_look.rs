@@ -513,6 +513,13 @@ impl Popup {
             endings::Cancel::Unthread,
         ));
         let text = self.typo_marks(text, l.text_width());
+        let text = self.signal_marks(
+            text,
+            &self.shown[..self.room()],
+            l.text_width(),
+            (0.0, 0.0),
+            l.foreground,
+        );
         let text = self.with_hearing(
             text,
             &l.text_style(),
