@@ -69,6 +69,8 @@ const HISTORY_SECS: f32 = 1.4;
 const SINK_SECS: f64 = 0.45;
 /// Seconds for the dots to join into a line when the text lands.
 const JOIN_SECS: f64 = 0.5;
+/// Seconds for the margin bell (MO-31) to tighten or relax the newest line.
+const BELL_SECS: f64 = 0.12;
 
 const AMBER: u32 = 0xff9a2e;
 const HOT: u32 = 0xffd59a;
@@ -589,6 +591,16 @@ impl Popup {
             .word_enter(Transition::fade().wipe(1.0));
         if self.amber.ended_at.is_some() {
             words = words.opacity(0.4);
+        }
+        if let Some(bell) = self.look.bell() {
+            // MO-31: on the default 260 ms spring each letter of a word
+            // creeps to rest at its own frame, and at the default width a
+            // short word on amber's newest line read up to 13 % loose (the
+            // envelope allows 5 %). On a faster spring it stays inside.
+            words = words.margin_bell(Bell {
+                travel: Spring::critical_to_98(BELL_SECS),
+                ..bell
+            });
         }
         let words = self.typo_words(words);
         let words = self.handoff_or(words, &style, Some(width), hex(TEXT, 1.0), hex(AMBER, 1.0));
