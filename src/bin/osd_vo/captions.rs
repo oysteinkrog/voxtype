@@ -55,6 +55,8 @@ const STATUS_Y: f32 = 160.0;
 const TICK_HZ: f64 = 60.0;
 /// Below this confidence a word gets the thin underline.
 const DOUBT: f32 = 0.6;
+/// MO-33: the fold's spring; it nears edge-on in about 220 ms.
+const FOLD_SECS: f64 = 0.22;
 
 #[derive(Clone, Copy)]
 struct Fonts {
@@ -377,9 +379,25 @@ impl Popup {
         let f = fonts(&l.fonts);
         let style = l.text_style();
         let all = self.stable_lines(&style, WRAP);
-        let lines = &all[all.len().saturating_sub(SLOTS.len() - 1)..];
+        // With fold-under (MO-33) the line that leaves the top stays in the
+        // last slot, turned away about its baseline, instead of fading up.
+        let fold = matches!(l.overflow(), Overflow::Fold(_));
+        let kept = if fold { SLOTS.len() } else { SLOTS.len() - 1 };
+        let lines = &all[all.len().saturating_sub(kept)..];
         let n = lines.len();
         let roll = Spring::critical_to_98(ROLL_SECS);
+        let fold_angle = match l.overflow() {
+            Overflow::Fold(f) => f.angle,
+            _ => 0.0,
+        };
+        // A row turns about its centre line, so a folding row's box is as
+        // tall as twice its baseline.
+        let base = self
+            .measure
+            .layout("x", &style, None)
+            .glyphs
+            .first()
+            .map_or(LINE * 0.7, |g| g.pos.y);
         let live = mode == Mode::Listening;
         let newest = if live {
             self.model.words().last().map(|w| w.id)
@@ -396,6 +414,7 @@ impl Popup {
             let (cy, opacity) = SLOTS[age.min(SLOTS.len() - 1)];
             let lx = (BAND_W - w) / 2.0;
             let ly = cy - LINE / 2.0;
+            let leaving = age + 1 >= SLOTS.len();
             if age == 0 && live {
                 dot = Some(Point::new(lx - 22.0, cy + 1.0));
             }
@@ -408,7 +427,7 @@ impl Popup {
                 _ => (&words[..], None),
             };
             let line_el = |key: String, ws: &[Word], colour: Color| {
-                Element::live_text(key, ws)
+                let text = Element::live_text(key, ws)
                     .text_style(style)
                     .revision_motion(revision::motion(&self.look))
                     .word_revise(revision::revise(&self.look))
@@ -416,7 +435,9 @@ impl Popup {
                     .motion(Prop::TextColor, Spring::critical_to_98(0.15))
                     .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                     .motion(Prop::Offset, Spring::POP)
-                    .word_enter(Transition::fade().offset(0.0, 6.0))
+                    .word_enter(Transition::fade().offset(0.0, 6.0));
+                // MO-14 and the other word channels.
+                self.typo_words(text)
             };
             // Each part gets its own measured width, so neither wraps.
             let width = |ws: &[Word]| {
@@ -441,7 +462,15 @@ impl Popup {
                     0.0,
                 ));
             }
-            sculpt_rows.push((words.clone(), Point::new(x + lx, y + ly)));
+            if fold {
+                row = row
+                    .size(*w + 4.0, 2.0 * base)
+                    .rotate_x(if leaving { fold_angle } else { 0.0 })
+                    .motion(Prop::Tilt, Spring::critical_to_98(FOLD_SECS));
+            }
+            if !leaving {
+                sculpt_rows.push((words.clone(), Point::new(x + lx, y + ly)));
+            }
             texts.push(
                 at(row, x + lx, y + ly)
                     .opacity(if mode == Mode::Cancelled { opacity * 0.4 } else { opacity })
@@ -454,7 +483,7 @@ impl Popup {
                     ),
             );
             // Unsure words on this line get the underline.
-            if live {
+            if live && !leaving {
                 let mut px = lx;
                 for (k, wd) in words.iter().enumerate() {
                     let ww = self.measure.layout(&wd.text, &style, None).size.w;
@@ -529,12 +558,18 @@ impl Popup {
             .child(canvas);
         if l.on(wild_space::SOUND_SCULPTURE) {
             // Letter bodies behind the text, as deep as each word was loud.
-            let done = !matches!(mode, Mode::Listening | Mode::Loading);
+            let done = !matches!(mode, Mode::Listening | Mode::Loading) || self.still();
             if let Some(e) = self.sculpture_element(&sculpt_rows, &style, size, roll, done) {
                 panel = panel.child(e);
             }
         }
         panel = panel.children(texts);
+        let ink = endings::Ink {
+            text: hex(WHITE),
+            mark: hex(ACCENT),
+            faint: hex(HINT),
+        };
+        panel = panel.children(self.unthread_rows(&sculpt_rows, style, size, ink));
         if !label.is_empty() {
             panel = panel.child(
                 at(

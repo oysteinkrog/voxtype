@@ -226,6 +226,51 @@ impl Popup {
         out
     }
 
+    /// MO-51 for a look that lays out its own lines: the unthread under
+    /// `rows`, each row's words in `style` and the top left of its text box,
+    /// on a canvas `size` big at the origin. Plays when `unthread` is on and
+    /// a dictation with words on screen was cancelled.
+    pub(crate) fn unthread_rows(
+        &self,
+        rows: &[(Vec<Word>, Point)],
+        style: TextStyle,
+        size: Size,
+        ink: Ink,
+    ) -> Option<Element<Msg>> {
+        let at = self.ended_at?;
+        if self.ending() != Some(Ending::Cancelled) || !self.look.on("unthread") {
+            return None;
+        }
+        let mut laid: Option<Laid> = None;
+        for (words, o) in rows.iter().filter(|r| !r.0.is_empty()) {
+            let joined = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+            let row = Laid::new(self.measure.layout(&joined, &style, None), words, style).shifted(o.x, o.y);
+            laid = Some(match laid {
+                None => row,
+                Some(mut all) => {
+                    let n = all.text.glyphs.len();
+                    all.words.extend(row.words.iter().map(|w| WordBox {
+                        first: w.first + n,
+                        end: w.end + n,
+                        ..*w
+                    }));
+                    all.text.glyphs.extend(row.text.glyphs);
+                    all
+                }
+            });
+        }
+        let th = Thread::new(&laid?, at, ink, self.still());
+        let until = th.until();
+        Some(
+            kit::at(
+                Element::canvas("unthread", until, move |t, r, p| th.draw(t, r, p)),
+                0.0,
+                0.0,
+            )
+            .size(size.w, size.h),
+        )
+    }
+
     /// The newest smoothed level, 0 to 1.
     fn last_level(&self) -> f32 {
         self.wave.last().copied().unwrap_or(0.0).clamp(0.0, 1.0)
