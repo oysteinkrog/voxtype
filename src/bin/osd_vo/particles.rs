@@ -888,7 +888,14 @@ impl Popup {
             .size(w, self.lines as f32 * TEXT_LINE * s)
             .child(words);
         let (x, y) = self.particles_text_at(phase, x0, y0);
-        at(self.with_hearing(text, &style, w, hex(INK), hex(CYAN)), x, y)
+        // Under reduced motion no pre-echo blobs: they are motion that comes before the
+        // words. (The look's set has no other hearing feature.)
+        let text = if self.still() {
+            text
+        } else {
+            self.with_hearing(text, &style, w, hex(INK), hex(CYAN))
+        };
+        at(text, x, y)
     }
 
     /// The text box's top left in the surface.
