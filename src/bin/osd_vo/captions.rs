@@ -411,6 +411,7 @@ impl Popup {
                 Element::live_text(key, ws)
                     .text_style(style)
                     .revision_motion(revision::motion(&self.look))
+                    .word_revise(revision::revise(&self.look))
                     .color(colour)
                     .motion(Prop::TextColor, Spring::critical_to_98(0.15))
                     .motion(Prop::Opacity, Spring::critical_to_98(0.12))

@@ -1123,6 +1123,7 @@ impl Popup {
                     at(Element::live_text("words", words), 0.0, 0.0)
                         .text_style(style)
                         .revision_motion(revision::motion(&self.look))
+                        .word_revise(revision::revise(&self.look))
                         .color(hex(TEXT, 1.0))
                         .text_halo(hex(CYAN, 0.45), 7.0 * k)
                         .size(w, style.line_height)

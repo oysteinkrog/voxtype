@@ -526,6 +526,7 @@ impl Popup {
         let words = Element::live_text("words", &self.shown)
             .line_motion(&self.look)
             .revision_motion(revision::motion(&self.look))
+            .word_revise(revision::revise(&self.look))
             .text_style(l.text_style())
             .color(hex(PAPER))
             .opacity(dim)

@@ -1192,6 +1192,7 @@ impl Popup {
             Element::live_text(key, words)
                 .text_style(style)
                 .revision_motion(revision::motion(&self.look))
+                .word_revise(revision::revise(&self.look))
                 .color(colour)
                 .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                 .motion(Prop::Offset, Spring::POP)

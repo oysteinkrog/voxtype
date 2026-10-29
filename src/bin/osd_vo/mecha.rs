@@ -1321,6 +1321,7 @@ impl Popup {
         let words = Element::live_text("words", &self.shown)
             .line_motion(&self.look)
             .revision_motion(revision::motion(&self.look))
+            .word_revise(revision::revise(&self.look))
             .text_style(text_style(l))
             .color(text_color)
             .text_halo(hex(DEEP).fade(0.25), 2.0 * s)
