@@ -48,6 +48,12 @@
 //!   is brighter when the frame it started on was a near-certain token.
 //!   Nothing shows under reduced motion.
 //!
+//! - `mind-change`: when a step replaces a word the tail had guessed, the
+//!   old word lingers over the new one for 300 ms, fading. Each change in
+//!   the last 3 s tints a bar at the text column's right edge, so a model
+//!   that keeps changing its mind shows it. Under reduced motion the old
+//!   word holds still for the 300 ms.
+//!
 //! Nothing shows once the recording stops, so the signals end with the
 //! dictation and nothing moves at room tone. Under reduced motion the ghosts
 //! swap at once (no fades) and the floor jumps between steps: the ink tiers
@@ -69,9 +75,11 @@ pub(crate) const BREATHING_STOP: &str = "breathing-stop";
 pub(crate) const PRE_ECHO_LETTERS: &str = "pre-echo-letters";
 pub(crate) const TWIN_SPELLING: &str = "twin-spelling";
 pub(crate) const BIRTH_BURST: &str = "birth-burst";
+pub(crate) const MIND_CHANGE: &str = "mind-change";
 
 /// Every model signal feature.
-const ALL: [&str; 9] = [
+const ALL: [&str; 10] = [
+    MIND_CHANGE,
     BIRTH_BURST,
     TWIN_SPELLING,
     PRE_ECHO_LETTERS,
@@ -134,6 +142,45 @@ const BURST_MAX_WORDS: usize = 4;
 const BURST_INK: (f32, f32) = (0.25, 0.7);
 /// Words that came within this of each other came in one step.
 const BURST_STEP_SECS: f64 = 0.3;
+/// Mind change: how long a replaced word lingers and its ink at first, how
+/// long a change tints the edge, the tint per change and at most, and the
+/// edge bar's width.
+const CHANGE_SECS: f64 = 0.3;
+const CHANGE_INK: f32 = 0.5;
+const FLICKER_SECS: f64 = 3.0;
+const FLICKER_INK: f32 = 0.2;
+const FLICKER_MAX: f32 = 0.7;
+const EDGE_BAR_PX: f32 = 2.0;
+
+/// What the features keep between model steps.
+#[derive(Default)]
+pub(crate) struct State {
+    /// The words of the last step's text and tail, and how many of them
+    /// were committed.
+    last: Vec<String>,
+    last_committed: usize,
+    /// Replaced words: their place in the dictation, the old text and when.
+    echoes: Vec<(usize, String, f64)>,
+    /// When each recent change came.
+    flickers: Vec<f64>,
+}
+
+/// A step's words for comparing places: split on spaces, without the
+/// punctuation the tail adds and drops at its end.
+fn place_words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|w| w.trim_end_matches(['.', ',', '?', '!']).to_string())
+        .collect()
+}
+
+/// The places where `new` has another word than `old` had, among the places
+/// `old` had only guessed (from `committed` on). A tail that grows or
+/// drops words changes no place.
+fn changed_places(old: &[String], committed: usize, new: &[String]) -> Vec<usize> {
+    (committed..old.len().min(new.len()))
+        .filter(|&p| old[p] != new[p])
+        .collect()
+}
 
 /// One word of the tail.
 #[derive(Debug, PartialEq)]
@@ -189,6 +236,26 @@ struct TailLayout {
 }
 
 impl Popup {
+    /// Notes what a new model step changed, before it is stored.
+    pub(crate) fn note_signals(&mut self, s: &ModelSignals, t: f64) {
+        if !self.look.on(MIND_CHANGE) {
+            return;
+        }
+        let words = place_words(&s.with_tail);
+        let committed = place_words(&self.files.preview).len();
+        let st = &mut self.signal_state;
+        if s.with_tail.starts_with(self.files.preview.trim()) {
+            for p in changed_places(&st.last, st.last_committed, &words) {
+                st.echoes.push((p, st.last[p].clone(), t));
+                st.flickers.push(t);
+            }
+        }
+        st.echoes.retain(|e| t - e.2 < CHANGE_SECS);
+        st.flickers.retain(|&f| t - f < FLICKER_SECS);
+        st.last = words;
+        st.last_committed = committed;
+    }
+
     fn signals_on(&self) -> bool {
         ALL.iter().any(|f| self.look.on(f))
     }
@@ -229,6 +296,9 @@ impl Popup {
         if let Some(s) = self.live_signals() {
             let laid = self.tail_layout(s, words, width);
             for e in self.ghosts(laid.as_ref(), words, origin, ink) {
+                text = text.child(e);
+            }
+            for e in self.mind_change(s, words, width, origin, ink) {
                 text = text.child(e);
             }
             for e in self.birth_burst(s, words, width, origin) {
@@ -449,6 +519,84 @@ impl Popup {
             // Its baseline sits just above the word's ascenders.
             let y = first.pos.y - style.size * 0.95 - small.line_height * 0.8;
             out.push(kit::at(e, origin.0 + first.pos.x, origin.1 + y));
+        }
+        out
+    }
+
+    /// `mind-change`: replaced words lingering over their successors, and
+    /// the edge bar tinted by recent changes.
+    fn mind_change(
+        &self,
+        s: &ModelSignals,
+        words: &[Word],
+        width: f32,
+        origin: (f32, f32),
+        ink: Color,
+    ) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(MIND_CHANGE) {
+            return Vec::new();
+        }
+        let now = self.extra.now;
+        let st = &self.signal_state;
+        let style = l.text_style();
+        let mut out = Vec::new();
+        let echoes: Vec<_> = st
+            .echoes
+            .iter()
+            .filter(|e| (0.0..CHANGE_SECS).contains(&(now - e.2)))
+            .collect();
+        if !echoes.is_empty() {
+            // The places from the first word on screen, laid out as the
+            // text and its tail are.
+            let shown = s.with_tail.split_whitespace().skip(self.cut);
+            let mut full = String::new();
+            let mut ranges = Vec::new();
+            for w in shown {
+                if !full.is_empty() {
+                    full.push(' ');
+                }
+                ranges.push(full.len()..full.len() + w.len());
+                full.push_str(w);
+            }
+            let laid = self.measure.layout(&full, &style, Some(width));
+            let room = self.lines as f32 * style.line_height;
+            let reduced = self.signals_reduced();
+            for (p, old, at) in echoes {
+                let Some(range) = p.checked_sub(self.cut).and_then(|i| ranges.get(i)) else {
+                    continue;
+                };
+                let Some(g) = laid
+                    .glyphs
+                    .iter()
+                    .find(|g| range.contains(&(g.cluster as usize)))
+                else {
+                    continue;
+                };
+                let top = (g.pos.y / style.line_height).floor() * style.line_height;
+                if top >= room {
+                    continue;
+                }
+                let age = ((now - at) / CHANGE_SECS) as f32;
+                let (fade, rise) = if reduced { (0.7, 0.0) } else { (1.0 - age, 4.0 * age) };
+                let e = Element::label(format!("change-{p}-{old}"), old.clone())
+                    .text_style(style)
+                    .color(ink)
+                    .opacity(CHANGE_INK * fade);
+                out.push(kit::at(e, origin.0 + g.pos.x, origin.1 + top - rise));
+            }
+        }
+        let n = st.flickers.iter().filter(|&&f| now - f < FLICKER_SECS).count();
+        if n > 0 && !words.is_empty() {
+            let tint = (FLICKER_INK * n as f32).min(FLICKER_MAX);
+            let h = self.lines as f32 * style.line_height;
+            let bar = Element::shape("mind-change-edge", ShapeKind::RRect)
+                .size(EDGE_BAR_PX, h)
+                .radius(EDGE_BAR_PX * 0.5)
+                .fill(l.accent.fade(tint))
+                .presence(Transition::fade(), Transition::fade());
+            // Inside the column: the looks clip what lies past it.
+            out.push(kit::at(bar, origin.0 + width - EDGE_BAR_PX, origin.1));
         }
         out
     }
@@ -749,6 +897,20 @@ impl Popup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_changed_guess_is_a_mind_change_and_new_or_dropped_words_are_not() {
+        let w = |t: &str| place_words(t);
+        let old = w("This is a longer test on");
+        // "on" was a guess (place 5, after 5 committed words).
+        assert_eq!(changed_places(&old, 5, &w("This is a longer test of voice")), vec![5]);
+        assert!(changed_places(&old, 5, &w("This is a longer test on voice")).is_empty());
+        assert!(changed_places(&old, 5, &w("This is a longer test")).is_empty());
+        // A full stop that comes and goes changes no word.
+        assert!(changed_places(&w("a test."), 1, &w("a test")).is_empty());
+        // Committed places are not compared.
+        assert!(changed_places(&old, 6, &w("That is a longer test on")).is_empty());
+    }
 
     fn tok(text: &str, edge: u32) -> TailToken {
         TailToken {

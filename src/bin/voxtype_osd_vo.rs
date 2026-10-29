@@ -1406,6 +1406,8 @@ struct Popup {
     live_surface: bool,
     /// The live model's latest step: frame levels and the lookahead tail.
     model_signals: Option<voxtype::osd::live::ModelSignals>,
+    /// What the model signal features keep between steps.
+    signal_state: model_signals::State,
 }
 
 impl Popup {
@@ -1422,6 +1424,7 @@ impl Popup {
             look,
             signals: SignalsCell::default(),
             model_signals: None,
+            signal_state: model_signals::State::default(),
             recorder: None,
             measure: vo::ShapedLayout::new(fonts.clone()),
             levels: VecDeque::new(),
@@ -1798,6 +1801,7 @@ impl App for Popup {
                     tail = %s.with_tail,
                     "model signals"
                 );
+                self.note_signals(&s, cx.t());
                 self.model_signals = Some(*s);
                 return;
             }
