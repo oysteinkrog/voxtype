@@ -502,7 +502,7 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         .map_err(|e| e.to_string())
         .and_then(|path| ParakeetUnifiedHandle::load(&path, None).map_err(|e| e.to_string()));
     let unified = handle.as_ref().map_err(|e| e.clone()).and_then(|handle| {
-        ParakeetUnified::from_shared_with_streaming_config(handle, streaming_config.clone())
+        ParakeetUnified::from_shared_with_streaming_config(handle, streaming_config)
             .map_err(|e| e.to_string())
     });
     let mut first = match unified {
@@ -524,7 +524,7 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         // A fresh streaming state per recording; the weights stay loaded.
         let unified = first.take().or_else(|| {
             let h = handle.as_ref().ok()?;
-            ParakeetUnified::from_shared_with_streaming_config(h, streaming_config.clone()).ok()
+            ParakeetUnified::from_shared_with_streaming_config(h, streaming_config).ok()
         });
         if !live_session(
             config,
@@ -734,7 +734,7 @@ fn live_session(
                 "[worker] Preview text empty despite speech; running the preview model again"
             );
             if let Ok(mut u) =
-                ParakeetUnified::from_shared_with_streaming_config(h, streaming_config.clone())
+                ParakeetUnified::from_shared_with_streaming_config(h, *streaming_config)
             {
                 let mut text = String::new();
                 for chunk in samples.chunks(1600) {
