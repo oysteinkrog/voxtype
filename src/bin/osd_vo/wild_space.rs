@@ -27,7 +27,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use vo::scene::depth_stack::{DepthStack, Place, Sheet};
+use vo::scene::depth_stack::{DepthStack, Hold, Place, Sheet};
 use vo::scene::geom::Point;
 use vo::scene::emitter::LevelTrack;
 use vo::scene::lattice::{
@@ -480,7 +480,8 @@ impl Popup {
     /// box `w` wide and `rows` lines tall: the newest line flat at the
     /// bottom, the older ones receding on glass sheets above it. `newest`
     /// wraps the newest line's live text, for the look's typographic
-    /// channels (`Popup::typo_words`).
+    /// channels (`Popup::typo_words`). `hold` keeps the line just behind
+    /// the newest flat for a moment ([`HOLD_SECS`], [`GLIDE_SECS`]).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn depth_stack_lines(
         &self,
@@ -492,6 +493,7 @@ impl Popup {
         text: Color,
         glow: Color,
         newest: &dyn Fn(Element<Msg>) -> Element<Msg>,
+        hold: Option<&Hold>,
     ) -> Element<Msg> {
         let reduced = self.wild_reduced();
         let line_h = style.line_height;
@@ -512,8 +514,7 @@ impl Popup {
         let keyed: Vec<(vo::scene::Key, &(Vec<Word>, f32))> = lines
             .iter()
             .map(|l| {
-                let key = l.0.first().map_or(0, |w| w.id);
-                (vo::scene::Key::from(format!("sheet{key}")), l)
+                (depth_stack_key(l.0.first().map_or(0, |w| w.id)), l)
             })
             .collect();
         let content = |line: &&(Vec<Word>, f32), d: usize, p: &Place| {
@@ -526,7 +527,10 @@ impl Popup {
                 .text_blur(p.blur)
                 .motion(Prop::TextFx, stack.motion(d, reduced))
                 .size(lw, line_h)
-                .word_enter(Transition::fade().opacity(0.7).offset(0.0, 3.0))
+                // A word lands in place: the sheet of a new line rises 3 px
+                // already, and a rise of its own on top breaks the reading
+                // line's envelope (6ofh).
+                .word_enter(Transition::fade().opacity(0.7))
                 .word_change(Transition::fade().opacity(0.7));
             kit::at(
                 if d == 0 { newest(live) } else { live },
@@ -537,13 +541,15 @@ impl Popup {
         let h = rows.max(1) as f32 * line_h;
         let x = (w - sheet.w) / 2.0;
         kit::at(
-            stack.view(
+            stack.view_at(
                 "depth-stack",
                 Size::new(sheet.w, h),
                 sheet,
                 &keyed,
                 content,
                 reduced,
+                hold,
+                self.extra.now,
             ),
             x,
             0.0,
@@ -628,6 +634,22 @@ impl Popup {
         }
         Some(kit::at(Element::gpu("sculpture", source.clone()).size(size.w, size.h), 0.0, 0.0))
     }
+}
+
+/// How long a line that leaves the reading place as the box grows stays
+/// flat where it was read before it moves back. Long enough for a centred
+/// line to stop gliding along its row, so it is seen at rest there and not
+/// on the turned sheet it moves back to (6ofh).
+pub(crate) const HOLD_SECS: f64 = 0.35;
+
+/// How long a line that leaves the reading place in a full box glides up
+/// flat before it turns back, so it leaves the new line's row before it
+/// turns (6ofh).
+pub(crate) const GLIDE_SECS: f64 = 0.05;
+
+/// The key of a depth-stack sheet whose line starts with word `first`.
+pub(crate) fn depth_stack_key(first: WordId) -> vo::scene::Key {
+    vo::scene::Key::from(format!("sheet{first}"))
 }
 
 #[cfg(test)]

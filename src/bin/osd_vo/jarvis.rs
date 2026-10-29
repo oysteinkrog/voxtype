@@ -224,6 +224,12 @@ pub struct Extra {
     /// Widths of the pill's texts by text, font and size, so a view (one a
     /// frame on room tone) shapes none of them again.
     widths: std::sync::Mutex<Vec<(String, u32, u32, f32)>>,
+    /// The newest line's first word and the frame's rows when `lines`
+    /// were made, to see a line leave the reading place as the frame grows.
+    newest: Option<(vo_core::words::WordId, u32)>,
+    /// With `depth-stack`: the line that just left the reading place, held
+    /// flat for a moment before it moves back (6ofh).
+    pub(crate) hold: Option<vo::scene::depth_stack::Hold>,
 }
 
 /// Words laid out at most, from a start that only moves in steps of half
@@ -686,6 +692,32 @@ impl Popup {
             self.jarvis.centres = lines.iter().map(|(w, _)| self.jarvis_centres(w)).collect();
             self.jarvis.lines = lines;
             self.jarvis.words = words;
+        }
+        // The line that leaves the reading place is held flat a line pitch
+        // above the new reading line before it moves back: where it was
+        // read when the frame grew (the frame grows downward), one row up
+        // when it did not.
+        let first = |l: &(Vec<Word>, f32)| l.0.first().map(|w| w.id);
+        let n = self.jarvis.lines.len();
+        let newest = self.jarvis.lines.last().and_then(first).map(|id| (id, self.lines));
+        if let (Some((was, rows)), Some((id, now_rows))) = (self.jarvis.newest, newest) {
+            let behind = n.checked_sub(2).and_then(|i| first(&self.jarvis.lines[i]));
+            if id != was && behind == Some(was) {
+                self.jarvis.hold = Some(vo::scene::depth_stack::Hold {
+                    key: wild_space::depth_stack_key(was),
+                    since: t,
+                    secs: if now_rows > rows {
+                        wild_space::HOLD_SECS
+                    } else {
+                        wild_space::GLIDE_SECS
+                    },
+                    rise: self.look.text_style().line_height,
+                    glide: now_rows <= rows,
+                });
+            }
+        }
+        if newest.is_some() {
+            self.jarvis.newest = newest;
         }
     }
 
@@ -1196,6 +1228,7 @@ impl Popup {
                 hex(TEXT, 1.0),
                 hex(CYAN, 1.0),
                 &|words| self.typo_words(words),
+                self.jarvis.hold.as_ref(),
             ));
         }
         let stacked = if self.look.on(wild_space::DEPTH_STACK) {
