@@ -44,8 +44,19 @@ pub(crate) const SOUND_SCULPTURE: &str = "sound-sculpture";
 pub(crate) const LATTICE_DRIFT: &str = "lattice-drift";
 
 /// The deepest a letter of the sculpture goes, in logical pixels, for the
-/// loudest word.
-const SCULPT_DEPTH: f32 = 34.0;
+/// loudest word. With the shear below the back face sits at most about 4 by
+/// 6 px from the glyph, so the walls read as depth and not as a second copy
+/// of the word (7b8x: at 34 px it was 10 by 15 px away).
+const SCULPT_DEPTH: f32 = 12.0;
+/// How far the back face moves across and up per pixel of depth.
+const SCULPT_SHEAR: (f32, f32) = (0.24, 0.36);
+/// The bodies' colour: the framework's grey, faint, so the walls stay under
+/// 15 % of the text's contrast on the reading line.
+const SCULPT_COLOR: u32 = 0x7d8696;
+const SCULPT_ALPHA: f32 = 0.1;
+const SCULPT_LIGHT: f32 = 0.6;
+/// Seconds a new word lies flat before its body grows: about its fade in.
+const SCULPT_WAIT: f64 = 0.2;
 
 /// Peak swing, in logical pixels, of the pluck a word's arrival gives its
 /// bundle: this times 0.5 for a quiet word up to 1.5 for the loudest.
@@ -561,7 +572,15 @@ impl Popup {
             return Some(s);
         }
         let face = self.look.fonts.get(font)?;
-        let mut look = SculptLook::default();
+        let mut look = SculptLook {
+            color: Color::hex(SCULPT_COLOR, SCULPT_ALPHA),
+            shear: SCULPT_SHEAR,
+            ..SculptLook::default()
+        };
+        // No bright rim or hot light along the walls' edges: those outline the
+        // back face and read as a second copy of the word.
+        look.light.rim = 0.0;
+        look.light.intensity = SCULPT_LIGHT;
         if self.wild_reduced() {
             // Still: each letter stands at its depth at once.
             look.grow_secs = 0.001;
@@ -614,7 +633,10 @@ impl Popup {
                     let c = g.cluster as usize;
                     let wi = starts.iter().rposition(|&s| s <= c).unwrap_or(0);
                     let word = &words[wi];
-                    let depth = if newest {
+                    // A word still fading in waits flat, so its body never shows
+                    // through letters that are not yet solid.
+                    let fading = self.heard.word(word.id).is_some_and(|h| t - h.born < SCULPT_WAIT);
+                    let depth = if newest && !fading {
                         SCULPT_DEPTH * self.word_loudness(word.id).max(0.15)
                     } else {
                         0.0
