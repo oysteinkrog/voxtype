@@ -535,6 +535,7 @@ impl Laid {
 
 fn glyph(g: &PlacedGlyph, o: Point, style: &TextStyle, color: Color) -> GlyphInstance {
     GlyphInstance {
+        xform: vo::scene::display::GlyphXform::IDENTITY,
         pos: Point::new(o.x + g.pos.x, o.y + g.pos.y),
         size: style.size,
         font: g.font,

@@ -485,6 +485,7 @@ impl Popup {
                 }
                 for &(font, glyph, pos) in &glyphs {
                     p.glyph(vo::scene::display::GlyphInstance {
+                        xform: vo::scene::display::GlyphXform::IDENTITY,
                         pos,
                         size,
                         font,

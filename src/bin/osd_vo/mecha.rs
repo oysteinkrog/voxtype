@@ -421,6 +421,7 @@ impl Label {
                 0.0
             };
             p.glyph(GlyphInstance {
+                xform: vo::scene::display::GlyphXform::IDENTITY,
                 pos: pt(self.x + g.pos.x + dx, self.y + g.pos.y),
                 size: self.px,
                 font: self.font,

@@ -1154,6 +1154,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
+name = "data-url"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
+
+[[package]]
 name = "defmt"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1667,6 +1673,12 @@ dependencies = [
  "crc32fast",
  "miniz_oxide",
 ]
+
+[[package]]
+name = "float-cmp"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 
 [[package]]
 name = "float_next_after"
@@ -2848,6 +2860,12 @@ dependencies = [
  "icu_normalizer",
  "icu_properties",
 ]
+
+[[package]]
+name = "imagesize"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 
 [[package]]
 name = "indenter"
@@ -4232,6 +4250,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "pico-args"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5be167a7af36ee22fe3115051bc51f6e6c7054c9348e28deb4f49bd6f705a315"
+
+[[package]]
 name = "pidlock"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4838,6 +4862,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "resvg"
+version = "0.49.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1572844b6727a1bf842190e9947641a68ac44bed83f50afb4bd1407a2564bee8"
+dependencies = [
+ "bytemuck",
+ "log",
+ "pico-args",
+ "rgb",
+ "svgtypes",
+ "tiny-skia",
+ "usvg",
+]
+
+[[package]]
+name = "rgb"
+version = "0.8.53"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4867,6 +4915,15 @@ name = "roff"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88f8660c1ff60292143c98d08fc6e2f654d722db50410e3f3797d40baaf9d8f3"
+
+[[package]]
+name = "roxmltree"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "rubato"
@@ -5235,6 +5292,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "simplecss"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a9c6883ca9c3c7c90e888de77b7a5c849c779d25d74a1269b0218b14e8b136c"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "siphasher"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
+
+[[package]]
 name = "skrifa"
 version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5373,6 +5445,9 @@ name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6637bab7722d379c8b41ba849228d680cc12d0a45ba1fa2b48f2a30577a06731"
+dependencies = [
+ "float-cmp",
+]
 
 [[package]]
 name = "strsim"
@@ -5407,6 +5482,16 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "svgtypes"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "695b5790b3131dafa99b3bbfd25a216edb3d216dad9ca208d4657bfb8f2abc3d"
+dependencies = [
+ "kurbo",
+ "siphasher",
+]
 
 [[package]]
 name = "syn"
@@ -5645,6 +5730,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
+ "png 0.18.1",
  "tiny-skia-path",
 ]
 
@@ -6251,6 +6337,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "usvg"
+version = "0.49.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d09b73ee83641d390ad7ffd9000f347b16eb128e437675b6ff277ea5c7fcf22c"
+dependencies = [
+ "data-url",
+ "imagesize",
+ "kurbo",
+ "log",
+ "pico-args",
+ "roxmltree",
+ "simplecss",
+ "siphasher",
+ "strict-num",
+ "svgtypes",
+ "tiny-skia-path",
+]
+
+[[package]]
 name = "utf-8"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6333,7 +6438,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vo"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d#0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=c49dfd6a98f6baf25688aaa546b2606dc125e203#c49dfd6a98f6baf25688aaa546b2606dc125e203"
 dependencies = [
  "bytemuck",
  "png 0.18.1",
@@ -6352,7 +6457,7 @@ dependencies = [
 [[package]]
 name = "vo-3d"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d#0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=c49dfd6a98f6baf25688aaa546b2606dc125e203#c49dfd6a98f6baf25688aaa546b2606dc125e203"
 dependencies = [
  "bytemuck",
  "harfrust",
@@ -6367,7 +6472,7 @@ dependencies = [
 [[package]]
 name = "vo-core"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d#0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=c49dfd6a98f6baf25688aaa546b2606dc125e203#c49dfd6a98f6baf25688aaa546b2606dc125e203"
 dependencies = [
  "serde",
  "serde_json",
@@ -6377,7 +6482,7 @@ dependencies = [
 [[package]]
 name = "vo-dots"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d#0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=c49dfd6a98f6baf25688aaa546b2606dc125e203#c49dfd6a98f6baf25688aaa546b2606dc125e203"
 dependencies = [
  "vo-core",
  "vo-scene",
@@ -6386,7 +6491,7 @@ dependencies = [
 [[package]]
 name = "vo-host"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d#0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=c49dfd6a98f6baf25688aaa546b2606dc125e203#c49dfd6a98f6baf25688aaa546b2606dc125e203"
 dependencies = [
  "vo-scene",
  "wgpu 30.0.1",
@@ -6395,7 +6500,7 @@ dependencies = [
 [[package]]
 name = "vo-host-wayland"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d#0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=c49dfd6a98f6baf25688aaa546b2606dc125e203#c49dfd6a98f6baf25688aaa546b2606dc125e203"
 dependencies = [
  "libc",
  "pollster",
@@ -6410,9 +6515,10 @@ dependencies = [
 [[package]]
 name = "vo-render"
 version = "0.0.1"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d#0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=c49dfd6a98f6baf25688aaa546b2606dc125e203#c49dfd6a98f6baf25688aaa546b2606dc125e203"
 dependencies = [
  "bytemuck",
+ "half",
  "png 0.18.1",
  "skrifa 0.49.0",
  "tiny-skia",
@@ -6424,10 +6530,12 @@ dependencies = [
 [[package]]
 name = "vo-scene"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d#0f1cb9ab0ab98604d5769aab61ae16dbdd56a02d"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=c49dfd6a98f6baf25688aaa546b2606dc125e203#c49dfd6a98f6baf25688aaa546b2606dc125e203"
 dependencies = [
  "harfrust",
  "kurbo",
+ "png 0.18.1",
+ "resvg",
  "serde",
  "skrifa 0.49.0",
  "slotmap",

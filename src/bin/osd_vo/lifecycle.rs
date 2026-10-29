@@ -389,6 +389,7 @@ impl Handoff {
                 continue;
             }
             p.glyph(GlyphInstance {
+                xform: vo::scene::display::GlyphXform::IDENTITY,
                 pos: Point::new(
                     o.x + g.pos.x + g.advance * (1.0 - k) * 0.5,
                     o.y + g.pos.y + dy,
@@ -444,6 +445,7 @@ impl Handoff {
             p.layer(m, fade * (0.4 + 0.6 * squash), |p| {
                 for g in &self.shaped.glyphs[line.glyphs.clone()] {
                     p.glyph(GlyphInstance {
+                        xform: vo::scene::display::GlyphXform::IDENTITY,
                         pos: Point::new(o.x + g.pos.x, o.y + g.pos.y + dy),
                         size: self.size,
                         font: g.font,
@@ -538,6 +540,7 @@ impl Handoff {
         let own = self.receipt.lines.first().map_or(0.0, |l| l.baseline);
         for g in &self.receipt.glyphs {
             p.glyph(GlyphInstance {
+                xform: vo::scene::display::GlyphXform::IDENTITY,
                 pos: Point::new(lx + g.pos.x, o.y + base + g.pos.y - own),
                 size: self.receipt_size(),
                 font: g.font,
