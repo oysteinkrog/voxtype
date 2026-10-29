@@ -55,6 +55,10 @@ const ALL: [&str; 7] = [CHANNELS, VOICE, STAGGER, ONSET, PITCH, TRACKING, CONFID
 const STABLE_AFTER: u32 = 2;
 /// The seam stays this long after its word stabilised, closing.
 const SEAM_CLOSE_SECS: f64 = 0.5;
+/// A cut scrolls the text up a line and settles within about this long (the
+/// flow's drop hold and scroll spring); the stable settle waits until then.
+/// 0.35 s still let a settle add 0.01 px to type's reading line at 424 px.
+const SCROLL_SECS: f64 = 0.6;
 /// The baseline relaxes flat over about this long after a word is said.
 const PITCH_RELAX: f64 = 0.6;
 /// Baseline per semitone of pitch (MO-14): twice the framework's default so the
@@ -74,6 +78,8 @@ struct Inner {
     kept: HashMap<WordId, (u32, Option<f64>)>,
     /// Spoken-order delay of each word, fixed when the word first shows.
     delay: HashMap<WordId, f64>,
+    /// The popup's cut (first word on screen) and when it last moved.
+    cut: (usize, f64),
 }
 
 /// One word's channel state for this view.
@@ -150,7 +156,11 @@ impl Popup {
         let l = &self.look;
         let t = self.extra.now;
         let seen = self.channels_sync(t);
-        let s = self.channels.0.lock().unwrap();
+        let mut s = self.channels.0.lock().unwrap();
+        if s.cut.0 != self.cut {
+            s.cut = (self.cut, t);
+        }
+        let scrolling = self.cut > 0 && t - s.cut.1 < SCROLL_SECS;
         let bus = self.signals.get();
         let vt = VoiceTypo {
             pitch_px: PITCH_PX,
@@ -199,8 +209,12 @@ impl Popup {
             let mut wt = WordTypo::rest(rest).motion(motion);
             if l.on(CONFIDENCE) {
                 if seen.stable {
-                    // Sets with a 1 px settle down, once.
-                    wt = wt.kick(1, Typo::REST.baseline(-1.0));
+                    // Sets with a 1 px settle down, once, after a line scroll: on
+                    // a scrolling line it would add to the scroll's own baseline
+                    // travel on the reading line.
+                    if !scrolling {
+                        wt = wt.kick(1, Typo::REST.baseline(-1.0));
+                    }
                 } else if !still {
                     // Once the dictation is finishing, the final text lands
                     // at full ink: a revision arrives at 70 % of its rest, and

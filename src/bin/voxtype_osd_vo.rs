@@ -677,6 +677,9 @@ struct Look {
     look_set: bool,
 }
 
+/// Letter spacing of a full newest line under type's margin bell (MO-31).
+const TYPE_BELL_TIGHT: f32 = 0.97;
+
 /// The line motion features of a look on its transcript (MO-31 to MO-34).
 trait LineMotion {
     fn line_motion(self, look: &Look) -> Self;
@@ -808,7 +811,13 @@ impl Look {
             return None;
         }
         Some(match self.theme {
-            OsdTheme::Type | OsdTheme::Phosphor => Bell::DEFAULT.carriage(3.0),
+            // At 4 % a short word on type's newest line read 5 % tight at the default
+            // width (envelope tracking 95 %, the limit is 5 %); 3 % stays inside.
+            OsdTheme::Type => Bell {
+                tight: TYPE_BELL_TIGHT,
+                ..Bell::DEFAULT.carriage(3.0)
+            },
+            OsdTheme::Phosphor => Bell::DEFAULT.carriage(3.0),
             _ => Bell::DEFAULT,
         })
     }
