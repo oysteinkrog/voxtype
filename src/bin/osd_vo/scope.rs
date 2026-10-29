@@ -1033,7 +1033,10 @@ impl Popup {
                 )
                 .motion(Prop::Position, Spring::critical_to_98(0.12))
                 .rewind_hide(rw)
-                .presence(Transition::fade(), Transition::fade()),
+                // A new line comes in through its words' own entry: a fade
+                // of the whole line from 0 put its first word under the
+                // reading line's 70 % ink floor (RD-09).
+                .presence(Transition::NONE, Transition::fade()),
             );
         }
         // MO-50: a cancel takes the words back into the caret.

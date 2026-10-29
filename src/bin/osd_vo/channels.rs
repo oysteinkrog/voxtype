@@ -51,6 +51,15 @@ pub(crate) const CONFIDENCE: &str = "confidence-ink";
 
 const ALL: [&str; 7] = [CHANNELS, VOICE, STAGGER, ONSET, PITCH, TRACKING, CONFIDENCE];
 
+/// How a look draws MO-24's seam.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Seam {
+    /// Two accent hairlines with a gap between them.
+    Hairline,
+    /// A row of dots `pitch` apart and `r` in radius, in `color`.
+    Dots { pitch: f32, r: f32, color: Color },
+}
+
 /// Hypotheses a word must keep its text to count as stable (MO-24).
 const STABLE_AFTER: u32 = 2;
 /// The seam stays this long after its word stabilised, closing.
@@ -150,8 +159,16 @@ impl Popup {
 
     /// The live text with the channels the look's features ask for.
     pub(crate) fn typo_words(&self, words: Element<Msg>) -> Element<Msg> {
+        match self.channel_typos() {
+            Some(typos) => words.word_typo(typos),
+            None => words,
+        }
+    }
+
+    /// The channels of [`Popup::typo_words`], or `None` when the look asks for none.
+    pub(crate) fn channel_typos(&self) -> Option<Typos> {
         if !self.channels_on() {
-            return words;
+            return None;
         }
         let l = &self.look;
         let t = self.extra.now;
@@ -240,14 +257,31 @@ impl Popup {
             }
             typos.set(w.id, wt);
         }
-        words.word_typo(typos)
+        Some(typos)
     }
 
     /// Marks under the words for the channels: the open seam under each
     /// tentative word (MO-24). `width` is the live text's wrap width; the
     /// marks are placed from the same layout the live text uses.
     pub(crate) fn typo_marks(&self, text: Element<Msg>, width: f32) -> Element<Msg> {
-        if !self.look.on(CONFIDENCE) || self.shown.is_empty() {
+        self.typo_marks_for(text, &self.shown, width)
+    }
+
+    /// [`Popup::typo_marks`] for a live text that holds only `words`, such as
+    /// one of karaoke's lines.
+    pub(crate) fn typo_marks_for(&self, text: Element<Msg>, words: &[Word], width: f32) -> Element<Msg> {
+        self.typo_marks_in(text, words, width, Seam::Hairline)
+    }
+
+    /// [`Popup::typo_marks_for`] with the seam drawn as `seam` says.
+    pub(crate) fn typo_marks_in(
+        &self,
+        text: Element<Msg>,
+        words: &[Word],
+        width: f32,
+        seam: Seam,
+    ) -> Element<Msg> {
+        if !self.look.on(CONFIDENCE) || words.is_empty() {
             return text;
         }
         let l = &self.look;
@@ -255,16 +289,17 @@ impl Popup {
         let seen = self.channels_sync(t);
         let reduced = self.channels_reduced();
         let style = l.text_style();
-        let joined = self.shown.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        let joined = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
         let laid = self.measure.layout(&joined, &style, Some(width));
-        let mut starts = Vec::with_capacity(self.shown.len());
+        let mut starts = Vec::with_capacity(words.len());
         let mut at = 0usize;
-        for w in &self.shown {
+        for w in words {
             starts.push(at);
             at += w.text.len() + 1;
         }
         let mut text = text;
-        for (i, w) in self.shown.iter().enumerate() {
+        let mut dotted = Vec::new();
+        for (i, w) in words.iter().enumerate() {
             let Some(seen) = seen.get(&w.id) else { continue };
             let closing = seen.stable_at.map(|a| t - a);
             if closing.is_some_and(|c| c > SEAM_CLOSE_SECS) {
@@ -285,6 +320,16 @@ impl Popup {
             let half = 0.5 * (x1 - x0 - open).max(0.0);
             let alpha = if seen.stable { 0.0 } else { 0.6 };
             let spring = if reduced { Spring::SNAP } else { Spring::critical_to_98(0.3) };
+            if matches!(seam, Seam::Dots { .. }) {
+                dotted.push(DotSeam {
+                    x0,
+                    x1,
+                    y: y + 1.0,
+                    open,
+                    stable_at: seen.stable.then(|| seen.stable_at.unwrap_or(t)),
+                });
+                continue;
+            }
             for (k, x) in [(0, x0), (1, x1 - half)] {
                 let seg = Element::shape(format!("seam-{}-{k}", w.id), ShapeKind::RRect)
                     .fill(l.accent.fade(alpha))
@@ -295,6 +340,78 @@ impl Popup {
                 text = text.child(kit::at(seg, x, y));
             }
         }
+        if let (Seam::Dots { pitch, r, color }, false) = (seam, dotted.is_empty()) {
+            // One canvas for all the dots: it holds still, so it costs
+            // nothing per frame, until a seam closes.
+            let until = dotted
+                .iter()
+                .filter_map(|d| d.stable_at)
+                .map(|a| a + SEAM_CLOSE_SECS)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let h = self.lines.max(1) as f32 * style.line_height + 2.0 * style.size;
+            let draw = move |t: f64, rect: Rect, p: &mut vo::scene::canvas::Painter| {
+                for d in &dotted {
+                    d.draw(t, rect, pitch, r, color, reduced, p);
+                }
+            };
+            text = text.child(kit::at(Element::canvas("seams", until, draw), 0.0, 0.0).size(width, h));
+        }
         text
+    }
+}
+
+/// MO-24's seam as a row of dots under one word, in the text's coordinates.
+struct DotSeam {
+    x0: f32,
+    x1: f32,
+    y: f32,
+    /// The gap in the middle while the word is tentative.
+    open: f32,
+    /// When the word set, if it has.
+    stable_at: Option<f64>,
+}
+
+impl DotSeam {
+    /// Tentative: the dots with the gap left out. Set: the gap fills for
+    /// the first half of `SEAM_CLOSE_SECS`, then the row fades. Under
+    /// reduced motion a set word's row goes at once.
+    #[allow(clippy::too_many_arguments)]
+    fn draw(
+        &self,
+        t: f64,
+        rect: Rect,
+        pitch: f32,
+        r: f32,
+        color: Color,
+        reduced: bool,
+        p: &mut vo::scene::canvas::Painter,
+    ) {
+        use vo::scene::display::{Paint, ShapeInstance};
+        use vo::scene::geom::Point;
+        let (alpha, gap) = match self.stable_at.map(|a| t - a) {
+            None => (0.6, self.open),
+            Some(_) if reduced => return,
+            Some(c) => {
+                let half = 0.5 * SEAM_CLOSE_SECS;
+                let fade = 1.0 - ((c - half) / half).clamp(0.0, 1.0) as f32;
+                if fade <= 0.0 {
+                    return;
+                }
+                (0.6 * fade, 0.0)
+            }
+        };
+        let n = ((self.x1 - self.x0) / pitch).floor().max(0.0) as usize;
+        let mid = 0.5 * (self.x0 + self.x1);
+        for k in 0..=n {
+            let x = self.x0 + k as f32 * pitch;
+            if (x - mid).abs() < 0.5 * gap {
+                continue;
+            }
+            p.shape(ShapeInstance::circle(
+                Point::new(rect.x + x, rect.y + self.y),
+                r,
+                Paint::solid(color.fade(alpha)),
+            ));
+        }
     }
 }

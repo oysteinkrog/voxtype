@@ -25,7 +25,7 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value as Json};
 
-use super::{ActivationMode, Config, LanguageConfig};
+use super::{ActivationMode, Config, LanguageConfig, StreamingWindow};
 use crate::tui::ConfigEditor;
 
 /// Version of the `voxtype config schema --json` document shape. Bump when
@@ -900,6 +900,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Hotkey",
         "Secondary-model modifier",
         "Hold this alongside the hotkey to transcribe with whisper.secondary_model.",
+    ),
+    spec(
+        "hotkey.correction_key",
+        "hotkey",
+        "correction_key",
+        open(HOTKEY_MODIFIER_CHOICES),
+        "Hotkey",
+        "Correction key",
+        "Hold this while recording and respeak words to replace the ones they sound like. Taps keep their meaning.",
+    ),
+    spec(
+        "hotkey.correction_hold_ms",
+        "hotkey",
+        "correction_hold_ms",
+        KeyType::Int { min: 100, max: 5000 },
+        "Hotkey",
+        "Correction hold",
+        "Milliseconds the correction key must be held before a correction starts.",
     ),
     // -- Audio --------------------------------------------------------------
     spec(
@@ -2441,6 +2459,11 @@ fn language_json(l: &LanguageConfig) -> Json {
     json!(l.as_vec().join(","))
 }
 
+/// `secs` to two decimals, so 0.32 reads as 0.32 and not 0.3199999928474426.
+fn centi(secs: f32) -> f64 {
+    (secs as f64 * 100.0).round() / 100.0
+}
+
 /// The effective value of `key` in a fully-resolved [`Config`], as JSON.
 ///
 /// Returns `None` only for keys that aren't in the allowlist. Every
@@ -2581,6 +2604,8 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }),
         "hotkey.cancel_key" => opt_str(cfg.hotkey.cancel_key.as_ref()),
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
+        "hotkey.correction_key" => opt_str(cfg.hotkey.correction_key.as_ref()),
+        "hotkey.correction_hold_ms" => json!(cfg.hotkey.correction_hold_ms),
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
@@ -2721,9 +2746,19 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "whisper.max_loaded_models" => json!(cfg.whisper.max_loaded_models),
         "whisper.cold_model_timeout_secs" => json!(cfg.whisper.cold_model_timeout_secs),
         "whisper.context_window_optimization" => json!(cfg.whisper.context_window_optimization),
-        "parakeet.streaming_chunk_secs" => json!(pk().streaming_chunk_secs),
-        "parakeet.streaming_left_context_secs" => json!(pk().streaming_left_context_secs),
-        "parakeet.streaming_right_context_secs" => json!(pk().streaming_right_context_secs),
+        // Absent keys report the default window the model runs with.
+        "parakeet.streaming_chunk_secs" => match pk().streaming_chunk_secs {
+            Some(secs) => json!(secs),
+            None => json!(centi(StreamingWindow::default().chunk_secs())),
+        },
+        "parakeet.streaming_left_context_secs" => match pk().streaming_left_context_secs {
+            Some(secs) => json!(secs),
+            None => json!(centi(StreamingWindow::default().left_secs())),
+        },
+        "parakeet.streaming_right_context_secs" => match pk().streaming_right_context_secs {
+            Some(secs) => json!(secs),
+            None => json!(centi(StreamingWindow::default().right_secs())),
+        },
         "streaming.interval_secs" => json!(cfg.streaming.unwrap_or_default().interval_secs),
         "streaming.max_buffer_secs" => json!(cfg.streaming.unwrap_or_default().max_buffer_secs),
         "streaming.min_speech_rms" => json!(cfg.streaming.unwrap_or_default().min_speech_rms),

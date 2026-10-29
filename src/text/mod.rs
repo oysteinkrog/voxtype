@@ -4,6 +4,8 @@
 //! - Spoken punctuation conversion (e.g., "period" → ".")
 //! - Custom word replacements
 
+pub mod align;
+
 use crate::config::TextConfig;
 use regex::Regex;
 use std::collections::HashMap;

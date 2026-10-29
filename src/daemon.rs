@@ -4127,6 +4127,22 @@ impl Daemon {
         // Current state
         let mut state = State::Idle;
 
+        // Spoken corrections work on the live words, so the listener
+        // watches for a correction hold only while a live preview records.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let correction_armed = hotkey_listener
+            .as_ref()
+            .and_then(|l| l.correction_armed());
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let correction_armed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
+        let corrections_on = self.config.live_preview_active() && !self.config.live_typing;
+        if correction_armed.is_some() && !corrections_on {
+            tracing::warn!(
+                "hotkey.correction_key needs live_preview_model and no live_typing; \
+                 corrections are off"
+            );
+        }
+
         // Audio capture (created fresh for each recording)
         let mut audio_capture: Option<Box<dyn AudioCapture>> = None;
 
@@ -4171,6 +4187,12 @@ impl Daemon {
         transcribing_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
+            if let Some(armed) = &correction_armed {
+                armed.store(
+                    corrections_on && state.is_streaming(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
             tokio::select! {
                 // Handle hotkey events (only if hotkey listener is enabled)
                 Some(hotkey_event) = async {
@@ -4554,6 +4576,29 @@ impl Daemon {
                                 end_recording_notification("Cancelled", "Transcription aborted", &self.config.output.notification, self.config.engine).await;
                             } else {
                                 tracing::trace!("Cancel ignored - not recording or transcribing");
+                            }
+                        }
+
+                        // === SPOKEN CORRECTIONS (live preview sessions) ===
+                        // Word times are seconds since the session started.
+                        (HotkeyEvent::CorrectionStart { pressed_at }, _) => {
+                            if let State::Streaming { started_at, .. } = &state {
+                                let t0 = pressed_at.saturating_duration_since(*started_at);
+                                tracing::debug!("Correction hold from {:.2} s", t0.as_secs_f32());
+                                crate::osd::correction::start(t0.as_secs_f32());
+                                crate::osd::live::refresh_correction();
+                            }
+                        }
+                        (HotkeyEvent::CorrectionEnd, _) => {
+                            if let State::Streaming { started_at, .. } = &state {
+                                crate::osd::correction::end(started_at.elapsed().as_secs_f32());
+                                crate::osd::live::refresh_correction();
+                            }
+                        }
+                        (HotkeyEvent::CorrectionCancel, _) => {
+                            if state.is_streaming() {
+                                crate::osd::correction::cancel();
+                                crate::osd::live::refresh_correction();
                             }
                         }
                     }
@@ -5010,10 +5055,17 @@ impl Daemon {
                                     // one Final after the stop tap. Wait for
                                     // Right Ctrl to come up, or the paste
                                     // key becomes a different shortcut.
-                                    if self.config.live_preview_active() {
+                                    let corrected;
+                                    let text = if self.config.live_preview_active() {
+                                        // Spoken corrections, before the
+                                        // clear below forgets them.
+                                        corrected = crate::osd::correction::apply_final(&text);
                                         // The text is ready: let the OSD hide.
                                         clear_live_preview();
-                                    }
+                                        &corrected
+                                    } else {
+                                        &text
+                                    };
                                     if self.config.live_preview_active()
                                         && !modifiers_released(LIVE_TYPING_FINAL_WAIT).await
                                     {
@@ -5021,7 +5073,7 @@ impl Daemon {
                                     }
                                     if let Err(e) = s.commit_segment(
                                         chain,
-                                        &text,
+                                        text,
                                         Some(&self.text_processor),
                                         self.config.output.pre_output_command.as_deref(),
                                         self.config.output.post_output_command.as_deref(),
@@ -5062,14 +5114,28 @@ impl Daemon {
                             }
                         }
                         Some(StreamingEvent::Error(err)) => {
-                            tracing::error!("Streaming backend error: {}", err);
-                            send_notification(
-                                "Streaming Error",
-                                &err.to_string(),
-                                self.config.output.notification.show_engine_icon,
-                                self.config.engine,
-                                "critical",
-                            ).await;
+                            let no_speech = matches!(
+                                &err,
+                                crate::error::TranscribeError::InferenceFailed(m)
+                                    if m == crate::transcribe::worker::NO_SPEECH
+                            );
+                            if no_speech {
+                                // A dictation started and stopped again without
+                                // speaking: the popup says so, nothing else.
+                                tracing::info!("Streaming session ended with no speech");
+                                crate::osd::outcome::write(crate::osd::outcome::Outcome::Empty);
+                            } else {
+                                tracing::error!("Streaming backend error: {}", err);
+                                // Not "critical": KDE and GNOME keep critical
+                                // notifications up until they are closed.
+                                send_notification(
+                                    "Streaming Error",
+                                    &err.to_string(),
+                                    self.config.output.notification.show_engine_icon,
+                                    self.config.engine,
+                                    "normal",
+                                ).await;
+                            }
                             self.end_streaming(
                                 &mut state,
                                 &mut audio_capture,

@@ -17,7 +17,7 @@
 //! - Perceived latency is just transcription time, not model load + transcription
 
 use super::streaming::{StreamHandle, StreamingEvent, StreamingTranscriber};
-use super::worker::{PARTIAL_PREFIX, READY_SIGNAL, STATUS_PREFIX, WORDS_PREFIX};
+use super::worker::{PARTIAL_PREFIX, READY_SIGNAL, SIGNALS_PREFIX, STATUS_PREFIX, WORDS_PREFIX};
 use super::Transcriber;
 use crate::config::WhisperConfig;
 use crate::error::TranscribeError;
@@ -267,7 +267,7 @@ impl SubprocessTranscriber {
             stdout.read_line(&mut line).map_err(|e| {
                 TranscribeError::InferenceFailed(format!("Failed to read worker output: {}", e))
             })?;
-            if ![PARTIAL_PREFIX, STATUS_PREFIX, WORDS_PREFIX]
+            if ![PARTIAL_PREFIX, STATUS_PREFIX, WORDS_PREFIX, SIGNALS_PREFIX]
                 .iter()
                 .any(|p| line.starts_with(p))
             {
@@ -631,8 +631,13 @@ impl StreamingTranscriber for SubprocessTranscriber {
                     write_live_status(json);
                     continue;
                 } else if let Some(json) = trimmed.strip_prefix(WORDS_PREFIX) {
-                    if let Ok(words) = serde_json::from_str(json) {
-                        crate::osd::live::timed_words(words);
+                    if let Ok(lines) = serde_json::from_str(json) {
+                        crate::osd::live::word_lines(lines);
+                    }
+                    continue;
+                } else if let Some(json) = trimmed.strip_prefix(SIGNALS_PREFIX) {
+                    if let Ok(step) = serde_json::from_str(json) {
+                        crate::osd::live::signals(step);
                     }
                     continue;
                 }

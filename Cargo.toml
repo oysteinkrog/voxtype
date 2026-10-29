@@ -143,10 +143,10 @@ rubato = "0.16"
 
 # OSD on the vo GPU overlay framework (gated on `osd-vo`). Pinned to a commit
 # of the framework repo; nothing in the default build pulls it in.
-vo = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "d1aaec9666037c699a17ffdb3aa3b592bcdc82d9", optional = true }
-vo-core = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "d1aaec9666037c699a17ffdb3aa3b592bcdc82d9", optional = true }
-vo-dots = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "d1aaec9666037c699a17ffdb3aa3b592bcdc82d9", optional = true }
-vo-3d = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "d1aaec9666037c699a17ffdb3aa3b592bcdc82d9", optional = true }
+vo = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "7d64e2ba0c948fa6651defa7a970a5f439b4a3f6", optional = true }
+vo-core = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "7d64e2ba0c948fa6651defa7a970a5f439b4a3f6", optional = true }
+vo-dots = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "7d64e2ba0c948fa6651defa7a970a5f439b4a3f6", optional = true }
+vo-3d = { git = "https://github.com/oysteinkrog/voxtype-osd-gpu", rev = "7d64e2ba0c948fa6651defa7a970a5f439b4a3f6", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tao = "0.32"
@@ -378,7 +378,8 @@ required-features = ["cohere"]
 # if needed) once that PR merges and ships in a crates.io release.
 [patch.crates-io]
 openvino-genai = { git = "https://github.com/voxtype/openvino-rs", branch = "whisper-pipeline-with-properties" }
-# Per-token confidence for the live preview's revision log
-# (live_preview_revisions_dir): parakeet-rs 0.3.5 plus one commit that keeps
-# the softmax score of each emitted token in ParakeetUnified.
-parakeet-rs = { git = "https://github.com/oysteinkrog/parakeet-rs", branch = "voxtype-confidence" }
+# Model signals for the live preview: parakeet-rs 0.3.5 plus the softmax
+# score of each emitted token (voxtype-confidence), and the per-step
+# distribution summaries and lookahead tail of ParakeetUnified
+# (voxtype-signals).
+parakeet-rs = { git = "https://github.com/oysteinkrog/parakeet-rs", rev = "a6e79312871f76de0ac89196a4baaff0b50919e6" }

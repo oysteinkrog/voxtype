@@ -213,6 +213,20 @@ pub struct Cli {
     #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
     pub model_modifier: Option<String>,
 
+    /// Key to hold while recording to respeak a correction (e.g., RIGHTSHIFT).
+    /// Taps of the key keep their meaning
+    #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
+    pub correction_key: Option<String>,
+
+    /// How long to hold the correction key before a correction starts [default: 450]
+    #[arg(
+        long,
+        value_name = "MS",
+        help_heading = "Hotkey",
+        hide_short_help = true
+    )]
+    pub correction_hold_ms: Option<u64>,
+
     // -- Audio --
     /// Audio input device name (or "default" for system default)
     #[arg(long, value_name = "DEVICE", help_heading = "Audio")]

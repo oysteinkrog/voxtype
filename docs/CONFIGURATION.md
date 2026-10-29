@@ -1406,6 +1406,47 @@ streaming = true
 mode = "toggle"
 ```
 
+### streaming_chunk_secs, streaming_left_context_secs, streaming_right_context_secs
+
+**Type:** Float (seconds)
+**Default:** `0.56`, `5.6` and `0.56` (the parakeet-rs defaults)
+**Required:** No
+
+The window of the cache-aware streaming model. It is used by `streaming = true`
+and by the live preview model (`live_preview_model`). Each step, the model
+commits the words in one chunk of audio. It sees `streaming_left_context_secs`
+of earlier audio, and it waits for `streaming_right_context_secs` of audio after
+the chunk before it commits.
+
+- `streaming_chunk_secs` is the step size: how often new words appear.
+- A word is committed between `right` and `chunk + right` seconds after it is
+  spoken, so a smaller chunk and right context means less lag. Each step costs
+  one encoder run, so a smaller chunk means more CPU per second of audio. A
+  shorter left context makes each run cheaper.
+
+Each value is rounded to a whole number of 0.08 s encoder steps (8 mel frames),
+and the log says so when a value is rounded. A chunk that rounds to 0, a
+negative value, or a value over 60 s is an error: `streaming = true` refuses to
+start, and the live preview logs the error and uses the defaults. A key you
+leave out keeps its default.
+
+The live worker logs the window it uses, for example
+`Live preview window: 2.40 s left + 0.32 s chunk + 0.32 s right (step 0.32 s)`.
+
+A smaller window costs words. On 437 LibriSpeech test-clean utterances with
+`parakeet-unified-en-0.6b-int8`, the default window had a word error rate of
+1.88 % and dropped no word that the whole-clip transcript has. A window of
+2.4 s + 0.32 s + 0.32 s cut the median commit wait from 0.88 s to 0.48 s, but
+the word error rate rose to 2.41 % and it dropped 18 words, once a run of 12.
+
+**Example (the defaults, written out):**
+```toml
+[parakeet]
+streaming_left_context_secs = 5.6
+streaming_chunk_secs = 0.56
+streaming_right_context_secs = 0.56
+```
+
 ### Complete Example
 
 ```toml

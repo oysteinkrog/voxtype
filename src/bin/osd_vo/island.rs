@@ -1194,6 +1194,12 @@ impl Popup {
         opacity: f32,
     ) -> Element<Msg> {
         let l = &self.look;
+        // The words come back at full ink or not at all: a fade from 0 as the
+        // capsule changes form left the reading line at 20 % ink (RD-09), and
+        // a new word's own fade in on top of a partly faded text went under
+        // the 70 % floor too. A form change still fades the old words out
+        // through `presence`.
+        let opacity = if opacity <= 0.0 { 0.0 } else { 1.0 };
         let live = |key: String, words: &[Word], style: TextStyle, colour: Color| {
             Element::live_text(key, words)
                 .text_style(style)
@@ -1221,8 +1227,8 @@ impl Popup {
                 ));
             return at(self.with_hearing(text, &style, w, hex(WHITE), hex(BLUE)), x, y)
                 .opacity(opacity)
-                .presence(Transition::fade(), Transition::fade())
-                .motion(Prop::Opacity, Spring::critical_to_98(SWAP_OUT));
+                .presence(Transition::NONE, Transition::fade())
+                .motion(Prop::Opacity, Motion::Snap);
         }
         let style = card_style(l);
         let words = &self.shown[..self.island_room(w, &style)];
@@ -1256,8 +1262,8 @@ impl Popup {
         }
         at(self.with_hearing(text, &style, w, hex(WHITE), hex(BLUE)), x, y)
             .opacity(opacity)
-            .presence(Transition::fade(), Transition::fade())
-            .motion(Prop::Opacity, Spring::critical_to_98(SWAP_OUT))
+            .presence(Transition::NONE, Transition::fade())
+            .motion(Prop::Opacity, Motion::Snap)
     }
 
     /// The words, or while a delivery shows the text leaving for the app and

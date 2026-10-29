@@ -92,6 +92,15 @@ pub(crate) enum Cancel {
     Rewind,
 }
 
+/// How a look draws the empty measure's line and marks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Pen {
+    /// Strokes: a hairline and two measuring rules.
+    Line,
+    /// Dots `pitch` apart and `r` in radius, as on a dot-matrix display.
+    Dots { pitch: f32, r: f32 },
+}
+
 /// What the loading word needs between messages.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct State {
@@ -165,6 +174,18 @@ impl Popup {
         ink: Ink,
         cancel: Cancel,
     ) -> Vec<Element<Msg>> {
+        self.line_marks_with(style, w, ink, cancel, Pen::Line)
+    }
+
+    /// [`Popup::line_marks`] with the empty measure drawn by `pen`.
+    pub(crate) fn line_marks_with(
+        &self,
+        style: TextStyle,
+        w: f32,
+        ink: Ink,
+        cancel: Cancel,
+        pen: Pen,
+    ) -> Vec<Element<Msg>> {
         let mut out = Vec::new();
         let still = self.still();
         let h = self.lines.max(1) as f32 * style.line_height;
@@ -180,7 +201,8 @@ impl Popup {
             (Some(Ending::Empty), Some(at))
                 if self.shown.is_empty() && self.look.on("empty-measure") =>
             {
-                let m = Measure::new(&self.measure, style, w, at, self.last_level(), ink, still);
+                let mut m = Measure::new(&self.measure, style, w, at, self.last_level(), ink, still);
+                m.pen = pen;
                 let until = m.until();
                 out.push(place(
                     "empty-measure",
@@ -226,6 +248,51 @@ impl Popup {
         out
     }
 
+    /// MO-51 for a look that lays out its own lines: the unthread under
+    /// `rows`, each row's words in `style` and the top left of its text box,
+    /// on a canvas `size` big at the origin. Plays when `unthread` is on and
+    /// a dictation with words on screen was cancelled.
+    pub(crate) fn unthread_rows(
+        &self,
+        rows: &[(Vec<Word>, Point)],
+        style: TextStyle,
+        size: Size,
+        ink: Ink,
+    ) -> Option<Element<Msg>> {
+        let at = self.ended_at?;
+        if self.ending() != Some(Ending::Cancelled) || !self.look.on("unthread") {
+            return None;
+        }
+        let mut laid: Option<Laid> = None;
+        for (words, o) in rows.iter().filter(|r| !r.0.is_empty()) {
+            let joined = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+            let row = Laid::new(self.measure.layout(&joined, &style, None), words, style).shifted(o.x, o.y);
+            laid = Some(match laid {
+                None => row,
+                Some(mut all) => {
+                    let n = all.text.glyphs.len();
+                    all.words.extend(row.words.iter().map(|w| WordBox {
+                        first: w.first + n,
+                        end: w.end + n,
+                        ..*w
+                    }));
+                    all.text.glyphs.extend(row.text.glyphs);
+                    all
+                }
+            });
+        }
+        let th = Thread::new(&laid?, at, ink, self.still());
+        let until = th.until();
+        Some(
+            kit::at(
+                Element::canvas("unthread", until, move |t, r, p| th.draw(t, r, p)),
+                0.0,
+                0.0,
+            )
+            .size(size.w, size.h),
+        )
+    }
+
     /// The newest smoothed level, 0 to 1.
     fn last_level(&self) -> f32 {
         self.wave.last().copied().unwrap_or(0.0).clamp(0.0, 1.0)
@@ -239,7 +306,9 @@ impl Popup {
             .map(|w| w.text.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        let text = self.measure.layout(&joined, &style, Some(w));
+        let mut text = self.measure.layout(&joined, &style, Some(w));
+        // A centred look's words sit where its live text puts them.
+        text.align_in(style.align, w);
         Laid::new(text, &self.shown, style)
     }
 
@@ -558,6 +627,7 @@ struct Measure {
     style: TextStyle,
     ink: Ink,
     still: bool,
+    pen: Pen,
 }
 
 impl Measure {
@@ -585,6 +655,7 @@ impl Measure {
             style,
             ink,
             still,
+            pen: Pen::Line,
         }
     }
 
@@ -602,15 +673,31 @@ impl Measure {
         // The breath line: its last breath dies away and it lies flat.
         let k = (e / FLAT_SECS).clamp(0.0, 1.0) as f32;
         let amp = (1.0 + 3.0 * self.level) * (1.0 - k) * (1.0 - k);
-        let line = if amp > 0.05 {
-            make::wave(x0, x0 + self.w, y, amp, 14.0, (e * 9.0) as f32)
-        } else {
-            make::underline(x0, x0 + self.w, y)
-        };
-        p.stroke(
-            &line,
-            &StrokeStyle::solid(1.0, self.ink.faint.fade(0.9 - 0.4 * k)),
-        );
+        let line_ink = self.ink.faint.fade(0.9 - 0.4 * k);
+        match self.pen {
+            Pen::Line => {
+                let line = if amp > 0.05 {
+                    make::wave(x0, x0 + self.w, y, amp, 14.0, (e * 9.0) as f32)
+                } else {
+                    make::underline(x0, x0 + self.w, y)
+                };
+                p.stroke(&line, &StrokeStyle::solid(1.0, line_ink));
+            }
+            Pen::Dots { pitch, r } => {
+                // The same wave, sampled one dot per pitch.
+                let n = (self.w / pitch).floor() as usize;
+                for i in 0..=n {
+                    let dx = i as f32 * pitch;
+                    let ph = std::f32::consts::TAU * dx / 14.0 - (e * 9.0) as f32;
+                    let dy = if amp > 0.05 { amp * ph.sin() } else { 0.0 };
+                    p.shape(ShapeInstance::circle(
+                        Point::new(x0 + dx, y + dy),
+                        r,
+                        Paint::solid(line_ink),
+                    ));
+                }
+            }
+        }
         // Two measuring marks close on the middle, on nothing.
         let close = ease_in_out((e - MARKS.0) / (MARKS.1 - MARKS.0));
         let fade = 1.0 - ((e - MARKS.1) / 0.1).clamp(0.0, 1.0) as f32;
@@ -618,12 +705,7 @@ impl Measure {
             let tall = self.style.size * 0.8;
             let half = self.w / 2.0 * (1.0 - close);
             for x in [mid - half, mid + half] {
-                p.shape(ShapeInstance::line(
-                    Point::new(x, y + 2.0),
-                    Point::new(x, y - tall),
-                    1.25,
-                    Paint::solid(self.ink.mark.fade(fade)),
-                ));
+                self.rule(p, x, y + 2.0, y - tall, 1.25, self.ink.mark.fade(fade));
             }
         }
         // The caret types "No speech", centred where the marks met.
@@ -644,12 +726,37 @@ impl Measure {
                 .glyphs
                 .get(typed)
                 .map_or(self.words.size.w, |g| g.pos.x);
-            p.shape(ShapeInstance::line(
-                Point::new(o.x + x + 1.0, r.y + self.baseline + 2.0),
-                Point::new(o.x + x + 1.0, r.y + self.baseline - self.style.size * 0.8),
+            self.rule(
+                p,
+                o.x + x + 1.0,
+                r.y + self.baseline + 2.0,
+                r.y + self.baseline - self.style.size * 0.8,
                 1.5,
-                Paint::solid(self.ink.mark.fade(caret)),
-            ));
+                self.ink.mark.fade(caret),
+            );
+        }
+    }
+
+    /// An upright mark from `y0` down to `y1` (up the screen) at `x`: a
+    /// line `width` wide, or a column of dots.
+    fn rule(&self, p: &mut Painter, x: f32, y0: f32, y1: f32, width: f32, c: Color) {
+        match self.pen {
+            Pen::Line => p.shape(ShapeInstance::line(
+                Point::new(x, y0),
+                Point::new(x, y1),
+                width,
+                Paint::solid(c),
+            )),
+            Pen::Dots { pitch, r } => {
+                let n = ((y0 - y1) / pitch).floor() as usize;
+                for i in 0..=n {
+                    p.shape(ShapeInstance::circle(
+                        Point::new(x, y0 - i as f32 * pitch),
+                        r,
+                        Paint::solid(c),
+                    ));
+                }
+            }
         }
     }
 }

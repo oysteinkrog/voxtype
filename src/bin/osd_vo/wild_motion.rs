@@ -24,7 +24,7 @@
 
 use super::*;
 
-use vo::scene::flow::letter_physics::LetterPhysics;
+pub(crate) use vo::scene::flow::letter_physics::LetterPhysics;
 use vo::scene::flow::magnet::Magnet;
 use vo::scene::flow::Caret;
 use vo::scene::font::var_axes::Axes;
@@ -53,12 +53,18 @@ const ACCENT: u32 = 0x4DA3FF;
 /// The wildcard motion features of a look on its transcript.
 pub(crate) trait WildMotion {
     fn wild_motion(self, popup: &Popup) -> Self;
+    /// [`WildMotion::wild_motion`] with the letters falling as `letters` says.
+    fn wild_motion_with(self, popup: &Popup, letters: LetterPhysics) -> Self;
 }
 
 impl<M> WildMotion for Element<M> {
     fn wild_motion(self, popup: &Popup) -> Element<M> {
+        self.wild_motion_with(popup, LetterPhysics::default())
+    }
+
+    fn wild_motion_with(self, popup: &Popup, letters: LetterPhysics) -> Element<M> {
         let look = &popup.look;
-        let reduced = look.on("reduced-motion");
+        let reduced = look.on("reduced-motion") || kit::reduced();
         let accent = Color::hex(ACCENT, 1.0);
         let mut words = self;
         let physics = look.on(LETTER_PHYSICS);
@@ -68,7 +74,7 @@ impl<M> WildMotion for Element<M> {
             words = words.word_enter(Transition::fade().opacity(0.7));
         }
         if physics && !reduced {
-            words = words.letter_physics(LetterPhysics::default());
+            words = words.letter_physics(letters);
         }
         if magnet {
             words = words
@@ -93,7 +99,7 @@ impl Popup {
         let bus = self.signals.get();
         let mut voices = self.breath.0.lock().unwrap_or_else(|e| e.into_inner());
         voices.update(t, &self.model, &bus);
-        let reduced = self.look.on("reduced-motion");
+        let reduced = self.look.on("reduced-motion") || kit::reduced();
         let level = bus.envelope(Sig::Level, 0.03, 0.3, t);
         let pitch = voices.live_pitch(&bus, t);
         let n = self.shown.len();
@@ -116,7 +122,7 @@ impl Popup {
     }
 
     /// The flex font and each shown word's instance of it.
-    fn breath_fonts(&self, size: f32, free: bool) -> Option<(u32, Vec<(WordId, u32)>)> {
+    pub(crate) fn breath_fonts(&self, size: f32, free: bool) -> Option<(u32, Vec<(WordId, u32)>)> {
         let fonts = &self.look.fonts;
         let base = fonts.asset("flex").ok()?;
         let words = self

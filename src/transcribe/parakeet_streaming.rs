@@ -41,6 +41,18 @@ use parakeet_rs::{ParakeetUnified, ParakeetUnifiedHandle, UnifiedStreamingConfig
 use std::sync::Mutex;
 use tokio::sync::{mpsc, oneshot};
 
+/// The parakeet-rs streaming config for a window of whole encoder steps.
+/// Always passes `UnifiedStreamingConfig::validate`'s divisible-by-8 check.
+pub(crate) fn unified_streaming_config(
+    window: crate::config::StreamingWindow,
+) -> UnifiedStreamingConfig {
+    UnifiedStreamingConfig {
+        left_context_secs: window.left_secs(),
+        chunk_secs: window.chunk_secs(),
+        right_context_secs: window.right_secs(),
+    }
+}
+
 /// Streaming-capable Parakeet transcriber backed by `ParakeetUnified`.
 pub struct ParakeetStreamingTranscriber {
     /// Shared model weights. Cloned cheaply for each streaming session.
@@ -110,17 +122,18 @@ impl ParakeetStreamingTranscriber {
             ))
         })?;
 
-        let streaming_config = UnifiedStreamingConfig {
-            chunk_secs: config.streaming_chunk_secs,
-            left_context_secs: config.streaming_left_context_secs,
-            right_context_secs: config.streaming_right_context_secs,
+        for note in config.streaming_rounding_notes() {
+            tracing::warn!("[parakeet] {note} (whole 0.08 s steps)");
         }
-        .validate()
-        .map_err(|e| {
+        let window = config.streaming_window().map_err(|e| {
+            TranscribeError::InitFailed(format!("Invalid Parakeet streaming config: {e}"))
+        })?;
+        tracing::info!("Parakeet streaming window: {window}");
+        let streaming_config = unified_streaming_config(window).validate().map_err(|e| {
             TranscribeError::InitFailed(format!(
                 "Invalid Parakeet streaming config: {}. \
-                Check streaming_chunk_secs, streaming_left_context_secs, \
-                streaming_right_context_secs in [parakeet].",
+                    Check streaming_chunk_secs, streaming_left_context_secs, \
+                    streaming_right_context_secs in [parakeet].",
                 e
             ))
         })?;
@@ -311,6 +324,35 @@ mod tests {
             right_context_secs: 0.5,
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn unified_config_from_a_window_always_validates() {
+        for left in [0u32, 1, 19, 30, 40, 70] {
+            for chunk in 1u32..=12 {
+                for right in [0u32, 1, 4, 6, 7] {
+                    let window = crate::config::StreamingWindow {
+                        left_steps: left,
+                        chunk_steps: chunk,
+                        right_steps: right,
+                    };
+                    let cfg = unified_streaming_config(window);
+                    assert!(cfg.validate().is_ok(), "{window}");
+                    assert_eq!(cfg.chunk_frames(), chunk as usize * 8, "{window}");
+                    assert_eq!(cfg.left_context_frames(), left as usize * 8, "{window}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absent_keys_give_parakeet_rs_default() {
+        let window = ParakeetConfig::default().streaming_window().unwrap();
+        let cfg = unified_streaming_config(window);
+        let d = UnifiedStreamingConfig::default();
+        assert_eq!(cfg.left_context_frames(), d.left_context_frames());
+        assert_eq!(cfg.chunk_frames(), d.chunk_frames());
+        assert_eq!(cfg.right_context_frames(), d.right_context_frames());
     }
 
     #[test]

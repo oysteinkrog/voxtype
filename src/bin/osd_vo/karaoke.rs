@@ -104,12 +104,13 @@ const BOW_TIGHTEN: f64 = 0.45;
 
 /// How far the string's middle sits below its ends at `age` seconds after
 /// the word came, for a word said at `pitch` (0 to 1, `None` unvoiced):
-/// slack that tightens, and a high pitch bending it up.
+/// slack that tightens, and a high pitch bending it up. Under reduced
+/// motion the string rests straight.
 fn bow_sag(age: f64, pitch: Option<f32>, reduced: bool) -> f32 {
-    let bend = pitch.map_or(0.0, |p| -(p - 0.5).clamp(-0.5, 0.5) * 2.0 * BOW_BEND);
     if reduced {
-        return bend;
+        return 0.0;
     }
+    let bend = pitch.map_or(0.0, |p| -(p - 0.5).clamp(-0.5, 0.5) * 2.0 * BOW_BEND);
     let tight = ease_out(age / BOW_TIGHTEN);
     BOW_SLACK * (1.0 - tight) + bend * tight
 }
@@ -123,6 +124,10 @@ const BAR_SECS: f64 = 0.028;
 const STATUS_Y: f32 = 479.0;
 
 const TICK_HZ: f64 = 60.0;
+/// Set on the lit word copy's id: above the transcript's ids (`envelope.rs`
+/// checks ids below 1 << 20), so the envelope does not take it for a second
+/// copy of the word.
+const LIT_ID: u32 = 1 << 30;
 
 #[derive(Clone, Copy)]
 struct Fonts {
@@ -695,33 +700,33 @@ impl Popup {
                 - self.measure.layout("x", style, None).size.w
         };
         let ww = self.measure.layout(&word.text, style, None).size.w;
-        let gradient = |key: &'static str, w: f32, h: f32| {
+        // The gradient runs over `span` (the whole box when `None`); past it
+        // the box keeps the last colour.
+        let gradient = |key: &'static str, w: f32, h: f32, span: Option<f32>| {
             Element::canvas(key, f64::NEG_INFINITY, move |_, r, p| {
                 p.shape(ShapeInstance::rrect(
                     RRect::new(r, 0.0),
                     Paint::linear(
                         Point::new(r.x, 0.0),
                         ramp(0.0),
-                        Point::new(r.x + r.w, 0.0),
+                        Point::new(r.x + span.unwrap_or(r.w), 0.0),
                         ramp(1.0),
                     ),
                 ));
             })
             .size(w, h)
         };
+        // A word arriving spaced out (MO-15) is wider than its plain width.
+        let (box_w, span) = if self.look.on(channels::TRACKING) {
+            ((ww + 4.0) * 1.3, Some(ww + 4.0))
+        } else {
+            (ww + 4.0, None)
+        };
         let lit = at(
             Element::layer(format!("hot-{}", word.id))
-                .size(ww + 4.0, LINE)
-                .child(at(gradient("fill", ww + 4.0, LINE), 0.0, 0.0))
-                .child(
-                    Element::mask("glyphs").child(at(
-                        Element::label("word", word.text.as_str())
-                            .text_style(*style)
-                            .color(Color::WHITE),
-                        0.0,
-                        0.0,
-                    )),
-                ),
+                .size(box_w, LINE)
+                .child(at(gradient("fill", box_w, LINE, span), 0.0, 0.0))
+                .child(Element::mask("glyphs").child(at(self.karaoke_lit_glyphs(word, style), 0.0, 0.0))),
             // In the line's own box (see karaoke_text), which moves with the words.
             px - lead,
             0.0,
@@ -738,7 +743,7 @@ impl Popup {
             Element::layer("under")
                 .size(ww, 3.0)
                 .glow(hex(BLUE).fade(0.7), 5.0, 0.7)
-                .child(at(gradient("bar", ww, 3.0), 0.0, 0.0).radius(1.5)),
+                .child(at(gradient("bar", ww, 3.0, None), 0.0, 0.0).radius(1.5)),
             px,
             LINE * 0.86,
         )
@@ -746,6 +751,47 @@ impl Popup {
         .motion(Prop::Size, Spring::critical_to_98(0.24))
         .presence(Transition::fade(), Transition::fade());
         vec![lit, under]
+    }
+
+    /// The glyphs that mask the lit word's gradient. With `spoken-tracking`
+    /// the word in the line arrives spaced out, so the mask is a live text
+    /// with the same channels, and the two keep the same letter places. Its
+    /// word id is outside the transcript's (`LIT_ID`), so the reading-line
+    /// envelope follows only the word in the line.
+    fn karaoke_lit_glyphs(&self, word: &Word, style: &TextStyle) -> Element<Msg> {
+        let plain = || {
+            Element::label("word", word.text.as_str())
+                .text_style(*style)
+                .color(Color::WHITE)
+        };
+        if !self.look.on(channels::TRACKING) || self.look.on("reduced-motion") || kit::reduced() {
+            return plain();
+        }
+        let Some(mut typos) = self.channel_typos() else {
+            return plain();
+        };
+        let alias = word.id | LIT_ID;
+        typos.words = typos
+            .words
+            .iter()
+            .filter(|(id, _)| *id == word.id)
+            .map(|(_, t)| (alias, *t))
+            .collect();
+        typos.tracks = typos
+            .tracks
+            .iter()
+            .filter(|(id, _)| *id == word.id)
+            .map(|(_, k)| (alias, k.clone()))
+            .collect();
+        let lit = Word {
+            id: alias,
+            text: word.text.clone(),
+        };
+        Element::live_text("word", std::slice::from_ref(&lit))
+            .text_style(*style)
+            .color(Color::WHITE)
+            .word_enter(Transition::NONE)
+            .word_typo(typos)
     }
 
     /// MO-64: the underline as a bowstring from the middle of the word
@@ -771,7 +817,7 @@ impl Popup {
         let heard = self.heard.word(word.id);
         let born = heard.map_or(self.extra.now, |h| h.born);
         let pitch = heard.and_then(|h| h.pitch);
-        let reduced = self.look.on("reduced-motion");
+        let reduced = self.look.on("reduced-motion") || kit::reduced();
         let until = if reduced { f64::NEG_INFINITY } else { born + BOW_TIGHTEN + 0.05 };
         at(
             Element::canvas(format!("bow-{}", word.id), until, move |t, r, p| {
@@ -803,6 +849,68 @@ impl Popup {
         )
         .size(LINE_BOX, LINE + 2.0 * BOW_SLACK)
         .presence(Transition::fade(), Transition::fade())
+    }
+
+    /// A line's live text with the typographic channels (MO-15
+    /// `spoken-tracking` and the others, `channels.rs`) and, on the newest
+    /// line, the line motion (MO-32 `margin-mark` and the others). Each line
+    /// is a live text of its own, so the mark's split on a wrap is drawn by
+    /// `karaoke_mark_top`. Under reduced motion words keep plain spacing.
+    fn karaoke_channels(&self, text: Element<Msg>, words: &[Word], newest: bool) -> Element<Msg> {
+        let text = if self.look.on("reduced-motion") || kit::reduced() {
+            text
+        } else {
+            self.typo_words(text)
+        };
+        let text = self.typo_marks_for(text, words, LINE_BOX);
+        if !newest {
+            return text;
+        }
+        let text = text.line_motion(&self.look);
+        match self.look.margin_mark() {
+            // In the look's own cyan rather than the desktop accent.
+            Some(m) => text.margin_mark(MarginMark { color: hex(CYAN), ..m }),
+            None => text,
+        }
+    }
+
+    /// MO-32 on karaoke: when a new line starts, the top half of the margin
+    /// mark stays beside the line before (`lines[i]`) and fades as that line
+    /// rolls up; the bottom half is the newest line's own mark, in the slot the
+    /// reader keeps looking at. Nothing splits under reduced motion.
+    fn karaoke_mark_top(&self, lines: &[(Vec<Word>, f32)], i: usize, style: &TextStyle) -> Option<Element<Msg>> {
+        let mark = self.look.margin_mark()?;
+        if self.look.on("reduced-motion") || kit::reduced() {
+            return None;
+        }
+        let newest = lines.last()?.0.first()?.id;
+        let (born, id) = self.line_born?;
+        if id != newest || self.extra.now - born >= mark.fade {
+            return None;
+        }
+        let (words, w) = &lines[i];
+        let joined = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        let baseline = self.measure.layout(&joined, style, None).glyphs.first()?.pos.y;
+        let full = mark.height * style.size;
+        let x = (LINE_BOX - w) / 2.0 - mark.gap - mark.width;
+        let y = baseline - 0.28 * style.size - 0.25 * full;
+        let fade = mark.fade;
+        Some(at(
+            Element::canvas("mark-top", born + fade, move |t, r, p| {
+                let k = 1.0 - ease_out((t - born) / fade);
+                if k <= 0.0 {
+                    return;
+                }
+                let bar = Rect::new(r.x + x, r.y + y - 0.25 * full, mark.width, 0.5 * full);
+                p.shape(ShapeInstance::rrect(
+                    RRect::new(bar, 0.5 * mark.width),
+                    Paint::solid(hex(CYAN).fade(k)),
+                ));
+            }),
+            0.0,
+            0.0,
+        )
+        .size(LINE_BOX, LINE))
     }
 
     /// The rolling lines, the lit newest word and its underline, or the
@@ -842,6 +950,7 @@ impl Popup {
                 .motion(Prop::Opacity, Motion::Snap)
                 .motion(Prop::Offset, Spring::POP)
                 .word_enter(Transition::fade().offset(0.0, 8.0));
+            let text = self.karaoke_channels(text, words, age == 0);
             // The words sit in a box of their own, with the lit newest word in it, so the
             // two move as one when the line re-centres.
             let mut hot = if age == 0 {
@@ -862,7 +971,8 @@ impl Popup {
                 .align_items(AlignItems::CENTER)
                 .child(inline)
                 .children(self.karaoke_rewind(words, &style))
-                .children(hot);
+                .children(hot)
+                .children((age == 1).then(|| self.karaoke_mark_top(lines, i, &style)).flatten());
             let line = at(column, ox + (CARD_W - LINE_BOX) / 2.0, oy + cy - LINE / 2.0)
                 .scale(scale)
                 .opacity(if cancelled { opacity * 0.4 } else { opacity })
@@ -963,7 +1073,8 @@ mod tests {
         // A high word bends the string up, a low one down.
         assert!(bow_sag(1.0, Some(1.0), false) < -BOW_BEND * 0.9);
         assert!(bow_sag(1.0, Some(0.0), false) > BOW_BEND * 0.9);
-        // Reduced motion: no slack, only the bend.
-        assert_eq!(bow_sag(0.0, Some(0.5), true), 0.0);
+        // Reduced motion: straight, whatever the pitch.
+        assert_eq!(bow_sag(0.0, Some(1.0), true), 0.0);
+        assert_eq!(bow_sag(1.0, None, true), 0.0);
     }
 }

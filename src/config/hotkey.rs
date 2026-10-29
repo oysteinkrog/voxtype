@@ -89,10 +89,29 @@ pub struct HotkeyConfig {
     /// either Ctrl key.
     #[serde(default = "default_true")]
     pub look_chord: bool,
+
+    /// A key whose clean hold while recording marks a spoken correction:
+    /// hold it, say the right words, let go, and they replace the words
+    /// they sound most like. Taps and double taps of the key keep their
+    /// meaning, so it can be `double_tap_alt_key`. Pressing any other key
+    /// during the hold drops the correction. Unset (the default) turns
+    /// corrections off.
+    #[serde(default)]
+    pub correction_key: Option<String>,
+
+    /// How long `correction_key` must be held before a correction starts,
+    /// in milliseconds. With `double_tap` it is raised to at least
+    /// `double_tap_ms` + 150, so a slow tap never starts a correction.
+    #[serde(default = "default_correction_hold_ms")]
+    pub correction_hold_ms: u64,
 }
 
 fn default_double_tap_ms() -> u64 {
     300
+}
+
+fn default_correction_hold_ms() -> u64 {
+    450
 }
 
 impl Default for HotkeyConfig {
@@ -110,6 +129,8 @@ impl Default for HotkeyConfig {
             double_tap_alt_key: None,
             double_tap_cancel_key: None,
             look_chord: true,
+            correction_key: None,
+            correction_hold_ms: default_correction_hold_ms(),
         }
     }
 }

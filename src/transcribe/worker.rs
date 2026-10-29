@@ -214,6 +214,16 @@ pub const WORDS_PREFIX: &str = "W ";
 /// model is still loading.
 pub const STATUS_PREFIX: &str = "S ";
 
+/// Prefix of a model signals line, sent after each streaming step of the
+/// live model while the OSD is on: `G <json>`, an
+/// [`crate::osd::live::SignalsStep`]. It never carries text that gets typed.
+pub const SIGNALS_PREFIX: &str = "G ";
+
+/// Error text of a final response when the recording held no words, as when a
+/// dictation is started and stopped again without speaking. The daemon treats
+/// it as "no speech", not as a failure.
+pub const NO_SPEECH: &str = "No speech recognized";
+
 /// Error text from the engine thread when the GPU has too little free memory.
 #[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 const GPU_BUSY: &str = "GPU busy";
@@ -448,7 +458,8 @@ impl Progress {
 /// 2. Parent sends any number of `[u32 sample_count (LE)][f32 samples...]`
 ///    blocks while recording, then an empty block (count 0) or EOF.
 /// 3. For each change in the running transcript the worker writes
-///    `P <json string>`.
+///    `W <words>` and `P <json string>`. With the OSD on it also writes
+///    `G <json>` after each streaming step (see [`SIGNALS_PREFIX`]).
 /// 4. Meanwhile the engine model transcribes each part of the clip that
 ///    ends in a pause (see [`PauseSplitter`]). After EOF only the last part
 ///    is left; until it is done the worker writes `S <json>` status lines,
@@ -481,18 +492,50 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
 
     eprintln!("[worker] Loading live preview model: {}", live_model);
     let load_start = std::time::Instant::now();
-    // parakeet-rs's own context sizes. voxtype's [parakeet] streaming_*
-    // defaults (1.5 s left context) fail the unified model's check that
-    // contexts map to mel-frame counts divisible by 8.
-    let streaming_config = UnifiedStreamingConfig::default();
+    // [parakeet] streaming_* sets the window; absent keys keep parakeet-rs's
+    // own sizes (5.6 s left + 0.56 s chunk + 0.56 s right).
+    let parakeet = config.parakeet.clone().unwrap_or_default();
+    for note in parakeet.streaming_rounding_notes() {
+        eprintln!("[worker] [parakeet] {} (whole 0.08 s steps)", note);
+    }
+    let streaming_config = match parakeet.streaming_window() {
+        Ok(w) => {
+            eprintln!("[worker] Live preview window: {}", w);
+            super::parakeet_streaming::unified_streaming_config(w)
+        }
+        Err(e) => {
+            eprintln!("[worker] {}; using the default live preview window", e);
+            UnifiedStreamingConfig::default()
+        }
+    };
     // None = CPU: the GPU is left to the engine model.
-    let handle = super::parakeet::resolve_model_path(live_model)
-        .map_err(|e| e.to_string())
+    let model_path = super::parakeet::resolve_model_path(live_model).map_err(|e| e.to_string());
+    let handle = model_path
+        .clone()
         .and_then(|path| ParakeetUnifiedHandle::load(&path, None).map_err(|e| e.to_string()));
-    let unified = handle.as_ref().map_err(|e| e.clone()).and_then(|handle| {
-        ParakeetUnified::from_shared_with_streaming_config(handle, streaming_config.clone())
-            .map_err(|e| e.to_string())
-    });
+    // The model signals (word details, frame levels, the lookahead tail)
+    // are for the OSD: without it the worker sends none, and skips the
+    // lookahead decode (a few ms per step).
+    let vocab = config
+        .osd
+        .enabled
+        .then(|| model_path.as_ref().ok())
+        .flatten()
+        .and_then(|path| {
+            parakeet_rs::SentencePieceVocab::from_file(path.join("tokenizer.model"))
+                .map_err(|e| eprintln!("[worker] No model signals: {}", e))
+                .ok()
+        });
+    let new_unified = |handle: &ParakeetUnifiedHandle| {
+        ParakeetUnified::from_shared_with_streaming_config(handle, streaming_config).map(|mut u| {
+            u.set_tentative_enabled(vocab.is_some());
+            u
+        })
+    };
+    let unified = handle
+        .as_ref()
+        .map_err(|e| e.clone())
+        .and_then(|handle| new_unified(handle).map_err(|e| e.to_string()));
     let mut first = match unified {
         Ok(u) => {
             eprintln!(
@@ -510,10 +553,9 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
 
     loop {
         // A fresh streaming state per recording; the weights stay loaded.
-        let unified = first.take().or_else(|| {
-            let h = handle.as_ref().ok()?;
-            ParakeetUnified::from_shared_with_streaming_config(h, streaming_config.clone()).ok()
-        });
+        let unified = first
+            .take()
+            .or_else(|| new_unified(handle.as_ref().ok()?).ok());
         if !live_session(
             config,
             &mut out,
@@ -521,6 +563,7 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             unified,
             &handle,
             &streaming_config,
+            vocab.as_ref(),
         )? {
             return Ok(());
         }
@@ -538,6 +581,7 @@ fn live_session(
     mut unified: Option<parakeet_rs::ParakeetUnified>,
     handle: &Result<parakeet_rs::ParakeetUnifiedHandle, String>,
     streaming_config: &parakeet_rs::UnifiedStreamingConfig,
+    vocab: Option<&parakeet_rs::SentencePieceVocab>,
 ) -> anyhow::Result<bool> {
     use super::revisions::RevisionLog;
     use parakeet_rs::ParakeetUnified;
@@ -623,6 +667,7 @@ fn live_session(
     // Off unless live_preview_revisions_dir is set; the clock starts with
     // the first audio block.
     let mut revlog: Option<RevisionLog> = None;
+    let mut signals = SignalsSent::default();
     let mut more = false;
     for msg in blocks_rx.iter() {
         let Some(block) = msg else {
@@ -654,18 +699,22 @@ fn live_session(
         }
         let Some(u) = unified.as_mut() else { continue };
         match u.transcribe_chunk(&block) {
-            Ok(delta) if !delta.is_empty() => {
-                last_partial.push_str(&delta);
-                let shown = last_partial.trim_start();
-                let words = preview_words(u);
-                writeln!(out, "{}{}", WORDS_PREFIX, serde_json::to_string(&words)?)?;
-                writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(shown)?)?;
-                out.flush()?;
-                if let Some(log) = revlog.as_mut() {
-                    log.preview(samples.len() as f32 / 16000.0, shown, words);
+            Ok(delta) => {
+                if !delta.is_empty() {
+                    last_partial.push_str(&delta);
+                    let shown = last_partial.trim_start();
+                    let words = preview_words(u, vocab);
+                    writeln!(out, "{}{}", WORDS_PREFIX, serde_json::to_string(&words)?)?;
+                    writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(shown)?)?;
+                    if let Some(log) = revlog.as_mut() {
+                        log.preview(samples.len() as f32 / 16000.0, shown, words);
+                    }
                 }
+                if let Some(vocab) = vocab {
+                    signals.send(out, u, vocab, samples.len())?;
+                }
+                out.flush()?;
             }
-            Ok(_) => {}
             Err(e) => {
                 eprintln!("[worker] Live preview failed, stopping it: {}", e);
                 unified = None;
@@ -693,7 +742,7 @@ fn live_session(
                     out,
                     "{}{}",
                     WORDS_PREFIX,
-                    serde_json::to_string(&preview_words(u))?
+                    serde_json::to_string(&preview_words(u, vocab))?
                 )?;
             }
             writeln!(
@@ -707,10 +756,14 @@ fn live_session(
                 log.preview(
                     samples.len() as f32 / 16000.0,
                     last_partial.trim(),
-                    preview_words(u),
+                    preview_words(u, vocab),
                 );
             }
         }
+    }
+    if let (Some(u), Some(vocab)) = (unified.as_ref(), vocab) {
+        signals.send(out, u, vocab, samples.len())?;
+        out.flush()?;
     }
     let mut preview_final = last_partial.trim().to_string();
     any_speech |= splitter.tail(samples.len()).is_some();
@@ -722,8 +775,9 @@ fn live_session(
                 "[worker] Preview text empty despite speech; running the preview model again"
             );
             if let Ok(mut u) =
-                ParakeetUnified::from_shared_with_streaming_config(h, streaming_config.clone())
+                ParakeetUnified::from_shared_with_streaming_config(h, *streaming_config)
             {
+                u.set_tentative_enabled(false);
                 let mut text = String::new();
                 for chunk in samples.chunks(1600) {
                     if let Ok(d) = u.transcribe_chunk(chunk) {
@@ -740,7 +794,7 @@ fn live_session(
 
     if config.live_preview_final == "preview" {
         let response = if preview_final.is_empty() {
-            WorkerResponse::error("No speech recognized")
+            WorkerResponse::error(NO_SPEECH)
         } else {
             WorkerResponse::success(preview_final.clone(), None)
         };
@@ -844,18 +898,102 @@ fn live_session(
     Ok(more)
 }
 
-/// The preview model's words so far, with their audio timing.
+/// The preview model's words so far, with their audio timing, and their
+/// details when `vocab` is given (the OSD is on).
 #[cfg(feature = "parakeet")]
-fn preview_words(u: &parakeet_rs::ParakeetUnified) -> Vec<super::revisions::Word> {
+fn preview_words(
+    u: &parakeet_rs::ParakeetUnified,
+    vocab: Option<&parakeet_rs::SentencePieceVocab>,
+) -> Vec<super::revisions::Word> {
     let timed = u.get_timed_transcript(parakeet_rs::TimestampMode::Tokens);
     let conf = u.token_confidences();
-    super::revisions::words_from_tokens(
-        timed
-            .tokens
+    let details = u.token_details();
+    super::revisions::words_with_details(timed.tokens.iter().enumerate().map(|(i, t)| {
+        let detail = vocab.zip(details.get(i)).map(|(v, d)| word_detail(d, v));
+        (t.text.as_str(), t.start, t.end, conf.get(i).copied(), detail)
+    }))
+}
+
+/// Seconds per encoder frame of the live model.
+#[cfg(feature = "parakeet")]
+const LIVE_FRAME_SECS: f32 = 0.08;
+
+#[cfg(feature = "parakeet")]
+fn word_detail(
+    d: &parakeet_rs::TokenDetail,
+    vocab: &parakeet_rs::SentencePieceVocab,
+) -> crate::osd::live::WordDetail {
+    // top[0] is the emitted token; blank as runner-up names no word.
+    let (runner_up, _) = d.top[1];
+    crate::osd::live::WordDetail {
+        entropy: d.entropy,
+        margin: d.margin,
+        runner_up: (runner_up < vocab.size()).then(|| vocab.decode_single(runner_up)),
+    }
+}
+
+/// What the worker has sent of the live model's signals this recording.
+#[cfg(feature = "parakeet")]
+#[derive(Default)]
+struct SignalsSent {
+    steps: u32,
+    frames: usize,
+}
+
+#[cfg(feature = "parakeet")]
+impl SignalsSent {
+    /// Writes a `G` line when the model took a step since the last one:
+    /// the frames new since then and the current lookahead tail.
+    fn send(
+        &mut self,
+        out: &mut impl Write,
+        u: &parakeet_rs::ParakeetUnified,
+        vocab: &parakeet_rs::SentencePieceVocab,
+        samples: usize,
+    ) -> io::Result<()> {
+        use crate::osd::live::{FrameLevel, Guess, SignalsStep, TailToken};
+        let all = u.frame_signals();
+        if all.len() <= self.frames {
+            return Ok(());
+        }
+        let frames = all[self.frames..]
             .iter()
-            .enumerate()
-            .map(|(i, t)| (t.text.as_str(), t.start, t.end, conf.get(i).copied())),
-    )
+            .map(|f| FrameLevel {
+                t: f.abs_frame as f32 * LIVE_FRAME_SECS,
+                level: f.log10_nonblank,
+                top: f
+                    .top
+                    .iter()
+                    .map(|&(id, logp)| Guess {
+                        text: vocab.decode_single(id),
+                        logp,
+                    })
+                    .collect(),
+            })
+            .collect();
+        self.frames = all.len();
+        self.steps += 1;
+        let tail = u
+            .tentative()
+            .iter()
+            .map(|t| TailToken {
+                text: t.text.clone(),
+                start: t.abs_frame as f32 * LIVE_FRAME_SECS,
+                end: (t.abs_frame + 1) as f32 * LIVE_FRAME_SECS,
+                edge: t.frames_to_edge as u32,
+                conf: t.confidence,
+                detail: Some(word_detail(&t.detail, vocab)),
+            })
+            .collect();
+        let step = SignalsStep {
+            step: self.steps,
+            audio_s: samples as f32 / 16000.0,
+            frames,
+            tail,
+            with_tail: u.transcript_with_tentative().trim().to_string(),
+        };
+        writeln!(out, "{}{}", SIGNALS_PREFIX, serde_json::to_string(&step)?)
+    }
 }
 
 /// Write the revision log to `live_preview_revisions_dir`, if set.

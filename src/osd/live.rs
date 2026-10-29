@@ -30,8 +30,46 @@
 //! final text, which model makes the live text, the microphone, and the
 //! language (null for automatic); it is written when the recording starts.
 //!
-//! The file is written to a temporary name and renamed, so a reader never
-//! sees half of it. It is removed when the dictation ends.
+//! A word may also carry `"detail": {"entropy": 0.4, "margin": 0.9,
+//! "runner_up": " the"}` when the live model gives it (see [`WordDetail`]);
+//! it is left out otherwise.
+//!
+//! While the user makes a spoken correction, the doc also carries
+//! `"correction": {"hearing": "FrankenTerm", "pending": false, "note": null}`
+//! ([`crate::osd::correction::CorrectionView`]) and its words already have
+//! the corrections made; it is left out of dictations without one.
+//!
+//! The live model's own signals go to a second file, `preview-signals.json`
+//! ([`ModelSignals`]), written once per streaming step. It never changes
+//! `preview.json`, so the text and its words are the same with or without
+//! it. Popups that do not know it never read it, and daemons from before it
+//! never write it.
+//!
+//! ```json
+//! {"version": 1, "step": 12, "audio_s": 6.72, "frames_total": 84,
+//!  "frames": [{"t": 6.08, "level": -3.2,
+//!              "top": [{"text": " the", "logp": -9.1}, ...]}, ...],
+//!  "tail": [{"text": " of", "start": 1.28, "end": 1.36, "edge": 5,
+//!            "conf": 0.64, "detail": {"entropy": 1.1, "margin": 0.3,
+//!                                     "runner_up": " on"}}, ...],
+//!  "with_tail": "this is a longer test of"}
+//! ```
+//!
+//! `step` counts the live model's steps in this dictation (one per 0.56 s of
+//! audio by default) and `audio_s` is the audio it had heard. `frames` holds
+//! the newest [`SIGNALS_KEEP_FRAMES`] encoder frames (80 ms each) that ended
+//! without a new token, oldest first, and `frames_total` how many there were
+//! in all: `t` is the frame's start in seconds into the recording, `level`
+//! is log10(1 - P(blank)) (0 when a token was nearly emitted, -5 for
+//! silence), and `top` the likeliest tokens there with their natural log
+//! probability. `tail` is what the right-context audio (the newest 0.56 s)
+//! decodes to: tentative tokens that are never typed and are replaced at the
+//! next step, each with `edge`, the frames between it and the newest audio.
+//! A token that starts with a space starts a word. `with_tail` is the
+//! committed live text followed by the tail.
+//!
+//! Both files are written to a temporary name and renamed, so a reader never
+//! sees half of one. They are removed when the dictation ends.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -40,9 +78,20 @@ use std::sync::Mutex;
 /// File format version.
 pub const LIVE_VERSION: u32 = 1;
 
+/// `preview-signals.json` format version.
+pub const SIGNALS_VERSION: u32 = 1;
+
+/// Frames kept in `preview-signals.json`: 5.6 s, one live model window.
+pub const SIGNALS_KEEP_FRAMES: usize = 70;
+
 /// `preview.json` in the runtime folder.
 pub fn path() -> PathBuf {
     crate::config::Config::runtime_dir().join("preview.json")
+}
+
+/// `preview-signals.json` in the runtime folder.
+pub fn signals_path() -> PathBuf {
+    crate::config::Config::runtime_dir().join("preview-signals.json")
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -55,6 +104,10 @@ pub struct LiveDoc {
     pub target: Option<LiveTarget>,
     #[serde(default)]
     pub meta: Option<LiveMeta>,
+    /// Spoken corrections ([`crate::osd::correction`]); left out when the
+    /// dictation has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction: Option<crate::osd::correction::CorrectionView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -69,6 +122,119 @@ pub struct LiveWord {
     pub since: u32,
     /// How many times the word's text changed.
     pub changes: u32,
+    /// The live model's distribution at the word, when it gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<WordDetail>,
+}
+
+/// How sure the live model was of a word or token, from its distribution
+/// over the vocabulary. For a word, its least certain token's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WordDetail {
+    /// Shannon entropy in nats: 0 when one token had all the probability.
+    pub entropy: f32,
+    /// Probability of the chosen token minus that of the runner-up.
+    pub margin: f32,
+    /// The second likeliest token (a leading space starts a word), or None
+    /// when that was blank.
+    pub runner_up: Option<String>,
+}
+
+impl WordDetail {
+    /// The less certain of two: the higher entropy, and the smaller margin
+    /// with its runner-up.
+    pub fn least_certain(self, other: WordDetail) -> WordDetail {
+        let entropy = self.entropy.max(other.entropy);
+        let mut out = if other.margin < self.margin {
+            other
+        } else {
+            self
+        };
+        out.entropy = entropy;
+        out
+    }
+}
+
+/// One line of the live worker's word list: a timed word and, from newer
+/// workers, its detail.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WordLine {
+    #[serde(flatten)]
+    pub word: TimedWord,
+    #[serde(default)]
+    pub detail: Option<WordDetail>,
+}
+
+/// One encoder frame (80 ms) that ended without a new token.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FrameLevel {
+    /// Start of the frame, seconds into the recording.
+    pub t: f32,
+    /// log10(1 - P(blank)): near 0 when a token almost came, about -5 in
+    /// silence.
+    pub level: f32,
+    /// The likeliest tokens, likeliest first.
+    pub top: Vec<Guess>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Guess {
+    pub text: String,
+    /// Natural log probability.
+    pub logp: f32,
+}
+
+/// A tentative token decoded from the newest audio. Never typed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TailToken {
+    pub text: String,
+    /// Seconds into the recording.
+    pub start: f32,
+    pub end: f32,
+    /// Encoder frames between this token and the newest audio.
+    pub edge: u32,
+    /// The model's probability for the token, 0 to 1.
+    pub conf: f32,
+    pub detail: Option<WordDetail>,
+}
+
+/// One streaming step of the live model, as the worker sends it: the frames
+/// new since the last step and the current tail.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SignalsStep {
+    pub step: u32,
+    pub audio_s: f32,
+    pub frames: Vec<FrameLevel>,
+    pub tail: Vec<TailToken>,
+    pub with_tail: String,
+}
+
+/// `preview-signals.json`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelSignals {
+    pub version: u32,
+    pub step: u32,
+    pub audio_s: f32,
+    pub frames_total: u64,
+    pub frames: Vec<FrameLevel>,
+    pub tail: Vec<TailToken>,
+    pub with_tail: String,
+}
+
+impl ModelSignals {
+    /// Take in one step: append its frames, keeping the newest
+    /// [`SIGNALS_KEEP_FRAMES`], and replace the tail.
+    pub fn apply(&mut self, step: SignalsStep) {
+        self.version = SIGNALS_VERSION;
+        self.step = step.step;
+        self.audio_s = step.audio_s;
+        self.frames_total += step.frames.len() as u64;
+        self.frames.extend(step.frames);
+        let excess = self.frames.len().saturating_sub(SIGNALS_KEEP_FRAMES);
+        self.frames.drain(..excess);
+        self.tail = step.tail;
+        self.with_tail = step.with_tail;
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +295,17 @@ impl LiveDoc {
     /// to this text (its words joined with spaces are the text); otherwise
     /// the words are the text split on whitespace, without timing.
     pub fn apply_preview(&mut self, text: &str, timed: Option<&[TimedWord]>) {
+        self.apply_preview_with_details(text, timed, None);
+    }
+
+    /// [`Self::apply_preview`] with a detail for each timed word. The details
+    /// are used only together with the timing, for the same text.
+    pub fn apply_preview_with_details(
+        &mut self,
+        text: &str,
+        timed: Option<&[TimedWord]>,
+        details: Option<&[Option<WordDetail>]>,
+    ) {
         let text = text.trim();
         self.version = LIVE_VERSION;
         self.rev += 1;
@@ -137,6 +314,7 @@ impl LiveDoc {
                 .map(|w| w.text.as_str())
                 .eq(text.split_whitespace())
         });
+        let details = details.filter(|d| Some(d.len()) == timed.map(|t| t.len()));
         let new: Vec<(&str, Option<&TimedWord>)> = match timed {
             Some(t) => t.iter().map(|w| (w.text.as_str(), Some(w))).collect(),
             None => text.split_whitespace().map(|w| (w, None)).collect(),
@@ -158,6 +336,7 @@ impl LiveDoc {
                     conf: timing.and_then(|t| t.conf),
                     since,
                     changes,
+                    detail: details.and_then(|d| d[i].clone()),
                 }
             })
             .collect();
@@ -172,7 +351,18 @@ struct Live {
     session: u64,
     /// Timing for the next preview, and the text it belongs to.
     timed: Option<Vec<TimedWord>>,
+    /// The words' details, beside `timed`.
+    details: Option<Vec<Option<WordDetail>>>,
+    /// The newest preview as the live model gave it, before corrections.
+    raw: Option<RawPreview>,
+    signals: ModelSignals,
 }
+
+type RawPreview = (
+    String,
+    Option<Vec<TimedWord>>,
+    Option<Vec<Option<WordDetail>>>,
+);
 
 static LIVE: Mutex<Live> = Mutex::new(Live {
     doc: LiveDoc {
@@ -183,9 +373,21 @@ static LIVE: Mutex<Live> = Mutex::new(Live {
         status: None,
         target: None,
         meta: None,
+        correction: None,
     },
     session: 0,
     timed: None,
+    details: None,
+    raw: None,
+    signals: ModelSignals {
+        version: SIGNALS_VERSION,
+        step: 0,
+        audio_s: 0.0,
+        frames_total: 0,
+        frames: Vec::new(),
+        tail: Vec::new(),
+        with_tail: String::new(),
+    },
 });
 
 fn with_live(f: impl FnOnce(&mut Live)) {
@@ -195,13 +397,16 @@ fn with_live(f: impl FnOnce(&mut Live)) {
 }
 
 fn write(doc: &LiveDoc) {
-    let path = path();
+    write_json(&path(), doc);
+}
+
+fn write_json(path: &std::path::Path, value: &impl Serialize) {
     let tmp = path.with_extension("json.tmp");
-    let Ok(json) = serde_json::to_string(doc) else {
+    let Ok(json) = serde_json::to_string(value) else {
         return;
     };
     if std::fs::write(&tmp, json).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+        let _ = std::fs::rename(&tmp, path);
     }
 }
 
@@ -209,6 +414,24 @@ fn write(doc: &LiveDoc) {
 pub fn timed_words(words: Vec<TimedWord>) {
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
     live.timed = Some(words);
+    live.details = None;
+}
+
+/// The live worker's word list for the preview text that follows: timing,
+/// and each word's detail when the worker gives it.
+pub fn word_lines(lines: Vec<WordLine>) {
+    let (words, details): (Vec<_>, Vec<_>) =
+        lines.into_iter().map(|l| (l.word, l.detail)).unzip();
+    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    live.timed = Some(words);
+    live.details = details.iter().any(Option::is_some).then_some(details);
+}
+
+/// One streaming step of the live model: written to `preview-signals.json`.
+pub fn signals(step: SignalsStep) {
+    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    live.signals.apply(step);
+    write_json(&signals_path(), &live.signals);
 }
 
 /// A new preview text. On the first one of a dictation, looks up the app
@@ -217,7 +440,9 @@ pub fn preview(text: &str) {
     let mut first = None;
     with_live(|live| {
         let timed = live.timed.take();
-        live.doc.apply_preview(text, timed.as_deref());
+        let details = live.details.take();
+        live.raw = Some((text.to_string(), timed, details));
+        render(live, true);
         first = (live.doc.rev == 1).then_some(live.session);
     });
     if let Some(session) = first {
@@ -227,6 +452,55 @@ pub fn preview(text: &str) {
             }
         });
     }
+}
+
+/// Puts the newest preview in the doc with the spoken corrections made.
+/// `fresh`: it is a new preview, so corrections waiting for it are placed.
+/// Without timed words the text goes in as it is.
+fn render(live: &mut Live, fresh: bool) {
+    use crate::osd::correction;
+    let Some((text, timed, details)) = live.raw.clone() else {
+        live.doc.correction = correction::view();
+        return;
+    };
+    let matching = timed
+        .as_ref()
+        .filter(|t| t.iter().map(|w| w.text.as_str()).eq(text.split_whitespace()));
+    if let Some(words) = matching {
+        let n = words.len();
+        let details = details.clone().filter(|d| d.len() == n);
+        let raw = words
+            .iter()
+            .cloned()
+            .zip(details.unwrap_or_else(|| vec![None; n]))
+            .collect();
+        let shown = if fresh {
+            correction::overlay(raw)
+        } else {
+            correction::current()
+        };
+        if correction::active() {
+            let (words, details): (Vec<_>, Vec<_>) = shown.into_iter().unzip();
+            let text = words
+                .iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            live.doc
+                .apply_preview_with_details(&text, Some(&words), Some(&details));
+            live.doc.correction = correction::view();
+            return;
+        }
+    }
+    live.doc
+        .apply_preview_with_details(&text, timed.as_deref(), details.as_deref());
+    live.doc.correction = None;
+}
+
+/// A spoken correction started, ended or was dropped: show the text and
+/// the correction afresh.
+pub fn refresh_correction() {
+    with_live(|live| render(live, false));
 }
 
 pub fn status(phase: Phase, fraction: Option<f64>, text: &str) {
@@ -279,14 +553,29 @@ pub fn clear() {
         ..LiveDoc::default()
     };
     live.timed = None;
+    live.details = None;
+    live.raw = None;
+    crate::osd::correction::clear();
+    live.signals = ModelSignals {
+        version: SIGNALS_VERSION,
+        ..ModelSignals::default()
+    };
     live.session += 1;
     let _ = std::fs::remove_file(path());
+    let _ = std::fs::remove_file(signals_path());
 }
 
 /// The current file, for a popup. None when there is none or it does not
 /// parse.
 pub fn read() -> Option<LiveDoc> {
     let json = std::fs::read_to_string(path()).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+/// The current `preview-signals.json`, for a popup. None when there is none
+/// or it does not parse.
+pub fn read_signals() -> Option<ModelSignals> {
+    let json = std::fs::read_to_string(signals_path()).ok()?;
     serde_json::from_str(&json).ok()
 }
 
@@ -368,6 +657,94 @@ mod tests {
         assert_eq!(v["meta"]["language"], "en");
         let back: LiveDoc = serde_json::from_value(v).unwrap();
         assert_eq!(back, doc);
+    }
+
+    fn detail(margin: f32) -> Option<WordDetail> {
+        Some(WordDetail {
+            entropy: 0.5,
+            margin,
+            runner_up: Some(" the".into()),
+        })
+    }
+
+    #[test]
+    fn details_go_with_their_own_timing_only() {
+        let mut doc = LiveDoc::default();
+        let t = timed(&[("hello", 0.1), ("world", 0.5)]);
+        let d = [detail(0.9), None];
+        doc.apply_preview_with_details("hello world", Some(&t), Some(&d));
+        assert_eq!(doc.words[0].detail, detail(0.9));
+        assert_eq!(doc.words[1].detail, None);
+        let v = serde_json::to_value(&doc).unwrap();
+        assert_eq!(v["words"][0]["detail"]["runner_up"], " the");
+        assert!(v["words"][1].get("detail").is_none());
+        // A text the timing does not describe gets neither.
+        doc.apply_preview_with_details("hello there", Some(&t), Some(&d));
+        assert!(doc.words.iter().all(|w| w.detail.is_none()));
+    }
+
+    /// The worker's word lines parse with and without details, so the text
+    /// and timing stay the same either way.
+    #[test]
+    fn word_lines_parse_old_and_new_shapes() {
+        let old = r#"[{"text":"hi","start":0.1,"end":0.3,"conf":0.9}]"#;
+        let new = r#"[{"text":"hi","start":0.1,"end":0.3,"conf":0.9,
+            "detail":{"entropy":0.2,"margin":0.8,"runner_up":null}}]"#;
+        let old: Vec<WordLine> = serde_json::from_str(old).unwrap();
+        let new: Vec<WordLine> = serde_json::from_str(new).unwrap();
+        assert_eq!(old[0].word, new[0].word);
+        assert_eq!(old[0].detail, None);
+        assert_eq!(new[0].detail.as_ref().unwrap().margin, 0.8);
+    }
+
+    #[test]
+    fn signals_keep_the_newest_frames_and_replace_the_tail() {
+        let frame = |t: f32| FrameLevel {
+            t,
+            level: -3.0,
+            top: vec![Guess {
+                text: " a".into(),
+                logp: -9.0,
+            }],
+        };
+        let tail = |text: &str| TailToken {
+            text: text.into(),
+            start: 1.0,
+            end: 1.08,
+            edge: 2,
+            conf: 0.6,
+            detail: None,
+        };
+        let mut s = ModelSignals::default();
+        s.apply(SignalsStep {
+            step: 1,
+            audio_s: 1.12,
+            frames: (0..50).map(|i| frame(i as f32 * 0.08)).collect(),
+            tail: vec![tail(" on")],
+            with_tail: "test on".into(),
+        });
+        s.apply(SignalsStep {
+            step: 2,
+            audio_s: 1.68,
+            frames: (50..57).map(|i| frame(i as f32 * 0.08)).collect(),
+            tail: vec![tail(" of")],
+            with_tail: "test of".into(),
+        });
+        assert_eq!(s.version, SIGNALS_VERSION);
+        assert_eq!(s.frames_total, 57);
+        assert_eq!(s.frames.len(), 57);
+        s.apply(SignalsStep {
+            step: 3,
+            frames: (57..80).map(|i| frame(i as f32 * 0.08)).collect(),
+            ..SignalsStep::default()
+        });
+        assert_eq!(s.frames.len(), SIGNALS_KEEP_FRAMES);
+        assert_eq!(s.frames_total, 80);
+        assert!((s.frames[0].t - 0.8).abs() < 1e-6);
+        assert!(s.tail.is_empty());
+        let back: ModelSignals =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
     }
 
     /// A file from before `meta`, `audio_left_s` and `eta_s` still reads.

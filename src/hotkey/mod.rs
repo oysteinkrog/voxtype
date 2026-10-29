@@ -10,6 +10,9 @@ pub mod evdev_listener;
 
 use crate::config::HotkeyConfig;
 use crate::error::HotkeyError;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 /// Events emitted by the hotkey listener
@@ -26,6 +29,16 @@ pub enum HotkeyEvent {
     Released,
     /// The cancel key was pressed (abort recording/transcription)
     Cancel,
+    /// The correction key has been held cleanly past its threshold while
+    /// recording. The correction began when the key went down, at
+    /// `pressed_at`, so speech from that moment on belongs to it.
+    CorrectionStart { pressed_at: Instant },
+    /// The correction key was let go, or a hotkey key was pressed during the
+    /// hold: the correction ends here and should be applied.
+    CorrectionEnd,
+    /// Another key was pressed during the hold (a typed capital, a
+    /// shortcut): drop the correction and keep its words as dictation.
+    CorrectionCancel,
 }
 
 /// Trait for hotkey detection implementations
@@ -36,6 +49,12 @@ pub trait HotkeyListener: Send {
 
     /// Stop listening and clean up
     fn stop(&mut self) -> Result<(), HotkeyError>;
+
+    /// A flag the daemon sets while it records. Correction holds are only
+    /// watched while it is set. None when no correction key is configured.
+    fn correction_armed(&self) -> Option<Arc<AtomicBool>> {
+        None
+    }
 }
 
 /// Factory function to create the appropriate hotkey listener
