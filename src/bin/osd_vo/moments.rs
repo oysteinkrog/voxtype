@@ -706,6 +706,10 @@ impl App for Played {
     fn main_surface(&self) -> Option<(Size, Placement)> {
         self.popup.main_surface()
     }
+
+    fn frame_pace(&self) -> Option<f64> {
+        self.popup.frame_pace()
+    }
 }
 
 #[cfg(test)]

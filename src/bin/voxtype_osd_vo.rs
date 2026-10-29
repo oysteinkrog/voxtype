@@ -434,6 +434,19 @@ const OUTCOME_GRACE_SECS: f64 = 0.1;
 /// `osd::ipc::FrameRing`.
 const PLAYOUT_DELAY_SECS: f64 = 0.05;
 
+/// A capture frame whose peak stays under this is room tone (RD-11): the
+/// hearing features call voice anything above about -45 dBFS.
+const ROOM_TONE_DBFS: f64 = -45.0;
+
+/// On room tone the popup draws at the ambient cap once the last louder
+/// frame is this old, so the release of a word's peak scrolls at full rate.
+const ROOM_TONE_AFTER_LOUD_SECS: f64 = 0.3;
+
+/// ... and once the last change of words, state or look is this old, so
+/// event motion (near still within 600 ms, MOTION-PLAN rule 8) and the
+/// popup's opening keep the full rate.
+const ROOM_TONE_AFTER_EVENT_SECS: f64 = 0.6;
+
 /// How often the runtime files are read. About 10 Hz is plenty for text.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -1241,6 +1254,12 @@ struct Popup {
     /// When the popup opened and when the last frame came.
     shown_at: f64,
     last_audio: Option<f64>,
+    /// When a capture frame last peaked above room tone.
+    loud_at: f64,
+    /// When the runtime files last changed: words, state, look.
+    event_at: f64,
+    /// The frame pace for `App::frame_pace`, set after each update.
+    pace: Option<f64>,
     files: Files,
     /// "00:12", frozen while the final text is made.
     clock: String,
@@ -1352,6 +1371,9 @@ impl Popup {
             wave: Arc::from([]),
             newest_at: 0.0,
             shown_at: 0.0,
+            loud_at: f64::NEG_INFINITY,
+            event_at: 0.0,
+            pace: None,
             last_audio: None,
             files: Files::default(),
             clock: "00:00".into(),
@@ -1465,6 +1487,20 @@ impl Popup {
         })
     }
 
+    /// The frame pace at `t` (RD-11): the ambient cap while the popup records
+    /// room tone with nothing else going on, else `None` (every vblank). The
+    /// waveform keeps scrolling with its whole history and the clock keeps
+    /// ticking; only the redraw rate drops.
+    fn room_tone_pace(&self, t: f64) -> Option<f64> {
+        let quiet = self.files.recording
+            && !self.files.transcribing
+            && self.files.status.is_empty()
+            && !self.closing
+            && t - self.loud_at >= ROOM_TONE_AFTER_LOUD_SECS
+            && t - self.event_at >= ROOM_TONE_AFTER_EVENT_SECS;
+        quiet.then_some(vo_core::ambient::AMBIENT_FPS)
+    }
+
     /// The daemon records or makes the final text.
     fn busy(&self) -> bool {
         self.files.recording || self.files.transcribing || !self.files.status.is_empty()
@@ -1518,6 +1554,10 @@ impl Popup {
                 self.received = 0;
             }
             self.last_seq = Some(f.seq);
+            let amp = f.max.max(-f.min) as f64;
+            if amp > 0.0 && 20.0 * amp.log10() > ROOM_TONE_DBFS {
+                self.loud_at = t;
+            }
             self.levels
                 .push_back(tick_level(f.max.max(-f.min) as f64, self.look.gain));
             if self.levels.len() > window {
@@ -1662,6 +1702,7 @@ impl App for Popup {
 
     fn init(&mut self, cx: &mut Cx<Msg>) {
         self.shown_at = cx.t();
+        self.event_at = cx.t();
         self.extra.now = cx.t();
         self.sync_showcase(cx.t());
         self.sync_scope(cx.t());
@@ -1700,6 +1741,9 @@ impl App for Popup {
                 self.step_seen = true;
                 let preview_changed = files.preview != self.files.preview;
                 let live_changed = files.live != self.files.live;
+                if files != self.files {
+                    self.event_at = t;
+                }
                 self.extra.files(&self.files, &files, t);
                 self.was_recording |= files.recording;
                 self.was_finishing |= files.transcribing || (files.finishing && !files.recording);
@@ -1783,6 +1827,7 @@ impl App for Popup {
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
         self.arm_cyber_tick(cx);
+        self.pace = self.room_tone_pace(t);
         if !tick && self.idle(t) {
             tracing::info!(
                 recording = self.files.recording,
@@ -1808,6 +1853,10 @@ impl App for Popup {
             return surfaces;
         }
         Vec::new()
+    }
+
+    fn frame_pace(&self) -> Option<f64> {
+        self.pace
     }
 
     /// A look picked with the look chord has its own size and place.
@@ -2894,6 +2943,66 @@ mod tests {
         // Files that changed for another reason.
         assert_eq!(new_step(true, press(2), press(2)), None);
         assert_eq!(new_step(true, None, None), None);
+    }
+
+    /// RD-11: on room tone the popup asks for the ambient pace, so a room-tone
+    /// audio frame does not draw before its slot (vo's `live::pace_tests`),
+    /// while the waveform still scrolls and keeps its history. Speech, a
+    /// change of words or the end of the recording draws at once again.
+    #[test]
+    fn room_tone_frames_wait_for_the_ambient_pace() {
+        let cfg = OsdConfig::default();
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        let mut p = Popup::new(look, &fonts);
+        p.files.recording = true;
+        let mut seq = 0;
+        let mut frames = |amp: f32| {
+            seq += 2;
+            vec![
+                AudioFrame { seq: seq - 1, min: -amp, max: amp, peak_dbfs: 0.0 },
+                AudioFrame { seq, min: -amp, max: amp, peak_dbfs: 0.0 },
+            ]
+        };
+        // Speech: every vblank.
+        let mut t = 1.0;
+        for _ in 0..10 {
+            t += 0.02;
+            p.audio(frames(0.3), t);
+            assert_eq!(p.room_tone_pace(t), None);
+        }
+        // Room tone, as the long-silence moment plays it (-54 dBFS): the
+        // full rate while the speech peak's release scrolls, then the pace.
+        let speech_end = t;
+        let mut paced_at = None;
+        let (mut newest, mut levels) = (p.newest_at, p.levels.len());
+        for _ in 0..50 {
+            t += 0.02;
+            p.audio(frames(0.002), t);
+            if paced_at.is_none() && p.room_tone_pace(t).is_some() {
+                paced_at = Some(t);
+            }
+            // The waveform keeps scrolling and keeps its history.
+            assert!(p.newest_at > newest && p.levels.len() >= levels);
+            (newest, levels) = (p.newest_at, p.levels.len());
+        }
+        let paced_at = paced_at.expect("room tone is paced");
+        assert!(paced_at - speech_end >= ROOM_TONE_AFTER_LOUD_SECS - 1e-9);
+        assert_eq!(p.room_tone_pace(t), Some(vo_core::ambient::AMBIENT_FPS));
+        // The clock still ticks under the pace.
+        assert_eq!(p.clock, format!("00:0{}", t as u64));
+        // A new word: the full rate while its motion plays.
+        p.event_at = t;
+        assert_eq!(p.room_tone_pace(t + 0.3), None);
+        assert!(p.room_tone_pace(t + ROOM_TONE_AFTER_EVENT_SECS).is_some());
+        // Speech again: at once.
+        t += 0.02;
+        p.audio(frames(0.3), t);
+        assert_eq!(p.room_tone_pace(t), None);
+        // The recording stopped: endings and the exit keep the full rate.
+        p.files.recording = false;
+        assert_eq!(p.room_tone_pace(t + 5.0), None);
     }
 
     /// A frame put on the signal bus is the frame vo reads off the wire.
