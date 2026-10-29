@@ -531,9 +531,7 @@ impl Popup {
                 // already rises 3 px from 70 % ink, and a rise or fade of its
                 // own on top breaks the reading line's envelope (6ofh).
                 .word_enter(Transition::NONE)
-                // Revised words move as on the look's plain lines.
-                .revision_motion(super::revision::motion(&self.look))
-                .word_revise(super::revision::revise(&self.look));
+                .word_change(Transition::fade().opacity(0.7));
             kit::at(
                 if d == 0 { newest(live) } else { live },
                 ((sheet.w - lw) / 2.0).max(0.0),
