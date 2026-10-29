@@ -15,6 +15,7 @@ use super::*;
 
 use std::sync::OnceLock;
 
+use vo::scene::depth_stack::{DepthStack, Hold, Place, Sheet};
 use vo::scene::display::{BlendMode, Paint, ShapeInstance};
 use vo::scene::emitter::{
     tilt_x, Emitter, EmitterLook, EmitterSim, EmitterSource, LevelTrack, Shape, Shock, SpriteStyle,
@@ -109,6 +110,14 @@ pub struct Extra {
     /// Words the engine was unsure of, with when it became sure (`None`
     /// while still unsure), for the `type` look's wavy underlines.
     pub doubtful: std::collections::HashMap<vo_core::words::WordId, Option<f64>>,
+    /// MO-86: the shown words line by line for the depth stack, and the
+    /// words they were broken from.
+    stack_lines: Vec<Vec<Word>>,
+    stack_words: Vec<Word>,
+    /// The reading line's first word and the strip's rows then.
+    stack_newest: Option<(vo_core::words::WordId, u32)>,
+    /// The line that just left the reading place, held flat for a moment.
+    stack_hold: Option<Hold>,
 }
 
 /// Reach of the card's glow. Its falloff is exp(-d / GLOW_PX), so it is
@@ -441,6 +450,43 @@ impl Popup {
         let cols = (self.look.text_width() / DOT_PITCH).floor() as i32;
         self.extra
             .sync_dots(t, cols, &self.clock, self.word_count, phase);
+        self.sync_stack(t);
+    }
+
+    /// MO-86: breaks the shown words into lines for the depth stack when
+    /// they change, and holds the line that leaves the reading place flat a
+    /// line pitch above the new one before it moves back, as jarvis does.
+    fn sync_stack(&mut self, t: f64) {
+        if !self.look.on(wild_space::DEPTH_STACK) {
+            return;
+        }
+        if self.shown != self.extra.stack_words {
+            let style = self.look.text_style();
+            self.extra.stack_lines = self.wrap_lines(&self.shown, &style, self.look.text_width());
+            self.extra.stack_words = self.shown.clone();
+        }
+        let lines = &self.extra.stack_lines;
+        let first = |l: &Vec<Word>| l.first().map(|w| w.id);
+        let newest = lines.last().and_then(first).map(|id| (id, self.lines));
+        if let (Some((was, rows)), Some((id, now_rows))) = (self.extra.stack_newest, newest) {
+            let behind = lines.len().checked_sub(2).and_then(|i| first(&lines[i]));
+            if id != was && behind == Some(was) {
+                self.extra.stack_hold = Some(Hold {
+                    key: wild_space::depth_stack_key(was),
+                    since: t,
+                    secs: if now_rows > rows {
+                        wild_space::HOLD_SECS
+                    } else {
+                        wild_space::GLIDE_SECS
+                    },
+                    rise: self.look.text_line,
+                    glide: now_rows <= rows,
+                });
+            }
+        }
+        if newest.is_some() {
+            self.extra.stack_newest = newest;
+        }
     }
 
     /// The dot-matrix header across the whole row, glowing a little.
@@ -809,9 +855,45 @@ impl Popup {
     /// moves.
     fn strip(&self, phase: Phase) -> Element<Msg> {
         let l = &self.look;
+        let words = if l.on(wild_space::DEPTH_STACK) {
+            self.stack(phase)
+        } else {
+            self.strip_words(&self.shown, phase)
+        };
+        let words = self.handoff_or(
+            words,
+            &l.text_style(),
+            Some(l.text_width()),
+            c(ICE),
+            c(TEAL),
+        );
+        // MO-84: the words as a stencil in front of a light that follows the voice.
+        let words = self.letter_fx_layers(words, l.text_width());
+        let mut strip_fill = c(MATTE);
+        strip_fill.a = 0.9;
+        let negatives = self.negatives(phase);
+        Element::panel("strip")
+            .height(self.lines as f32 * l.text_line + 2.0 * STRIP_PAD_Y)
+            .pad_edges(STRIP_PAD_Y, STRIP_PAD_X, STRIP_PAD_Y, STRIP_PAD_X)
+            .margin_edges(0.0, -STRIP_PAD_X, 0.0, -STRIP_PAD_X)
+            .radius(8.0)
+            .fill(strip_fill)
+            .hairline(c(SLATE).fade(0.25))
+            // A specular edge at the top left, and one sheen across the
+            // strip when it appears.
+            .rim(c(ICE).fade(0.35), 1.0, 0.12, -0.375, 0.0)
+            .sheen(c(ICE).fade(0.10), 0.7)
+            .child(words)
+            .children(negatives)
+    }
+
+    /// The live text of `words` as the reading line shows it: particles,
+    /// halo and the final pulse, and the variable font (MO-81) last.
+    fn strip_words(&self, words: &[Word], phase: Phase) -> Element<Msg> {
+        let l = &self.look;
         // One brief brightening when the final text lands.
         let text = mix(ICE, OsdColor::rgb(1.0, 1.0, 1.0), self.final_pulse());
-        let mut words = Element::live_text("words", &self.shown)
+        let mut words = Element::live_text("words", words)
             .line_motion(&self.look)
             .text_style(l.text_style())
             .color(c(text))
@@ -850,29 +932,82 @@ impl Popup {
         let words = words
             .text_halo(halo, radius)
             .motion(Prop::TextFx, Spring::SOFT);
-        let words = self.handoff_or(
-            words,
-            &l.text_style(),
-            Some(l.text_width()),
-            c(ICE),
-            c(TEAL),
-        );
-        let mut strip_fill = c(MATTE);
-        strip_fill.a = 0.9;
-        let negatives = self.negatives(phase);
-        Element::panel("strip")
-            .height(self.lines as f32 * l.text_line + 2.0 * STRIP_PAD_Y)
-            .pad_edges(STRIP_PAD_Y, STRIP_PAD_X, STRIP_PAD_Y, STRIP_PAD_X)
-            .margin_edges(0.0, -STRIP_PAD_X, 0.0, -STRIP_PAD_X)
-            .radius(8.0)
-            .fill(strip_fill)
-            .hairline(c(SLATE).fade(0.25))
-            // A specular edge at the top left, and one sheen across the
-            // strip when it appears.
-            .rim(c(ICE).fade(0.35), 1.0, 0.12, -0.375, 0.0)
-            .sheen(c(ICE).fade(0.10), 0.7)
-            .child(words)
-            .children(negatives)
+        self.letter_fx_words(words).wild_motion(self)
+    }
+
+    /// MO-86: the transcript as a depth stack. The reading line lies flat
+    /// where the flat text puts its last line; older lines recede up and
+    /// back on matte glass sheets, dimmer and softer with each place.
+    fn stack(&self, phase: Phase) -> Element<Msg> {
+        let l = &self.look;
+        let reduced = self.wild_reduced();
+        let line_h = l.text_line;
+        let (pad_x, pad_y) = (STRIP_PAD_X / 2.0, 4.0);
+        let sheet = Size::new(l.text_width() + 2.0 * pad_x, line_h + 2.0 * pad_y);
+        let mut fill = c(MATTE);
+        fill.a = 0.92;
+        let stack = DepthStack {
+            step_z: 140.0,
+            step_rise: line_h,
+            step_x: 10.0,
+            turn: -0.35,
+            sheet: Some(Sheet {
+                fill,
+                edge: c(TEAL).fade(0.3),
+                edge_width: 1.0,
+                radius: 6.0,
+                pad: (pad_x, pad_y),
+            }),
+            ..DepthStack::default()
+        };
+        let keyed: Vec<(vo::scene::Key, &Vec<Word>)> = self
+            .extra
+            .stack_lines
+            .iter()
+            .map(|ws| {
+                (
+                    wild_space::depth_stack_key(ws.first().map_or(0, |w| w.id)),
+                    ws,
+                )
+            })
+            .collect();
+        let content = |ws: &&Vec<Word>, d: usize, p: &Place| {
+            let live = if d == 0 {
+                self.strip_words(ws, phase)
+            } else {
+                Element::live_text("words", ws.as_slice())
+                    .text_style(l.text_style())
+                    .color(c(ICE))
+                    .text_halo(c(TEAL).fade(0.22), 4.0)
+                    .word_enter(Transition::NONE)
+                    .wild_motion(self)
+            };
+            // The reading line keeps its halo's soft motion; older lines
+            // blur on the sheets' springs.
+            let live = if d == 0 {
+                live
+            } else {
+                live.text_blur(p.blur)
+                    .motion(Prop::TextFx, stack.motion(d, reduced))
+            };
+            at(live.size(l.text_width(), line_h), pad_x, pad_y)
+        };
+        let rows = self.lines.max(1) as f32;
+        at(
+            stack.view_at(
+                "depth-stack",
+                Size::new(sheet.w, rows * line_h + pad_y),
+                sheet,
+                &keyed,
+                content,
+                reduced,
+                self.extra.stack_hold.as_ref(),
+                self.extra.now,
+            ),
+            // Out of the flow, so placed from the strip's padding edge.
+            STRIP_PAD_X - pad_x,
+            STRIP_PAD_Y,
+        )
     }
 
     fn sc_status(&self, phase: Phase) -> Element<Msg> {
@@ -1160,10 +1295,14 @@ impl Popup {
         let style = l.text_style();
         let (boxes, _) =
             sounding::word_boxes(&self.measure, &self.shown, &style, Some(l.text_width()));
+        // Under the depth stack only the reading line lies on the strip.
+        let stacked = l.on(wild_space::DEPTH_STACK);
+        let last_y = boxes.last().map_or(0.0, |b| b.rect.y);
         let items: Vec<_> = boxes
             .iter()
             .rev()
             .take(2)
+            .filter(|b| !stacked || b.rect.y >= last_y - 1.0)
             .filter_map(|b| {
                 let h = self.heard.word(b.id)?;
                 let w = self.shown.iter().find(|w| w.id == b.id)?;

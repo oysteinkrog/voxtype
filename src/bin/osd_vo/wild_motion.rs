@@ -58,7 +58,7 @@ pub(crate) trait WildMotion {
 impl<M> WildMotion for Element<M> {
     fn wild_motion(self, popup: &Popup) -> Element<M> {
         let look = &popup.look;
-        let reduced = look.on("reduced-motion");
+        let reduced = look.on("reduced-motion") || kit::reduced();
         let accent = Color::hex(ACCENT, 1.0);
         let mut words = self;
         let physics = look.on(LETTER_PHYSICS);
@@ -93,7 +93,7 @@ impl Popup {
         let bus = self.signals.get();
         let mut voices = self.breath.0.lock().unwrap_or_else(|e| e.into_inner());
         voices.update(t, &self.model, &bus);
-        let reduced = self.look.on("reduced-motion");
+        let reduced = self.look.on("reduced-motion") || kit::reduced();
         let level = bus.envelope(Sig::Level, 0.03, 0.3, t);
         let pitch = voices.live_pitch(&bus, t);
         let n = self.shown.len();
@@ -116,7 +116,7 @@ impl Popup {
     }
 
     /// The flex font and each shown word's instance of it.
-    fn breath_fonts(&self, size: f32, free: bool) -> Option<(u32, Vec<(WordId, u32)>)> {
+    pub(crate) fn breath_fonts(&self, size: f32, free: bool) -> Option<(u32, Vec<(WordId, u32)>)> {
         let fonts = &self.look.fonts;
         let base = fonts.asset("flex").ok()?;
         let words = self

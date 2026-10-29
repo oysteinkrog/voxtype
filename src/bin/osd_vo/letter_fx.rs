@@ -147,7 +147,17 @@ impl Popup {
             return text;
         }
         let l = &self.look;
-        let style = l.text_style();
+        let mut style = l.text_style();
+        // MO-81: words set in the variable font are laid in it, each glyph
+        // in its word's instance, so the effects sit on the drawn letters.
+        let breath = if l.on(super::wild_motion::VARIABLE_BREATH) {
+            self.breath_fonts(style.size, false)
+        } else {
+            None
+        };
+        if let Some((base, _)) = &breath {
+            style.font = *base;
+        }
         let height = self.lines as f32 * l.text_line;
         let reduced = self.letter_fx_reduced();
         let (born, morphs) = self.letter_fx_sync();
@@ -170,8 +180,14 @@ impl Popup {
             at += w.text.len() + 1;
         }
         let word_of = |cluster: u32| starts.iter().rposition(|&s| s <= cluster as usize);
+        let font = |g: &vo::scene::text::PlacedGlyph| match &breath {
+            Some((base, fonts)) if g.font == *base => word_of(g.cluster)
+                .and_then(|i| fonts.iter().find(|f| f.0 == self.shown[i].id))
+                .map_or(g.font, |f| f.1),
+            _ => g.font,
+        };
         let glyph = |g: &vo::scene::text::PlacedGlyph, start: f64| {
-            FxGlyph::new(g.font, g.glyph, g.pos, style.size, l.foreground, start)
+            FxGlyph::new(font(g), g.glyph, g.pos, style.size, l.foreground, start)
         };
         let fx = |effect, glyphs| {
             GlyphFx::new(effect, glyphs)
@@ -189,6 +205,20 @@ impl Popup {
             // but casts no letters, or it would show the old text as a ghost.
             let all: Vec<FxGlyph> = if leaving {
                 Vec::new()
+            } else if l.on(super::wild_space::DEPTH_STACK) {
+                // Under a depth stack only the reading line lies on the
+                // panel; the older lines sit on sheets in front of it.
+                // The stack keeps its reading line in the box's last row.
+                let last = laid.lines.last().map_or(0..0, |line| line.glyphs.clone());
+                let dy = (self.lines as f32 - laid.lines.len() as f32) * l.text_line;
+                laid.glyphs[last]
+                    .iter()
+                    .map(|g| {
+                        let mut fx = glyph(g, 0.0);
+                        fx.pos.y += dy;
+                        fx
+                    })
+                    .collect()
             } else {
                 laid.glyphs.iter().map(|g| glyph(g, 0.0)).collect()
             };
