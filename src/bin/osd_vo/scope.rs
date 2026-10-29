@@ -14,6 +14,13 @@
 //!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
+//!
+//! While the popup is open it stays a little alive (m18, MOTION-PLAN rule 8):
+//! the trace keeps a floor of at most 1 px from the real room level, the
+//! graticule's glow breathes from 6 % to 9 % over 4 s, and the trigger
+//! marker blinks at 1 Hz. The glow and the blink are ambient loops stepped
+//! at 15 a second; all three stop under reduced motion and leave the view
+//! as the popup closes. None of them is near the transcript.
 
 use super::*;
 
@@ -26,6 +33,7 @@ use vo::scene::path::{icons, Contour, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
+use vo::scene::{Loop, LoopProp};
 
 const BG: u32 = 0x04100b;
 const PANEL: u32 = 0x061711;
@@ -89,6 +97,19 @@ const STRIP_TICK: f64 = 0.6;
 /// Envelope points kept per word, and words kept.
 const STRIP_POINTS: usize = 32;
 const STRIP_WORDS: usize = 64;
+
+/// m18: the most the trace's live floor swings, in logical pixels, reached
+/// at the room-tone level (`ROOM_TONE_DBFS`); true silence draws it flat.
+const FLOOR_PX: f32 = 1.0;
+/// m18: the graticule glow's alpha at rest, its swing on top, and the
+/// seconds per breath.
+const GLOW_ALPHA: f32 = 0.06;
+const GLOW_SWING: f64 = 0.03;
+const GLOW_PERIOD: f64 = 4.0;
+/// m18: the trigger marker's dim opacity in the off half of its 1 s blink.
+const TRIGGER_DIM: f32 = 0.35;
+/// m18: the idle loops' pace, the slow-loop cap of MOTION-PLAN rule 8.
+const IDLE_FPS: f64 = 15.0;
 
 /// MO-63: one word's stretch of trace, frozen when the word came.
 #[derive(Clone, Debug, PartialEq)]
@@ -209,6 +230,45 @@ fn scaled(r: (f32, f32, f32, f32)) -> Rect {
     Rect::new(r.0 * S, r.1 * S, r.2 * S, r.3 * S)
 }
 
+/// m18: the trace's live floor for `level`, in pixels: up to `FLOOR_PX`,
+/// reached at `room` (the room-tone level), so the quiet trace still shows
+/// the room it hears. Flat at true silence and with `room` 0 (off).
+fn live_floor(level: f32, room: f32) -> f32 {
+    if room <= 0.0 {
+        return 0.0;
+    }
+    FLOOR_PX * (level / room).clamp(0.0, 1.0).sqrt()
+}
+
+/// The graticule's box in the scene's frame, without the card margin.
+fn graticule() -> Rect {
+    let sc = scaled(SCOPE);
+    Rect::new(
+        sc.x + SCALE_W * S + 1.0,
+        sc.y + 1.0,
+        sc.w - SCALE_W * S - 14.0 * S,
+        sc.h - 14.0 * S,
+    )
+}
+
+/// The graticule's lines, the strip's foot cut off when `strip` is on.
+fn grid_lines(strip: bool) -> Vec<Rect> {
+    let g = graticule();
+    let (cols, rows) = (24, 8);
+    let foot = if strip { g.h - STRIP_H * S } else { g.h };
+    let mut out = Vec::with_capacity(cols + rows + 2);
+    for i in 0..=cols {
+        out.push(Rect::new(g.x + g.w * i as f32 / cols as f32, g.y, 1.0, foot));
+    }
+    for j in 0..=rows {
+        let y = g.y + g.h * j as f32 / rows as f32;
+        if y <= g.y + foot {
+            out.push(Rect::new(g.x, y, g.w, 1.0));
+        }
+    }
+    out
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Loading,
@@ -281,6 +341,11 @@ struct Scene {
     joint: Option<Arc<[f64]>>,
     /// MO-63: the frozen words, and whether motion is reduced.
     sentence: Option<(Arc<[Frozen]>, bool)>,
+    /// m18: the trace level of room tone, where the live floor reaches
+    /// `FLOOR_PX`, and whether the idle motion holds still (reduced motion):
+    /// the trace then draws room tone flat.
+    room: f32,
+    still: bool,
 }
 
 impl Scene {
@@ -369,13 +434,7 @@ impl Scene {
     }
 
     fn graticule(&self) -> Rect {
-        let sc = scaled(SCOPE);
-        Rect::new(
-            sc.x + SCALE_W * S + 1.0,
-            sc.y + 1.0,
-            sc.w - SCALE_W * S - 14.0 * S,
-            sc.h - 14.0 * S,
-        )
+        graticule()
     }
 
     fn draw_grid(&self, p: &mut Painter) {
@@ -414,11 +473,14 @@ impl Scene {
             let s = t_eff - (1.0 - u) * WINDOW;
             let k = (s * CARRIER_HZ).floor() as i64;
             // A spiky envelope: loud syllables stand out of a low floor.
-            let env = (self.level_at(s) / FULL).min(1.0).powf(1.7);
+            let level = self.level_at(s);
+            let env = if self.still && level <= self.room { 0.0 } else { (level / FULL).min(1.0).powf(1.7) };
+            let floor = if self.still { 0.0 } else { live_floor(level, self.room) };
             let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
             let z = noise(k);
             let mag = 0.08 + 0.92 * z * z;
-            let y = cy - sign * mag * env * (g.h / 2.0 - 4.0) * (1.0 - flat);
+            let swing = (env * (g.h / 2.0 - 4.0)).max(floor);
+            let y = cy - sign * mag * swing * (1.0 - flat);
             pts.push(Point::new(g.x + u as f32 * g.w, y));
         }
         let colour = if self.mode == Mode::Cancelled {
@@ -707,6 +769,61 @@ impl Popup {
 
     pub(crate) fn arm_scope_tick(&mut self, _cx: &mut Cx<Msg>) {}
 
+    /// m18: whether the idle motion holds still: reduced motion, or the
+    /// popup is closing.
+    fn scope_idle_still(&self) -> bool {
+        reduced() || self.look.on("reduced-motion") || self.closing
+    }
+
+    /// m18: the graticule glow and the trigger marker, each with its idle
+    /// loop while the popup is open, at rest under reduced motion. Offset
+    /// by `o`, the card margin.
+    fn scope_idle(&self, o: f32) -> [Element<Msg>; 2] {
+        let still = self.scope_idle_still();
+        let size = Self::scope_surface(&self.look);
+        let lines = grid_lines(self.look.on(SENTENCE_TRACE));
+        let glow = at(
+            Element::canvas("scope-glow", 0.0, move |_, b, p| {
+                // The lines again in the trace's colour, faded by the node's opacity.
+                for r in &lines {
+                    let (x, y) = (b.x + r.x + o, b.y + r.y + o);
+                    p.shape(ShapeInstance::rrect(
+                        RRect::new(Rect::new(x, y, r.w, r.h), 0.0),
+                        Paint::solid(hex(TRACE)),
+                    ));
+                }
+            }),
+            0.0,
+            0.0,
+        )
+        .size(size.w, size.h)
+        .opacity(GLOW_ALPHA);
+        // On the graticule's left edge at the centre line: the trigger level.
+        let g = graticule();
+        let (tw, th) = (6.0, 9.0);
+        let marker = at(
+            Element::canvas("scope-trigger", 0.0, move |_, b, p| {
+                let tri = Contour::polyline(
+                    &[Point::new(b.x, b.y), Point::new(b.x + tw, b.y + th / 2.0), Point::new(b.x, b.y + th)],
+                    true,
+                );
+                p.fill([&tri], &StrokeStyle::solid(0.0, hex(VALUE)));
+            }),
+            o + g.x + 1.0,
+            o + g.y + g.h / 2.0 - th / 2.0 + 0.5,
+        )
+        .size(tw, th);
+        if still {
+            return [glow, marker];
+        }
+        let breathe = Loop::pulse(GLOW_SWING, GLOW_PERIOD).fps(IDLE_FPS).settle(Spring::SNAP);
+        let blink = Loop {
+            amp: -(1.0 - TRIGGER_DIM) as f64,
+            ..Loop::gate(0.5, 1.0, 1.0).fps(IDLE_FPS).settle(Spring::SNAP)
+        };
+        [glow.ambient(LoopProp::Opacity, breathe), marker.ambient(LoopProp::Opacity, blink)]
+    }
+
     pub(crate) fn scope_surface(_look: &Look) -> Size {
         Size::new((W + 2.0 * MARGIN).ceil(), (H + 2.0 * MARGIN).ceil())
     }
@@ -763,6 +880,8 @@ impl Popup {
             sentence: l
                 .on(SENTENCE_TRACE)
                 .then(|| (Arc::from(s.sentence.as_slice()), reduced() || l.on("reduced-motion"))),
+            room: tick_level(10f64.powf(ROOM_TONE_DBFS / 20.0), l.gain) as f32,
+            still: self.scope_idle_still(),
         };
         let until = scene.until(self.extra.now);
         let canvas = at(
@@ -785,6 +904,7 @@ impl Popup {
             .size(size.w, size.h)
             .presence(Transition::fade(), Transition::fade().scale(0.98))
             .child(canvas)
+            .children(self.scope_idle(o))
             .child(label("title".into(), "VOICE DICTATION".into(), bold(14.0 * S * 1.15), hex(TEXT), 61.0, 15.0))
             .child(
                 label(
@@ -983,5 +1103,40 @@ mod sentence_tests {
         // Sound from before the levels start reads as silence.
         assert!(envelope(&levels, 1.0, -5.0, -4.0, 4).iter().all(|&e| e == 0.0));
         assert!(strip_width((0.0, 0.01)) >= STRIP_MIN_W);
+    }
+
+    #[test]
+    fn the_live_floor_follows_the_room_and_stays_within_a_pixel() {
+        let room = 0.125;
+        assert_eq!(live_floor(0.0, room), 0.0, "true silence draws flat");
+        assert_eq!(live_floor(room, room), FLOOR_PX);
+        assert_eq!(live_floor(0.9, room), FLOOR_PX, "never more than FLOOR_PX");
+        let quiet = live_floor(room / 4.0, room);
+        assert!(quiet > 0.0 && quiet < FLOOR_PX);
+        assert_eq!(live_floor(room, 0.0), 0.0, "off");
+    }
+
+    #[test]
+    fn the_grid_glow_lines_stay_in_the_graticule_and_above_the_strip() {
+        let g = graticule();
+        let foot = g.y + g.h - STRIP_H * S;
+        for strip in [false, true] {
+            let lines = grid_lines(strip);
+            assert!(!lines.is_empty());
+            for r in lines {
+                assert!(r.x >= g.x - 0.01 && r.x + r.w <= g.x + g.w + 1.01, "{r:?}");
+                assert!(r.y >= g.y - 0.01 && r.y + r.h <= g.y + g.h + 1.01, "{r:?}");
+                if strip {
+                    assert!(r.y + r.h <= foot + 1.01, "{r:?} reaches into the strip");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_idle_motion_stays_out_of_the_transcript() {
+        // Everything m18 moves is in the graticule, well above the first text line.
+        let g = graticule();
+        assert!(g.y + g.h < TEXT_TOP);
     }
 }
