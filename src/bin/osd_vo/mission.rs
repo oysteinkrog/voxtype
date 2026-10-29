@@ -21,7 +21,6 @@ use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::lattice::LatticeStyle;
-use vo::scene::roll::digit_roll;
 
 /// Colours sampled from the mock-up.
 const ORANGE: u32 = 0xFF7A1A;
@@ -191,6 +190,64 @@ fn read_vram() -> Option<(f32, f32)> {
     (total > 0.0).then_some((used / 1024.0, total / 1024.0))
 }
 
+/// `vo::scene::roll::digit_roll` (counting up) with each digit's ten figures
+/// in one label of ten lines instead of ten labels. It draws the same, and
+/// the view, rebuilt every frame on room tone, has two nodes per digit
+/// instead of twelve: the tiles' eleven rolling digits were about a sixth
+/// of mission's idle CPU.
+fn digit_roll(
+    key: &str,
+    text: &str,
+    style: TextStyle,
+    color: Color,
+    spring: Spring,
+) -> Element<Msg> {
+    const FIGURES: &str = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9";
+    let lh = style.line_height;
+    let n = text.chars().count();
+    let cells: Vec<Element<Msg>> = text
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            // Keyed by place from the right, and a column by the text to its
+            // left, so a carry rolls a new column in as in `digit_roll`.
+            let place = n - 1 - i;
+            match c.to_digit(10) {
+                Some(d) => {
+                    let prefix: String = text.chars().take(i).collect();
+                    let figures = Element::label(format!("{key}-c{place}-{prefix}"), FIGURES)
+                        .text_style(style)
+                        .color(color)
+                        .height(10.0 * lh)
+                        .shrink(0.0)
+                        .offset(0.0, -(d as f32) * lh)
+                        .motion(Prop::Offset, spring)
+                        .presence(
+                            Transition::NONE.offset(0.0, lh),
+                            Transition::NONE
+                                .offset(0.0, -(d as f32 + 1.0) * lh)
+                                .opacity(0.0),
+                        )
+                        .motion(Prop::Opacity, Spring::SNAP);
+                    Element::layer(format!("{key}-d{place}"))
+                        .height(lh)
+                        .align_items(AlignItems::FLEX_START)
+                        .fade_edges(0.0, 0.2 * lh, 0.0, 0.2 * lh)
+                        .child(figures)
+                }
+                None if c.is_whitespace() => Element::row(format!("{key}-s{place}"))
+                    .width(0.26 * style.size)
+                    .height(lh),
+                None => Element::label(format!("{key}-s{place}"), c.to_string())
+                    .text_style(style)
+                    .color(color)
+                    .height(lh),
+            }
+        })
+        .collect();
+    Element::row(key.to_string()).children(cells)
+}
+
 /// A number from 0 to 1 that depends only on `n`.
 fn noise(n: u32) -> f32 {
     let mut x = n.wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
@@ -201,14 +258,32 @@ fn noise(n: u32) -> f32 {
 }
 
 /// A line icon on the 24 unit grid.
-fn icon(key: &'static str, outline: Outline, px: f32, color: Color) -> Element<Msg> {
+fn icon(key: &'static str, outline: Arc<Outline>, px: f32, color: Color) -> Element<Msg> {
     Element::stroke_path(
         key,
-        Arc::new(outline),
+        outline,
         Rect::new(0.0, 0.0, 24.0, 24.0),
         StrokeStyle::solid(1.8, color),
     )
     .size(px, px)
+}
+
+/// The tile icons, flattened once rather than on every view.
+struct Icons {
+    model: Arc<Outline>,
+    chip: Arc<Outline>,
+    timer: Arc<Outline>,
+    mic: Arc<Outline>,
+}
+
+fn tile_icons() -> &'static Icons {
+    static ICONS: OnceLock<Icons> = OnceLock::new();
+    ICONS.get_or_init(|| Icons {
+        model: Arc::new(model_icon()),
+        chip: Arc::new(Outline::new(&icons::chip(), 0.05)),
+        timer: Arc::new(Outline::new(&icons::timer(), 0.05)),
+        mic: Arc::new(Outline::new(&icons::mic(), 0.05)),
+    })
 }
 
 /// A small network: three nodes joined, for the model.
@@ -499,6 +574,7 @@ impl Popup {
         let roll = Spring::critical_to_98(0.3);
         let orange = hex(ORANGE);
         let facts = facts();
+        let glyphs = tile_icons();
         let tile = |key: &'static str, n: usize, name: &'static str, glyph: Element<Msg>| {
             let tw = (TILE_W[n] * k).floor();
             Element::panel(key)
@@ -542,7 +618,7 @@ impl Popup {
             "model",
             0,
             "MODEL",
-            icon("icon", model_icon(), 20.0, orange),
+            icon("icon", glyphs.model.clone(), 20.0, orange),
         )
         .child(at(text("value", model, value, INK), 38.0, 30.0))
         .child(at(
@@ -577,7 +653,7 @@ impl Popup {
             "vram",
             1,
             "VRAM",
-            icon("icon", Outline::new(&icons::chip(), 0.05), 20.0, orange),
+            icon("icon", glyphs.chip.clone(), 20.0, orange),
         );
         match vram() {
             Some((used, total)) => {
@@ -648,7 +724,7 @@ impl Popup {
             "latency",
             2,
             "LATENCY",
-            icon("icon", Outline::new(&icons::timer(), 0.05), 20.0, orange),
+            icon("icon", glyphs.timer.clone(), 20.0, orange),
         )
         .child(at(
             Element::row("value")
@@ -672,7 +748,7 @@ impl Popup {
             "mic",
             3,
             "MICROPHONE",
-            icon("icon", Outline::new(&icons::mic(), 0.05), 20.0, orange),
+            icon("icon", glyphs.mic.clone(), 20.0, orange),
         )
         .child(at(text("value", mic, value, INK), 38.0, 30.0))
         .child(at(text("about", "Input".into(), small, SOFT), 38.0, 50.0));
@@ -696,7 +772,7 @@ impl Popup {
             "elapsed",
             4,
             "ELAPSED",
-            icon("icon", Outline::new(&icons::timer(), 0.05), 20.0, orange),
+            icon("icon", glyphs.timer.clone(), 20.0, orange),
         )
         .child(at(digit_roll("clock", &clock, value, hex(INK), roll), 38.0, 30.0))
         .child(at(dots, 40.0, 53.0));
