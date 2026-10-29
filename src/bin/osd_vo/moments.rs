@@ -752,7 +752,10 @@ pub(crate) fn live(
     }
     let played = Played {
         name: m.name(),
-        popup: Popup::scripted(look, &fonts),
+        popup: Popup {
+            live_surface: true,
+            ..Popup::scripted(look, &fonts)
+        },
         inputs,
     };
     resident

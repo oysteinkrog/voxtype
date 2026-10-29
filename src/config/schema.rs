@@ -247,7 +247,7 @@ const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom
 const OSD_FRAME_BACKGROUND_CHOICES: &[&str] = &["background", "none"];
 const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "none"];
 const OSD_LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
-const OSD_ANCHOR_CHOICES: &[&str] = &["top", "reading-line"];
+const OSD_ANCHOR_CHOICES: &[&str] = &["top", "reading-line", "center"];
 const OSD_POSITION_CHOICES: &[&str] = &[
     "bottom-center",
     "top-center",
@@ -1329,7 +1329,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         closed(OSD_ANCHOR_CHOICES),
         "OSD",
         "Vertical anchor",
-        "What the centered anchors place: the top edge (`top`, at top_margin) or the newest text line (`reading-line`, at reading_line), which keeps the line you read in one place.",
+        "What the centered anchors place: the top edge (`top`, at top_margin) the newest text line (`reading-line`, at reading_line), which keeps the line you read in one place, or the popup's middle (`center`, at reading_line).",
     ),
     spec(
         "osd.reading_line",
@@ -1338,7 +1338,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Float { min: 0.0, max: 1.0 },
         "OSD",
         "Reading line position",
-        "Newest text line's centre as a fraction of monitor height, with anchor = reading-line. 0.5 is the middle.",
+        "Newest text line's centre (anchor = reading-line) or the popup's middle (anchor = center) as a fraction of monitor height. 0.5 is the middle.",
     ),
     spec(
         "osd.preview_font_pt",

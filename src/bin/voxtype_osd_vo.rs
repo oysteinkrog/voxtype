@@ -225,7 +225,7 @@ struct Args {
     /// at `top_margin` and grows it downward; `reading-line` puts the newest
     /// text line at `--reading-line` and grows the popup upward, so the line
     /// you read stays put. Also `[osd] anchor`.
-    #[arg(long, env = "VOXTYPE_OSD_ANCHOR", value_parser = ["top", "reading-line"])]
+    #[arg(long, env = "VOXTYPE_OSD_ANCHOR", value_parser = ["top", "reading-line", "center"])]
     anchor: Option<String>,
 
     /// Height of the newest text line as a fraction of the screen, with
@@ -241,6 +241,11 @@ struct Args {
     /// word_fade = true`.
     #[arg(long, env = "VOXTYPE_OSD_WORD_FADE")]
     word_fade: bool,
+
+    /// Show the active look's number and name, such as "3/20 Type", above
+    /// the live popup's top-left corner. Also `[osd] look_badge = true`.
+    #[arg(long, env = "VOXTYPE_OSD_LOOK_BADGE")]
+    look_badge: bool,
 
     /// Look to draw: `swiss` (default here), `showcase`, a rich look that
     /// shows off the GPU renderer, or `type`, led by type and line. Also
@@ -660,6 +665,8 @@ struct Look {
     stop_hint: String,
     /// New words fade in; otherwise they appear at once, as in GTK.
     word_fade: bool,
+    /// The live popup names its look in a strip above the panel.
+    badge: bool,
     /// `Swiss`, `Showcase` or `Type`; anything else draws swiss.
     theme: OsdTheme,
     /// The icon theme's microphone as a registered path and its viewBox, or `None` to draw
@@ -729,6 +736,7 @@ impl Look {
             hues: (color(l), color(c), color(r)),
             stop_hint,
             word_fade: cfg.word_fade,
+            badge: cfg.look_badge,
             theme: cfg.theme,
             mic: load_mic_icon(fonts),
             reading_line: (cfg.anchor == OsdAnchor::ReadingLine)
@@ -1064,6 +1072,21 @@ impl Look {
     /// outside the panel is not counted here: vo's automatic margin
     /// (`SurfaceMargin::Auto`) adds it, and grows the surface while an
     /// effect needs more (EG-08).
+    /// The live surface: `surface` plus the look badge's strip on top.
+    fn live_surface(&self) -> Size {
+        let s = self.surface();
+        Size::new(s.w, s.h + self.badge_h())
+    }
+
+    /// Height of the look badge's strip above the panel, or 0 without it.
+    fn badge_h(&self) -> f32 {
+        if self.badge {
+            BADGE_H
+        } else {
+            0.0
+        }
+    }
+
     fn surface(&self) -> Size {
         if self.theme == OsdTheme::Amber {
             return Popup::amber_surface(self);
@@ -1373,6 +1396,8 @@ struct Popup {
     step_seen: bool,
     /// When the look chord last picked a look, to name it in the status row.
     picked_at: Option<f64>,
+    /// Runs on a `live_spec` surface, which has room for the look badge.
+    live_surface: bool,
 }
 
 impl Popup {
@@ -1446,6 +1471,7 @@ impl Popup {
             scripted: false,
             step_seen: false,
             picked_at: None,
+            live_surface: false,
         }
     }
 
@@ -1921,7 +1947,47 @@ impl App for Popup {
                 .child(look),
             None => look,
         };
+        let root = if self.live_surface && self.look.badge {
+            Element::column("badged")
+                .pad_edges(BADGE_H, 0.0, 0.0, 0.0)
+                .child(self.look_badge())
+                .child(root)
+        } else {
+            root
+        };
         root.signals(self.signals.clone())
+    }
+}
+
+/// Height of the look badge's strip above the panel.
+const BADGE_H: f32 = 22.0;
+
+impl Popup {
+    /// "3/20 Type": the look's place in the look chord's list and its
+    /// name, small and dim at the strip's left, so a chord press shows
+    /// where it landed.
+    fn look_badge(&self) -> Element<Msg> {
+        let theme = self.look.theme;
+        let name = format!("{theme:?}");
+        let text = match OsdTheme::VO_LOOKS.iter().position(|t| *t == theme) {
+            Some(i) => format!("{}/{}  {name}", i + 1, OsdTheme::VO_LOOKS.len()),
+            None => name,
+        };
+        Element::row(format!("look-badge-{theme:?}"))
+            .align_items(AlignItems::CENTER)
+            .pad_edges(2.0, 7.0, 2.0, 7.0)
+            .radius(4.0)
+            .fill(Color::rgba(0.0, 0.0, 0.0, 0.62))
+            .layout(|s| {
+                s.position = vo::scene::taffy::Position::Absolute;
+                s.inset.left = vo::scene::taffy::LengthPercentageAuto::length(0.0);
+                s.inset.top = vo::scene::taffy::LengthPercentageAuto::length(1.0);
+            })
+            .child(
+                Element::label("look-badge-text", text)
+                    .text_style(TextStyle::new(SANS, 11.0, 15.0).tracking(0.3))
+                    .color(Color::rgba(1.0, 1.0, 1.0, 0.82)),
+            )
     }
 }
 
@@ -2112,7 +2178,7 @@ fn new_step(
 /// The live popup's surface for `look`.
 fn live_spec(cfg: &OsdConfig, look: &Look) -> OverlaySpec {
     OverlaySpec {
-        size: look.surface(),
+        size: look.live_surface(),
         placement: placement(cfg, look),
         input: InputMode::None,
         app_id: "voxtype-osd".into(),
@@ -2128,12 +2194,19 @@ fn placement(cfg: &OsdConfig, look: &Look) -> Placement {
         margin: [m, m, m, m],
     };
     match cfg.position {
+        OsdPosition::BottomCenter | OsdPosition::TopCenter if cfg.anchor == OsdAnchor::Center => {
+            Placement::LineAt {
+                fraction: cfg.reading_line.clamp(0.0, 1.0),
+                y: look.badge_h() + look.surface().h / 2.0,
+            }
+        }
         OsdPosition::BottomCenter | OsdPosition::TopCenter => match look.reading_line {
             Some(fraction) => Placement::LineAt {
                 fraction,
-                y: look
-                    .newest_line_centre(look.max_lines())
-                    .unwrap_or(look.surface().h / 2.0),
+                y: look.badge_h()
+                    + look
+                        .newest_line_centre(look.max_lines())
+                        .unwrap_or(look.surface().h / 2.0),
             },
             None => Placement::FromTop {
                 fraction: cfg.top_margin.clamp(0.0, 1.0),
@@ -2314,6 +2387,7 @@ fn main() -> anyhow::Result<()> {
         cfg.waveform_gain = g;
     }
     cfg.word_fade |= args.word_fade;
+    cfg.look_badge |= args.look_badge;
     if let Some(a) = args.anchor.as_deref().and_then(OsdAnchor::from_name) {
         cfg.anchor = a;
     }
@@ -2434,6 +2508,7 @@ fn main() -> anyhow::Result<()> {
         let mut popup = Popup::new(look.clone(), &fonts);
         popup.recorder = args.record.as_deref().and_then(replay::recorder);
         popup.osd = Some(cfg.clone());
+        popup.live_surface = true;
         let result = resident.run(popup, live_spec(&cfg, &look), options);
         // The popup may have picked a look with the look chord.
         if let Some(theme) = look_step::saved() {

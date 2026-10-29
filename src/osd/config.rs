@@ -33,6 +33,9 @@ pub enum OsdAnchor {
     /// the monitor height, and the popup grows upward as the text gets
     /// longer, so the line being read stays put.
     ReadingLine,
+    /// The middle of the popup at its full height sits at `reading_line` of
+    /// the monitor height, so every look is centred on the same spot.
+    Center,
 }
 
 impl OsdAnchor {
@@ -40,6 +43,7 @@ impl OsdAnchor {
         match name {
             "top" => Some(OsdAnchor::Top),
             "reading-line" => Some(OsdAnchor::ReadingLine),
+            "center" => Some(OsdAnchor::Center),
             _ => None,
         }
     }
@@ -606,9 +610,9 @@ pub struct OsdConfig {
     /// default, at `top_margin`) or its newest text line (`reading-line`,
     /// at `reading_line`). Corner anchors ignore it.
     pub anchor: OsdAnchor,
-    /// Height of the newest text line's centre as a fraction of the
-    /// monitor's height, when `anchor = "reading-line"`. 0.5 is the middle
-    /// of the screen.
+    /// Height of the newest text line's centre (`anchor = "reading-line"`)
+    /// or of the popup's middle (`anchor = "center"`) as a fraction of the
+    /// monitor's height. 0.5 is the middle of the screen.
     pub reading_line: f32,
     /// Font size of the live preview text in points (gtk4 OSD). `None`
     /// keeps the GTK theme's size.
@@ -620,6 +624,10 @@ pub struct OsdConfig {
     /// Fade new live words in (vo OSD only). Off by default: words appear
     /// at once, as in the gtk4 OSD.
     pub word_fade: bool,
+    /// Show the active look's place in the look chord's list and its name,
+    /// such as "3/20 Type", above the vo popup's top-left corner. Off by
+    /// default.
+    pub look_badge: bool,
     /// Motion features of the vo popup: `"look"` (each look's own set),
     /// `"none"`, or a list of names (see [`OsdMotion`]).
     pub motion: OsdMotion,
@@ -667,6 +675,7 @@ impl Default for OsdConfig {
             opacity: 0.95,
             theme: OsdTheme::Default,
             word_fade: false,
+            look_badge: false,
             motion: OsdMotion::Look,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,
