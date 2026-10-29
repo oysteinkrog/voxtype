@@ -124,6 +124,10 @@ const BAR_SECS: f64 = 0.028;
 const STATUS_Y: f32 = 479.0;
 
 const TICK_HZ: f64 = 60.0;
+/// Set on the lit word copy's id: above the transcript's ids (`envelope.rs`
+/// checks ids below 1 << 20), so the envelope does not take it for a second
+/// copy of the word.
+const LIT_ID: u32 = 1 << 30;
 
 #[derive(Clone, Copy)]
 struct Fonts {
@@ -751,19 +755,43 @@ impl Popup {
 
     /// The glyphs that mask the lit word's gradient. With `spoken-tracking`
     /// the word in the line arrives spaced out, so the mask is a live text
-    /// with the same channels, and the two keep the same letter places.
+    /// with the same channels, and the two keep the same letter places. Its
+    /// word id is outside the transcript's (`LIT_ID`), so the reading-line
+    /// envelope follows only the word in the line.
     fn karaoke_lit_glyphs(&self, word: &Word, style: &TextStyle) -> Element<Msg> {
-        if !self.look.on(channels::TRACKING) || self.look.on("reduced-motion") || kit::reduced() {
-            return Element::label("word", word.text.as_str())
-                .text_style(*style)
-                .color(Color::WHITE);
-        }
-        self.typo_words(
-            Element::live_text("word", std::slice::from_ref(word))
+        let plain = || {
+            Element::label("word", word.text.as_str())
                 .text_style(*style)
                 .color(Color::WHITE)
-                .word_enter(Transition::NONE),
-        )
+        };
+        if !self.look.on(channels::TRACKING) || self.look.on("reduced-motion") || kit::reduced() {
+            return plain();
+        }
+        let Some(mut typos) = self.channel_typos() else {
+            return plain();
+        };
+        let alias = word.id | LIT_ID;
+        typos.words = typos
+            .words
+            .iter()
+            .filter(|(id, _)| *id == word.id)
+            .map(|(_, t)| (alias, *t))
+            .collect();
+        typos.tracks = typos
+            .tracks
+            .iter()
+            .filter(|(id, _)| *id == word.id)
+            .map(|(_, k)| (alias, k.clone()))
+            .collect();
+        let lit = Word {
+            id: alias,
+            text: word.text.clone(),
+        };
+        Element::live_text("word", std::slice::from_ref(&lit))
+            .text_style(*style)
+            .color(Color::WHITE)
+            .word_enter(Transition::NONE)
+            .word_typo(typos)
     }
 
     /// MO-64: the underline as a bowstring from the middle of the word

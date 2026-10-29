@@ -150,8 +150,16 @@ impl Popup {
 
     /// The live text with the channels the look's features ask for.
     pub(crate) fn typo_words(&self, words: Element<Msg>) -> Element<Msg> {
+        match self.channel_typos() {
+            Some(typos) => words.word_typo(typos),
+            None => words,
+        }
+    }
+
+    /// The channels of [`Popup::typo_words`], or `None` when the look asks for none.
+    pub(crate) fn channel_typos(&self) -> Option<Typos> {
         if !self.channels_on() {
-            return words;
+            return None;
         }
         let l = &self.look;
         let t = self.extra.now;
@@ -240,7 +248,7 @@ impl Popup {
             }
             typos.set(w.id, wt);
         }
-        words.word_typo(typos)
+        Some(typos)
     }
 
     /// Marks under the words for the channels: the open seam under each
