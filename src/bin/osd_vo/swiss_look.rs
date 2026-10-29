@@ -5,7 +5,7 @@
 //! While the swiss popup is open it keeps a little idle life (v41, RD-02):
 //! a soft highlight runs along the top hairline once every 8 s, the
 //! recording dot breathes from 100 % to 70 % while listening, and the
-//! clock's colon dims to half for a quarter second each second. All three
+//! clock's colon dims to half for a quarter second as each second ticks. All three
 //! are ambient loops stepped at 15 a second, far from the transcript. They
 //! leave the view in the update that asks to exit and on a look switch, and
 //! hold still under reduced motion.
@@ -98,12 +98,16 @@ fn dot_loop() -> Loop {
         .settle(Spring::SNAP)
 }
 
-/// v41: the colon's mask on opacity, `COLON_SOFT` for `COLON_SECS` at the
-/// start of each second.
+/// v41: the colon's mask on opacity: `COLON_SOFT` for the first
+/// `COLON_SECS` after the loop starts, then 0 for good. The mask is a new
+/// node for each clock value, so the loop starts in the frame whose digits
+/// change and the dim runs in step with the clock's own seconds.
 fn colon_loop() -> Loop {
+    // One cycle is far longer than any one clock value stays on screen.
+    const ONCE: f64 = 3600.0;
     Loop {
         amp: COLON_SOFT,
-        ..Loop::gate(0.0, COLON_SECS, 1.0)
+        ..Loop::gate(0.0, COLON_SECS / ONCE, ONCE)
             .fps(IDLE_FPS)
             .settle(Spring::SNAP)
     }
@@ -175,7 +179,9 @@ impl Popup {
     }
 
     /// v41: a patch of panel colour over the clock's colon whose opacity
-    /// steps to `COLON_SOFT` at each whole second, so the colon softens.
+    /// steps to `COLON_SOFT` as the clock's digits change, so the colon
+    /// softens on each of the clock's seconds. Its key carries the clock
+    /// value, so each new value brings a new mask and a fresh loop.
     fn swiss_colon(&self, value: &str, style: &TextStyle) -> Option<Element<Msg>> {
         let i = value.find(':')?;
         // The clock stops once the recording does; so does its colon.
@@ -184,7 +190,7 @@ impl Popup {
         }
         let before = self.measure.layout(&value[..i], style, None).size.w;
         let colon = self.measure.layout(":", style, None).size;
-        let mask = Element::shape("colon", ShapeKind::RRect)
+        let mask = Element::shape(format!("colon-{value}"), ShapeKind::RRect)
             .size(colon.w, colon.h)
             .fill(self.look.background)
             .opacity(0.0)
@@ -516,12 +522,19 @@ mod idle_tests {
     }
 
     #[test]
-    fn the_colon_softens_for_a_quarter_second_each_second() {
+    fn the_colon_softens_once_for_a_quarter_second_from_its_start() {
+        // The loop starts when the clock's digits change (a new mask node).
         let l = colon_loop();
-        for s in 0..5 {
-            let t = s as f64;
-            assert_eq!(l.value(0.0, t + 0.01), COLON_SOFT);
-            assert_eq!(l.value(0.0, t + 0.5), 0.0);
+        assert_eq!(
+            l.value(0.0, 0.0),
+            COLON_SOFT,
+            "soft in the digits' first frame"
+        );
+        assert_eq!(l.value(0.0, 0.2), COLON_SOFT);
+        assert_eq!(l.value(0.0, COLON_SECS + 0.07), 0.0);
+        // A clock that stalls does not blink again on its own.
+        for k in 1..10 {
+            assert_eq!(l.value(0.0, k as f64), 0.0);
         }
         assert!(l.fps <= IDLE_FPS);
     }
