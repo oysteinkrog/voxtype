@@ -294,6 +294,15 @@ codegen-units = 1
 strip = true
 opt-level = 3
 
+# Optimised like release but without LTO, for CPU and frame budget numbers
+# that match what users run (scripts/osd-vo-budget.sh). Builds far faster.
+[profile.measure]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+strip = false
+
 [profile.dev]
 opt-level = 1  # Faster dev builds, whisper still usable
 
