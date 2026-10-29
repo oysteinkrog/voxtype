@@ -75,6 +75,7 @@ impl Popup {
                     pause,
                     loud: self.word_loudness(w.id),
                     at: h.map_or(self.shown_at, |h| h.born),
+                    ..Default::default()
                 }
             })
             .collect()
