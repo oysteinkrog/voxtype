@@ -1525,6 +1525,47 @@ mod tests {
         assert_eq!(READY_SIGNAL, "READY");
     }
 
+    /// Writes the live model's word lists for a public fixture, step by
+    /// step, to tests/fixtures/correction/, for tests/correction_replay.rs.
+    /// Needs the parakeet-unified-en-0.6b-int8 model:
+    /// `cargo test --features parakeet -- --ignored record_live_words`.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    #[ignore]
+    fn record_live_words_of_a_public_fixture() {
+        use parakeet_rs::{ParakeetUnified, ParakeetUnifiedHandle, UnifiedStreamingConfig};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let reader = hound::WavReader::open(root.join("tests/fixtures/vad/speech_long.wav"))
+            .expect("fixture opens");
+        let max = (1 << (reader.spec().bits_per_sample - 1)) as f32;
+        let samples: Vec<f32> = reader
+            .into_samples::<i32>()
+            .filter_map(Result::ok)
+            .map(|s| s as f32 / max)
+            .collect();
+        let path = super::super::parakeet::resolve_model_path("parakeet-unified-en-0.6b-int8")
+            .expect("model path");
+        let handle = ParakeetUnifiedHandle::load(&path, None).expect("model loads");
+        let mut u = ParakeetUnified::from_shared_with_streaming_config(
+            &handle,
+            UnifiedStreamingConfig::default(),
+        )
+        .expect("live model");
+        let mut steps = Vec::new();
+        for chunk in samples.chunks(1600) {
+            if !u.transcribe_chunk(chunk).expect("chunk").is_empty() {
+                steps.push(preview_words(&u, None));
+            }
+        }
+        if !u.flush().expect("flush").is_empty() {
+            steps.push(preview_words(&u, None));
+        }
+        let out = root.join("tests/fixtures/correction/speech_long.live.json");
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        std::fs::write(&out, serde_json::to_string_pretty(&steps).unwrap()).unwrap();
+        eprintln!("{} steps to {}", steps.len(), out.display());
+    }
+
     #[cfg(feature = "parakeet")]
     fn sent_parts(rx: &std::sync::mpsc::Receiver<Job>) -> Vec<usize> {
         rx.try_iter()
