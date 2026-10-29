@@ -1,8 +1,113 @@
 //! The `Default` and `Swiss` look of the vo popup: the panel with its header,
 //! waveform, transcript, rule and status row. The other looks fall through to it
 //! as well, and several reuse its pieces.
+//!
+//! While the swiss popup is open it keeps a little idle life (v41, RD-02):
+//! a soft highlight runs along the top hairline once every 8 s, the
+//! recording dot breathes from 100 % to 70 % while listening, and the
+//! clock's colon dims to half for a quarter second each second. All three
+//! are ambient loops stepped at 15 a second, far from the transcript. They
+//! leave the view in the update that asks to exit and on a look switch, and
+//! hold still under reduced motion.
 
 use super::*;
+use vo::scene::ambient::{Loop, LoopProp, Wave as LoopWave};
+use vo::scene::display::{Paint, ShapeInstance};
+use vo::scene::geom::{Point, RRect};
+
+/// v41: the idle loops' pace, the slow-loop cap of RD-02.
+const IDLE_FPS: f64 = 15.0;
+/// v41: the shimmer's width, how often it runs, how long one pass takes,
+/// when the first pass comes after the popup opens (all seconds but the
+/// width), and how much lighter than the hairline it is (HSL lightness).
+const SHIMMER_W: f32 = 60.0;
+const SHIMMER_EVERY: f64 = 8.0;
+const SHIMMER_PASS: f64 = 1.2;
+const SHIMMER_FIRST: f64 = 2.0;
+const SHIMMER_LIGHTER: f32 = 0.2;
+/// v41: the recording dot's lowest opacity and seconds per breath.
+const DOT_LOW: f64 = 0.7;
+const DOT_PERIOD: f64 = 2.4;
+/// v41: the clock colon's opacity while soft and how long it stays soft
+/// at each whole second.
+const COLON_SOFT: f64 = 0.5;
+const COLON_SECS: f64 = 0.25;
+
+/// `c` with its HSL lightness raised by `amount`, hue and saturation kept.
+fn lighter(c: Color, amount: f32) -> Color {
+    let (r, g, b) = (c.r, c.g, c.b);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    let l2 = (l + amount).clamp(0.0, 1.0);
+    if d <= f32::EPSILON {
+        return Color::rgba(l2, l2, l2, c.a);
+    }
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
+    let h = if max == r {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    } / 6.0;
+    let q = if l2 < 0.5 {
+        l2 * (1.0 + s)
+    } else {
+        l2 + s - l2 * s
+    };
+    let p = 2.0 * l2 - q;
+    let ch = |t: f32| {
+        let t = t.rem_euclid(1.0);
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    Color::rgba(ch(h + 1.0 / 3.0), ch(h), ch(h - 1.0 / 3.0), c.a)
+}
+
+/// v41: the shimmer's loop for a hairline `span` wide: the highlight
+/// starts just left of the span and crosses it in `SHIMMER_PASS`, then
+/// waits out of sight for the rest of `SHIMMER_EVERY`.
+fn shimmer_loop(span: f32) -> Loop {
+    let travel = (span + SHIMMER_W) as f64;
+    Loop::new(
+        LoopWave::Ramp,
+        travel * SHIMMER_EVERY / SHIMMER_PASS,
+        SHIMMER_EVERY,
+    )
+    .phase(1.0 - SHIMMER_FIRST / SHIMMER_EVERY)
+    .fps(IDLE_FPS)
+    .settle(Spring::SNAP)
+}
+
+/// v41: the dot's breath on opacity, 1.0 down to `DOT_LOW` and back.
+fn dot_loop() -> Loop {
+    Loop::pulse(DOT_LOW - 1.0, DOT_PERIOD)
+        .fps(IDLE_FPS)
+        .settle(Spring::SNAP)
+}
+
+/// v41: the colon's mask on opacity, `COLON_SOFT` for `COLON_SECS` at the
+/// start of each second.
+fn colon_loop() -> Loop {
+    Loop {
+        amp: COLON_SOFT,
+        ..Loop::gate(0.0, COLON_SECS, 1.0)
+            .fps(IDLE_FPS)
+            .settle(Spring::SNAP)
+    }
+}
 
 impl Popup {
     pub(super) fn panel(&self) -> Element<Msg> {
@@ -30,6 +135,61 @@ impl Popup {
                     .margin_edges(RULE_MARGIN_TOP, 0.0, 0.0, 0.0),
             )
             .child(self.status_row(&status))
+            .children(self.swiss_shimmer())
+    }
+
+    /// v41: whether the swiss idle loops run: the swiss look, open, and
+    /// motion not reduced.
+    fn swiss_idle(&self) -> bool {
+        matches!(self.look.theme, OsdTheme::Swiss | OsdTheme::Default)
+            && !self.closing
+            && !kit::reduced()
+            && !self.look.on("reduced-motion")
+    }
+
+    /// v41: the highlight on the top hairline, in a layer clipped to the
+    /// hairline's straight run between the rounded corners.
+    fn swiss_shimmer(&self) -> Option<Element<Msg>> {
+        if !self.swiss_idle() {
+            return None;
+        }
+        let l = &self.look;
+        let span = l.width - 2.0 * RADIUS;
+        let hi = lighter(l.border, SHIMMER_LIGHTER);
+        let clear = Color::rgba(hi.r, hi.g, hi.b, 0.0);
+        let glint = Element::canvas("glint", 0.0, move |_, b, p| {
+            let mid = Point::new(b.x + b.w / 2.0, b.y);
+            p.shape(ShapeInstance::rrect(
+                RRect::new(b, 0.0),
+                Paint::sheen(mid, Point::new(b.w / 2.0, 0.0), hi, clear),
+            ));
+        });
+        let glint = kit::at(glint, -SHIMMER_W, 0.0)
+            .size(SHIMMER_W, BORDER)
+            .ambient(LoopProp::OffsetX, shimmer_loop(span));
+        Some(
+            kit::at(Element::layer("shimmer").clip(), RADIUS, 0.0)
+                .size(span, BORDER)
+                .child(glint),
+        )
+    }
+
+    /// v41: a patch of panel colour over the clock's colon whose opacity
+    /// steps to `COLON_SOFT` at each whole second, so the colon softens.
+    fn swiss_colon(&self, value: &str, style: &TextStyle) -> Option<Element<Msg>> {
+        let i = value.find(':')?;
+        // The clock stops once the recording does; so does its colon.
+        if !self.swiss_idle() || self.status().finishing {
+            return None;
+        }
+        let before = self.measure.layout(&value[..i], style, None).size.w;
+        let colon = self.measure.layout(":", style, None).size;
+        let mask = Element::shape("colon", ShapeKind::RRect)
+            .size(colon.w, colon.h)
+            .fill(self.look.background)
+            .opacity(0.0)
+            .ambient(LoopProp::Opacity, colon_loop());
+        Some(kit::at(mask, before, 0.0))
     }
 
     pub(super) fn header(&self) -> Element<Msg> {
@@ -55,6 +215,11 @@ impl Popup {
                     ),
                 )
                 .child(caption("caption", name, l.caption_small_px, 1.5))
+                .children(if key == "time" {
+                    self.swiss_colon(value, &l.mono(l.value_px))
+                } else {
+                    None
+                })
         };
         // The icon theme's microphone, or one from shapes: the capsule and its stand.
         let mic = match l.mic {
@@ -183,7 +348,9 @@ impl Popup {
     /// under the text as the text area's clip does.
     fn swiss_lattice(&self) -> Option<Element<Msg>> {
         let l = &self.look;
-        if !matches!(l.theme, OsdTheme::Swiss | OsdTheme::Default) || !l.on(wild_space::KINETIC_LATTICE) {
+        if !matches!(l.theme, OsdTheme::Swiss | OsdTheme::Default)
+            || !l.on(wild_space::KINETIC_LATTICE)
+        {
             return None;
         }
         let set = wild_space::LatticeSet {
@@ -253,9 +420,14 @@ impl Popup {
                 .fill(Color::TRANSPARENT)
                 .border(l.accent, 1.0)
         } else {
-            Element::shape("dot", ShapeKind::RRect)
+            let dot = Element::shape("dot", ShapeKind::RRect)
                 .size(DOT, DOT)
-                .fill(l.accent)
+                .fill(l.accent);
+            if self.swiss_idle() {
+                dot.ambient(LoopProp::Opacity, dot_loop())
+            } else {
+                dot
+            }
         };
         let mut row = Element::row("status")
             .align_items(AlignItems::CENTER)
@@ -292,5 +464,65 @@ impl Popup {
             );
         }
         row
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn lighter_raises_hsl_lightness_and_keeps_alpha() {
+        let g = lighter(Color::rgba(0.25, 0.25, 0.25, 0.5), 0.2);
+        assert!(
+            (g.r - 0.45).abs() < 1e-5 && (g.g - 0.45).abs() < 1e-5 && (g.b - 0.45).abs() < 1e-5
+        );
+        assert_eq!(g.a, 0.5);
+        let warm = Color::rgba(0.3, 0.25, 0.2, 1.0);
+        let up = lighter(warm, 0.2);
+        assert!(up.r > warm.r && up.g > warm.g && up.b > warm.b);
+        assert!(up.r > up.g && up.g > up.b, "the hue stays: {up:?}");
+        assert_eq!(lighter(Color::WHITE, 0.2).r, 1.0);
+    }
+
+    #[test]
+    fn the_shimmer_crosses_once_every_8_s_and_hides_in_between() {
+        let span = 540.0;
+        let l = shimmer_loop(span);
+        // The glint's left edge on the span, from its rest at -SHIMMER_W.
+        let x = |t: f64| -SHIMMER_W as f64 + l.value(0.0, t);
+        let shows = |t: f64| x(t) > -SHIMMER_W as f64 && x(t) < span as f64;
+        for k in 0..3 {
+            let t0 = SHIMMER_FIRST + k as f64 * SHIMMER_EVERY;
+            assert!(shows(t0 + SHIMMER_PASS / 2.0), "mid pass {k}");
+            assert!(!shows(t0 - 0.1), "before pass {k}");
+            assert!(!shows(t0 + SHIMMER_PASS + 0.1), "after pass {k}");
+        }
+        assert!(!shows(0.0), "no pass as the popup opens");
+        assert!(l.fps <= IDLE_FPS);
+    }
+
+    #[test]
+    fn the_dot_breathes_between_70_and_100_percent() {
+        let l = dot_loop();
+        let mut lo: f64 = 0.0;
+        for i in 0..100 {
+            let v = l.value(0.0, i as f64 * 0.05);
+            assert!((DOT_LOW - 1.0 - 1e-9..=1e-9).contains(&v), "{v}");
+            lo = lo.min(v);
+        }
+        assert!((lo - (DOT_LOW - 1.0)).abs() < 0.01);
+        assert!(l.fps <= IDLE_FPS);
+    }
+
+    #[test]
+    fn the_colon_softens_for_a_quarter_second_each_second() {
+        let l = colon_loop();
+        for s in 0..5 {
+            let t = s as f64;
+            assert_eq!(l.value(0.0, t + 0.01), COLON_SOFT);
+            assert_eq!(l.value(0.0, t + 0.5), 0.0);
+        }
+        assert!(l.fps <= IDLE_FPS);
     }
 }
