@@ -351,6 +351,8 @@ struct Scene {
     /// When the content of the current shape fades in.
     content_at: f64,
     levels: Arc<[f32]>,
+    /// How far the chrome has exhaled (MO-12), 0 awake to 1 at rest.
+    rest: f32,
     newest_at: f64,
     finish_at: Option<f64>,
     /// Progress, eased: from, to, when; `None` hides the bar.
@@ -437,7 +439,7 @@ impl Scene {
         ));
         p.shape(ShapeInstance::rrect(
             body,
-            Paint::glow(hex(HALO).fade(0.30), 7.0, 0.55),
+            Paint::glow(hex(HALO).fade(0.30 * (1.0 - 0.6 * self.rest)), 7.0, 0.55),
         ));
         p.shape(
             ShapeInstance::rrect(body, Paint::solid(hex(BODY).fade(0.98))).with_stroke(
@@ -979,7 +981,8 @@ impl Popup {
             card,
             shown_at: self.shown_at,
             content_at,
-            levels: self.wave.clone(),
+            levels: self.exhale_levels(&self.wave),
+            rest: self.exhale(),
             newest_at: self.newest_at,
             finish_at: self.extra.finish_at,
             prog: finishing.then_some(s.prog),
@@ -1041,12 +1044,15 @@ impl Popup {
             let style = TextStyle::new(f.text, 14.0, 18.0).tracking(0.3);
             panel = panel.child(
                 at(
-                    digit_roll(
-                        "clock",
-                        &self.clock,
-                        style,
-                        hex(WHITE),
-                        Spring::critical_to_98(0.25),
+                    self.exhale_motion(
+                        digit_roll(
+                            "clock",
+                            &self.clock,
+                            style,
+                            self.exhale_color(hex(WHITE), hex(DIM)),
+                            Spring::critical_to_98(0.25),
+                        ),
+                        &[Prop::TextColor],
                     ),
                     ox + cx,
                     oy + cy - 9.0,
@@ -1200,22 +1206,23 @@ impl Popup {
         };
         if !card {
             let style = pill_style(l);
-            return at(
-                Element::column("pilltext")
-                    .width(w)
-                    .height(lines as f32 * PILL_LINE)
-                    .child(live(
+            let text = Element::column("pilltext")
+                .width(w)
+                .height(lines as f32 * PILL_LINE)
+                .child(self.island_handoff(
+                    live(
                         "words".into(),
                         &self.shown[..self.island_room(w, &style)],
                         style,
                         hex(WHITE),
-                    )),
-                x,
-                y,
-            )
-            .opacity(opacity)
-            .presence(Transition::fade(), Transition::fade())
-            .motion(Prop::Opacity, Spring::critical_to_98(SWAP_OUT));
+                    ),
+                    &style,
+                    w,
+                ));
+            return at(self.with_hearing(text, &style, w, hex(WHITE), hex(BLUE)), x, y)
+                .opacity(opacity)
+                .presence(Transition::fade(), Transition::fade())
+                .motion(Prop::Opacity, Spring::critical_to_98(SWAP_OUT));
         }
         let style = card_style(l);
         let words = &self.shown[..self.island_room(w, &style)];
@@ -1223,10 +1230,14 @@ impl Popup {
         let new_y = self
             .island_last_line(words, w, &style)
             .map_or(0.0, |(ly, _)| ly);
-        at(
-            Element::column("cardtext")
-                .width(w)
-                .height(lines as f32 * CARD_LINE)
+        let mut text = Element::column("cardtext")
+            .width(w)
+            .height(lines as f32 * CARD_LINE);
+        if self.delivered().is_some() {
+            // The hand-off lays out all the words itself, in one block.
+            text = text.child(self.island_handoff(Element::column("handed"), &style, w));
+        } else {
+            text = text
                 .child(at(
                     live("old".into(), old, style, hex(DIM))
                         .word_enter(Transition::NONE)
@@ -1241,13 +1252,19 @@ impl Popup {
                     live(format!("new-{}", old.len()), new, style, hex(WHITE)).width(w),
                     0.0,
                     new_y,
-                )),
-            x,
-            y,
-        )
-        .opacity(opacity)
-        .presence(Transition::fade(), Transition::fade())
-        .motion(Prop::Opacity, Spring::critical_to_98(SWAP_OUT))
+                ));
+        }
+        at(self.with_hearing(text, &style, w, hex(WHITE), hex(BLUE)), x, y)
+            .opacity(opacity)
+            .presence(Transition::fade(), Transition::fade())
+            .motion(Prop::Opacity, Spring::critical_to_98(SWAP_OUT))
+    }
+
+    /// The words, or while a delivery shows the text leaving for the app and
+    /// folding into the receipt (MO-42, MO-43). `style` and `w` are the ones
+    /// `words` is laid out with.
+    fn island_handoff(&self, words: Element<Msg>, style: &TextStyle, w: f32) -> Element<Msg> {
+        self.handoff_or(words, style, Some(w), hex(WHITE), hex(GREEN))
     }
 
     /// The index of the first word on the last line of the card's text.
