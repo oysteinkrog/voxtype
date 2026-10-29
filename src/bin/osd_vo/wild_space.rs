@@ -149,8 +149,11 @@ pub(crate) struct State {
     /// Each word's loudness and the sound it was measured over, kept once
     /// the whole sound was in the level history, so a word does not go
     /// quiet when its sound scrolls out of that history (LT-12).
-    loudness: RefCell<HashMap<WordId, ((f64, f64), f32)>>,
+    loudness: RefCell<HashMap<WordId, KeptLoudness>>,
 }
+
+/// A word's loudness and the sound (start, end) it was measured over.
+type KeptLoudness = ((f64, f64), f32);
 
 /// The level over room tone as a [`LevelTrack`], and when the voice was last
 /// heard over room tone.
