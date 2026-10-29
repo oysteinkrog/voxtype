@@ -506,6 +506,7 @@ impl Popup {
         let dim = if mode == Mode::Cancelled { 0.45 } else { 1.0 };
         let words = Element::live_text("words", &self.shown)
             .line_motion(&self.look)
+            .revision_motion(revision::motion(&self.look))
             .text_style(style)
             .color(hex(INK))
             .opacity(dim)
@@ -516,7 +517,17 @@ impl Popup {
         let mut text = Element::column("text")
             .height(self.lines.min(MAX_LINES) as f32 * TEXT_LINE)
             .margin_edges(TEXT_TOP, TEXT_X, TEXT_BOTTOM, TEXT_X)
-            .child(words);
+            .child(words)
+            .children(self.line_marks(
+                style,
+                l.text_width(),
+                endings::Ink {
+                    text: hex(INK),
+                    mark: hex(VIOLET),
+                    faint: hex(GREY),
+                },
+                endings::Cancel::Unthread,
+            ));
         // Lay the words out as the live text does, to place the wavy lines
         // and the caret.
         let joined = self
