@@ -1909,6 +1909,10 @@ impl App for Popup {
         let look = self
             .look_view(tokens)
             .map_live_texts(&mut |e| self.set_type(e));
+        // Each look hangs under a node named for it, so a look switch drops
+        // the old look whole at once: no exit of it, its status row
+        // included, draws over the new look.
+        let look = Element::column(format!("look-{:?}", self.look.theme)).child(look);
         // The shift and the taller panel come in the same frame, on a
         // surface that keeps its size, so the reading line never moves.
         let root = match self.look.reading_shift(self.lines) {
