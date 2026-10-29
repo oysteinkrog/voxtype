@@ -44,7 +44,8 @@ struct Inner {
     laid: Vec<(Laid, ShapedText)>,
 }
 
-type Laid = (String, u32, u32, u32);
+/// Text, font, size and width, and each word's font by byte range.
+type Laid = (String, u32, u32, u32, Vec<(usize, usize, u32)>);
 
 /// Pairs letters of `old` and `new` that a longest common subsequence
 /// keeps: `(old index, new index)` in order.
@@ -146,19 +147,55 @@ impl Popup {
         words
     }
 
-    /// `text` laid out in `style` at `width`, from the last few layouts.
-    fn letter_fx_laid(&self, text: &str, style: &TextStyle, width: f32) -> ShapedText {
+    /// `words` laid out in `style` at `width` as the live text lays them
+    /// out, from the last few layouts. With `breath`, the flex font and each
+    /// word's instance (MO-81): each word is laid in its instance, so the
+    /// letters sit where the live text draws them, and each glyph is then
+    /// drawn in the flex font's default instance. A new instance is a new
+    /// font, and the light's atlas would need a fresh glyph field for every
+    /// letter each time a word breathes.
+    fn letter_fx_laid(
+        &self,
+        words: &[Word],
+        style: &TextStyle,
+        width: f32,
+        breath: Option<&(u32, Vec<(WordId, u32)>)>,
+    ) -> ShapedText {
+        let text = words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut fonts = Vec::new();
+        if let Some((_, instances)) = breath {
+            let mut at = 0usize;
+            for w in words {
+                if let Some(&(_, f)) = instances.iter().find(|i| i.0 == w.id) {
+                    fonts.push((at, at + w.text.len(), f));
+                }
+                at += w.text.len() + 1;
+            }
+        }
         let key = (
-            text.to_string(),
+            text,
             style.font,
             style.size.to_bits(),
             width.to_bits(),
+            fonts,
         );
         let mut s = self.letter_fx.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, laid)) = s.laid.iter().find(|(k, _)| *k == key) {
             return laid.clone();
         }
-        let laid = self.measure.layout(text, style, Some(width));
+        let ranges: Vec<_> = key.4.iter().map(|&(a, b, f)| (a..b, f)).collect();
+        let mut laid = self
+            .measure
+            .layout_fonts(&key.0, style, Some(width), &[], &ranges);
+        for g in &mut laid.glyphs {
+            if key.4.iter().any(|r| r.2 == g.font) {
+                g.font = style.font;
+            }
+        }
         if s.laid.len() >= 4 {
             s.laid.remove(0);
         }
@@ -174,14 +211,15 @@ impl Popup {
         }
         let l = &self.look;
         let mut style = l.text_style();
-        // MO-81: words set in the variable font are laid in it, so the
-        // effects sit on the drawn letters. In its default instance: each
-        // word's own instance is a new font, and a new font's glyph fields
-        // cost the light a fresh field each time the word breathes.
-        if l.on(super::wild_motion::VARIABLE_BREATH) {
-            if let Ok(flex) = l.fonts.asset("flex") {
-                style.font = flex;
-            }
+        // MO-81: words set in the variable font are laid as the live text
+        // lays them, so the effects sit on the drawn letters.
+        let breath = if l.on(super::wild_motion::VARIABLE_BREATH) {
+            self.breath_fonts(style.size, false)
+        } else {
+            None
+        };
+        if let Some((base, _)) = &breath {
+            style.font = *base;
         }
         let height = self.lines as f32 * l.text_line;
         let reduced = self.letter_fx_reduced();
@@ -191,13 +229,7 @@ impl Popup {
 
         // Every glyph on screen with its word, from the layout the live
         // text uses.
-        let joined = self
-            .shown
-            .iter()
-            .map(|w| w.text.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let laid = self.letter_fx_laid(&joined, &style, width);
+        let laid = self.letter_fx_laid(&self.shown, &style, width, breath.as_ref());
         let mut starts = Vec::with_capacity(self.shown.len());
         let mut at = 0usize;
         for w in &self.shown {
@@ -229,13 +261,8 @@ impl Popup {
                 // panel, in the box's last row; the older lines sit on
                 // sheets in front of it.
                 let line = self.stack_reading_line();
-                let text = line
-                    .iter()
-                    .map(|w| w.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
                 let dy = self.lines.saturating_sub(1) as f32 * l.text_line;
-                self.letter_fx_laid(&text, &style, width)
+                self.letter_fx_laid(line, &style, width, breath.as_ref())
                     .glyphs
                     .iter()
                     .map(|g| {
