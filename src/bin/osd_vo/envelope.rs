@@ -56,6 +56,19 @@ pub(crate) fn run(
         },
     );
     println!("envelope:\n{report}");
+    // Development: every breach, one line each, to find where a look goes wrong.
+    if std::env::var_os("VO_ENVELOPE_DETAIL").is_some() {
+        for v in &report.violations {
+            println!(
+                "breach frame {} t {:.3} word {} {} {:.3}",
+                v.frame,
+                v.t,
+                v.word,
+                v.breach.kind(),
+                v.breach.value()
+            );
+        }
+    }
     let budget = measure_budget(Popup::new(look.clone(), &fonts), &scenario, fps, options())
         .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
     let mut over = None;
