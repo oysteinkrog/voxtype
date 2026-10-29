@@ -1010,7 +1010,9 @@ impl Popup {
             at(live.size(l.text_width(), line_h), pad_x, pad_y)
         };
         let rows = self.lines.max(1) as f32;
-        at(
+        // In the flow at the strip's content box, so the stack sits in the
+        // same place whether or not the light's layers wrap it.
+        let stack = at(
             stack.view_at(
                 "depth-stack",
                 Size::new(sheet.w, rows * line_h + pad_y),
@@ -1021,10 +1023,12 @@ impl Popup {
                 self.extra.stack_hold.as_ref(),
                 self.extra.now,
             ),
-            // Out of the flow, so placed from the strip's padding edge.
-            STRIP_PAD_X - pad_x,
-            STRIP_PAD_Y,
-        )
+            -pad_x,
+            0.0,
+        );
+        Element::column("stack-box")
+            .size(l.text_width(), rows * line_h)
+            .child(stack)
     }
 
     fn sc_status(&self, phase: Phase) -> Element<Msg> {
