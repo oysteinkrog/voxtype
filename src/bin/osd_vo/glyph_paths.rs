@@ -28,7 +28,7 @@ use vo::scene::geom::{Affine, Point};
 use vo::scene::glyph_morph::{GlyphMorph, MorphFrom, MorphStyle, WordOutline};
 use vo::scene::path::{Contour, StrokeStyle};
 use vo::scene::snap::{snapped, Snap};
-use vo::scene::stroke_write::{WriteStyle, Writing};
+use vo::scene::stroke_write::{PenParams, PenPhase, PenSchedule, PenSlot, WriteStyle, Writing};
 use vo::scene::text::ShapedText;
 
 pub(crate) const MORPH: &str = "glyph-morph";
@@ -36,10 +36,11 @@ pub(crate) const BREATH: &str = "breath-line";
 pub(crate) const BROKEN: &str = "broken-frame";
 pub(crate) const WRITE: &str = "stroke-write";
 
-/// How long the pen takes to write one word, and how long its strokes stay
-/// once it is written.
-const WRITE_SECS: f64 = 0.42;
+/// How long a word's strokes stay once it is written or swept.
 const WRITE_FADE: f64 = 0.22;
+/// Pen speed in text sizes per second. At 22.7 px text, "the" is 135 px
+/// of pen path (about 170 ms) and "dictation" 334 px (the 260 ms cap).
+const PEN_SPEED: f32 = 35.0;
 
 /// A new word's outline morph, in seconds.
 const MORPH_SECS: f64 = 0.24;
@@ -519,89 +520,142 @@ fn write_cache() -> &'static Mutex<HashMap<WriteKey, Arc<Writing>>> {
     C.get_or_init(Default::default)
 }
 
+/// One pen per popup (SW-01): its schedule and each word's slot in it, by
+/// popup (`Popup::paths_popup`). Words join as they are first seen, so a
+/// slot once given never changes.
+struct PenBook {
+    schedule: PenSchedule,
+    slot: HashMap<u32, usize>,
+    used: f64,
+}
+
+fn pens() -> &'static Mutex<HashMap<u64, PenBook>> {
+    static C: std::sync::OnceLock<Mutex<HashMap<u64, PenBook>>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
 impl Popup {
     /// The pen writing each new word by its strokes (MO-80), over the live
     /// text, which arrives at the reading-line ink and fills as the pen
-    /// passes.
+    /// passes. One pen for the popup, a word at a time (SW-01): a word the
+    /// pen cannot start within 250 ms is swept in instead.
     fn writing_overlay(&self, laid: &[Laid], w: f32, h: f32) -> Option<Element<Msg>> {
         if self.paths_reduced() {
             return None;
         }
         let l = &self.look;
         let size = l.text_style().size;
-        let mut plays: Vec<(Arc<Writing>, f64)> = Vec::new();
+        let now = self.extra.now;
+        let popup = self.paths_popup();
+        let mut plays: Vec<(Arc<Writing>, PenSlot)> = Vec::new();
+        let mut books = pens().lock().unwrap_or_else(|e| e.into_inner());
+        if books.len() > 64 {
+            books.retain(|_, b| now - b.used < 30.0);
+        }
+        let book = books.entry(popup).or_insert_with(|| PenBook {
+            schedule: PenSchedule::new(PenParams {
+                speed: PEN_SPEED * size,
+                ..PenParams::default()
+            }),
+            slot: HashMap::new(),
+            used: now,
+        });
+        book.used = now;
         for word in laid {
-            let born = self.paths_times(word).0;
-            if born + WRITE_SECS + WRITE_FADE < self.extra.now - 0.05 {
+            let known = book
+                .slot
+                .get(&word.id)
+                .and_then(|&i| book.schedule.slot(i))
+                .copied();
+            if known.is_some_and(|x| x.end + WRITE_FADE < now - 0.05) {
                 continue;
             }
-            let key: WriteKey = (
-                word.id,
-                word.text.clone(),
-                (word.x.0 * 4.0) as i32,
-                (word.baseline * 4.0) as i32,
-                size.to_bits(),
-            );
-            let writing = {
-                let mut c = write_cache().lock().unwrap_or_else(|e| e.into_inner());
-                if c.len() > 256 {
-                    c.clear();
+            let writing = self.writing(word, size);
+            let slot = match known {
+                Some(x) => x,
+                None => {
+                    let born = self.paths_times(word).0;
+                    let i = book.schedule.push(born, writing.length());
+                    book.slot.insert(word.id, i);
+                    book.schedule.slots()[i]
                 }
-                c.entry(key)
-                    .or_insert_with(|| {
-                        let outline =
-                            WordOutline::new(self.measure.fonts(), &word.shaped, size, Point::ZERO);
-                        // The laid glyph clusters index the joined text: rebase them
-                        // onto the word's own text.
-                        let base = word.shaped.glyphs.first().map_or(0, |g| g.cluster);
-                        let mut outline = outline;
-                        for g in &mut outline.glyphs {
-                            g.cluster -= base;
-                        }
-                        Arc::new(Writing::new(
-                            self.measure.fonts(),
-                            &word.text,
-                            outline,
-                            0.15 * size,
-                        ))
-                    })
-                    .clone()
             };
-            plays.push((writing, born));
+            if slot.end + WRITE_FADE < now - 0.05 {
+                continue;
+            }
+            plays.push((writing, slot));
         }
-        let until = plays
-            .iter()
-            .map(|p| p.1 + WRITE_SECS + WRITE_FADE)
-            .fold(0.0, f64::max);
+        drop(books);
         if plays.is_empty() {
             return None;
         }
+        let until = plays
+            .iter()
+            .map(|p| p.1.end + WRITE_FADE)
+            .fold(0.0, f64::max);
         let (accent, head) = (l.accent, l.foreground);
         let draw = move |t: f64, r: Rect, p: &mut Painter| {
             p.layer(Affine::translate(r.x, r.y), 1.0, |p| {
-                for (writing, born) in &plays {
-                    if t < *born {
-                        continue;
-                    }
-                    let k = ((t - born) / WRITE_SECS).clamp(0.0, 1.0);
-                    let fade = (1.0 - (t - born - WRITE_SECS) / WRITE_FADE).clamp(0.0, 1.0) as f32;
-                    if fade <= 0.0 {
-                        continue;
-                    }
-                    // The pen starts quick and slows as it lands.
-                    let s = kit::ease_out(k) * writing.length();
-                    let style = WriteStyle {
+                for (writing, slot) in &plays {
+                    let style = |fade: f32, pen_head: f32| WriteStyle {
                         pen: StrokeStyle::solid(1.4, accent.fade(fade)),
-                        head: if k < 1.0 { 3.0 } else { 0.0 },
+                        head: pen_head,
                         head_color: head,
                         ink: head.fade(0.0),
                         ink_floor: 0.0,
                     };
-                    writing.draw(p, s, &style);
+                    match slot.phase(t) {
+                        PenPhase::Waiting => {}
+                        PenPhase::Writing(u) => {
+                            let (done, along) = writing.pen_at(u);
+                            writing.draw_from(p, done, along, &style(1.0, 3.0));
+                        }
+                        PenPhase::Sweeping(k) => writing.draw_swept(p, k, &style(1.0, 0.0)),
+                        PenPhase::Done => {
+                            let fade = (1.0 - (t - slot.end) / WRITE_FADE).clamp(0.0, 1.0) as f32;
+                            if fade > 0.0 {
+                                let all = writing.strokes().count();
+                                writing.draw_from(p, all, 0.0, &style(fade, 0.0));
+                            }
+                        }
+                    }
                 }
             })
         };
         Some(kit::at(Element::canvas("stroke-write", until, draw), 0.0, 0.0).size(w, h))
+    }
+
+    /// `word`'s pen strokes, built once and shared like the morphs.
+    fn writing(&self, word: &Laid, size: f32) -> Arc<Writing> {
+        let key: WriteKey = (
+            word.id,
+            word.text.clone(),
+            (word.x.0 * 4.0) as i32,
+            (word.baseline * 4.0) as i32,
+            size.to_bits(),
+        );
+        let mut c = write_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if c.len() > 256 {
+            c.clear();
+        }
+        c.entry(key)
+            .or_insert_with(|| {
+                let mut outline =
+                    WordOutline::new(self.measure.fonts(), &word.shaped, size, Point::ZERO);
+                // The laid glyph clusters index the joined text: rebase them
+                // onto the word's own text.
+                let base = word.shaped.glyphs.first().map_or(0, |g| g.cluster);
+                for g in &mut outline.glyphs {
+                    g.cluster -= base;
+                }
+                Arc::new(Writing::new(
+                    self.measure.fonts(),
+                    &word.text,
+                    outline,
+                    0.15 * size,
+                ))
+            })
+            .clone()
     }
 }
 
@@ -622,15 +676,19 @@ fn seen() -> &'static Mutex<HashMap<SeenKey, Seen>> {
 }
 
 impl Popup {
+    /// One popup: when it opened, its theme and its features, so the
+    /// station's tiles keep apart.
+    fn paths_popup(&self) -> u64 {
+        self.look.features.iter().flat_map(|f| f.bytes()).fold(
+            self.shown_at.to_bits() ^ (self.look.theme as u64).rotate_left(48),
+            |h, b| h.rotate_left(5) ^ b as u64,
+        )
+    }
+
     /// When `w` came and when its text last changed after that.
     fn paths_times(&self, w: &Laid) -> (f64, Option<f64>) {
         let now = self.extra.now;
-        // One popup: when it opened, its theme and its features, so the
-        // station's tiles keep apart.
-        let popup = self.look.features.iter().flat_map(|f| f.bytes()).fold(
-            self.shown_at.to_bits() ^ (self.look.theme as u64).rotate_left(48),
-            |h, b| h.rotate_left(5) ^ b as u64,
-        );
+        let popup = self.paths_popup();
         let mut map = seen().lock().unwrap_or_else(|e| e.into_inner());
         if map.len() > 4096 {
             map.retain(|_, s| now - s.changed.unwrap_or(s.born) < 30.0);
