@@ -844,7 +844,9 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.10))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(self.ghost_enter(Transition::fade().opacity(0.0)))
-            .word_change(Transition::fade().opacity(0.4))
+            // A revised word on the reading line stays readable: it starts at the
+            // reading-line ink (0.7), as a rewrapped or rolled word does.
+            .word_change(Transition::fade().opacity(0.7))
             // The newest word runs from pale blue through blue to violet, as drawn.
             .current_word(self.shown.last().map(|w| w.id))
             .word_mark(
