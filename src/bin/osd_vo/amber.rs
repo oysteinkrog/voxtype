@@ -531,29 +531,28 @@ impl Popup {
             ))
     }
 
-    /// The vertical labels down the left and the right, one character a
-    /// row.
+    /// The vertical labels down the left and the right: vertical text (EG-30),
+    /// so the face's vertical forms and metrics set them, one character every
+    /// `JP_STEP` concept pixels.
     fn amber_side_labels(&self, g: &Geo) -> Element<Msg> {
         let k = g.k;
         let f = fonts(&self.look);
-        let style = TextStyle::new(f.jp, JP_PX * k, JP_STEP * k);
+        let style = TextStyle {
+            tracking: (JP_STEP - JP_PX) * k,
+            ..TextStyle::new(f.jp, JP_PX * k, JP_STEP * k).vertical()
+        };
         let column = |key: &str, text: &str, x: f32, y: f32, end: f32, a: f32| {
-            let mut e = Element::layer(key.to_string());
             // A short popup shows only the characters that fit above `end`.
             let fit = ((end - y) / JP_STEP).floor().max(0.0) as usize;
-            for (i, ch) in text.chars().take(fit).enumerate() {
-                let s = ch.to_string();
-                e = e.child(at(
-                    Element::label(format!("{key}-{i}"), s.as_str())
-                        .text_style(style)
-                        .color(hex(AMBER, a))
-                        .width(JP_PX * k * 1.2)
-                        .presence(Transition::fade().wipe(1.0), Transition::fade()),
-                    (x - JP_PX / 2.0) * k,
-                    (y + i as f32 * JP_STEP) * k,
-                ));
-            }
-            e
+            let shown: String = text.chars().take(fit).collect();
+            at(
+                Element::label(key.to_string(), shown.as_str())
+                    .text_style(style)
+                    .color(hex(AMBER, a))
+                    .presence(Transition::fade().wipe(1.0), Transition::fade()),
+                (x - JP_PX / 2.0) * k,
+                y * k,
+            )
         };
         Element::layer("labels")
             .child(column(
@@ -781,6 +780,97 @@ mod tests {
         assert!(peak > WAVE_AMP * 0.3);
         let quiet = panel(0.0);
         assert_eq!(quiet.bar(2.0, WAVE_BARS / 2), 0.0);
+    }
+
+    /// The side captions' glyphs as `glyph x y size`, two decimals, for the
+    /// amber look at `scale` times the concept's width.
+    fn side_caption(reg: &FontRegistry, scale: f32) -> Option<String> {
+        use vo::scene::scene::Scene;
+        use vo::scene::text::ShapedLayout;
+        let theme = PlasmaTheme::default();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Amber,
+            width_px: (CONCEPT_W * scale) as u32,
+            ..OsdConfig::default()
+        };
+        let look = Look::new(&cfg, &theme, String::new(), reg);
+        let jp = fonts(&look).jp;
+        if jp == SANS {
+            return None;
+        }
+        let popup = Popup::new(look, reg);
+        let g = Geo::new(&popup.look);
+        let mut scene: Scene<Msg> =
+            Scene::new().with_text(Box::new(ShapedLayout::new(reg.clone())));
+        scene.set_viewport(0.0, g.surface(), 1.0);
+        scene.apply(
+            Element::column("root").child(popup.amber_side_labels(&g)),
+            0.0,
+        );
+        let list = scene.sample(2.0);
+        let mut out = String::new();
+        for gl in list.glyphs.iter().filter(|gl| gl.font == jp) {
+            out += &format!(
+                "{} {:.2} {:.2} {:.2}\n",
+                gl.glyph, gl.pos.x, gl.pos.y, gl.size
+            );
+        }
+        Some(out)
+    }
+
+    /// EG-30: a golden of the side captions at 1x and 1.5x. Needs IBM Plex
+    /// Sans JP (skipped without it). `VOXTYPE_BLESS=1` rewrites the files.
+    #[test]
+    fn the_side_captions_match_their_golden() {
+        // One registry: `fonts` keeps the first look's font ids.
+        let reg = load_fonts(&PlasmaTheme::default()).unwrap();
+        for (scale, name) in [(1.0, "1x"), (1.5, "1.5x")] {
+            let Some(got) = side_caption(&reg, scale) else {
+                eprintln!("IBM Plex Sans JP is not installed: no side caption golden");
+                return;
+            };
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "tests/fixtures/osd-vo/amber-side-caption-{name}.txt"
+            ));
+            if std::env::var_os("VOXTYPE_BLESS").is_some() {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &got).unwrap();
+            }
+            let want = std::fs::read_to_string(&path).unwrap_or_default();
+            assert_eq!(
+                got,
+                want,
+                "{} differs; VOXTYPE_BLESS=1 rewrites it",
+                path.display()
+            );
+            // Top to bottom in one column, one character every JP_STEP.
+            let rows: Vec<Vec<f32>> = got
+                .lines()
+                .map(|l| l.split(' ').skip(1).map(|v| v.parse().unwrap()).collect())
+                .collect();
+            // The right label shows whole; the left one as much as fits the popup.
+            let right: Vec<_> = rows
+                .iter()
+                .filter(|r| r[0] > 300.0 * scale)
+                .cloned()
+                .collect();
+            let left: Vec<_> = rows
+                .iter()
+                .filter(|r| r[0] < 300.0 * scale)
+                .cloned()
+                .collect();
+            assert_eq!(right.len(), RIGHT_LABEL.chars().count());
+            // The look's scale, from its whole-pixel width.
+            let k = (CONCEPT_W * scale) as u32 as f32 / CONCEPT_W;
+            assert!(!left.is_empty());
+            for pair in left.windows(2).chain(right.windows(2)) {
+                assert!(
+                    (pair[1][1] - pair[0][1] - JP_STEP * k).abs() < 0.02,
+                    "{pair:?}"
+                );
+                assert!((pair[1][0] - pair[0][0]).abs() <= 0.5, "{pair:?}");
+            }
+        }
     }
 
     #[test]
