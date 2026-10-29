@@ -4556,6 +4556,14 @@ impl Daemon {
                                 tracing::trace!("Cancel ignored - not recording or transcribing");
                             }
                         }
+
+                        // Nothing arms the listener's correction flag yet, so
+                        // these only arrive once recording sets it.
+                        (event @ (HotkeyEvent::CorrectionStart { .. }
+                            | HotkeyEvent::CorrectionEnd
+                            | HotkeyEvent::CorrectionCancel), _) => {
+                            tracing::debug!("Correction hold event not handled yet: {:?}", event);
+                        }
                     }
                 }
 

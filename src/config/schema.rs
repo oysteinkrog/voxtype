@@ -901,6 +901,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Secondary-model modifier",
         "Hold this alongside the hotkey to transcribe with whisper.secondary_model.",
     ),
+    spec(
+        "hotkey.correction_key",
+        "hotkey",
+        "correction_key",
+        open(HOTKEY_MODIFIER_CHOICES),
+        "Hotkey",
+        "Correction key",
+        "Hold this while recording and respeak words to replace the ones they sound like. Taps keep their meaning.",
+    ),
+    spec(
+        "hotkey.correction_hold_ms",
+        "hotkey",
+        "correction_hold_ms",
+        KeyType::Int { min: 100, max: 5000 },
+        "Hotkey",
+        "Correction hold",
+        "Milliseconds the correction key must be held before a correction starts.",
+    ),
     // -- Audio --------------------------------------------------------------
     spec(
         "audio.device",
@@ -2586,6 +2604,8 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }),
         "hotkey.cancel_key" => opt_str(cfg.hotkey.cancel_key.as_ref()),
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
+        "hotkey.correction_key" => opt_str(cfg.hotkey.correction_key.as_ref()),
+        "hotkey.correction_hold_ms" => json!(cfg.hotkey.correction_hold_ms),
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),

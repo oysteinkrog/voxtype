@@ -136,6 +136,12 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(ref model_modifier) = cli.model_modifier {
         config.hotkey.model_modifier = Some(model_modifier.clone());
     }
+    if let Some(ref correction_key) = cli.correction_key {
+        config.hotkey.correction_key = Some(correction_key.clone());
+    }
+    if let Some(ms) = cli.correction_hold_ms {
+        config.hotkey.correction_hold_ms = ms;
+    }
 
     // Whisper overrides
     if let Some(delay) = cli.pre_type_delay {

@@ -16,6 +16,8 @@ use inotify::{Inotify, WatchMask};
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
@@ -41,6 +43,10 @@ pub struct EvdevListener {
     double_tap_cancel: Option<Key>,
     /// Watch for the popup's look chord (`HotkeyConfig::look_chord`)
     look_chord: bool,
+    /// Correction key and its hold threshold (`HotkeyConfig::correction_key`)
+    correction: Option<(Key, Duration)>,
+    /// Set by the daemon while it records; holds count only then
+    correction_armed: Arc<AtomicBool>,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -97,6 +103,8 @@ impl EvdevListener {
             }
         }
 
+        let correction = correction_setting(config, target_key, cancel_key)?;
+
         // Verify we can access /dev/input (permission check)
         std::fs::read_dir("/dev/input")
             .map_err(|e| HotkeyError::DeviceAccess(format!("/dev/input: {}", e)))?;
@@ -122,6 +130,8 @@ impl EvdevListener {
                 .map(|k| parse_key_name(k))
                 .transpose()?,
             look_chord: config.look_chord,
+            correction,
+            correction_armed: Arc::new(AtomicBool::new(false)),
             stop_signal: None,
         })
     }
@@ -148,6 +158,9 @@ impl HotkeyListener for EvdevListener {
         let double_tap_alt = self.double_tap_alt;
         let double_tap_cancel = self.double_tap_cancel;
         let look_chord = self.look_chord;
+        let correction = self
+            .correction
+            .map(|(key, hold)| (key, hold, self.correction_armed.clone()));
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
@@ -162,6 +175,7 @@ impl HotkeyListener for EvdevListener {
                 double_tap_alt,
                 double_tap_cancel,
                 look_chord,
+                correction,
                 tx,
                 stop_rx,
             ) {
@@ -178,6 +192,50 @@ impl HotkeyListener for EvdevListener {
         }
         Ok(())
     }
+
+    fn correction_armed(&self) -> Option<Arc<AtomicBool>> {
+        self.correction.map(|_| self.correction_armed.clone())
+    }
+}
+
+/// The correction key and hold threshold to use, or None when corrections
+/// are off. A key that already starts, stops or cancels on its own press
+/// would fire both, so it turns corrections off with a warning; the
+/// double-tap keys are fine, since a hold is never a tap.
+fn correction_setting(
+    config: &HotkeyConfig,
+    target_key: Key,
+    cancel_key: Option<Key>,
+) -> Result<Option<(Key, Duration)>, HotkeyError> {
+    let Some(name) = &config.correction_key else {
+        return Ok(None);
+    };
+    let key = parse_key_name(name)?;
+    let single_press_key = !config.double_tap && key == target_key;
+    if single_press_key || cancel_key == Some(key) {
+        tracing::warn!(
+            "correction_key {:?} also starts, stops or cancels recording on a press; \
+             corrections are off",
+            key
+        );
+        return Ok(None);
+    }
+    let mut hold_ms = config.correction_hold_ms;
+    if config.double_tap && hold_ms < config.double_tap_ms + 150 {
+        hold_ms = config.double_tap_ms + 150;
+        tracing::warn!(
+            "correction_hold_ms {} is too close to double_tap_ms {}; using {} ms",
+            config.correction_hold_ms,
+            config.double_tap_ms,
+            hold_ms
+        );
+    }
+    tracing::info!(
+        "Holding {:?} for {} ms while recording starts a correction",
+        key,
+        hold_ms
+    );
+    Ok(Some((key, Duration::from_millis(hold_ms))))
 }
 
 /// Manages input devices with hotplug detection via inotify
@@ -553,6 +611,107 @@ impl DoubleTap {
     }
 }
 
+/// What a correction hold did.
+#[derive(Debug, PartialEq, Eq)]
+enum HoldEvent {
+    /// The hold passed its threshold; it began at this key-down.
+    Start(Instant),
+    End,
+    Cancel,
+}
+
+/// Detects a clean hold of the correction key while recording: held for at
+/// least `hold` with no other key pressed. A shorter press is left alone, so
+/// taps and double taps of the same key keep working: `DoubleTap` only
+/// counts presses shorter than its window, which is below `hold`.
+struct CleanHold {
+    key: Key,
+    hold: Duration,
+    /// Keys that end the correction instead of dropping it: the hotkeys,
+    /// so a stop gesture during the hold applies the correction first.
+    hotkeys: Vec<Key>,
+    /// When the key went down, while the hold is still clean.
+    down_at: Option<Instant>,
+    /// Whether `Start` was sent for the current hold.
+    started: bool,
+}
+
+impl CleanHold {
+    fn new(key: Key, hold: Duration, hotkeys: Vec<Key>) -> Self {
+        Self {
+            key,
+            hold,
+            hotkeys,
+            down_at: None,
+            started: false,
+        }
+    }
+
+    /// Feed one key event. `armed` is whether the daemon is recording.
+    fn event(&mut self, key: Key, value: i32, now: Instant, armed: bool) -> Option<HoldEvent> {
+        if key == self.key {
+            return match value {
+                1 => {
+                    self.down_at = armed.then_some(now);
+                    self.started = false;
+                    None
+                }
+                0 => {
+                    self.down_at = None;
+                    std::mem::take(&mut self.started).then_some(HoldEvent::End)
+                }
+                _ => None,
+            };
+        }
+        if value != 1 {
+            return None;
+        }
+        self.down_at = None;
+        std::mem::take(&mut self.started).then(|| {
+            if self.hotkeys.contains(&key) {
+                HoldEvent::End
+            } else {
+                HoldEvent::Cancel
+            }
+        })
+    }
+
+    /// Call often (every poll): starts the correction once the clean hold
+    /// passes the threshold. A hold whose recording ended before then is
+    /// dropped.
+    fn tick(&mut self, now: Instant, armed: bool) -> Option<HoldEvent> {
+        let down = self.down_at?;
+        if self.started {
+            return None;
+        }
+        if !armed {
+            self.down_at = None;
+            return None;
+        }
+        (now.duration_since(down) >= self.hold).then(|| {
+            self.started = true;
+            HoldEvent::Start(down)
+        })
+    }
+
+    /// Devices changed: whatever was held is gone. A started correction
+    /// is dropped rather than applied, since its end is unknown.
+    fn reset(&mut self) -> Option<HoldEvent> {
+        self.down_at = None;
+        std::mem::take(&mut self.started).then_some(HoldEvent::Cancel)
+    }
+}
+
+impl From<HoldEvent> for HotkeyEvent {
+    fn from(event: HoldEvent) -> Self {
+        match event {
+            HoldEvent::Start(pressed_at) => HotkeyEvent::CorrectionStart { pressed_at },
+            HoldEvent::End => HotkeyEvent::CorrectionEnd,
+            HoldEvent::Cancel => HotkeyEvent::CorrectionCancel,
+        }
+    }
+}
+
 /// Left Ctrl and Right Ctrl held, then Down or Up: the popup's next or
 /// previous look (`crate::osd::look_step`).
 ///
@@ -595,6 +754,7 @@ fn evdev_listener_loop(
     double_tap_alt: Option<Key>,
     double_tap_cancel: Option<Key>,
     look_chord: bool,
+    correction: Option<(Key, Duration, Arc<AtomicBool>)>,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -633,6 +793,17 @@ fn evdev_listener_loop(
     };
 
     let mut look_chord = look_chord.then(LookChord::default);
+
+    let mut correction = correction.map(|(key, hold, armed)| {
+        let alt = double_tap_alt.as_ref().map(|(k, _)| *k);
+        let cancel = double_tap_cancel.as_ref().map(|(k, _)| *k);
+        let hotkeys = [Some(target_key), alt, cancel]
+            .into_iter()
+            .flatten()
+            .filter(|k| *k != key)
+            .collect();
+        (CleanHold::new(key, hold, hotkeys), armed)
+    });
 
     if let Some(cancel) = cancel_key {
         tracing::info!(
@@ -690,6 +861,11 @@ fn evdev_listener_loop(
             }
             if let Some(chord) = look_chord.as_mut() {
                 *chord = LookChord::default();
+            }
+            if let Some(event) = correction.as_mut().and_then(|(hold, _)| hold.reset()) {
+                if tx.blocking_send(event.into()).is_err() {
+                    return Ok(()); // Channel closed
+                }
             }
             manager.handle_device_changes();
         }
@@ -769,6 +945,22 @@ fn evdev_listener_loop(
             if let Some(forward) = look_chord.as_mut().and_then(|c| c.event(key, value)) {
                 tracing::debug!("Look chord ({})", if forward { "next" } else { "previous" });
                 crate::osd::look_step::write(forward);
+            }
+
+            // The correction hold sees every key first, so its end or cancel
+            // reaches the daemon before a stop or cancel the same key fires.
+            if let Some((hold, armed)) = correction.as_mut() {
+                let now = Instant::now();
+                let armed = armed.load(Ordering::Relaxed);
+                for event in [hold.tick(now, armed), hold.event(key, value, now, armed)]
+                    .into_iter()
+                    .flatten()
+                {
+                    tracing::debug!("Correction hold: {:?}", event);
+                    if tx.blocking_send(event.into()).is_err() {
+                        return Ok(()); // Channel closed
+                    }
+                }
             }
 
             // Check cancel key first (if configured)
@@ -864,6 +1056,16 @@ fn evdev_listener_loop(
                         }
                     }
                     TargetKeyAction::Ignore => {}
+                }
+            }
+        }
+
+        // A hold passes its threshold with no key event, so check it here.
+        if let Some((hold, armed)) = correction.as_mut() {
+            if let Some(event) = hold.tick(Instant::now(), armed.load(Ordering::Relaxed)) {
+                tracing::debug!("Correction hold: {:?}", event);
+                if tx.blocking_send(event.into()).is_err() {
+                    return Ok(()); // Channel closed
                 }
             }
         }
@@ -1132,8 +1334,13 @@ mod tests {
         main: DoubleTap,
         alt: DoubleTap,
         cancel: DoubleTap,
+        /// Right Shift is also the correction key, held 450 ms.
+        hold: CleanHold,
+        /// Whether the daemon is recording.
+        armed: bool,
         t: Instant,
-        /// Look steps (`true` = next) and double taps fired, in order.
+        /// Look steps (`true` = next), double taps and correction events
+        /// fired, in order.
         fired: Vec<String>,
     }
 
@@ -1145,14 +1352,49 @@ mod tests {
                 main: DoubleTap::new(w),
                 alt: DoubleTap::new(w),
                 cancel: DoubleTap::new(w),
+                hold: CleanHold::new(
+                    Key::KEY_RIGHTSHIFT,
+                    Duration::from_millis(450),
+                    vec![Key::KEY_RIGHTCTRL, Key::KEY_RIGHTALT],
+                ),
+                armed: false,
                 t: Instant::now(),
                 fired: Vec::new(),
             }
         }
 
+        fn recording(&mut self, armed: bool) -> &mut Keys {
+            self.armed = armed;
+            self
+        }
+
+        fn push_hold(&mut self, event: Option<HoldEvent>) {
+            let name = match event {
+                Some(HoldEvent::Start(at)) => {
+                    format!("start@{}", at.duration_since(self.t).as_millis())
+                }
+                Some(HoldEvent::End) => "end".into(),
+                Some(HoldEvent::Cancel) => "cancel-correction".into(),
+                None => return,
+            };
+            self.fired.push(name);
+        }
+
+        /// A poll with no key event `ms` after the start.
+        fn at(&mut self, ms: u64) -> &mut Keys {
+            let now = self.t + Duration::from_millis(ms);
+            let event = self.hold.tick(now, self.armed);
+            self.push_hold(event);
+            self
+        }
+
         /// One key event `ms` after the start, in the loop's order.
         fn key(&mut self, ms: u64, key: Key, value: i32) -> &mut Keys {
             let now = self.t + Duration::from_millis(ms);
+            let event = self.hold.tick(now, self.armed);
+            self.push_hold(event);
+            let event = self.hold.event(key, value, now, self.armed);
+            self.push_hold(event);
             if let Some(forward) = self.chord.event(key, value) {
                 self.fired
                     .push(if forward { "next" } else { "prev" }.into());
@@ -1314,6 +1556,165 @@ mod tests {
         dt.event(true, 0, ms(80));
         dt.event(true, 1, ms(500));
         assert!(!dt.event(true, 0, ms(550)));
+    }
+
+    #[test]
+    fn taps_of_the_correction_key_still_paste_while_recording() {
+        let mut k = Keys::new();
+        k.recording(true)
+            .key(0, Key::KEY_RIGHTSHIFT, 1)
+            .key(80, Key::KEY_RIGHTSHIFT, 0)
+            .key(200, Key::KEY_RIGHTSHIFT, 1)
+            .key(260, Key::KEY_RIGHTSHIFT, 0)
+            .at(900);
+        assert_eq!(k.fired, ["alt"]);
+        // A slow press under the hold threshold is neither.
+        let mut k = Keys::new();
+        k.recording(true)
+            .key(0, Key::KEY_RIGHTSHIFT, 1)
+            .at(400)
+            .key(420, Key::KEY_RIGHTSHIFT, 0);
+        assert!(k.fired.is_empty(), "{:?}", k.fired);
+    }
+
+    #[test]
+    fn a_clean_hold_starts_at_key_down_and_never_stops() {
+        let mut k = Keys::new();
+        k.recording(true)
+            .key(100, Key::KEY_RIGHTSHIFT, 1)
+            .at(400)
+            .at(550)
+            .key(600, Key::KEY_RIGHTSHIFT, 2)
+            .at(1500)
+            .key(2000, Key::KEY_RIGHTSHIFT, 0);
+        assert_eq!(k.fired, ["start@100", "end"]);
+    }
+
+    #[test]
+    fn a_release_in_the_same_poll_as_the_threshold_still_starts_first() {
+        let mut k = Keys::new();
+        k.recording(true)
+            .key(0, Key::KEY_RIGHTSHIFT, 1)
+            .key(700, Key::KEY_RIGHTSHIFT, 0);
+        assert_eq!(k.fired, ["start@0", "end"]);
+    }
+
+    #[test]
+    fn another_key_during_the_hold_cancels_the_correction() {
+        // Shift for a capital letter after the correction started.
+        let mut k = Keys::new();
+        k.recording(true)
+            .key(0, Key::KEY_RIGHTSHIFT, 1)
+            .at(500)
+            .key(600, Key::KEY_A, 1)
+            .key(650, Key::KEY_A, 0)
+            .key(700, Key::KEY_RIGHTSHIFT, 0);
+        assert_eq!(k.fired, ["start@0", "cancel-correction"]);
+        // Typed before the threshold: never starts at all.
+        let mut k = Keys::new();
+        k.recording(true)
+            .key(0, Key::KEY_RIGHTSHIFT, 1)
+            .key(100, Key::KEY_A, 1)
+            .key(150, Key::KEY_A, 0)
+            .at(800)
+            .key(900, Key::KEY_RIGHTSHIFT, 0);
+        assert!(k.fired.is_empty(), "{:?}", k.fired);
+    }
+
+    #[test]
+    fn a_stop_during_the_hold_ends_the_correction_before_stopping() {
+        let mut k = Keys::new();
+        k.recording(true)
+            .key(0, Key::KEY_RIGHTSHIFT, 1)
+            .at(500)
+            .key(800, Key::KEY_RIGHTCTRL, 1)
+            .key(850, Key::KEY_RIGHTCTRL, 0)
+            .key(950, Key::KEY_RIGHTCTRL, 1)
+            .key(1000, Key::KEY_RIGHTCTRL, 0)
+            .key(1100, Key::KEY_RIGHTSHIFT, 0);
+        assert_eq!(k.fired, ["start@0", "end", "main"]);
+    }
+
+    #[test]
+    fn a_tap_then_a_long_hold_is_only_a_correction() {
+        let mut k = Keys::new();
+        k.recording(true)
+            .key(0, Key::KEY_RIGHTSHIFT, 1)
+            .key(80, Key::KEY_RIGHTSHIFT, 0)
+            .key(200, Key::KEY_RIGHTSHIFT, 1)
+            .at(700)
+            .key(1200, Key::KEY_RIGHTSHIFT, 0);
+        assert_eq!(k.fired, ["start@200", "end"]);
+    }
+
+    #[test]
+    fn holds_outside_recording_do_nothing() {
+        let mut k = Keys::new();
+        k.key(0, Key::KEY_RIGHTSHIFT, 1)
+            .at(800)
+            .key(1000, Key::KEY_RIGHTSHIFT, 0);
+        assert!(k.fired.is_empty(), "{:?}", k.fired);
+        // Recording ends before the threshold: dropped.
+        let mut k = Keys::new();
+        k.recording(true).key(0, Key::KEY_RIGHTSHIFT, 1).at(200);
+        k.recording(false).at(500).recording(true).at(600);
+        k.key(700, Key::KEY_RIGHTSHIFT, 0);
+        assert!(k.fired.is_empty(), "{:?}", k.fired);
+    }
+
+    #[test]
+    fn a_device_change_drops_a_started_correction() {
+        let t = Instant::now();
+        let mut hold = CleanHold::new(Key::KEY_RIGHTSHIFT, Duration::from_millis(450), vec![]);
+        assert_eq!(hold.reset(), None);
+        hold.event(Key::KEY_RIGHTSHIFT, 1, t, true);
+        assert_eq!(
+            hold.tick(t + Duration::from_millis(500), true),
+            Some(HoldEvent::Start(t))
+        );
+        assert_eq!(hold.reset(), Some(HoldEvent::Cancel));
+        assert_eq!(hold.event(Key::KEY_RIGHTSHIFT, 0, t, true), None);
+    }
+
+    fn hotkey_config(toml: &str) -> HotkeyConfig {
+        toml::from_str(toml).expect("hotkey config parses")
+    }
+
+    #[test]
+    fn correction_setting_defaults_off_and_keeps_clear_of_double_taps() {
+        let off = hotkey_config("key = \"RIGHTCTRL\"");
+        assert_eq!(
+            correction_setting(&off, Key::KEY_RIGHTCTRL, None).unwrap(),
+            None
+        );
+
+        let cfg = hotkey_config(
+            "key = \"RIGHTCTRL\"\ndouble_tap = true\ncorrection_key = \"RIGHTSHIFT\"",
+        );
+        assert_eq!(
+            correction_setting(&cfg, Key::KEY_RIGHTCTRL, None).unwrap(),
+            Some((Key::KEY_RIGHTSHIFT, Duration::from_millis(450)))
+        );
+        // Too close to the tap window: raised to double_tap_ms + 150.
+        let cfg = hotkey_config(
+            "key = \"RIGHTCTRL\"\ndouble_tap = true\ndouble_tap_ms = 400\n\
+             correction_key = \"RIGHTSHIFT\"\ncorrection_hold_ms = 450",
+        );
+        assert_eq!(
+            correction_setting(&cfg, Key::KEY_RIGHTCTRL, None).unwrap(),
+            Some((Key::KEY_RIGHTSHIFT, Duration::from_millis(550)))
+        );
+        // A single-press push-to-talk key or cancel key cannot double up.
+        let ptt = hotkey_config("key = \"RIGHTSHIFT\"\ncorrection_key = \"RIGHTSHIFT\"");
+        assert_eq!(
+            correction_setting(&ptt, Key::KEY_RIGHTSHIFT, None).unwrap(),
+            None
+        );
+        let cancel = hotkey_config("key = \"RIGHTCTRL\"\ncorrection_key = \"ESC\"");
+        assert_eq!(
+            correction_setting(&cancel, Key::KEY_RIGHTCTRL, Some(Key::KEY_ESC)).unwrap(),
+            None
+        );
     }
 
     #[test]

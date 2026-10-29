@@ -127,6 +127,14 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     if let Ok(key) = std::env::var("VOXTYPE_CANCEL_KEY") {
         config.hotkey.cancel_key = Some(key);
     }
+    if let Ok(key) = std::env::var("VOXTYPE_CORRECTION_KEY") {
+        config.hotkey.correction_key = Some(key);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_CORRECTION_HOLD_MS") {
+        if let Ok(ms) = val.parse::<u64>() {
+            config.hotkey.correction_hold_ms = ms;
+        }
+    }
 
     // Whisper / engine
     if let Ok(model) = std::env::var("VOXTYPE_MODEL") {
