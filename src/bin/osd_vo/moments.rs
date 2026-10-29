@@ -225,8 +225,7 @@ impl Take {
                     clock: self.seq as u64 * (WIRE_SAMPLE_RATE as u64 / FRAME_HZ as u64),
                 });
             }
-            self.inputs.push((t, Input::Msg(Msg::Audio(frames))));
-            self.inputs.push((t, Input::Msg(Msg::Voice(voice))));
+            self.inputs.push((t, Input::Msg(Msg::Audio(frames, voice))));
             t += 0.02;
         }
     }
@@ -242,7 +241,8 @@ impl Take {
                 max: 0.0,
                 peak_dbfs: -120.0,
             };
-            self.inputs.push((t, Input::Msg(Msg::Audio(vec![silent]))));
+            self.inputs
+                .push((t, Input::Msg(Msg::Audio(vec![silent], Vec::new()))));
             pump += 1;
             t += 0.033;
         }
@@ -817,6 +817,29 @@ mod tests {
         assert_eq!(Moment::parse("nope"), None);
     }
 
+    /// Each message is one `update` and one view rebuild, so room tone must come as one
+    /// message per capture batch: its frames and their voice features together.
+    #[test]
+    fn a_room_tone_batch_is_one_message() {
+        let look = test_look();
+        let s = scenario(&look, Moment::LongSilence);
+        let mut at: Vec<f64> = Vec::new();
+        for (t, input) in &s.inputs {
+            if let Input::Msg(Msg::Audio(frames, voice)) = input {
+                assert!(!frames.is_empty());
+                if frames.iter().all(|f| !f.is_pump_silence()) {
+                    assert_eq!(voice.len(), frames.len(), "features ride with their frames");
+                }
+                at.push(*t);
+            }
+        }
+        assert!(at.len() > 100, "the moment records room tone");
+        assert!(
+            at.windows(2).all(|w| w[1] > w[0]),
+            "two audio messages for one batch"
+        );
+    }
+
     #[test]
     fn every_moment_records_then_ends_inside_its_duration() {
         let look = test_look();
@@ -837,7 +860,7 @@ mod tests {
                 .inputs
                 .iter()
                 .filter_map(|(_, i)| match i {
-                    Input::Msg(Msg::Audio(f)) => Some(f.clone()),
+                    Input::Msg(Msg::Audio(f, _)) => Some(f.clone()),
                     _ => None,
                 })
                 .flatten()
@@ -887,7 +910,7 @@ mod tests {
             .inputs
             .iter()
             .filter_map(|(_, i)| match i {
-                Input::Msg(Msg::Voice(v)) => Some(v.clone()),
+                Input::Msg(Msg::Audio(_, v)) => Some(v.clone()),
                 _ => None,
             })
             .flatten()

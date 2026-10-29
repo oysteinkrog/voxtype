@@ -1214,10 +1214,10 @@ impl Voice {
 
 #[derive(Clone, Debug)]
 enum Msg {
-    /// Frames read from the socket in one go.
-    Audio(Vec<AudioFrame>),
-    /// The voice features of those frames, when the daemon sends them.
-    Voice(Vec<Voice>),
+    /// Frames read from the socket in one go, with their voice features when
+    /// the daemon sends them. One message per capture batch, so the view is
+    /// built once per batch.
+    Audio(Vec<AudioFrame>, Vec<Voice>),
     Files(Files),
     /// Time to see whether the daemon went idle.
     Check,
@@ -1722,8 +1722,10 @@ impl App for Popup {
         if self.closing {
             return;
         }
-        if let (Some(r), Some(rec)) = (&self.recorder, replay::Recorded::of(&msg)) {
-            let _ = r.record_at(cx.t(), &rec);
+        if let Some(r) = &self.recorder {
+            for rec in replay::Recorded::of(&msg) {
+                let _ = r.record_at(cx.t(), &rec);
+            }
         }
         let t = cx.t();
         self.extra.now = t;
@@ -1731,11 +1733,16 @@ impl App for Popup {
         // messages and the idle check do.
         let tick = matches!(msg, Msg::Tick);
         match msg {
-            Msg::Audio(frames) => {
-                self.audio(frames, t);
-                self.arm_check(cx);
+            Msg::Audio(frames, voice) => {
+                // A recording played back keeps frames and features apart.
+                if !frames.is_empty() {
+                    self.audio(frames, t);
+                    self.arm_check(cx);
+                }
+                if !voice.is_empty() {
+                    self.voice(voice, t);
+                }
             }
-            Msg::Voice(voice) => self.voice(voice, t),
             Msg::Files(files) => {
                 let step = new_step(self.step_seen, self.files.look_step, files.look_step);
                 self.step_seen = true;
@@ -2105,8 +2112,7 @@ fn placement(cfg: &OsdConfig, look: &Look) -> Placement {
 #[derive(Default)]
 struct Sink {
     proxy: Option<vo::Proxy<Msg>>,
-    audio: Vec<Vec<AudioFrame>>,
-    voice: Vec<Vec<Voice>>,
+    audio: Vec<(Vec<AudioFrame>, Vec<Voice>)>,
     files: Files,
 }
 
@@ -2114,31 +2120,17 @@ struct Sink {
 const HELD_AUDIO: usize = 64;
 
 impl Sink {
-    /// Sends to the open popup, or keeps the message for the next one.
-    fn audio(&mut self, frames: Vec<AudioFrame>) {
+    /// Sends one capture batch to the open popup, or keeps it for the next one.
+    fn audio(&mut self, frames: Vec<AudioFrame>, voice: Vec<Voice>) {
         if let Some(p) = &self.proxy {
-            if p.send(Msg::Audio(frames.clone())) {
+            if p.send(Msg::Audio(frames.clone(), voice.clone())) {
                 return;
             }
             self.proxy = None;
         }
-        self.audio.push(frames);
+        self.audio.push((frames, voice));
         if self.audio.len() > HELD_AUDIO {
             self.audio.remove(0);
-        }
-    }
-
-    /// Like `audio`, for the voice features.
-    fn voice(&mut self, voice: Vec<Voice>) {
-        if let Some(p) = &self.proxy {
-            if p.send(Msg::Voice(voice.clone())) {
-                return;
-            }
-            self.proxy = None;
-        }
-        self.voice.push(voice);
-        if self.voice.len() > HELD_AUDIO {
-            self.voice.remove(0);
         }
     }
 
@@ -2189,10 +2181,7 @@ fn read_audio(shared: Shared, socket: PathBuf, reconnect: Duration) {
                 let frames = rich.into_iter().map(|r| r.frame).collect();
                 let (lock, cv) = &*shared;
                 let mut sink = lock.lock().unwrap();
-                sink.audio(frames);
-                if !voice.is_empty() {
-                    sink.voice(voice);
-                }
+                sink.audio(frames, voice);
                 drop(sink);
                 cv.notify_one();
             }
@@ -2370,11 +2359,8 @@ fn main() -> anyhow::Result<()> {
             let (proxy, inbox) = vo::channel();
             // Audio first: frames that come before the daemon's state file
             // says "recording" must not let the popup close at once.
-            for frames in sink.audio.drain(..) {
-                proxy.send(Msg::Audio(frames));
-            }
-            for voice in sink.voice.drain(..) {
-                proxy.send(Msg::Voice(voice));
+            for (frames, voice) in sink.audio.drain(..) {
+                proxy.send(Msg::Audio(frames, voice));
             }
             proxy.send(Msg::Files(sink.files.clone()));
             sink.proxy = Some(proxy);
@@ -2486,7 +2472,7 @@ fn scenario(look: &Look, cancel: bool) -> vo::Scenario<Msg> {
             });
             seq += 1;
         }
-        inputs.push((t, msg(Msg::Audio(frames))));
+        inputs.push((t, msg(Msg::Audio(frames, Vec::new()))));
         t += 0.02;
     }
     let mut pump = 0u32;
@@ -2498,7 +2484,7 @@ fn scenario(look: &Look, cancel: bool) -> vo::Scenario<Msg> {
             max: 0.0,
             peak_dbfs: -120.0,
         };
-        inputs.push((t, msg(Msg::Audio(vec![silent]))));
+        inputs.push((t, msg(Msg::Audio(vec![silent], Vec::new()))));
         pump += 1;
         t += 0.033;
     }

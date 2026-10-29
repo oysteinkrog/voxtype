@@ -402,7 +402,7 @@ impl Station {
     fn starts_dictation(msg: &Msg) -> bool {
         match msg {
             Msg::Files(f) => (f.recording || f.finishing || f.transcribing) && !f.suppressed,
-            Msg::Audio(frames) => frames.iter().any(|f| !f.is_pump_silence()),
+            Msg::Audio(frames, _) => frames.iter().any(|f| !f.is_pump_silence()),
             _ => false,
         }
     }
@@ -507,7 +507,7 @@ impl App for Station {
                 Cue::Page(gen) => self.turn_page(gen, cx),
                 Cue::Resume(gen) => self.resume(gen, cx),
             },
-            m @ (Msg::Audio(_) | Msg::Voice(_) | Msg::Files(_)) => {
+            m @ (Msg::Audio(..) | Msg::Files(_)) => {
                 if self.script == Script::Live {
                     self.live_msg(m, cx);
                 }

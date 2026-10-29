@@ -16,9 +16,9 @@ use voxtype::audio::features::{AudioFeatures, MEL_BANDS};
 use voxtype::audio::levels::AudioFrame;
 use voxtype::osd::live::LiveDoc;
 
-use super::Msg;
 #[cfg(any(test, feature = "osd-vo-preview"))]
-use super::{Files, Voice};
+use super::Files;
+use super::{Msg, Voice};
 
 /// One recorded message. Audio, voice features and the runtime files; timers are the
 /// popup's own and are not recorded.
@@ -63,32 +63,27 @@ pub(super) struct FilesRec {
 }
 
 impl Recorded {
-    /// The recorded form of `msg`, for the messages a recording keeps.
-    pub(super) fn of(msg: &Msg) -> Option<Recorded> {
-        Some(match msg {
-            Msg::Audio(frames) => Recorded::Audio(
-                frames
-                    .iter()
-                    .map(|f| (f.seq, f.min, f.max, f.peak_dbfs))
-                    .collect(),
-            ),
-            Msg::Voice(v) => Recorded::Voice(
-                v.iter()
-                    .map(|v| VoiceRec {
-                        seq: v.seq,
-                        rms_dbfs: v.features.rms_dbfs,
-                        f0_hz: v.features.f0_hz,
-                        voiced: v.features.voiced,
-                        centroid_hz: v.features.centroid_hz,
-                        flatness: v.features.flatness,
-                        mel: v.features.mel.to_vec(),
-                        onset: v.features.onset,
-                        peak_dbfs: v.peak_dbfs,
-                        clock: v.clock,
-                    })
-                    .collect(),
-            ),
-            Msg::Files(f) => Recorded::Files(Box::new(FilesRec {
+    /// The recorded form of `msg`, for the messages a recording keeps. A capture batch
+    /// is kept as two lines, its frames and then their voice features, as recordings
+    /// made before the two were one message hold them.
+    pub(super) fn of(msg: &Msg) -> Vec<Recorded> {
+        match msg {
+            Msg::Audio(frames, voice) => {
+                let mut recs = Vec::with_capacity(2);
+                if !frames.is_empty() {
+                    recs.push(Recorded::Audio(
+                        frames
+                            .iter()
+                            .map(|f| (f.seq, f.min, f.max, f.peak_dbfs))
+                            .collect(),
+                    ));
+                }
+                if !voice.is_empty() {
+                    recs.push(Recorded::voice(voice));
+                }
+                recs
+            }
+            Msg::Files(f) => vec![Recorded::Files(Box::new(FilesRec {
                 recording: f.recording,
                 finishing: f.finishing,
                 suppressed: f.suppressed,
@@ -96,9 +91,28 @@ impl Recorded {
                 fraction: f.fraction,
                 status: f.status.clone(),
                 live: f.live.clone(),
-            })),
-            _ => return None,
-        })
+            }))],
+            _ => Vec::new(),
+        }
+    }
+
+    fn voice(v: &[Voice]) -> Recorded {
+        Recorded::Voice(
+            v.iter()
+                .map(|v| VoiceRec {
+                    seq: v.seq,
+                    rms_dbfs: v.features.rms_dbfs,
+                    f0_hz: v.features.f0_hz,
+                    voiced: v.features.voiced,
+                    centroid_hz: v.features.centroid_hz,
+                    flatness: v.features.flatness,
+                    mel: v.features.mel.to_vec(),
+                    onset: v.features.onset,
+                    peak_dbfs: v.peak_dbfs,
+                    clock: v.clock,
+                })
+                .collect(),
+        )
     }
 
     // `..Default::default()` covers fields that Files and AudioFeatures gain after a
@@ -117,8 +131,10 @@ impl Recorded {
                         peak_dbfs,
                     })
                     .collect(),
+                Vec::new(),
             ),
-            Recorded::Voice(v) => Msg::Voice(
+            Recorded::Voice(v) => Msg::Audio(
+                Vec::new(),
                 v.into_iter()
                     .map(|v| {
                         let mut mel = [0u8; MEL_BANDS];
@@ -298,14 +314,25 @@ mod tests {
             fraction: Some(0.5),
             ..Files::default()
         };
-        for msg in [Msg::Audio(frames), Msg::Voice(voice), Msg::Files(files)] {
-            let rec = Recorded::of(&msg).expect("kept");
+        // A capture batch is kept as its frames, then their voice features.
+        let batch = Recorded::of(&Msg::Audio(frames.clone(), voice.clone()));
+        assert_eq!(batch.len(), 2);
+        let parts = [
+            Msg::Audio(frames, Vec::new()),
+            Msg::Audio(Vec::new(), voice),
+        ];
+        for (rec, msg) in batch.into_iter().zip(parts) {
             let json = serde_json::to_string(&rec).unwrap();
             let back: Recorded = serde_json::from_str(&json).unwrap();
             assert_eq!(format!("{:?}", back.msg()), format!("{msg:?}"));
         }
+        let msg = Msg::Files(files);
+        let [rec] = <[Recorded; 1]>::try_from(Recorded::of(&msg)).expect("kept");
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: Recorded = serde_json::from_str(&json).unwrap();
+        assert_eq!(format!("{:?}", back.msg()), format!("{msg:?}"));
         assert!(
-            Recorded::of(&Msg::Check).is_none(),
+            Recorded::of(&Msg::Check).is_empty(),
             "timers are not recorded"
         );
     }
@@ -318,7 +345,7 @@ mod tests {
                 finishing,
                 ..Files::default()
             }))
-            .unwrap()
+            .remove(0)
         };
         let events = vec![
             (0.1, files(true, false)),
