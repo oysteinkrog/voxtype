@@ -1328,6 +1328,10 @@ impl Popup {
             .text_halo(hex(DEEP).fade(0.25), 2.0 * s)
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
+            // The block grows upward from the bottom of the box as lines wrap.
+            // It jumps there, so the newest line arrives on the box's last line
+            // and stays (RD-09).
+            .motion(Prop::Position, Motion::Snap)
             .word_enter(Transition::fade().offset(10.0 * s, 0.0));
         let text = at(
             // Anchored to the bottom, so the newest line always sits on the
