@@ -771,18 +771,13 @@ impl Popup {
         // The word count and the pace at the tile's top right: each new word
         // casts a block into the notch by the count (MO-65), and the pace
         // digits lean with the speech rate (MO-66).
+        // Both are off by default on mission, so the shaping and the casts
+        // they need run only when one is on: on room tone the view is rebuilt
+        // every frame, and shaping is most of its cost.
+        let count_cast = self.motion("count-cast");
+        let lean_pace = self.motion("lean-pace");
         let digits = TextStyle::new(f.bold, 12.0, 14.0);
         let caps = TextStyle::new(f.caps, 9.0, 12.0).tracking(1.3);
-        let count = self.tally_count();
-        let (wpm, lean) = self.tally_pace();
-        let wpm = wpm.to_string();
-        let cell = self.measure.layout("0", &digits, None).size.w;
-        let width =
-            |n: usize, unit: &str| cell * n as f32 + self.measure.layout(unit, &caps, None).size.w;
-        let count_x = inner - 46.0 - width(count.len(), " WORDS");
-        let pace_x = count_x - NOTCH_ROOM - 14.0 - width(wpm.len(), " WPM");
-        let notch = Rect::new(count_x - NOTCH_ROOM + 2.0, LABEL_Y - 1.0, 2.5, 13.0);
-        let casts = self.tally_casts(Point::new(TEXT_X, TEXT_TOP), notch, accent, false);
         let stat = |key: &'static str, n: Element<Msg>, unit: &'static str| {
             Element::row(key)
                 .align_items(AlignItems::END)
@@ -799,34 +794,49 @@ impl Popup {
             .radius(5.0)
             .fill(hex(TILE).fade(0.55))
             .border(accent.fade(0.35), 1.0);
-        if self.motion("count-cast") {
-            tile = tile
-                .child(at(
-                    Element::canvas("cast", casts.until(), move |t, r, p| casts.draw(t, r, p))
+        if count_cast || lean_pace {
+            let count = self.tally_count();
+            let cell = self.measure.layout("0", &digits, None).size.w;
+            let width = |n: usize, unit: &str| {
+                cell * n as f32 + self.measure.layout(unit, &caps, None).size.w
+            };
+            let count_x = inner - 46.0 - width(count.len(), " WORDS");
+            if count_cast {
+                let notch = Rect::new(count_x - NOTCH_ROOM + 2.0, LABEL_Y - 1.0, 2.5, 13.0);
+                let casts = self.tally_casts(Point::new(TEXT_X, TEXT_TOP), notch, accent, false);
+                tile = tile
+                    .child(at(
+                        Element::canvas("cast", casts.until(), move |t, r, p| {
+                            casts.draw(t, r, p)
+                        })
                         .size(inner, h),
-                    0.0,
-                    0.0,
-                ))
-                .child(at(
+                        0.0,
+                        0.0,
+                    ))
+                    .child(at(
+                        stat(
+                            "count",
+                            digit_roll("n", &count, digits, hex(INK), roll),
+                            " WORDS",
+                        ),
+                        count_x,
+                        LABEL_Y - 2.0,
+                    ));
+            }
+            if lean_pace {
+                let (wpm, lean) = self.tally_pace();
+                let wpm = wpm.to_string();
+                let pace_x = count_x - NOTCH_ROOM - 14.0 - width(wpm.len(), " WPM");
+                tile = tile.child(at(
                     stat(
-                        "count",
-                        digit_roll("n", &count, digits, hex(INK), roll),
-                        " WORDS",
+                        "pace",
+                        tally::lean_digits("n", &wpm, digits, hex(INK), cell, lean),
+                        " WPM",
                     ),
-                    count_x,
+                    pace_x,
                     LABEL_Y - 2.0,
                 ));
-        }
-        if self.motion("lean-pace") {
-            tile = tile.child(at(
-                stat(
-                    "pace",
-                    tally::lean_digits("n", &wpm, digits, hex(INK), cell, lean),
-                    " WPM",
-                ),
-                pace_x,
-                LABEL_Y - 2.0,
-            ));
+            }
         }
         // LT-07: the kinetic lattice in blueprint style under the words.
         if l.on(wild_space::KINETIC_LATTICE) {
@@ -845,12 +855,23 @@ impl Popup {
                     .map(|e| at(e, TEXT_X, TEXT_TOP)),
             );
         }
-        tile.children(self.limit_line(
-            Point::new(TEXT_X, TEXT_TOP),
-            Size::new(inner, h),
-            hex(INK).fade(0.5),
-            hex(0xFF3B30),
-        ))
+        // MO-35: the hairline shapes the whole transcript to find its line,
+        // so it is built only once the limit is near; until then it would
+        // draw nothing. The audio frames rebuild the view while recording.
+        let limit_near = self.limit_secs().is_some_and(|limit| {
+            self.extra.now + limit::WINDOW_SECS + 1.0 >= self.shown_at + limit
+        });
+        let hairline = if limit_near {
+            self.limit_line(
+                Point::new(TEXT_X, TEXT_TOP),
+                Size::new(inner, h),
+                hex(INK).fade(0.5),
+                hex(0xFF3B30),
+            )
+        } else {
+            None
+        };
+        tile.children(hairline)
         .child(corners(
                 "brackets",
                 inner,
@@ -984,7 +1005,15 @@ impl Popup {
             );
         }
         let mut left = Element::column("left").gap(5.0).child(words);
-        if let Some(fraction) = self
+        // MO-41: the seconds of audio left as a ruler, in place of the
+        // progress line, once the daemon reports them.
+        if let Some(ruler) = self.audio_ruler(hex(ORANGE), hex(TRACK)) {
+            left = left.child(
+                ruler
+                    .width(inner - 230.0)
+                    .presence(Transition::fade(), Transition::fade()),
+            );
+        } else if let Some(fraction) = self
             .kit_progress()
             .filter(|_| mode == Mode::Finishing)
         {
