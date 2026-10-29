@@ -5,7 +5,9 @@
 //! Prints both reports to stdout. Exits with an error when the envelope is
 //! breached or the 95th percentile frame is over budget, so a script can
 //! loop over looks. `VO_REDUCED_MOTION=1` checks the reduced-motion form.
-//! With `--moment NAME` it checks that moment instead.
+//! With `--moment NAME` it checks that moment instead. `VO_ENVELOPE_DETAIL=1`
+//! also prints every breach, one line each (frame, time, word id, kind,
+//! value); it is off by default.
 
 use vo::envelope::{check_scenario, measure_budget, Envelope};
 use vo::{FontRegistry, Options};
