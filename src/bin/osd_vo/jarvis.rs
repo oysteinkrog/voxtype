@@ -1247,9 +1247,12 @@ impl Popup {
             } else {
                 live
             };
+            // A new line comes in through its words' own entry: a fade of
+            // the whole line from 0 put its first word under the reading
+            // line's 70 % ink floor (RD-09).
             let line = Element::layer(format!("line{key}"))
                 .size(w, style.line_height)
-                .presence(Transition::fade(), Transition::fade())
+                .presence(Transition::NONE, Transition::fade())
                 .child(
                     at(live, 0.0, 0.0)
                         .text_style(style)
