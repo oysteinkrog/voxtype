@@ -23,6 +23,11 @@
 //!   faint thread between them on one line: the window the model is still
 //!   thinking about, 0.56 s of audio today.
 //!
+//! - `graded-doubt`: an underline under each word the model was unsure of,
+//!   from entropy 0.3 nats (hairline, faint) to 1.0 (2.4 px, strong), until
+//!   the final pass. It replaces the type look's on/off doubt line, which
+//!   fires only under 60 % confidence, where it is on.
+//!
 //! Nothing shows once the recording stops, so the signals end with the
 //! dictation and nothing moves at room tone. Under reduced motion the ghosts
 //! swap at once (no fades) and the floor jumps between steps: the ink tiers
@@ -39,9 +44,10 @@ pub(crate) const GHOST_TAIL: &str = "ghost-tail";
 pub(crate) const THREE_TIER: &str = "three-tier-ink";
 pub(crate) const FLOOR: &str = "listening-floor";
 pub(crate) const COMMIT_CURSOR: &str = "commit-cursor";
+pub(crate) const GRADED_DOUBT: &str = "graded-doubt";
 
 /// Every model signal feature.
-const ALL: [&str; 4] = [GHOST_TAIL, THREE_TIER, FLOOR, COMMIT_CURSOR];
+const ALL: [&str; 5] = [GHOST_TAIL, THREE_TIER, FLOOR, COMMIT_CURSOR, GRADED_DOUBT];
 
 /// Ink of a tail word with `ghost-tail` alone.
 const GHOST_INK: f32 = 0.45;
@@ -61,6 +67,13 @@ const FLOOR_REST_PX: f32 = 0.5;
 const CURSOR_PX: f32 = 1.5;
 const CURSOR_HEIGHT: f32 = 0.7;
 const CURSOR_GAP: f32 = 2.0;
+/// Graded doubt: a word's entropy (nats) from which it gets an underline,
+/// and at which the underline is at its heaviest.
+const DOUBT_FROM: f32 = 0.3;
+const DOUBT_FULL: f32 = 1.0;
+/// The underline's weight at the lightest and heaviest, in px.
+const DOUBT_MIN_PX: f32 = 0.6;
+const DOUBT_MAX_PX: f32 = 2.4;
 
 /// One word of the tail.
 #[derive(Debug, PartialEq)]
@@ -144,6 +157,9 @@ impl Popup {
             return text;
         }
         let mut text = text;
+        for e in self.graded_doubt(words, width, origin) {
+            text = text.child(e);
+        }
         if let Some(s) = self.live_signals() {
             let laid = self.tail_layout(s, words, width);
             for e in self.ghosts(laid.as_ref(), words, origin, ink) {
@@ -221,6 +237,67 @@ impl Popup {
             tail_end,
             line_h,
         })
+    }
+
+    /// The live model's detail of the shown word `i` of `words`, from
+    /// `preview.json`, when it describes the text on screen.
+    fn word_detail(&self, i: usize) -> Option<&voxtype::osd::live::WordDetail> {
+        let doc = self.files.live.as_ref()?;
+        if doc.text != self.files.preview {
+            return None;
+        }
+        doc.words.get(self.cut + i)?.detail.as_ref()
+    }
+
+    /// `graded-doubt`: an underline under each word the model was unsure
+    /// of, its weight and ink growing with the word's entropy, until the
+    /// final pass. Most words stay plain.
+    fn graded_doubt(&self, words: &[Word], width: f32, origin: (f32, f32)) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(GRADED_DOUBT) || self.status().finishing || self.ending().is_some() {
+            return Vec::new();
+        }
+        let style = l.text_style();
+        let joined = words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let laid = self.measure.layout(&joined, &style, Some(width));
+        let spring = if self.signals_reduced() {
+            Spring::SNAP
+        } else {
+            Spring::critical_to_98(0.3)
+        };
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        for (i, w) in words.iter().enumerate() {
+            let range = start..start + w.text.len();
+            start = range.end + 1;
+            let Some(d) = self.word_detail(i) else { continue };
+            let k = ((d.entropy - DOUBT_FROM) / (DOUBT_FULL - DOUBT_FROM)).clamp(0.0, 1.0);
+            if d.entropy < DOUBT_FROM {
+                continue;
+            }
+            let glyphs: Vec<_> = laid
+                .glyphs
+                .iter()
+                .filter(|g| range.contains(&(g.cluster as usize)))
+                .collect();
+            let (Some(first), Some(last)) = (glyphs.first(), glyphs.last()) else {
+                continue;
+            };
+            let weight = DOUBT_MIN_PX + (DOUBT_MAX_PX - DOUBT_MIN_PX) * k;
+            let line = Element::shape(format!("doubt-{}", w.id), ShapeKind::RRect)
+                .size(last.pos.x + last.advance - first.pos.x, weight)
+                .fill(l.accent.fade(0.3 + 0.5 * k))
+                .motion(Prop::Size, spring)
+                .motion(Prop::Position, Motion::Snap)
+                .presence(Transition::fade(), Transition::fade());
+            let y = first.pos.y + 0.16 * style.size;
+            out.push(kit::at(line, origin.0 + first.pos.x, origin.1 + y));
+        }
+        out
     }
 
     fn ghosts(

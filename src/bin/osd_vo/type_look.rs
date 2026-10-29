@@ -420,7 +420,8 @@ impl Popup {
     /// placed from the same layout the live text uses.
     fn doubt_lines(&self) -> Vec<Element<Msg>> {
         let l = &self.look;
-        if self.extra.doubtful.is_empty() {
+        // graded-doubt draws its own, graded line in place of this one.
+        if self.extra.doubtful.is_empty() || l.on(model_signals::GRADED_DOUBT) {
             return Vec::new();
         }
         let style = l.text_style();
