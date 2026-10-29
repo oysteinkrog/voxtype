@@ -491,15 +491,17 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             k.record(s0);
             let mut t = k.speak(
                 s0,
-                &["open", "the", "confirmation", "file", "and", "set"],
+                &["oh", "pen", "the", "confirmation", "file", "and", "set"],
                 per,
             );
-            // A burst: the newest words rewritten four times in under a
-            // second, one word becoming two and two becoming one, and a word
-            // on the older text put right.
+            // A burst: the newest words rewritten six times in about a second
+            // and a half, two words becoming one twice and a word on the older
+            // text put right. Each merge stays on one line, so its hinge
+            // (MO-21) runs even in a narrow look where the next word wraps.
             let burst = [
                 "open the confirmation file and set the pop",
                 "open the confirmation file and set the pop up",
+                "open the confirmation file and set the popup",
                 "open the confirmation file and set the popup theme",
                 "open the configuration file and set the popup theme to swish",
                 "open the configuration file and set the popup theme to swiss",
