@@ -2002,6 +2002,15 @@ impl Popup {
 
 /// Swiss: nothing animates unless a view asks for it, as in GTK. Showcase
 /// and type: everything springs.
+/// The live surface's margin policy: `Auto` for every look except the ones
+/// that ask for a minimum so entry causes no resize.
+pub(crate) fn surface_margin(look: &Look) -> vo::SurfaceMargin {
+    match look.theme {
+        OsdTheme::Showcase => Popup::showcase_margin(),
+        _ => vo::SurfaceMargin::default(),
+    }
+}
+
 fn default_motion(look: &Look) -> Motion {
     if matches!(
         look.theme,
@@ -2402,6 +2411,7 @@ fn main() -> anyhow::Result<()> {
                 .then(|| Box::new(LogDiagnostics::new(Some(heap))) as Box<dyn vo::Diagnostics>),
             default_motion: default_motion(&look),
             renderer_setup: Some(Arc::new(vo_3d::install)),
+            margin: surface_margin(&look),
             ..Options::default()
         };
         let mut popup = Popup::new(look.clone(), &fonts);

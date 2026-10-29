@@ -542,6 +542,14 @@ impl Popup {
         )
     }
 
+    /// The least transparent room round the showcase panel. The voice glow
+    /// creeps outward in the first 0.4 s and reaches this much in every show,
+    /// so asking for it up front means entry causes no resize. Sized to that
+    /// reach and no more, since the room costs idle memory.
+    pub(crate) fn showcase_margin() -> vo::SurfaceMargin {
+        vo::SurfaceMargin::AtLeast(vo::scene::Insets::new(237.0, 263.0, 237.0, 238.0))
+    }
+
     pub(crate) fn showcase_view(&self) -> Element<Msg> {
         let l = &self.look;
         let m = sc::MARGIN_PX;

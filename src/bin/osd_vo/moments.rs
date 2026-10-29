@@ -727,6 +727,7 @@ pub(crate) fn live(
         diagnostics: Some(Box::new(LogDiagnostics::new(Some(heap)))),
         default_motion: default_motion(&look),
         renderer_setup: Some(Arc::new(vo_3d::install)),
+        margin: surface_margin(&look),
         ..Options::default()
     };
     let spec = live_spec(cfg, &look);
