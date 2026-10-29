@@ -98,6 +98,11 @@ const STRIP_TICK: f64 = 0.6;
 const STRIP_POINTS: usize = 32;
 const STRIP_WORDS: usize = 64;
 
+/// LT-05: the lattice's pause labels under the newest line, in pixels at 1x:
+/// big enough to read, small enough to sit between the descenders and the
+/// transcript frame when the newest line is the fourth.
+const LATTICE_LABEL_PX: f32 = 10.0;
+
 /// m18: the most the trace's live floor swings, in logical pixels, reached
 /// at the room-tone level (`ROOM_TONE_DBFS`); true silence draws it flat.
 const FLOOR_PX: f32 = 1.0;
@@ -967,7 +972,7 @@ impl Popup {
                     stem: 6.0,
                     color: hex(TRACE).fade(0.5),
                     accent: hex(VALUE),
-                    label: newest.then(|| mono(8.0)),
+                    label: newest.then(|| mono(LATTICE_LABEL_PX)),
                     label_color: hex(LABEL).fade(0.8),
                     ..Default::default()
                 };
