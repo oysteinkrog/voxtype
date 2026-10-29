@@ -11,8 +11,8 @@
 #              arriving, one revision and a 1 s pause.
 #   idle-open  `--live-moment long-silence`, scene time 1.8 to 5.9 s: the
 #              popup open and recording room tone, no new words.
-#              The popup paces itself to 30 frames a second on room tone
-#              (RD-11) from 0.6 s after the last word, about 1.8 s here.
+#              The popup paces itself to 15 frames a second on room tone
+#              (RD-11, RD-14) from 0.6 s after the last word, about 1.8 s here.
 #
 # Each live run plays the moment in the real popup surface inside its own
 # nested `kwin_wayland --virtual` (never the real display). CPU is the

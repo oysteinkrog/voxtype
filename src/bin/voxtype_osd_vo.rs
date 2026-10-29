@@ -442,6 +442,15 @@ const ROOM_TONE_DBFS: f64 = -45.0;
 /// frame is this old, so the release of a word's peak scrolls at full rate.
 const ROOM_TONE_AFTER_LOUD_SECS: f64 = 0.3;
 
+/// The frame pace on room tone (RD-14), in frames a second. Half the ambient
+/// cap (`vo_core::ambient::AMBIENT_FPS`, 30): the room-tone waveform is near
+/// flat, and idle loops step at 30, 15 or fewer steps a second, so a 30-step
+/// loop moves two steps a frame, evenly. 15 also divides both 60 and 75 Hz,
+/// so every room-tone frame stays on screen for the same number of vblanks
+/// (20 would alternate on a 75 Hz output). Idle-open CPU on the measure
+/// build drops from about 2.3 to 5 % of one core at 30 to about 1.3 to 2.5 %.
+const ROOM_TONE_FPS: f64 = 15.0;
+
 /// ... and once the last change of words, state or look is this old, so
 /// event motion (near still within 600 ms, MOTION-PLAN rule 8) and the
 /// popup's opening keep the full rate.
@@ -1487,7 +1496,7 @@ impl Popup {
         })
     }
 
-    /// The frame pace at `t` (RD-11): the ambient cap while the popup records
+    /// The frame pace at `t` (RD-11): `ROOM_TONE_FPS` while the popup records
     /// room tone with nothing else going on, else `None` (every vblank). The
     /// waveform keeps scrolling with its whole history and the clock keeps
     /// ticking; only the redraw rate drops.
@@ -1498,7 +1507,7 @@ impl Popup {
             && !self.closing
             && t - self.loud_at >= ROOM_TONE_AFTER_LOUD_SECS
             && t - self.event_at >= ROOM_TONE_AFTER_EVENT_SECS;
-        quiet.then_some(vo_core::ambient::AMBIENT_FPS)
+        quiet.then_some(ROOM_TONE_FPS)
     }
 
     /// The daemon records or makes the final text.
@@ -2939,7 +2948,7 @@ mod tests {
         assert_eq!(new_step(true, None, None), None);
     }
 
-    /// RD-11: on room tone the popup asks for the ambient pace, so a room-tone
+    /// RD-11: on room tone the popup asks for `ROOM_TONE_FPS`, so a room-tone
     /// audio frame does not draw before its slot (vo's `live::pace_tests`),
     /// while the waveform still scrolls and keeps its history. Speech, a
     /// change of words or the end of the recording draws at once again.
@@ -2983,7 +2992,7 @@ mod tests {
         }
         let paced_at = paced_at.expect("room tone is paced");
         assert!(paced_at - speech_end >= ROOM_TONE_AFTER_LOUD_SECS - 1e-9);
-        assert_eq!(p.room_tone_pace(t), Some(vo_core::ambient::AMBIENT_FPS));
+        assert_eq!(p.room_tone_pace(t), Some(ROOM_TONE_FPS));
         // The clock still ticks under the pace.
         assert_eq!(p.clock, format!("00:0{}", t as u64));
         // A new word: the full rate while its motion plays.
