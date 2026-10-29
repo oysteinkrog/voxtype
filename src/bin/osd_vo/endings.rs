@@ -306,7 +306,9 @@ impl Popup {
             .map(|w| w.text.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        let text = self.measure.layout(&joined, &style, Some(w));
+        let mut text = self.measure.layout(&joined, &style, Some(w));
+        // A centred look's words sit where its live text puts them.
+        text.align_in(style.align, w);
         Laid::new(text, &self.shown, style)
     }
 

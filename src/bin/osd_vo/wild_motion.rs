@@ -24,7 +24,7 @@
 
 use super::*;
 
-use vo::scene::flow::letter_physics::LetterPhysics;
+pub(crate) use vo::scene::flow::letter_physics::LetterPhysics;
 use vo::scene::flow::magnet::Magnet;
 use vo::scene::flow::Caret;
 use vo::scene::font::var_axes::Axes;
@@ -53,10 +53,16 @@ const ACCENT: u32 = 0x4DA3FF;
 /// The wildcard motion features of a look on its transcript.
 pub(crate) trait WildMotion {
     fn wild_motion(self, popup: &Popup) -> Self;
+    /// [`WildMotion::wild_motion`] with the letters falling as `letters` says.
+    fn wild_motion_with(self, popup: &Popup, letters: LetterPhysics) -> Self;
 }
 
 impl<M> WildMotion for Element<M> {
     fn wild_motion(self, popup: &Popup) -> Element<M> {
+        self.wild_motion_with(popup, LetterPhysics::default())
+    }
+
+    fn wild_motion_with(self, popup: &Popup, letters: LetterPhysics) -> Element<M> {
         let look = &popup.look;
         let reduced = look.on("reduced-motion") || kit::reduced();
         let accent = Color::hex(ACCENT, 1.0);
@@ -68,7 +74,7 @@ impl<M> WildMotion for Element<M> {
             words = words.word_enter(Transition::fade().opacity(0.7));
         }
         if physics && !reduced {
-            words = words.letter_physics(LetterPhysics::default());
+            words = words.letter_physics(letters);
         }
         if magnet {
             words = words

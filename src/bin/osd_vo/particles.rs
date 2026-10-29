@@ -11,6 +11,22 @@
 //! popup already keeps, with the time of the newest one, so the GPU can ask for the level
 //! at any tick time and no state is kept here.
 //!
+//! The redesign's effects (`defaults.rs`), each a motion feature:
+//!
+//! - `particle-source` (MO-69): each onset of the voice kicks the swirl: the rings open
+//!   out and brighten, the strands sway wider and the dust stirs, then they settle over
+//!   about 0.3 s. The onsets come from `sounding` (the daemon's voice features, else rises
+//!   in the level).
+//! - `letter-physics` (MO-83): a new word's letters drop in together, bounce and lock
+//!   (`wild_motion`). The live text then swaps a revised word's glyphs at once, as
+//!   particle text needs.
+//! - `rewind` (MO-50): a cancel takes the words back into the caret, newest first, and
+//!   the swirl's voice goes back over the same audio.
+//! - `pre-echo` (MO-11): faint blobs per onset where the next word goes, before it comes.
+//!
+//! Under reduced motion the swirl is still dots, letters land in place, the rewind shows
+//! its end state and there are no blobs.
+//!
 //! The design is drawn for a 600 px wide card and scales with `[osd] width_px`. The card is
 //! taller than the swiss popup: 225 px with one line of words, 385 px with five, plus room
 //! above it for the swirl.
@@ -85,6 +101,22 @@ const CHIP_GAP: f32 = 28.0;
 const CHIP_BOTTOM: f32 = 20.0;
 /// Seconds for the swirl to open, and for the mic to become a check.
 const OPEN_SECS: f64 = 0.45;
+/// MO-83: a word's letters drop 2 px straight down together and bounce. A centred line
+/// moves as it grows. On top of that, letters that came one after another, or nudged and
+/// drifted sideways, loosened a word's spacing past the reading line (10 % against 5 %),
+/// and the full 3 px drop moved a baseline further than the line already does.
+fn letters() -> wild_motion::LetterPhysics {
+    wild_motion::LetterPhysics {
+        nudge: 0.0,
+        drift: 0.0,
+        stagger: 0.0,
+        drop: 2.0,
+        ..wild_motion::LetterPhysics::default()
+    }
+}
+/// MO-69: an onset's kick dies away with this time constant, and the most kick counted.
+const KICK_SECS: f64 = 0.12;
+const KICK_MAX: f32 = 1.5;
 const MORPH_SECS: f64 = 0.35;
 
 const CYAN: u32 = 0x2fc8ff;
@@ -226,6 +258,10 @@ struct Swirl {
     final_at: Option<f64>,
     /// 1, or less while the live model loads.
     dim: f32,
+    /// MO-69: the recent onsets in scene time; empty when the feature is off.
+    onsets: Arc<[f64]>,
+    /// MO-50: the voice's clock during a rewind cancel.
+    scrub: endings::Scrub,
 }
 
 impl Swirl {
@@ -255,7 +291,18 @@ impl Swirl {
     /// The voice level; from the stop it dies away (`Voice::at`) rather than dropping to
     /// nothing, which jerked the strands and drew every spark as a streak.
     fn level(&self, t: f64) -> f32 {
-        self.voice.at(t)
+        self.voice.at(self.scrub.map(t))
+    }
+
+    /// MO-69: how hard the latest onsets kick the swirl at `t`, 0 when quiet.
+    fn kick(&self, t: f64) -> f32 {
+        let k: f64 = self
+            .onsets
+            .iter()
+            .filter(|&&o| o <= t)
+            .map(|&o| (-(t - o) / KICK_SECS).exp())
+            .sum();
+        (k as f32).min(KICK_MAX)
     }
 }
 
@@ -327,10 +374,16 @@ struct Ring {
 impl EmitterSource for Ring {
     fn sim(&self, t: f64) -> EmitterSim {
         let w = &self.swirl;
-        let (l, calm) = (w.level(t), w.calm(t));
+        let (l, calm, kick) = (w.level(t), w.calm(t), w.kick(t));
         let s = w.s;
-        // While the final text is made the rings close in round the button.
-        let r = self.radius * s * (0.6 + 0.4 * w.open(t)) * (1.0 + 0.07 * l) * (1.0 - 0.3 * calm);
+        // While the final text is made the rings close in round the button; an onset
+        // opens them out a little.
+        let r = self.radius
+            * s
+            * (0.6 + 0.4 * w.open(t))
+            * (1.0 + 0.07 * l + 0.05 * kick)
+            * (1.0 - 0.3 * calm);
+        let l = l + 0.5 * kick;
         let shock = w.final_at.filter(|&f| t >= f).map(|f| Shock {
             age: (t - f) as f32,
             speed: r * 2.5,
@@ -353,7 +406,7 @@ impl EmitterSource for Ring {
 
     fn look(&self, t: f64) -> EmitterLook {
         let w = &self.swirl;
-        let (l, calm, flare) = (w.level(t), w.calm(t), w.flare(t));
+        let (l, calm, flare) = (w.level(t), w.calm(t), w.flare(t) + 0.4 * w.kick(t));
         let (sn, cs) = self.tilt.sin_cos();
         let q = self.squash;
         let live = if w.live(t) { 1.0 } else { 0.0 };
@@ -388,7 +441,7 @@ struct Dust {
 impl EmitterSource for Dust {
     fn sim(&self, t: f64) -> EmitterSim {
         let w = &self.swirl;
-        let l = w.level(t);
+        let l = w.level(t) + 0.6 * w.kick(t);
         EmitterSim {
             shape: Shape::Box {
                 half: [STRAND_TO * w.s, 26.0 * w.s, 0.0],
@@ -408,7 +461,7 @@ impl EmitterSource for Dust {
 
     fn look(&self, t: f64) -> EmitterLook {
         let w = &self.swirl;
-        let l = w.level(t);
+        let l = w.level(t) + 0.6 * w.kick(t);
         EmitterLook {
             origin: w.origin,
             size: 0.8 * w.s,
@@ -500,7 +553,7 @@ impl EmitterSource for Wing {
     fn sim(&self, t: f64) -> EmitterSim {
         let w = &self.swirl;
         let s = w.s;
-        let (l, calm, flare) = (w.level(t), w.calm(t), w.flare(t));
+        let (l, calm, flare) = (w.level(t), w.calm(t), w.flare(t) + 0.5 * w.kick(t));
         let quiet = if w.dim < 1.0 { 0.2 } else { 1.0 };
         EmitterSim {
             shape: Shape::Path {
@@ -527,7 +580,7 @@ impl EmitterSource for Wing {
 
     fn look(&self, t: f64) -> EmitterLook {
         let w = &self.swirl;
-        let l = w.level(t);
+        let l = w.level(t) + 0.4 * w.kick(t);
         EmitterLook {
             origin: w.origin,
             size: 0.95 * w.s,
@@ -584,9 +637,14 @@ impl Popup {
         let card_h = card_h(self.lines, phase) * s;
         // The swirl keeps to a band round the button, so its layer is no bigger than it needs.
         let band = Size::new(surface.w, 2.0 * SWIRL_HALF * s);
+        let onsets: Arc<[f64]> = if l.on(showcase::PARTICLE_SOURCE) && !self.still() {
+            self.heard.onsets().iter().rev().take(8).rev().copied().collect()
+        } else {
+            Arc::from([])
+        };
         let swirl = Swirl {
             voice: Voice {
-                levels: self.wave.clone(),
+                levels: self.exhale_levels(&self.wave),
                 newest_at: self.newest_at,
                 stop_at: self.extra.finish_at,
             },
@@ -597,6 +655,8 @@ impl Popup {
             finish_at: self.extra.finish_at,
             final_at: self.extra.final_at,
             dim: if self.status().loading { 0.25 } else { 1.0 },
+            onsets,
+            scrub: self.scrub(),
         };
         root.child(at(self.particles_card(card_h), x0, y0))
             .child(at(
@@ -611,6 +671,7 @@ impl Popup {
             ))
             .child(self.particles_trail(phase, x0, y0, surface))
             .child(self.particles_words(phase, x0, y0))
+            .children(self.particles_rewind(phase, x0, y0))
             .child(self.particles_bottom(phase, x0, y0))
     }
 
@@ -629,7 +690,8 @@ impl Popup {
             .size(l.width, h)
             .radius(CARD_RADIUS * s)
             .fill_gradient(Color::hex(CARD_TOP, a), Color::hex(CARD_BOTTOM, a))
-            .border(Color::hex(EDGE, 0.55), 1.0)
+            .border(Color::hex(EDGE, 0.55), self.exhale_width(1.0))
+            .motion(Prop::StrokeWidth, self.exhale_snap())
             .rim(Color::hex(VIOLET, 0.35), 1.0, 0.18, -0.4, 0.0)
             .presence(Transition::fade().offset(0.0, 8.0), exit)
     }
@@ -776,11 +838,6 @@ impl Popup {
     fn particles_words(&self, phase: Phase, x0: f32, y0: f32) -> Element<Msg> {
         let l = &self.look;
         let s = scale(l);
-        let lift = match phase {
-            Phase::Listening => 0.0,
-            Phase::Finishing => FINISH_LIFT,
-            Phase::Done => DONE_LIFT,
-        };
         let words = Element::live_text("words", &self.shown)
             .text_style(text_style(l))
             .color(hex(INK))
@@ -797,6 +854,13 @@ impl Popup {
                     hex(NEWEST_RIGHT),
                 ),
             );
+        let words = if l.on(wild_motion::LETTER_PHYSICS) {
+            // The letters' drop moves the glyphs: a revision swaps them at once, as the
+            // particle text does.
+            words.word_revise(vo::scene::flow::Revise::Swap)
+        } else {
+            words
+        };
         let words = if self.still() {
             words
         } else {
@@ -810,14 +874,49 @@ impl Popup {
                 ..WordParticles::default()
             })
         }
-        .presence(Transition::fade(), Transition::fade().dissolve(1.0));
-        at(
-            Element::column("text")
-                .size(TEXT_W * s, self.lines as f32 * TEXT_LINE * s)
-                .child(words),
-            x0 + (l.width - TEXT_W * s) / 2.0,
-            y0 + (TEXT_TOP - lift) * s,
-        )
+        .presence(Transition::fade(), Transition::fade().dissolve(1.0))
+        .wild_motion_with(self, letters());
+        let (style, w) = (text_style(l), text_width(l));
+        // For a rewind the live text turns clear rather than fading: particle text that
+        // fades scatters into dots.
+        let words = if self.rewinding() {
+            words.color(Color::TRANSPARENT).motion(Prop::TextColor, Motion::Snap)
+        } else {
+            words
+        };
+        let text = Element::column("text")
+            .size(w, self.lines as f32 * TEXT_LINE * s)
+            .child(words);
+        let (x, y) = self.particles_text_at(phase, x0, y0);
+        at(self.with_hearing(text, &style, w, hex(INK), hex(CYAN)), x, y)
+    }
+
+    /// The text box's top left in the surface.
+    fn particles_text_at(&self, phase: Phase, x0: f32, y0: f32) -> (f32, f32) {
+        let l = &self.look;
+        let s = scale(l);
+        let lift = match phase {
+            Phase::Listening => 0.0,
+            Phase::Finishing => FINISH_LIFT,
+            Phase::Done => DONE_LIFT,
+        };
+        (x0 + (l.width - TEXT_W * s) / 2.0, y0 + (TEXT_TOP - lift) * s)
+    }
+
+    /// MO-50: a cancel takes the words back into the caret, drawn where the live text
+    /// is, which turns clear meanwhile.
+    fn particles_rewind(&self, phase: Phase, x0: f32, y0: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        let (style, w) = (text_style(l), text_width(l));
+        let h = self.lines as f32 * TEXT_LINE * scale(l);
+        let ink = endings::Ink {
+            text: hex(INK).fade(0.5),
+            mark: hex(CYAN),
+            faint: Color::hex(HINT, 0.4),
+        };
+        let (x, y) = self.particles_text_at(phase, x0, y0);
+        self.rewind_mark("rewind", self.lay_words(style, w), ink, Size::new(w, h))
+            .map(|e| at(e, x, y))
     }
 
     /// The dust off the newest word while listening. Each of the last `TRAIL_SLOTS` words

@@ -446,7 +446,9 @@ impl Laid {
             joined.push_str(&w.text);
             ranges.push((w.id, start..joined.len()));
         }
-        let text = p.measure.layout(&joined, style, Some(width));
+        let mut text = p.measure.layout(&joined, style, Some(width));
+        // A centred look's words sit where its live text puts them.
+        text.align_in(style.align, width);
         let space = p.measure.layout("a a", style, None).size.w
             - 2.0 * p.measure.layout("a", style, None).size.w;
         let probe = p.measure.layout("Hg", style, None);
@@ -517,7 +519,11 @@ impl Laid {
                 let x = x + self.space;
                 ((x, y), (width - x).max(0.0))
             }
-            None => ((0.0, self.first_baseline), width),
+            // A centred line's first word comes in round the middle.
+            None => {
+                let x = self.style.align.factor() * width * 0.7;
+                ((x, self.first_baseline), width - x)
+            }
         }
     }
 }
