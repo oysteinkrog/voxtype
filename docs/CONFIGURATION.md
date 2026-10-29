@@ -1433,12 +1433,18 @@ leave out keeps its default.
 The live worker logs the window it uses, for example
 `Live preview window: 2.40 s left + 0.32 s chunk + 0.32 s right (step 0.32 s)`.
 
-**Example:**
+A smaller window costs words. On 437 LibriSpeech test-clean utterances with
+`parakeet-unified-en-0.6b-int8`, the default window had a word error rate of
+1.88 % and dropped no word that the whole-clip transcript has. A window of
+2.4 s + 0.32 s + 0.32 s cut the median commit wait from 0.88 s to 0.48 s, but
+the word error rate rose to 2.41 % and it dropped 18 words, once a run of 12.
+
+**Example (the defaults, written out):**
 ```toml
 [parakeet]
-streaming_left_context_secs = 2.4
-streaming_chunk_secs = 0.32
-streaming_right_context_secs = 0.32
+streaming_left_context_secs = 5.6
+streaming_chunk_secs = 0.56
+streaming_right_context_secs = 0.56
 ```
 
 ### Complete Example
