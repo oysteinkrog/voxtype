@@ -236,9 +236,8 @@ pub(crate) fn lattice_plucks(words: &[LatticeWord], onsets: &[f64]) -> Vec<Pluck
 
 /// The silence a line of `words` exhales in: since the voice was last
 /// heard over room tone (`voiced`) or the line's newest word, whichever is
-/// later. Only for a look with gutters: with none (scope today) a 1.3x bow
-/// reaches up into the newest line's letters and down into the next line's
-/// ascenders.
+/// later. Only for a look with gutters: with none a 1.3x bow reaches up
+/// into the newest line's letters and down into the next line's ascenders.
 fn lattice_quiet(look: &LatticeLook, words: &[LatticeWord], voiced: f64) -> Option<Quiet> {
     let line_at = words.iter().map(|w| w.at).fold(f64::NEG_INFINITY, f64::max);
     (line_at.is_finite() && !look.gutters.is_empty()).then(|| Quiet::since(voiced.max(line_at)))
