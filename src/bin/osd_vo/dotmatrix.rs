@@ -76,6 +76,12 @@ const LETTER_GAP: f64 = 0.015;
 const MAX_LETTERS: usize = 12;
 /// Rows the meter is short under a new word.
 const SHORT_ROWS: usize = 2;
+/// The reading-line marks: the empty measure's dots (MO-52) and the seam's
+/// under a tentative word (MO-24), pitch and radius.
+const MARK_PITCH: f32 = 6.0;
+const MARK_R: f32 = 1.3;
+const SEAM_PITCH: f32 = 4.0;
+const SEAM_R: f32 = 0.9;
 /// The word count's room in the status row, and the notch's room.
 const NOTCH_ROOM: f32 = 8.0;
 
@@ -576,16 +582,16 @@ impl Popup {
     fn dotmatrix_text(&self, mode: Mode) -> Element<Msg> {
         let l = &self.look;
         let dim = if mode == Mode::Cancelled { 0.45 } else { 1.0 };
-        // A new word stands at 70 % ink where it lands, readable at once,
-        // and the dots falling into it bring it to full ink (MO-60). Without
-        // the dots the fade is short, so a word that grows while it fades in
-        // (its new letters fade in too) is readable in every frame.
+        // A new word rises into place. With the dots (MO-60) it starts at
+        // 70 % ink, readable at once, as its dots fall into it. The fade is
+        // short either way, so a word that grows while it fades in (its new
+        // letters fade in too), or wraps to the next line, keeps the
+        // reading line's ink.
         let plain = !self.motion("dot-sort") || self.still();
-        let (enter, fade) = if plain {
-            (Transition::fade().opacity(0.0).offset(0.0, 6.0), 0.12)
-        } else {
-            (Transition::fade().opacity(0.7), 0.3)
-        };
+        let enter = Transition::fade()
+            .opacity(if plain { 0.0 } else { 0.7 })
+            .offset(0.0, 6.0);
+        let fade = 0.12;
         let words = Element::live_text("words", &self.shown)
             .line_motion(&self.look)
             .text_style(l.text_style())
@@ -594,6 +600,8 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(fade))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(enter);
+        // Tentative words at lower ink (MO-24).
+        let words = self.typo_words(words);
         let words = self.handoff_or(
             words,
             &l.text_style(),
@@ -601,12 +609,39 @@ impl Popup {
             hex(INK),
             hex(RED),
         );
+        let ink = endings::Ink {
+            text: hex(INK),
+            mark: hex(DOT),
+            faint: hex(GREY),
+        };
         let mut text = Element::column("text")
             .height(self.lines.min(MAX_LINES) as f32 * TEXT_LINE)
-            .child(words);
+            .child(words)
+            // The empty measure (MO-52), in dots.
+            .children(self.line_marks_with(
+                l.text_style(),
+                l.text_width(),
+                ink,
+                endings::Cancel::Unthread,
+                endings::Pen::Dots {
+                    pitch: MARK_PITCH,
+                    r: MARK_R,
+                },
+            ));
         if self.cut > 0 && !self.shown.is_empty() && self.delivered().is_none() {
             text = text.child(self.dotmatrix_ellipsis(dim));
         }
+        // The open seam under a tentative word, in dots (MO-24).
+        let text = self.typo_marks_in(
+            text,
+            &self.shown,
+            l.text_width(),
+            channels::Seam::Dots {
+                pitch: SEAM_PITCH,
+                r: SEAM_R,
+                color: hex(DOT),
+            },
+        );
         // The text area clips to its own box, as in Popup::text_area, so a line that leaves
         // as the text scrolls slides behind the top edge instead of over the waveform. The
         // box reaches into the left margin for the "…" and into the gap above the status row

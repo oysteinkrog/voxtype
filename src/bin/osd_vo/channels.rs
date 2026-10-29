@@ -51,6 +51,15 @@ pub(crate) const CONFIDENCE: &str = "confidence-ink";
 
 const ALL: [&str; 7] = [CHANNELS, VOICE, STAGGER, ONSET, PITCH, TRACKING, CONFIDENCE];
 
+/// How a look draws MO-24's seam.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Seam {
+    /// Two accent hairlines with a gap between them.
+    Hairline,
+    /// A row of dots `pitch` apart and `r` in radius, in `color`.
+    Dots { pitch: f32, r: f32, color: Color },
+}
+
 /// Hypotheses a word must keep its text to count as stable (MO-24).
 const STABLE_AFTER: u32 = 2;
 /// The seam stays this long after its word stabilised, closing.
@@ -261,6 +270,17 @@ impl Popup {
     /// [`Popup::typo_marks`] for a live text that holds only `words`, such as
     /// one of karaoke's lines.
     pub(crate) fn typo_marks_for(&self, text: Element<Msg>, words: &[Word], width: f32) -> Element<Msg> {
+        self.typo_marks_in(text, words, width, Seam::Hairline)
+    }
+
+    /// [`Popup::typo_marks_for`] with the seam drawn as `seam` says.
+    pub(crate) fn typo_marks_in(
+        &self,
+        text: Element<Msg>,
+        words: &[Word],
+        width: f32,
+        seam: Seam,
+    ) -> Element<Msg> {
         if !self.look.on(CONFIDENCE) || words.is_empty() {
             return text;
         }
@@ -299,6 +319,26 @@ impl Popup {
             let half = 0.5 * (x1 - x0 - open).max(0.0);
             let alpha = if seen.stable { 0.0 } else { 0.6 };
             let spring = if reduced { Spring::SNAP } else { Spring::critical_to_98(0.3) };
+            if let Seam::Dots { pitch, r, color } = seam {
+                // Dots under the word, the middle ones left out while the
+                // word is tentative. When it sets the gap fills, then the
+                // row fades.
+                let n = ((x1 - x0) / pitch).floor().max(0.0) as usize;
+                let mid = 0.5 * (x0 + x1);
+                for k in 0..=n {
+                    let x = x0 + k as f32 * pitch;
+                    let gap = !seen.stable && (x - mid).abs() < 0.5 * open;
+                    let closed = closing.is_some_and(|c| c < 0.5 * SEAM_CLOSE_SECS);
+                    let alpha = if gap || (seen.stable && !closed) { 0.0 } else { 0.6 };
+                    let dot = Element::shape(format!("seam-{}-{k}", w.id), ShapeKind::RRect)
+                        .size(2.0 * r, 2.0 * r)
+                        .radius(r)
+                        .fill(color.fade(alpha))
+                        .motion(Prop::Opacity, spring);
+                    text = text.child(kit::at(dot, x - r, y + 1.0 - r));
+                }
+                continue;
+            }
             for (k, x) in [(0, x0), (1, x1 - half)] {
                 let seg = Element::shape(format!("seam-{}-{k}", w.id), ShapeKind::RRect)
                     .fill(l.accent.fade(alpha))
