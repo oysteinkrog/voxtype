@@ -1277,6 +1277,9 @@ enum Msg {
     Loop,
     /// A timer of the motion station. A popup ignores it.
     Station(Box<station::Cue>),
+    /// `preview-signals.json` changed: the live model took a step. Kept
+    /// apart from `Files`, so it never touches the text or the lifecycle.
+    ModelSignals(Box<voxtype::osd::live::ModelSignals>),
 }
 
 /// The popup for one dictation. It closes itself when the daemon goes idle.
@@ -1398,6 +1401,8 @@ struct Popup {
     picked_at: Option<f64>,
     /// Runs on a `live_spec` surface, which has room for the look badge.
     live_surface: bool,
+    /// The live model's latest step: frame levels and the lookahead tail.
+    model_signals: Option<voxtype::osd::live::ModelSignals>,
 }
 
 impl Popup {
@@ -1413,6 +1418,7 @@ impl Popup {
         Popup {
             look,
             signals: SignalsCell::default(),
+            model_signals: None,
             recorder: None,
             measure: vo::ShapedLayout::new(fonts.clone()),
             levels: VecDeque::new(),
@@ -1780,6 +1786,20 @@ impl App for Popup {
                 let _ = r.record_at(cx.t(), &rec);
             }
         }
+        let msg = match msg {
+            Msg::ModelSignals(s) => {
+                tracing::debug!(
+                    step = s.step,
+                    audio_s = s.audio_s,
+                    frames = s.frames_total,
+                    tail = %s.with_tail,
+                    "model signals"
+                );
+                self.model_signals = Some(*s);
+                return;
+            }
+            m => m,
+        };
         let t = cx.t();
         self.extra.now = t;
         // An ambient frame never closes the popup; only the daemon's
@@ -1842,7 +1862,7 @@ impl App for Popup {
             }
             Msg::Check => self.check = None,
             Msg::Tick => self.extra.tick = None,
-            Msg::Loop | Msg::Station(_) => {}
+            Msg::Loop | Msg::Station(_) | Msg::ModelSignals(_) => {}
         }
         if let Some(ending) = self.ending() {
             if self.ended_at.is_none() {
@@ -2233,6 +2253,8 @@ struct Sink {
     proxy: Option<vo::Proxy<Msg>>,
     audio: Vec<(Vec<AudioFrame>, Vec<Voice>)>,
     files: Files,
+    /// The live model's latest step, for the next popup.
+    model_signals: Option<voxtype::osd::live::ModelSignals>,
 }
 
 /// Most audio batches held while no popup is open: about a second.
@@ -2260,6 +2282,15 @@ impl Sink {
                 self.proxy = None;
             }
         }
+    }
+
+    fn model_signals(&mut self, s: voxtype::osd::live::ModelSignals) {
+        if let Some(p) = &self.proxy {
+            if !p.send(Msg::ModelSignals(Box::new(s.clone()))) {
+                self.proxy = None;
+            }
+        }
+        self.model_signals = Some(s);
     }
 
     /// Whether a popup should open now.
@@ -2351,6 +2382,7 @@ fn read_files() -> Files {
 fn poll_files(shared: Shared) {
     let mut watch = voxtype::osd::watch::RuntimeWatch::new(VoxtypeConfig::runtime_dir());
     let mut last = None;
+    let mut last_signals = None;
     loop {
         let files = read_files();
         if last.as_ref() != Some(&files) {
@@ -2358,6 +2390,17 @@ fn poll_files(shared: Shared) {
             let (lock, cv) = &*shared;
             lock.lock().unwrap().files(files);
             cv.notify_one();
+        }
+        let signals = voxtype::osd::live::read_signals();
+        if signals != last_signals {
+            last_signals = signals.clone();
+            let (lock, _) = &*shared;
+            let mut sink = lock.lock().unwrap();
+            match signals {
+                Some(s) => sink.model_signals(s),
+                // The dictation ended: nothing to hand the next popup.
+                None => sink.model_signals = None,
+            }
         }
         watch.wait(POLL_INTERVAL);
     }
@@ -2483,6 +2526,9 @@ fn main() -> anyhow::Result<()> {
                 proxy.send(Msg::Audio(frames, voice));
             }
             proxy.send(Msg::Files(sink.files.clone()));
+            if let Some(s) = sink.model_signals.take() {
+                proxy.send(Msg::ModelSignals(Box::new(s)));
+            }
             sink.proxy = Some(proxy);
             inbox
         };

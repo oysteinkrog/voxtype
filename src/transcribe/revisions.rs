@@ -15,8 +15,10 @@
 //! `t_ms` is wall time since the first audio block, `audio_ms` the audio
 //! received so far. Word times are seconds into the recording. `conf` is
 //! the model's confidence for the word (the lowest token probability in
-//! it), or null when the model gives none.
+//! it), or null when the model gives none. A word may also carry `detail`
+//! (see [`WordDetail`]); it is left out when the model gives none.
 
+pub use crate::osd::live::WordDetail;
 use serde_json::{json, Value};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -33,6 +35,8 @@ pub struct Word {
     pub start: f32,
     pub end: f32,
     pub conf: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<WordDetail>,
 }
 
 /// Group subword tokens into words. A token that starts with a space (the
@@ -45,9 +49,22 @@ pub struct Word {
 pub fn words_from_tokens<'a>(
     tokens: impl IntoIterator<Item = (&'a str, f32, f32, Option<f32>)>,
 ) -> Vec<Word> {
+    words_with_details(
+        tokens
+            .into_iter()
+            .map(|(text, start, end, conf)| (text, start, end, conf, None)),
+    )
+}
+
+/// [`words_from_tokens`] with each token's distribution summary. A word's
+/// detail is its least certain token's: the highest entropy, and the
+/// smallest margin with that token's runner-up. None if any token has none.
+pub fn words_with_details<'a>(
+    tokens: impl IntoIterator<Item = (&'a str, f32, f32, Option<f32>, Option<WordDetail>)>,
+) -> Vec<Word> {
     let mut words: Vec<Word> = Vec::new();
     let mut boundary = true;
-    for (text, start, end, conf) in tokens {
+    for (text, start, end, conf, detail) in tokens {
         boundary |= text.starts_with(' ') || text.starts_with('\u{2581}');
         let piece = text.trim_start_matches([' ', '\u{2581}']);
         if piece.is_empty() {
@@ -58,12 +75,14 @@ pub fn words_from_tokens<'a>(
                 w.text.push_str(piece);
                 w.end = end;
                 w.conf = w.conf.zip(conf).map(|(a, b)| a.min(b));
+                w.detail = w.detail.take().zip(detail).map(|(a, b)| a.least_certain(b));
             }
             _ => words.push(Word {
                 text: piece.to_string(),
                 start,
                 end,
                 conf,
+                detail,
             }),
         }
         boundary = false;
@@ -226,6 +245,30 @@ mod tests {
         ]);
         assert_eq!(words[0].conf, Some(0.4));
         assert_eq!(words[1].conf, Some(0.8));
+    }
+
+    #[test]
+    fn word_detail_is_least_certain_token() {
+        let d = |entropy, margin, runner_up: &str| {
+            Some(WordDetail {
+                entropy,
+                margin,
+                runner_up: Some(runner_up.into()),
+            })
+        };
+        let words = words_with_details([
+            (" con", 0.0, 0.1, Some(0.9), d(0.2, 0.8, " com")),
+            ("fig", 0.1, 0.2, Some(0.4), d(1.5, 0.1, "fid")),
+            (" file", 0.2, 0.3, Some(0.8), None),
+        ]);
+        let first = words[0].detail.as_ref().unwrap();
+        assert_eq!(first.entropy, 1.5);
+        assert_eq!(first.margin, 0.1);
+        assert_eq!(first.runner_up.as_deref(), Some("fid"));
+        assert_eq!(words[1].detail, None);
+        // No detail: the JSON is as before.
+        let v = serde_json::to_value(&words[1]).unwrap();
+        assert!(v.get("detail").is_none());
     }
 
     #[test]
