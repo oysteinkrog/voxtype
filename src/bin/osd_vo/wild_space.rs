@@ -8,7 +8,11 @@
 //!   feeds it the voice: pitch colours a bundle, punctuation gives it
 //!   sentences and commas, onsets, arrivals and revisions pluck it, the level
 //!   over room tone pulls the newest line taut, and while the popup listens a
-//!   live strand runs from the newest word to the caret.
+//!   live strand runs from the newest word to the caret. LT-09: after 3 s
+//!   of silence a lattice with gutters exhales (every bow eases out to 1.3x
+//!   over 1.2 s and snaps back at the next onset), and `lattice-drift` lets the older
+//!   lines' lattices wander a pixel or two at 15 steps a second, clipped to
+//!   their own line so the newest line's box never changes.
 //! - `sound-sculpture` (MO-88, captions): extruded letter bodies behind the
 //!   flat text, as deep as the word was loud, laid flat when it is done.
 //!
@@ -25,13 +29,17 @@ use std::sync::OnceLock;
 use vo::scene::depth_stack::{DepthStack, Place, Sheet};
 use vo::scene::geom::Point;
 use vo::scene::emitter::LevelTrack;
-use vo::scene::lattice::{anchors, Boundary, LatticeLook, LatticeWord, LiveStrand, Pluck};
+use vo::scene::lattice::{
+    anchors, Boundary, LatticeDrift, LatticeLook, LatticeWord, LiveStrand, Pluck, Quiet,
+};
 use vo_3d::{Letter, SculptLook, Sculpture};
 use vo_core::words::WordId;
 
 pub(crate) const DEPTH_STACK: &str = "depth-stack";
 pub(crate) const KINETIC_LATTICE: &str = "kinetic-lattice";
 pub(crate) const SOUND_SCULPTURE: &str = "sound-sculpture";
+/// LT-09: the older lines' lattices drift (opt-in, with `kinetic-lattice`).
+pub(crate) const LATTICE_DRIFT: &str = "lattice-drift";
 
 /// The deepest a letter of the sculpture goes, in logical pixels, for the
 /// loudest word.
@@ -149,6 +157,21 @@ pub(crate) fn lattice_plucks(words: &[LatticeWord], onsets: &[f64]) -> Vec<Pluck
     out
 }
 
+/// The silence a line of `words` exhales in: since the voice was last
+/// heard over room tone (`voiced`) or the line's newest word, whichever is
+/// later. Only for a look with gutters: with none (scope today) a 1.3x bow
+/// reaches up into the newest line's letters and down into the next line's
+/// ascenders.
+fn lattice_quiet(look: &LatticeLook, words: &[LatticeWord], voiced: f64) -> Option<Quiet> {
+    let line_at = words.iter().map(|w| w.at).fold(f64::NEG_INFINITY, f64::max);
+    (line_at.is_finite() && !look.gutters.is_empty()).then(|| Quiet::since(voiced.max(line_at)))
+}
+
+/// A drift seed from a lattice's key, so lines side by side wander apart.
+fn drift_seed(key: &str) -> u32 {
+    key.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619))
+}
+
 impl Popup {
     pub(crate) fn wild_reduced(&self) -> bool {
         self.look.on("reduced-motion") || kit::reduced()
@@ -206,7 +229,12 @@ impl Popup {
     /// style; the voice is filled in here. `caret`, for the newest line
     /// while the popup listens, is the caret's x in the box: the level then
     /// pulls this line taut and a live strand runs from its newest word to
-    /// the caret, slackening over 3 s of silence.
+    /// the caret, slackening over 3 s of silence. A line whose `look` has
+    /// gutters exhales after 3 s of silence. `drift_clip`, for an older line, is the height of the
+    /// line's own box: with `lattice-drift` its lattice then drifts, clipped
+    /// to that height so it never reaches the next line. `None` (the newest
+    /// line) never drifts.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn lattice_line(
         &self,
         key: String,
@@ -215,16 +243,20 @@ impl Popup {
         size: Size,
         look: &LatticeLook,
         caret: Option<f32>,
+        drift_clip: Option<f32>,
     ) -> Element<Msg> {
         let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
         let nodes = anchors(&self.measure, &texts, style, None);
         let timed = self.lattice_words(words);
         let mut look = look.clone();
         look.plucks = lattice_plucks(&timed, self.heard.onsets()).into();
+        let floor = self.lattice_floor();
+        let mut voice = self.wild.voice.borrow_mut();
+        // Every line feeds the voice, so a line drawn before the newest one
+        // already hears this view's levels; frames fed before are skipped.
+        voice.feed(&self.kit_raw_levels(), floor);
+        look.quiet = lattice_quiet(&look, &timed, voice.voiced);
         if let (Some(caret_x), Some(newest)) = (caret, timed.len().checked_sub(1)) {
-            let floor = self.lattice_floor();
-            let mut voice = self.wild.voice.borrow_mut();
-            voice.feed(&self.kit_raw_levels(), floor);
             look.level = Some(voice.level.clone());
             look.level_floor = floor;
             look.live = Some(LiveStrand {
@@ -233,7 +265,24 @@ impl Popup {
                 since: voice.voiced.max(timed[newest].at),
             });
         }
-        look.view(key, size, timed.into(), nodes.into(), self.wild_reduced())
+        drop(voice);
+        let reduced = self.wild_reduced();
+        let clip = drift_clip.filter(|_| self.lattice_drifts());
+        look.drift = clip.map(|_| LatticeDrift { seed: drift_seed(&key), ..LatticeDrift::default() });
+        let view = look.view(key.clone(), size, timed.into(), nodes.into(), reduced);
+        match clip {
+            Some(h) => Element::layer(format!("{key}-clip"))
+                .size(size.w, h.min(size.h))
+                .clip()
+                .child(view),
+            None => view,
+        }
+    }
+
+    /// Whether older lines' lattices drift: `lattice-drift` is on, the
+    /// popup is not closing, and motion is not reduced.
+    pub(crate) fn lattice_drifts(&self) -> bool {
+        self.look.on(LATTICE_DRIFT) && !self.closing && !self.wild_reduced()
     }
 
     /// The depth stack of `lines` (oldest first, each with its width) in a
@@ -447,6 +496,30 @@ mod tests {
         v.feed(&levels(&all, 1.0 + 51.0 * step), floor);
         assert!(v.level.last() > last);
         assert!((v.voiced - (1.0 + 51.0 * step)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_exhale_counts_from_the_voice_or_the_newest_word_and_needs_gutters() {
+        use vo::scene::lattice::LineGutter;
+        let words = [LatticeWord::new(0.0, 0.5, 1.0), LatticeWord::new(0.2, 0.5, 2.5)];
+        let bare = LatticeLook::default();
+        assert_eq!(lattice_quiet(&bare, &words, 4.0), None, "no gutters, no exhale");
+        let gutters = vec![LineGutter { top: 26.0, height: 14.0, newest: true, descent: 6.0 }];
+        let look = LatticeLook { gutters, ..LatticeLook::default() };
+        assert_eq!(lattice_quiet(&look, &words, 4.0), Some(Quiet::since(4.0)));
+        assert_eq!(lattice_quiet(&look, &words, f64::NEG_INFINITY), Some(Quiet::since(2.5)));
+        assert_eq!(lattice_quiet(&look, &[], 4.0), None);
+        // Quiet from 4 s: no exhale until 7 s, full by 8.2 s, gone once the voice is back.
+        let l = LatticeLook { quiet: lattice_quiet(&look, &words, 4.0), ..look.clone() };
+        assert_eq!(l.exhale(6.9, false), 1.0);
+        assert_eq!(l.exhale(8.3, false), 1.3);
+        let back = LatticeLook { quiet: lattice_quiet(&look, &words, 8.3), ..look };
+        assert_eq!(back.exhale(8.3, false), 1.0, "snaps back when the voice returns");
+    }
+
+    #[test]
+    fn drift_seeds_differ_per_line() {
+        assert_ne!(drift_seed("lattice-1"), drift_seed("lattice-2"));
     }
 
     #[test]

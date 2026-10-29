@@ -849,6 +849,8 @@ impl Popup {
                         // LT-04: the live strand ends at the caret's foot, which
                         // the scene draws a margin further in than `caret`.
                         caret.filter(|_| newest).map(|(c, _)| c.x - TEXT_X + MARGIN + 1.5),
+                        // LT-09: only older lines drift, inside their own line.
+                        (!newest).then_some(LINE),
                     ),
                     o + TEXT_X,
                     o + TEXT_TOP + i as f32 * LINE,
