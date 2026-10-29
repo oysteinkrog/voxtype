@@ -474,6 +474,10 @@ impl Popup {
         let l = &self.look;
         // Each new word rises into place, readable within 120 ms; a
         // revised word dips and settles.
+        // A tentative word already sits at 75 % ink (confidence-ink), so it
+        // enters from nearly full opacity: the reading line asks 70 % of the
+        // settled ink from the first frame.
+        let enter_ink = if self.look.on(crate::channels::CONFIDENCE) { 0.95 } else { 0.0 };
         let words = Element::live_text("words", &self.shown[..self.room()])
             .line_motion(&self.look)
             .revision_motion(revision::motion(&self.look))
@@ -482,7 +486,7 @@ impl Popup {
             .color(l.foreground)
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(self.paths_word_enter(Transition::fade().opacity(0.0).offset(0.0, WORD_RISE)));
+            .word_enter(self.paths_word_enter(Transition::fade().opacity(enter_ink).offset(0.0, WORD_RISE)));
         let words = self.typo_words(words);
         // Before the hand-off, which may wrap the live text.
         let words = self.letter_fx_words(words);

@@ -201,7 +201,10 @@ impl Popup {
                 if seen.stable {
                     // Sets with a 1 px settle down, once.
                     wt = wt.kick(1, Typo::REST.baseline(-1.0));
-                } else {
+                } else if !still {
+                    // Once the dictation is finishing, the final text lands
+                    // at full ink: a revision arrives at 70 % of its rest, and
+                    // 75 % of that would break the reading line's floor.
                     wt.rest.ink = 0.75;
                     wt.rest.tracking = 1.02;
                 }
