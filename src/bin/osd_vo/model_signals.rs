@@ -43,6 +43,11 @@
 //!   than 0.2 apart, the runner-up shows small above it for 0.4 s and
 //!   fades over 0.8 s: the other word the model nearly wrote.
 //!
+//! - `birth-burst`: each new word gets a ring that opens out from it over
+//!   0.6 s. The ring opens wider when several words came in one step and
+//!   is brighter when the frame it started on was a near-certain token.
+//!   Nothing shows under reduced motion.
+//!
 //! Nothing shows once the recording stops, so the signals end with the
 //! dictation and nothing moves at room tone. Under reduced motion the ghosts
 //! swap at once (no fades) and the floor jumps between steps: the ink tiers
@@ -63,9 +68,11 @@ pub(crate) const GRADED_DOUBT: &str = "graded-doubt";
 pub(crate) const BREATHING_STOP: &str = "breathing-stop";
 pub(crate) const PRE_ECHO_LETTERS: &str = "pre-echo-letters";
 pub(crate) const TWIN_SPELLING: &str = "twin-spelling";
+pub(crate) const BIRTH_BURST: &str = "birth-burst";
 
 /// Every model signal feature.
-const ALL: [&str; 8] = [
+const ALL: [&str; 9] = [
+    BIRTH_BURST,
     TWIN_SPELLING,
     PRE_ECHO_LETTERS,
     GHOST_TAIL,
@@ -118,6 +125,15 @@ const TWIN_HOLD: f64 = 0.4;
 const TWIN_FADE: f64 = 0.8;
 const TWIN_INK: f32 = 0.55;
 const TWIN_SCALE: f32 = 0.55;
+/// Birth burst: how long a ring lasts, how far it opens per word born in
+/// the same step, the most words counted, and its ink at birth from a
+/// silent frame (level -3 or under) to a certain one (level 0).
+const BURST_SECS: f64 = 0.6;
+const BURST_PX: f32 = 4.0;
+const BURST_MAX_WORDS: usize = 4;
+const BURST_INK: (f32, f32) = (0.25, 0.7);
+/// Words that came within this of each other came in one step.
+const BURST_STEP_SECS: f64 = 0.3;
 
 /// One word of the tail.
 #[derive(Debug, PartialEq)]
@@ -213,6 +229,9 @@ impl Popup {
         if let Some(s) = self.live_signals() {
             let laid = self.tail_layout(s, words, width);
             for e in self.ghosts(laid.as_ref(), words, origin, ink) {
+                text = text.child(e);
+            }
+            for e in self.birth_burst(s, words, width, origin) {
                 text = text.child(e);
             }
             for e in self.floor(s, width, origin) {
@@ -430,6 +449,89 @@ impl Popup {
             // Its baseline sits just above the word's ascenders.
             let y = first.pos.y - style.size * 0.95 - small.line_height * 0.8;
             out.push(kit::at(e, origin.0 + first.pos.x, origin.1 + y));
+        }
+        out
+    }
+
+    /// `birth-burst`: a ring opening out from each new word.
+    fn birth_burst(
+        &self,
+        s: &ModelSignals,
+        words: &[Word],
+        width: f32,
+        origin: (f32, f32),
+    ) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(BIRTH_BURST) || self.signals_reduced() {
+            return Vec::new();
+        }
+        let now = self.extra.now;
+        let arrived = &self.tally.arrived;
+        let fresh: Vec<(u32, f64)> = arrived
+            .iter()
+            .filter(|(_, at)| (0.0..BURST_SECS).contains(&(now - at)))
+            .copied()
+            .collect();
+        if fresh.is_empty() {
+            return Vec::new();
+        }
+        let style = l.text_style();
+        let joined = words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let laid = self.measure.layout(&joined, &style, Some(width));
+        let doc = self
+            .files
+            .live
+            .as_ref()
+            .filter(|d| d.text == self.files.preview);
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        for (i, w) in words.iter().enumerate() {
+            let range = start..start + w.text.len();
+            start = range.end + 1;
+            let Some(&(_, at)) = fresh.iter().find(|(id, _)| *id == w.id) else {
+                continue;
+            };
+            let glyphs: Vec<_> = laid
+                .glyphs
+                .iter()
+                .filter(|g| range.contains(&(g.cluster as usize)))
+                .collect();
+            let (Some(first), Some(last)) = (glyphs.first(), glyphs.last()) else {
+                continue;
+            };
+            let together = arrived
+                .iter()
+                .filter(|(_, a)| (a - at).abs() < BURST_STEP_SECS)
+                .count()
+                .clamp(1, BURST_MAX_WORDS);
+            // The level of the frame the word started on.
+            let level = doc
+                .and_then(|d| d.words.get(self.cut + i)?.start)
+                .and_then(|t0| {
+                    s.frames
+                        .iter()
+                        .min_by(|a, b| (a.t - t0).abs().total_cmp(&(b.t - t0).abs()))
+                })
+                .map_or(-3.0, |f| f.level);
+            let k = ((level + 3.0) / 3.0).clamp(0.0, 1.0);
+            let age = ((now - at) / BURST_SECS) as f32;
+            let grow = 2.0 + BURST_PX * together as f32 * age;
+            let ink = (BURST_INK.0 + (BURST_INK.1 - BURST_INK.0) * k) * (1.0 - age);
+            let top = first.pos.y - style.size * 0.8;
+            let h = style.size * 1.0;
+            let ring = Element::shape(format!("burst-{}", w.id), ShapeKind::RRect)
+                .size(last.pos.x + last.advance - first.pos.x + 2.0 * grow, h + 2.0 * grow)
+                .radius(h * 0.5 + grow)
+                .stroke(l.accent.fade(ink), 1.5);
+            out.push(kit::at(
+                ring,
+                origin.0 + first.pos.x - grow,
+                origin.1 + top - grow,
+            ));
         }
         out
     }
