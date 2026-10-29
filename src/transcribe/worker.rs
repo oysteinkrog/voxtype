@@ -481,10 +481,22 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
 
     eprintln!("[worker] Loading live preview model: {}", live_model);
     let load_start = std::time::Instant::now();
-    // parakeet-rs's own context sizes. voxtype's [parakeet] streaming_*
-    // defaults (1.5 s left context) fail the unified model's check that
-    // contexts map to mel-frame counts divisible by 8.
-    let streaming_config = UnifiedStreamingConfig::default();
+    // [parakeet] streaming_* sets the window; absent keys keep parakeet-rs's
+    // own sizes (5.6 s left + 0.56 s chunk + 0.56 s right).
+    let parakeet = config.parakeet.clone().unwrap_or_default();
+    for note in parakeet.streaming_rounding_notes() {
+        eprintln!("[worker] [parakeet] {} (whole 0.08 s steps)", note);
+    }
+    let streaming_config = match parakeet.streaming_window() {
+        Ok(w) => {
+            eprintln!("[worker] Live preview window: {}", w);
+            super::parakeet_streaming::unified_streaming_config(w)
+        }
+        Err(e) => {
+            eprintln!("[worker] {}; using the default live preview window", e);
+            UnifiedStreamingConfig::default()
+        }
+    };
     // None = CPU: the GPU is left to the engine model.
     let handle = super::parakeet::resolve_model_path(live_model)
         .map_err(|e| e.to_string())

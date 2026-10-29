@@ -42,32 +42,151 @@ pub struct ParakeetConfig {
     #[serde(default)]
     pub streaming: bool,
 
-    /// Streaming chunk length in seconds. Smaller = lower latency, more
-    /// inference overhead. Maps to `UnifiedStreamingConfig::chunk_secs`.
-    #[serde(default = "default_streaming_chunk_secs")]
-    pub streaming_chunk_secs: f32,
+    /// Streaming chunk length in seconds: how often the cache-aware model
+    /// commits new words. Smaller = lower latency, more inference overhead.
+    /// Rounded to whole 0.08 s encoder steps. Absent: parakeet-rs's default
+    /// (0.56 s). Used by `streaming = true` and by `live_preview_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming_chunk_secs: Option<f32>,
 
-    /// Streaming left context in seconds. Maps to
-    /// `UnifiedStreamingConfig::left_context_secs`.
-    #[serde(default = "default_streaming_left_context_secs")]
-    pub streaming_left_context_secs: f32,
+    /// Streaming left context in seconds: past audio each chunk sees.
+    /// Rounded to whole 0.08 s steps. Absent: parakeet-rs's default (5.6 s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming_left_context_secs: Option<f32>,
 
-    /// Streaming right context in seconds. Maps to
-    /// `UnifiedStreamingConfig::right_context_secs`.
-    #[serde(default = "default_streaming_right_context_secs")]
-    pub streaming_right_context_secs: f32,
+    /// Streaming right context in seconds: lookahead each chunk waits for.
+    /// Rounded to whole 0.08 s steps. Absent: parakeet-rs's default (0.56 s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming_right_context_secs: Option<f32>,
 }
 
-fn default_streaming_chunk_secs() -> f32 {
-    0.5
+/// Seconds per encoder output frame of the cache-aware Parakeet models:
+/// 8 mel frames of 10 ms. Every streaming window size must be a whole
+/// number of these.
+pub const PARAKEET_STREAMING_STEP_SECS: f32 = 0.08;
+
+/// The longest window any one streaming key may ask for.
+const MAX_STREAMING_SECS: f32 = 60.0;
+
+/// The cache-aware streaming window, in whole encoder steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamingWindow {
+    pub left_steps: u32,
+    pub chunk_steps: u32,
+    pub right_steps: u32,
 }
 
-fn default_streaming_left_context_secs() -> f32 {
-    1.5
+/// parakeet-rs `UnifiedStreamingConfig::default()`, in encoder steps:
+/// 5.6 s left, 0.56 s chunk, 0.56 s right.
+impl Default for StreamingWindow {
+    fn default() -> Self {
+        Self {
+            left_steps: 70,
+            chunk_steps: 7,
+            right_steps: 7,
+        }
+    }
 }
 
-fn default_streaming_right_context_secs() -> f32 {
-    0.5
+impl StreamingWindow {
+    pub fn left_secs(&self) -> f32 {
+        self.left_steps as f32 * PARAKEET_STREAMING_STEP_SECS
+    }
+
+    pub fn chunk_secs(&self) -> f32 {
+        self.chunk_steps as f32 * PARAKEET_STREAMING_STEP_SECS
+    }
+
+    pub fn right_secs(&self) -> f32 {
+        self.right_steps as f32 * PARAKEET_STREAMING_STEP_SECS
+    }
+}
+
+impl std::fmt::Display for StreamingWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:.2} s left + {:.2} s chunk + {:.2} s right (step {:.2} s)",
+            self.left_secs(),
+            self.chunk_secs(),
+            self.right_secs(),
+            self.chunk_secs()
+        )
+    }
+}
+
+/// Round one `streaming_*` value to whole encoder steps.
+fn streaming_steps(key: &str, secs: f32) -> Result<u32, String> {
+    if !secs.is_finite() || !(0.0..=MAX_STREAMING_SECS).contains(&secs) {
+        return Err(format!(
+            "[parakeet] {key} = {secs} is out of range: use 0 to {MAX_STREAMING_SECS} seconds, \
+             in steps of {PARAKEET_STREAMING_STEP_SECS} s (for example 0.32)"
+        ));
+    }
+    Ok((secs / PARAKEET_STREAMING_STEP_SECS).round() as u32)
+}
+
+impl ParakeetConfig {
+    /// The streaming window from the `streaming_*` keys, each rounded to the
+    /// nearest whole 0.08 s step. A missing key keeps parakeet-rs's default
+    /// for that key. Errors on a value out of range, or a chunk that rounds
+    /// to zero.
+    pub fn streaming_window(&self) -> Result<StreamingWindow, String> {
+        let d = StreamingWindow::default();
+        let pick = |key: &str, value: Option<f32>, default: u32| match value {
+            Some(secs) => streaming_steps(key, secs),
+            None => Ok(default),
+        };
+        let window = StreamingWindow {
+            left_steps: pick(
+                "streaming_left_context_secs",
+                self.streaming_left_context_secs,
+                d.left_steps,
+            )?,
+            chunk_steps: pick(
+                "streaming_chunk_secs",
+                self.streaming_chunk_secs,
+                d.chunk_steps,
+            )?,
+            right_steps: pick(
+                "streaming_right_context_secs",
+                self.streaming_right_context_secs,
+                d.right_steps,
+            )?,
+        };
+        if window.chunk_steps == 0 {
+            return Err(format!(
+                "[parakeet] streaming_chunk_secs must be at least {PARAKEET_STREAMING_STEP_SECS} s \
+                 (one encoder step); it rounds to 0"
+            ));
+        }
+        Ok(window)
+    }
+
+    /// The `streaming_*` keys whose value is not a whole number of steps, with
+    /// the value it was rounded to, for a warning in the log.
+    pub fn streaming_rounding_notes(&self) -> Vec<String> {
+        [
+            (
+                "streaming_left_context_secs",
+                self.streaming_left_context_secs,
+            ),
+            ("streaming_chunk_secs", self.streaming_chunk_secs),
+            (
+                "streaming_right_context_secs",
+                self.streaming_right_context_secs,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let secs = value?;
+            let steps = streaming_steps(key, secs).ok()?;
+            let rounded = steps as f32 * PARAKEET_STREAMING_STEP_SECS;
+            ((rounded - secs).abs() > 1e-4)
+                .then(|| format!("{key} = {secs} rounded to {rounded:.2}"))
+        })
+        .collect()
+    }
 }
 
 impl Default for ParakeetConfig {
@@ -77,9 +196,9 @@ impl Default for ParakeetConfig {
             model_type: None, // Auto-detect
             on_demand_loading: false,
             streaming: false,
-            streaming_chunk_secs: default_streaming_chunk_secs(),
-            streaming_left_context_secs: default_streaming_left_context_secs(),
-            streaming_right_context_secs: default_streaming_right_context_secs(),
+            streaming_chunk_secs: None,
+            streaming_left_context_secs: None,
+            streaming_right_context_secs: None,
         }
     }
 }
@@ -187,6 +306,113 @@ mod tests {
         assert_eq!(config.model, "parakeet-tdt-0.6b-v3");
         assert!(config.model_type.is_none());
         assert!(!config.on_demand_loading);
+    }
+
+    fn parakeet_section(keys: &str) -> ParakeetConfig {
+        toml::from_str(&format!(
+            "model = \"parakeet-unified-en-0.6b-int8\"\n{keys}"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn streaming_window_absent_keys_keep_parakeet_rs_default() {
+        let window = parakeet_section("").streaming_window().unwrap();
+        assert_eq!(
+            (window.left_steps, window.chunk_steps, window.right_steps),
+            (70, 7, 7)
+        );
+        assert!((window.left_secs() - 5.6).abs() < 1e-4);
+        assert!((window.chunk_secs() - 0.56).abs() < 1e-4);
+        assert!((window.right_secs() - 0.56).abs() < 1e-4);
+    }
+
+    #[test]
+    fn streaming_window_reads_all_three_keys() {
+        let cfg = parakeet_section(
+            "streaming_left_context_secs = 2.4\n\
+             streaming_chunk_secs = 0.32\n\
+             streaming_right_context_secs = 0.32",
+        );
+        let window = cfg.streaming_window().unwrap();
+        assert_eq!(
+            (window.left_steps, window.chunk_steps, window.right_steps),
+            (30, 4, 4)
+        );
+        assert!(cfg.streaming_rounding_notes().is_empty());
+        assert_eq!(
+            window.to_string(),
+            "2.40 s left + 0.32 s chunk + 0.32 s right (step 0.32 s)"
+        );
+    }
+
+    #[test]
+    fn streaming_window_one_key_keeps_the_other_defaults() {
+        let window = parakeet_section("streaming_chunk_secs = 0.32")
+            .streaming_window()
+            .unwrap();
+        assert_eq!(
+            (window.left_steps, window.chunk_steps, window.right_steps),
+            (70, 4, 7)
+        );
+    }
+
+    #[test]
+    fn streaming_window_rounds_to_whole_steps() {
+        // The old built-in defaults, which parakeet-rs rejected outright.
+        let cfg = parakeet_section(
+            "streaming_left_context_secs = 1.5\n\
+             streaming_chunk_secs = 0.5\n\
+             streaming_right_context_secs = 0.5",
+        );
+        let window = cfg.streaming_window().unwrap();
+        assert_eq!(
+            (window.left_steps, window.chunk_steps, window.right_steps),
+            (19, 6, 6)
+        );
+        let notes = cfg.streaming_rounding_notes();
+        assert_eq!(notes.len(), 3);
+        assert_eq!(notes[1], "streaming_chunk_secs = 0.5 rounded to 0.48");
+    }
+
+    #[test]
+    fn streaming_window_accepts_zero_contexts() {
+        let window =
+            parakeet_section("streaming_left_context_secs = 0.0\nstreaming_right_context_secs = 0")
+                .streaming_window()
+                .unwrap();
+        assert_eq!((window.left_steps, window.right_steps), (0, 0));
+    }
+
+    #[test]
+    fn streaming_window_rejects_a_chunk_that_rounds_to_zero() {
+        let err = parakeet_section("streaming_chunk_secs = 0.03")
+            .streaming_window()
+            .unwrap_err();
+        assert!(err.contains("streaming_chunk_secs"), "{err}");
+        assert!(err.contains("rounds to 0"), "{err}");
+    }
+
+    #[test]
+    fn streaming_window_rejects_out_of_range_values() {
+        for keys in [
+            "streaming_left_context_secs = -0.08",
+            "streaming_right_context_secs = 61.0",
+            "streaming_chunk_secs = nan",
+        ] {
+            let err = parakeet_section(keys).streaming_window().unwrap_err();
+            assert!(err.contains("out of range"), "{keys}: {err}");
+        }
+    }
+
+    #[test]
+    fn streaming_keys_absent_are_not_serialized() {
+        let out = toml::to_string(&ParakeetConfig::default()).unwrap();
+        assert!(!out.contains("streaming_chunk_secs"), "{out}");
+        let cfg = parakeet_section("streaming_chunk_secs = 0.32");
+        let back: ParakeetConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.streaming_chunk_secs, Some(0.32));
+        assert_eq!(back.streaming_left_context_secs, None);
     }
 
     #[test]
