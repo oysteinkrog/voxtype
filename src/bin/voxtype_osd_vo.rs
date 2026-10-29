@@ -1047,8 +1047,10 @@ impl Look {
     }
 
     /// The surface: room for the panel at its tallest. The panel grows
-    /// inside it, so the surface never resizes; the rest is transparent and
-    /// click-through.
+    /// inside it; the rest is transparent and click-through. Room for ink
+    /// outside the panel is not counted here: vo's automatic margin
+    /// (`SurfaceMargin::Auto`) adds it, and grows the surface while an
+    /// effect needs more (EG-08).
     fn surface(&self) -> Size {
         if self.theme == OsdTheme::Amber {
             return Popup::amber_surface(self);
@@ -1109,7 +1111,7 @@ impl Look {
         }
         Size::new(
             self.width.ceil(),
-            self.panel_height(swiss::MAX_LINES as u32).ceil() + 2.0,
+            self.panel_height(swiss::MAX_LINES as u32).ceil(),
         )
     }
 }
