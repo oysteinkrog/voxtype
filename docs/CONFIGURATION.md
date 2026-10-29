@@ -350,6 +350,37 @@ look_chord = false  # Ctrl+Ctrl+Up/Down never switches the popup's look
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`).
 
+### correction_key
+
+**Type:** String (evdev key name)
+**Default:** unset (corrections off)
+**Required:** No
+**CLI:** `--correction-key KEY` · **Env:** `VOXTYPE_CORRECTION_KEY`
+
+Lets you fix a misheard word while you dictate. Hold the key, say the right words, and let go. Voxtype replaces the words on screen that sound most like what you said, among the words you said before the hold. "franken term" said again as "FrankenTerm" replaces the two words with one. The popup dims the live words while you hold the key, and its status row shows the words it hears. When you let go, it shows `old → new`, or "Not changed" with the reason: no match, two places fit, or too short to place. The pasted text gets the same change.
+
+Taps and double taps of the key keep their meaning, so the key can be your `double_tap_alt_key`. Only a hold counts: at least `correction_hold_ms` with no other key pressed. Pressing any other key during the hold (Shift for a capital, a shortcut) drops the correction, and the words you said stay part of the dictation. A stop or discard double tap during the hold applies the correction first.
+
+Corrections need `live_preview_model`, because they work on its timed words. They do not work with `live_typing`, which has already typed the words. Holds outside a recording do nothing.
+
+**Example:**
+```toml
+[hotkey]
+double_tap = true
+key = "RIGHTCTRL"
+double_tap_alt_key = "RIGHTSHIFT"
+correction_key = "RIGHTSHIFT"   # tap twice: paste only; hold: correct
+```
+
+### correction_hold_ms
+
+**Type:** Integer (milliseconds)
+**Default:** `450`
+**Required:** No
+**CLI:** `--correction-hold-ms MS` · **Env:** `VOXTYPE_CORRECTION_HOLD_MS`
+
+How long `correction_key` must be held before a correction starts. The correction itself starts at key-down, so words you say during the wait count. With `double_tap = true` the value is raised to at least `double_tap_ms` + 150, so a slow tap never starts a correction.
+
 ---
 
 ## [audio]

@@ -401,15 +401,27 @@ fn common_prefix_chars(a: &str, b: &str) -> usize {
     a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
 }
 
-/// Publish the live preview text for the OSD (`live_preview_model`).
-/// Written to a temp file and renamed, so a reader never sees half a line.
+/// Publish the live preview text for the OSD (`live_preview_model`), with
+/// any spoken corrections made.
 fn write_live_preview(text: &str) {
+    let shown = crate::osd::live::preview(text);
+    write_preview_file(&shown);
+}
+
+/// A spoken correction changed: show the corrected text at once.
+fn refresh_live_correction() {
+    if let Some(shown) = crate::osd::live::refresh_correction() {
+        write_preview_file(&shown);
+    }
+}
+
+/// Written to a temp file and renamed, so a reader never sees half a line.
+fn write_preview_file(text: &str) {
     let path = Config::live_preview_path();
     let tmp = path.with_extension("tmp");
     if std::fs::write(&tmp, text).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
     }
-    crate::osd::live::preview(text);
 }
 
 fn clear_live_preview() {
@@ -4586,19 +4598,19 @@ impl Daemon {
                                 let t0 = pressed_at.saturating_duration_since(*started_at);
                                 tracing::debug!("Correction hold from {:.2} s", t0.as_secs_f32());
                                 crate::osd::correction::start(t0.as_secs_f32());
-                                crate::osd::live::refresh_correction();
+                                refresh_live_correction();
                             }
                         }
                         (HotkeyEvent::CorrectionEnd, _) => {
                             if let State::Streaming { started_at, .. } = &state {
                                 crate::osd::correction::end(started_at.elapsed().as_secs_f32());
-                                crate::osd::live::refresh_correction();
+                                refresh_live_correction();
                             }
                         }
                         (HotkeyEvent::CorrectionCancel, _) => {
                             if state.is_streaming() {
                                 crate::osd::correction::cancel();
-                                crate::osd::live::refresh_correction();
+                                refresh_live_correction();
                             }
                         }
                     }

@@ -41,6 +41,8 @@ pub(crate) enum Moment {
     /// frame levels (`preview-signals.json`), for the model signal features
     /// (ASR-05).
     Lookahead,
+    /// Two spoken corrections (COR-3): one placed, one with no match.
+    Correction,
 }
 
 impl Moment {
@@ -63,6 +65,7 @@ impl Moment {
         Moment::TimeLimit,
         Moment::LookSwitch,
         Moment::Lookahead,
+        Moment::Correction,
     ];
 
     /// The name on the command line.
@@ -86,6 +89,7 @@ impl Moment {
             Moment::TimeLimit => "time-limit",
             Moment::LookSwitch => "look-switch",
             Moment::Lookahead => "lookahead",
+            Moment::Correction => "correction",
         }
     }
 
@@ -491,6 +495,14 @@ impl Take {
         end
     }
 
+    /// The spoken correction the daemon reports at `t`, None when there is
+    /// none to show.
+    fn correction(&mut self, t: f64, view: Option<voxtype::osd::correction::CorrectionView>) {
+        self.doc.correction = view;
+        self.files.live = Some(self.doc.clone());
+        self.files_at(t);
+    }
+
     /// A model load with real progress from `t` for `secs`.
     fn load(&mut self, t: f64, secs: f64) {
         let steps = (secs / 0.25).ceil() as usize;
@@ -831,6 +843,52 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             let t = k.speak(t + 0.2, &sentence_words(6, 6), per);
             k.stop(t);
             let shown = k.finish(t, 0.6, &final_text(&sentence_words(0, 12)));
+            k.pump(t + 0.03, shown);
+            k.end(shown + 0.2, Outcome::Done);
+            k.scenario(look, shown + 1.4)
+        }
+        Moment::Correction => {
+            use voxtype::osd::correction::{CorrectionNote, CorrectionView};
+            let hold = |hearing: &str| CorrectionView {
+                hearing: Some(hearing.into()),
+                pending: false,
+                note: None,
+            };
+            let note = |id, from: &str, to: &str, dropped: Option<&str>| CorrectionView {
+                hearing: None,
+                pending: false,
+                note: Some(CorrectionNote {
+                    id,
+                    from: from.into(),
+                    to: to.into(),
+                    dropped: dropped.map(str::to_string),
+                }),
+            };
+            k.record(s0);
+            let t = k.speak(s0, &["set", "the", "pop", "up", "theme", "to", "swiss"], per);
+            // Held from t: "popup" said again, placed on "pop up".
+            k.correction(t + 0.45, Some(hold("")));
+            k.sound(t, t + 1.0, Sound::Speech);
+            k.correction(t + 0.8, Some(hold("popup")));
+            let pending = CorrectionView {
+                hearing: None,
+                pending: true,
+                note: None,
+            };
+            k.correction(t + 1.0, Some(pending));
+            k.say(t + 1.4, "set the popup theme to swiss");
+            k.correction(t + 1.4, Some(note(1, "pop up", "popup", None)));
+            let t = k.speak(t + 1.6, &sentence_words(11, 4), per);
+            // A second hold that sounds like nothing on screen.
+            k.correction(t + 0.45, Some(hold("")));
+            k.sound(t, t + 1.0, Sound::Speech);
+            k.correction(t + 0.8, Some(hold("configuration")));
+            k.correction(t + 1.4, Some(note(2, "", "configuration", Some("no match"))));
+            let t = t + 1.4 + super::correction_note::NOTE_SECS;
+            k.stop(t);
+            let words: Vec<&str> = k.files.preview.split_whitespace().collect();
+            let text = final_text(&words);
+            let shown = k.finish(t, 0.6, &text);
             k.pump(t + 0.03, shown);
             k.end(shown + 0.2, Outcome::Done);
             k.scenario(look, shown + 1.4)
