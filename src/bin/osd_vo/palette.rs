@@ -38,6 +38,13 @@ const DESIGN_W: f32 = 600.0;
 const RADIUS: f32 = 12.5;
 const PAD_TOP: f32 = 22.0;
 const CHIP_H: f32 = 30.0;
+/// Below this panel width the chips drop their chevrons and the latency
+/// chip its word, so each label stays on one line.
+const CHIPS_FULL_W: f32 = 480.0;
+/// On a narrow panel, the most characters the engine chip keeps, and the
+/// most the engine and output chips keep together.
+const CHIP_CHARS: usize = 8;
+const CHIPS_CHARS: usize = 14;
 /// The waveform box and the bars in it.
 const WAVE_GAP: f32 = 26.0;
 const WAVE_H: f32 = 68.0;
@@ -110,6 +117,16 @@ fn panel_h(lines: u32) -> f32 {
 
 pub(crate) fn surface(look: &Look) -> Size {
     Size::new(look.width.ceil() + 24.0, (panel_h(MAX_LINES) + 24.0).ceil())
+}
+
+/// `s`, or its first `n - 1` characters and "…" when it is longer than `n`.
+fn cut(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(n - 1).collect();
+    out.push('…');
+    out
 }
 
 /// A small line icon on the 24 unit grid, stroked in `color`.
@@ -419,6 +436,18 @@ impl Popup {
         )
         .size(18.0, 18.0)
         .margin_edges(0.0, 0.0, 0.0, 22.0);
+        let full = l.width >= CHIPS_FULL_W;
+        // A narrow panel shortens what a chip says rather than wrap it: the
+        // engine keeps up to CHIP_CHARS characters, the output what is left
+        // of CHIPS_CHARS.
+        let (engine_name, output_name) = if full {
+            (facts.engine.clone(), facts.output.clone())
+        } else {
+            let engine = cut(&facts.engine, CHIP_CHARS);
+            let left = CHIPS_CHARS.saturating_sub(engine.chars().count()).max(5);
+            let output = cut(facts.output.trim_end_matches(" + Enter"), left);
+            (engine, output)
+        };
         let engine = chip("engine", 0)
             .child(icon(
                 "icon",
@@ -427,12 +456,18 @@ impl Popup {
                 1.8,
                 hex(BLUE),
             ))
-            .child(text("name", facts.engine.clone()))
-            .child(icon("more", chevron(), 12.0, 2.0, hex(SOFT)));
+            .child(text("name", engine_name));
         let output = chip("output", 1)
             .child(icon("icon", keyboard(), 16.0, 1.6, hex(INK)))
-            .child(text("name", facts.output.clone()))
-            .child(icon("more", chevron(), 12.0, 2.0, hex(SOFT)));
+            .child(text("name", output_name));
+        let (engine, output) = if full {
+            (
+                engine.child(icon("more", chevron(), 12.0, 2.0, hex(SOFT))),
+                output.child(icon("more", chevron(), 12.0, 2.0, hex(SOFT))),
+            )
+        } else {
+            (engine, output)
+        };
         let latency = self
             .fam
             .latency
@@ -455,7 +490,7 @@ impl Popup {
                         hex(INK),
                         Spring::critical_to_98(0.3),
                     ))
-                    .child(text("unit", " s latency".into())),
+                    .child(text("unit", if full { " s latency" } else { " s" }.into())),
             );
         let gear = Element::panel("gear")
             .direction_row()
