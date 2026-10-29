@@ -176,7 +176,6 @@ enum Icon {
 struct Screen {
     k: f32,
     w: f32,
-    h: f32,
     shown_at: f64,
     /// When the meter starts to sink.
     sink_at: Option<f64>,
@@ -701,7 +700,6 @@ impl Popup {
         let screen = Screen {
             k,
             w: g.w,
-            h,
             shown_at: self.shown_at,
             sink_at,
             loading: status.loading,
@@ -1112,7 +1110,6 @@ mod tests {
         Screen {
             k: 1.0,
             w: 600.0,
-            h: 400.0,
             shown_at: 0.0,
             sink_at: None,
             loading: false,

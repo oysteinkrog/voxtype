@@ -215,10 +215,12 @@ pub const WORDS_PREFIX: &str = "W ";
 pub const STATUS_PREFIX: &str = "S ";
 
 /// Error text from the engine thread when the GPU has too little free memory.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 const GPU_BUSY: &str = "GPU busy";
 
 /// Free memory on the first GPU in MiB, from nvidia-smi. `None` if it
 /// cannot be read, so a missing nvidia-smi never blocks the engine.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 fn free_vram_mib() -> Option<u64> {
     let out = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
@@ -233,6 +235,7 @@ fn free_vram_mib() -> Option<u64> {
 }
 
 /// What the engine thread reports to the live worker's main loop.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 enum EngineMsg {
     /// A part is done: seconds of audio, seconds it took.
     Part(f32, f32),
@@ -242,6 +245,7 @@ enum EngineMsg {
 
 /// Clips shorter than this use the preview model's final text when the
 /// engine model has not finished loading yet, instead of waiting for it.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 const LIVE_MIN_WAIT_SECS: f32 = 2.5;
 
 /// Splits a recording at pauses, so the engine model can transcribe each
@@ -352,7 +356,7 @@ impl PauseSplitter {
     fn tail(&self, total: usize) -> Option<std::ops::Range<usize>> {
         let n = self.frames.len();
         let speech = n > 0 && self.has_speech(0, n);
-        (speech && total > self.start).then(|| self.start..total)
+        (speech && total > self.start).then_some(self.start..total)
     }
 }
 
@@ -371,6 +375,7 @@ pub fn speech_parts(samples: &[f32]) -> Vec<std::ops::Range<usize>> {
 }
 
 /// How far the engine model has got through the parts sent to it.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 struct Progress {
     /// Seconds of audio in each part sent but not done, oldest first.
     pending: std::collections::VecDeque<f32>,
@@ -378,6 +383,7 @@ struct Progress {
     done_took: f32,
 }
 
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 impl Default for Progress {
     fn default() -> Self {
         Self {
@@ -388,6 +394,7 @@ impl Default for Progress {
     }
 }
 
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 impl Progress {
     fn part_done(&mut self, audio: f32, took: f32) {
         self.pending.pop_front();
@@ -940,6 +947,7 @@ pub fn run_live_worker(_config: &crate::config::Config, _live_model: &str) -> an
 }
 
 /// Read one `[u32 count][f32 samples]` block. `Ok(None)` at a clean EOF.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 fn read_block<R: Read>(reader: &mut R) -> io::Result<Option<Vec<f32>>> {
     let mut count_buf = [0u8; 4];
     match reader.read_exact(&mut count_buf) {
@@ -958,8 +966,9 @@ fn read_block<R: Read>(reader: &mut R) -> io::Result<Option<Vec<f32>>> {
     reader.read_exact(&mut bytes)?;
     Ok(Some(
         bytes
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>().0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect(),
     ))
 }

@@ -228,6 +228,7 @@ pub async fn send_transcription_notification(
 
 /// Trait for text output implementations
 #[async_trait::async_trait]
+#[allow(clippy::double_must_use)] // async_trait adds its own must_use
 pub trait TextOutput: Send + Sync {
     /// Output text (type it or copy to clipboard)
     async fn output(&self, text: &str) -> Result<(), OutputError>;

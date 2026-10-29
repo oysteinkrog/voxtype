@@ -1292,7 +1292,7 @@ impl Daemon {
     /// the language, as configured.
     fn publish_live_meta(&self) {
         let c = &self.config;
-        let engine = serde_json::to_value(&c.engine)
+        let engine = serde_json::to_value(c.engine)
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default();
