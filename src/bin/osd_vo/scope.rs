@@ -102,6 +102,34 @@ const STRIP_WORDS: usize = 64;
 /// big enough to read, small enough to sit between the descenders and the
 /// transcript frame when the newest line is the fourth.
 const LATTICE_LABEL_PX: f32 = 10.0;
+/// LT-08: the lattice in the Technical preset, thinned to hairlines: three
+/// strands per bundle at 35 % alpha, lengths and widths at 0.6, nodes 2 px
+/// under the descenders so the labels fit above the transcript frame.
+const LATTICE_STRANDS: usize = 3;
+const LATTICE_ALPHA: f32 = 0.35;
+const LATTICE_SCALE: f32 = 0.6;
+const LATTICE_DROP: f32 = 2.0;
+/// LT-08: the newest line's gutter under its box: the gap from the fourth
+/// line's box to the transcript frame, less a pixel, so the strands and
+/// labels never reach the frame or the next line's glyphs.
+const LATTICE_GUTTER: f32 = (INNER.1 + INNER.3) * S - TEXT_TOP - MAX_LINES as f32 * LINE - 1.0;
+
+/// LT-08: the lattice look for one transcript line in `style` whose first
+/// baseline sits `baseline` under its top, fitted to that line's gutter.
+fn lattice_look(style: &TextStyle, baseline: f32, newest: bool, label: TextStyle) -> vo::scene::lattice::LatticeLook {
+    let g = wild_space::line_gutter(style, baseline, newest, LATTICE_GUTTER);
+    let mut look = vo::scene::lattice::LatticeStyle::Technical.look(
+        hex(TRACE).fade(LATTICE_ALPHA),
+        hex(VALUE).fade(LATTICE_ALPHA),
+        LATTICE_SCALE,
+        newest.then_some(label),
+    );
+    look.strands = LATTICE_STRANDS;
+    look.drop = LATTICE_DROP;
+    look.label_color = hex(LABEL).fade(0.8);
+    look.gutters = vec![g];
+    wild_space::fit_look(look, &g)
+}
 
 /// m18: the most the trace's live floor swings, in logical pixels, reached
 /// at the room-tone level (`ROOM_TONE_DBFS`); true silence draws it flat.
@@ -965,23 +993,21 @@ impl Popup {
             // The kinetic lattice under each line, the times on the newest.
             for (i, (words, _)) in lines.iter().enumerate() {
                 let newest = i + 1 == lines.len();
-                let look = vo::scene::lattice::LatticeLook {
-                    bow: (1.5, 8.0),
-                    bow_per_sec: 22.0,
-                    drop: 4.0,
-                    stem: 6.0,
-                    color: hex(TRACE).fade(0.5),
-                    accent: hex(VALUE),
-                    label: newest.then(|| mono(LATTICE_LABEL_PX)),
-                    label_color: hex(LABEL).fade(0.8),
-                    ..Default::default()
-                };
+                let text = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+                let baseline = self
+                    .measure
+                    .layout(&text, &style, None)
+                    .lines
+                    .first()
+                    .map_or(style.size, |l| l.baseline);
+                let look = lattice_look(&style, baseline, newest, mono(LATTICE_LABEL_PX));
+                let h = if newest { LINE + LATTICE_GUTTER } else { LINE };
                 panel = panel.child(lattice_rewind(at(
                     self.lattice_line(
                         format!("lattice-{}", words[0].id),
                         words,
                         &style,
-                        Size::new(WRAP + 40.0, LINE + 14.0),
+                        Size::new(WRAP + 40.0, h),
                         &look,
                         // LT-04: the live strand ends at the caret's foot, which
                         // the scene draws a margin further in than `caret`.
@@ -1143,5 +1169,45 @@ mod sentence_tests {
         // Everything m18 moves is in the graticule, well above the first text line.
         let g = graticule();
         assert!(g.y + g.h < TEXT_TOP);
+    }
+}
+
+#[cfg(test)]
+mod lattice_tests {
+    use super::*;
+
+    fn label() -> TextStyle {
+        TextStyle::new(MONO, LATTICE_LABEL_PX, LATTICE_LABEL_PX * 1.3)
+    }
+
+    #[test]
+    fn the_lattice_is_three_hairlines_at_35_percent() {
+        let style = TextStyle::new(MONO, TEXT_PX, LINE);
+        let look = lattice_look(&style, 24.0, true, label());
+        assert_eq!(look.strands, 3);
+        assert!((look.color.a - LATTICE_ALPHA).abs() < 1e-4, "{:?}", look.color);
+        assert!((look.accent.a - LATTICE_ALPHA).abs() < 1e-4, "{:?}", look.accent);
+        assert!(look.width.1 <= 1.5, "hairlines, got {:?}", look.width);
+        let older = lattice_look(&style, 24.0, false, label());
+        assert!(older.label.is_none(), "labels on the newest line only");
+        assert!(older.color.a < look.color.a);
+    }
+
+    #[test]
+    fn the_newest_gutter_and_its_labels_stay_inside_the_transcript_frame() {
+        let style = TextStyle::new(MONO, TEXT_PX, LINE);
+        let frame_bottom = (INNER.1 + INNER.3) * S;
+        // The fourth line is the lowest the newest line ever sits.
+        let top = TEXT_TOP + (MAX_LINES - 1) as f32 * LINE;
+        for baseline in [21.0, 23.0, 25.0] {
+            let look = lattice_look(&style, baseline, true, label());
+            let g = look.gutters[0];
+            assert!(top + g.top + g.height < frame_bottom, "baseline {baseline}: {g:?}");
+            let label = look.label.expect("the newest line's labels fit");
+            let node = baseline + g.descent + look.drop;
+            assert!(node > baseline + TEXT_PX * 0.25, "nodes under the descenders");
+            assert!(look.stem >= 2.0);
+            assert!(node + look.stem + label.line_height <= g.top + g.height + 0.01, "baseline {baseline}");
+        }
     }
 }

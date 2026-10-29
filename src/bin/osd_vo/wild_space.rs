@@ -90,7 +90,7 @@ pub(crate) struct LatticeSet {
 /// line's `baseline`: the newest line's strip runs from its descenders to
 /// `gutter` under its box and bows down only; an older line's is the gap
 /// between its descenders and the next line's ascenders.
-fn line_gutter(style: &TextStyle, baseline: f32, newest: bool, gutter: f32) -> LineGutter {
+pub(crate) fn line_gutter(style: &TextStyle, baseline: f32, newest: bool, gutter: f32) -> LineGutter {
     let descent = style.size * DESCENT;
     let top = baseline + descent;
     let height = if newest {
@@ -104,7 +104,7 @@ fn line_gutter(style: &TextStyle, baseline: f32, newest: bool, gutter: f32) -> L
 /// `look` fitted to `g`: on an older line the drop lines and ticks stay in
 /// half the gutter; on the newest a label shows only when it fits under its
 /// drop line, which shortens to make room.
-fn fit_look(mut look: LatticeLook, g: &LineGutter) -> LatticeLook {
+pub(crate) fn fit_look(mut look: LatticeLook, g: &LineGutter) -> LatticeLook {
     let half = (g.height * 0.5 - 1.0).max(0.0);
     if !g.newest {
         // An older line stays quiet: fainter, finer, no accent, so only the
