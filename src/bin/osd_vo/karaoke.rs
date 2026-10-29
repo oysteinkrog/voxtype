@@ -104,12 +104,13 @@ const BOW_TIGHTEN: f64 = 0.45;
 
 /// How far the string's middle sits below its ends at `age` seconds after
 /// the word came, for a word said at `pitch` (0 to 1, `None` unvoiced):
-/// slack that tightens, and a high pitch bending it up.
+/// slack that tightens, and a high pitch bending it up. Under reduced
+/// motion the string rests straight.
 fn bow_sag(age: f64, pitch: Option<f32>, reduced: bool) -> f32 {
-    let bend = pitch.map_or(0.0, |p| -(p - 0.5).clamp(-0.5, 0.5) * 2.0 * BOW_BEND);
     if reduced {
-        return bend;
+        return 0.0;
     }
+    let bend = pitch.map_or(0.0, |p| -(p - 0.5).clamp(-0.5, 0.5) * 2.0 * BOW_BEND);
     let tight = ease_out(age / BOW_TIGHTEN);
     BOW_SLACK * (1.0 - tight) + bend * tight
 }
@@ -752,7 +753,7 @@ impl Popup {
     /// the word in the line arrives spaced out, so the mask is a live text
     /// with the same channels, and the two keep the same letter places.
     fn karaoke_lit_glyphs(&self, word: &Word, style: &TextStyle) -> Element<Msg> {
-        if !self.look.on(channels::TRACKING) || self.look.on("reduced-motion") {
+        if !self.look.on(channels::TRACKING) || self.look.on("reduced-motion") || kit::reduced() {
             return Element::label("word", word.text.as_str())
                 .text_style(*style)
                 .color(Color::WHITE);
@@ -788,7 +789,7 @@ impl Popup {
         let heard = self.heard.word(word.id);
         let born = heard.map_or(self.extra.now, |h| h.born);
         let pitch = heard.and_then(|h| h.pitch);
-        let reduced = self.look.on("reduced-motion");
+        let reduced = self.look.on("reduced-motion") || kit::reduced();
         let until = if reduced { f64::NEG_INFINITY } else { born + BOW_TIGHTEN + 0.05 };
         at(
             Element::canvas(format!("bow-{}", word.id), until, move |t, r, p| {
@@ -828,7 +829,7 @@ impl Popup {
     /// is a live text of its own, so the mark's split on a wrap is drawn by
     /// `karaoke_mark_top`. Under reduced motion words keep plain spacing.
     fn karaoke_channels(&self, text: Element<Msg>, words: &[Word], newest: bool) -> Element<Msg> {
-        let text = if self.look.on("reduced-motion") {
+        let text = if self.look.on("reduced-motion") || kit::reduced() {
             text
         } else {
             self.typo_words(text)
@@ -1044,7 +1045,8 @@ mod tests {
         // A high word bends the string up, a low one down.
         assert!(bow_sag(1.0, Some(1.0), false) < -BOW_BEND * 0.9);
         assert!(bow_sag(1.0, Some(0.0), false) > BOW_BEND * 0.9);
-        // Reduced motion: no slack, only the bend.
-        assert_eq!(bow_sag(0.0, Some(0.5), true), 0.0);
+        // Reduced motion: straight, whatever the pitch.
+        assert_eq!(bow_sag(0.0, Some(1.0), true), 0.0);
+        assert_eq!(bow_sag(1.0, None, true), 0.0);
     }
 }
