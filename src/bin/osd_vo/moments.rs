@@ -109,6 +109,14 @@ fn sentence_words(from: usize, n: usize) -> Vec<&'static str> {
     SENTENCE.split_whitespace().skip(from).take(n).collect()
 }
 
+/// Seconds of room tone in the long-silence moment. Long enough for the
+/// kinetic lattice to play all of its quiet out and then hold still: the
+/// live strand slackens over `LIVE_SLACK` (3 s), the exhale starts
+/// `EXHALE_AFTER` (3 s) into the silence and eases out over `EXHALE_OVER`
+/// (1.2 s), and then the lattice rests for 2.3 s before the voice comes
+/// back, so a render shows the rest as well as the motion (LT-12).
+const LONG_SILENCE: f64 = 6.5;
+
 /// The words of the lattice moment and the pause before each, in seconds.
 /// The commas and full stops are in the text, so the lattice sees clause
 /// and sentence ends.
@@ -471,8 +479,8 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
         Moment::LongSilence => {
             k.record(s0);
             let t = k.speak(s0, &sentence_words(0, 3), per);
-            k.sound(t, t + 5.0, Sound::Quiet);
-            let t = k.speak(t + 5.0, &sentence_words(3, 5), per);
+            k.sound(t, t + LONG_SILENCE, Sound::Quiet);
+            let t = k.speak(t + LONG_SILENCE, &sentence_words(3, 5), per);
             k.stop(t);
             let shown = k.finish(t, 0.6, &final_text(&sentence_words(0, 8)));
             k.pump(t + 0.03, shown);
@@ -923,6 +931,15 @@ mod tests {
             at.windows(2).all(|w| w[1] > w[0]),
             "two audio messages for one batch"
         );
+    }
+
+    /// LT-12: the long silence outlasts the lattice's quiet motion by more
+    /// than a second, so a render sees it come to rest.
+    #[test]
+    fn the_long_silence_outlasts_the_lattice_exhale() {
+        use vo::scene::lattice::{EXHALE_AFTER, EXHALE_OVER, LIVE_SLACK};
+        let quiet_motion = (EXHALE_AFTER + EXHALE_OVER).max(LIVE_SLACK);
+        assert!(LONG_SILENCE >= quiet_motion + 1.5, "{LONG_SILENCE} s of silence");
     }
 
     #[test]

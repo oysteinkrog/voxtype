@@ -24,6 +24,7 @@
 use super::*;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use vo::scene::depth_stack::{DepthStack, Place, Sheet};
@@ -62,6 +63,9 @@ const LEVEL_KEEP: f64 = 2.0;
 /// as a share of the font size, for the gutters between lines (LT-07).
 const DESCENT: f32 = 0.25;
 const ASCENT: f32 = 0.74;
+/// Words whose loudness is kept before the ones no longer heard are dropped.
+const LOUDNESS_KEEP: usize = 256;
+
 /// How much of its colour an older line's lattice keeps.
 const OLDER_FADE: f32 = 0.5;
 
@@ -142,6 +146,10 @@ pub(crate) struct State {
     sculpture: OnceLock<(Arc<Sculpture>, Arc<dyn vo::scene::gpu::GpuSource>)>,
     /// The voice as the lattice hears it, fed from the raw levels at each view.
     voice: RefCell<LatticeVoice>,
+    /// Each word's loudness and the sound it was measured over, kept once
+    /// the whole sound was in the level history, so a word does not go
+    /// quiet when its sound scrolls out of that history (LT-12).
+    loudness: RefCell<HashMap<WordId, ((f64, f64), f32)>>,
 }
 
 /// The level over room tone as a [`LevelTrack`], and when the voice was last
@@ -254,17 +262,34 @@ impl Popup {
     }
 
     /// How loud a word was, 0 to 1: the loudest level over the sound it
-    /// came from, or the level when it arrived.
+    /// came from. Measured once the whole sound is in the level history and
+    /// kept from then on: the history is a few seconds long, and a word
+    /// measured after its sound scrolled out would read as silent, so its
+    /// strand would thin seconds after it landed.
     pub(crate) fn word_loudness(&self, id: WordId) -> f32 {
-        let levels = self.kit_raw_levels();
         let Some(h) = self.heard.word(id) else {
             return 0.5;
         };
+        let mut kept = self.wild.loudness.borrow_mut();
+        if let Some(&(sound, loud)) = kept.get(&id) {
+            if sound == h.sound {
+                return loud;
+            }
+        }
+        let levels = self.kit_raw_levels();
         let (a, b) = h.sound;
         let peak = (0..=8)
             .map(|i| levels.at(a + (b - a) * i as f64 / 8.0))
-            .fold(0.0f32, f32::max);
-        peak.clamp(0.0, 1.0)
+            .fold(0.0f32, f32::max)
+            .clamp(0.0, 1.0);
+        let oldest = levels.newest_at - levels.levels.len().saturating_sub(1) as f64 / FRAME_HZ as f64;
+        if !levels.levels.is_empty() && a >= oldest && b <= levels.newest_at {
+            if kept.len() >= LOUDNESS_KEEP {
+                kept.retain(|id, _| self.heard.word(*id).is_some());
+            }
+            kept.insert(id, (h.sound, peak));
+        }
+        peak
     }
 
     /// The lattice timing of `words`: the pause before each (from the
@@ -601,6 +626,62 @@ impl Popup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The popup, reporting the first word's loudness against the newest
+    /// level's time after every message.
+    struct Loudness(Popup, std::rc::Rc<RefCell<Vec<(f64, f32)>>>);
+
+    impl vo::App for Loudness {
+        type Msg = Msg;
+
+        fn init(&mut self, cx: &mut Cx<Msg>) {
+            self.0.init(cx);
+        }
+
+        fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
+            self.0.update(msg, cx);
+            let first = (0..8).map(|i| i as WordId).find(|&id| self.0.heard.word(id).is_some());
+            if let Some(id) = first {
+                let at = self.0.kit_raw_levels().newest_at;
+                self.1.borrow_mut().push((at, self.0.word_loudness(id)));
+            }
+        }
+
+        fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
+            self.0.view(tokens)
+        }
+
+        fn surfaces(&self, tokens: &vo::Tokens) -> Vec<vo::SurfaceView<Msg>> {
+            self.0.surfaces(tokens)
+        }
+
+        fn main_surface(&self) -> Option<(Size, vo::Placement)> {
+            self.0.main_surface()
+        }
+    }
+
+    /// LT-12: a word keeps its loudness after its sound scrolls out of the
+    /// level history, so its strand does not thin seconds after it landed
+    /// (seen under reduced motion as the first two strands changing 3.6 and
+    /// 3.9 s into the long-silence moment).
+    #[test]
+    fn a_word_keeps_its_loudness_after_its_sound_scrolls_away() {
+        let theme = PlasmaTheme::default();
+        let fonts = load_fonts(&theme).unwrap();
+        let mut look = Look::new(&OsdConfig::default(), &theme, String::new(), &fonts);
+        look.theme = OsdTheme::Scope;
+        let s = super::moments::scenario(&look, super::moments::Moment::LongSilence);
+        let seen = std::rc::Rc::new(RefCell::new(Vec::new()));
+        vo::exit_check(Loudness(Popup::scripted(look, &fonts), seen.clone()), &s, 10.0, Options::default());
+        let seen = seen.borrow();
+        // From when the first word's sound is fully heard, to well past the
+        // few seconds of level history.
+        let settled: Vec<f32> = seen.iter().filter(|(at, _)| (1.0..6.0).contains(at)).map(|&(_, l)| l).collect();
+        assert!(seen.iter().any(|(at, _)| *at > 5.5), "the silence runs past the history");
+        assert!(settled.len() > 50, "{} samples", settled.len());
+        assert!(settled[0] > 0.05, "the word was heard: {}", settled[0]);
+        assert!(settled.iter().all(|&l| l == settled[0]), "loudness moved: {settled:?}");
+    }
 
     #[test]
     fn punctuation_ends_sentences_and_clauses() {
