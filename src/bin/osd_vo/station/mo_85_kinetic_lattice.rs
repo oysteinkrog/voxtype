@@ -7,5 +7,5 @@ use super::*;
 pub(super) fn exhibit() -> Exhibit {
     Exhibit::new("MO-85", "Kinetic lattice", OsdTheme::Scope)
         .feature(wild_space::KINETIC_LATTICE)
-        .moments(&[Moment::Pause, Moment::Dictation])
+        .moments(&[Moment::Lattice, Moment::Pause, Moment::RevisionBurst])
 }

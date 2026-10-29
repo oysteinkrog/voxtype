@@ -22,6 +22,9 @@ pub(crate) enum Moment {
     Pause,
     LongSilence,
     RevisionBurst,
+    /// Words with pauses from 100 to 900 ms, a comma, a sentence end and
+    /// one revision, for the kinetic lattice exhibit (MO-85).
+    Lattice,
     Wrap,
     Overflow,
     FinalPass,
@@ -43,6 +46,7 @@ impl Moment {
         Moment::Pause,
         Moment::LongSilence,
         Moment::RevisionBurst,
+        Moment::Lattice,
         Moment::Wrap,
         Moment::Overflow,
         Moment::FinalPass,
@@ -64,6 +68,7 @@ impl Moment {
             Moment::Pause => "pause",
             Moment::LongSilence => "long-silence",
             Moment::RevisionBurst => "revision-burst",
+            Moment::Lattice => "lattice",
             Moment::Wrap => "wrap",
             Moment::Overflow => "overflow",
             Moment::FinalPass => "final-pass",
@@ -103,6 +108,27 @@ const SENTENCE: &str = "open the configuration file and set the popup theme to s
 fn sentence_words(from: usize, n: usize) -> Vec<&'static str> {
     SENTENCE.split_whitespace().skip(from).take(n).collect()
 }
+
+/// The words of the lattice moment and the pause before each, in seconds.
+/// The commas and full stops are in the text, so the lattice sees clause
+/// and sentence ends.
+const LATTICE_SCRIPT: &[(&str, f64)] = &[
+    ("Open", 0.0),
+    ("the", 0.10),
+    ("configuration", 0.30),
+    ("file,", 0.15),
+    ("and", 0.55),
+    ("set", 0.10),
+    ("the", 0.20),
+    ("popup", 0.90),
+    ("theme", 0.35),
+    ("to", 0.12),
+    ("swish.", 0.25),
+    ("Then", 0.70),
+    ("press", 0.15),
+    ("the", 0.10),
+    ("key.", 0.45),
+];
 
 /// What the microphone hears in a stretch of a moment.
 #[derive(Clone, Copy, PartialEq)]
@@ -480,6 +506,39 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             k.stop(t);
             let shown = k.finish(t, 0.6, &final_text(&sentence_words(0, 16)));
             k.pump(t + 0.03, shown);
+            k.end(shown + 0.2, Outcome::Done);
+            k.scenario(look, shown + 1.4)
+        }
+        Moment::Lattice => {
+            k.record(s0);
+            let mut t = s0;
+            let mut cursor = s0;
+            let mut said: Vec<&str> = Vec::new();
+            for (i, (word, pause)) in LATTICE_SCRIPT.iter().enumerate() {
+                // A word is timed 0.35 s before it is said and lasts 0.25 s,
+                // so the pause the popup measures is the gap less 0.25 s.
+                t += if i == 0 { 0.35 } else { 0.25 + pause };
+                let from = t - 0.33;
+                if from > cursor {
+                    k.sound(cursor, from, Sound::Quiet);
+                }
+                k.sound(from.max(cursor), t - 0.01, Sound::Speech);
+                cursor = t - 0.01;
+                said.push(word);
+                k.say(t, &said.join(" "));
+                if *word == "swish." {
+                    // The engine hears it again and puts it right.
+                    k.sound(cursor, t + 0.5, Sound::Quiet);
+                    cursor = t + 0.5;
+                    *said.last_mut().unwrap() = "swiss.";
+                    k.say(t + 0.5, &said.join(" "));
+                }
+            }
+            let end = cursor.max(t) + 0.05;
+            k.stop(end);
+            let text = said.join(" ");
+            let shown = k.finish(end, 0.6, &text);
+            k.pump(end + 0.03, shown);
             k.end(shown + 0.2, Outcome::Done);
             k.scenario(look, shown + 1.4)
         }
@@ -945,5 +1004,31 @@ mod tests {
         assert!(starts.windows(2).all(|w| w[1] >= w[0]));
         // The pause shows as a gap of over a second between two words.
         assert!(starts.windows(2).any(|w| w[1] - w[0] > 1.2));
+    }
+
+    #[test]
+    fn the_lattice_moment_has_varied_pauses_a_comma_a_sentence_end_and_a_revision() {
+        let look = test_look();
+        let s = scenario(&look, Moment::Lattice);
+        let f = files(&s);
+        let doc = f.last().unwrap().1.live.clone().unwrap();
+        let mut pauses: Vec<i32> = Vec::new();
+        let mut end: Option<f32> = None;
+        for w in &doc.words {
+            if let (Some(a), Some(b)) = (w.start, w.end) {
+                if let Some(e) = end {
+                    pauses.push(((a - e) * 1000.0).round() as i32);
+                }
+                end = Some(b);
+            }
+        }
+        pauses.sort();
+        pauses.dedup();
+        assert!(pauses.len() >= 4, "pauses: {pauses:?}");
+        assert!(pauses.iter().any(|p| *p <= 150) && pauses.iter().any(|p| *p >= 800));
+        let texts: Vec<&str> = f.iter().map(|(_, x)| x.preview.as_str()).collect();
+        assert!(texts.iter().any(|t| t.ends_with("swish.")));
+        assert!(f.last().unwrap().1.preview.contains("file, and"));
+        assert!(f.last().unwrap().1.preview.contains("swiss. Then"));
     }
 }
