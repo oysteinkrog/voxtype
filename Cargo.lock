@@ -6438,7 +6438,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vo"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=3d7f74ba5a38114785db2066c4e563185fe3a705#3d7f74ba5a38114785db2066c4e563185fe3a705"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=475e0185f642af60d71db7e606bfad5bc1f49c63#475e0185f642af60d71db7e606bfad5bc1f49c63"
 dependencies = [
  "bytemuck",
  "png 0.18.1",
@@ -6457,7 +6457,7 @@ dependencies = [
 [[package]]
 name = "vo-3d"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=3d7f74ba5a38114785db2066c4e563185fe3a705#3d7f74ba5a38114785db2066c4e563185fe3a705"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=475e0185f642af60d71db7e606bfad5bc1f49c63#475e0185f642af60d71db7e606bfad5bc1f49c63"
 dependencies = [
  "bytemuck",
  "harfrust",
@@ -6472,7 +6472,7 @@ dependencies = [
 [[package]]
 name = "vo-core"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=3d7f74ba5a38114785db2066c4e563185fe3a705#3d7f74ba5a38114785db2066c4e563185fe3a705"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=475e0185f642af60d71db7e606bfad5bc1f49c63#475e0185f642af60d71db7e606bfad5bc1f49c63"
 dependencies = [
  "serde",
  "serde_json",
@@ -6482,7 +6482,7 @@ dependencies = [
 [[package]]
 name = "vo-dots"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=3d7f74ba5a38114785db2066c4e563185fe3a705#3d7f74ba5a38114785db2066c4e563185fe3a705"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=475e0185f642af60d71db7e606bfad5bc1f49c63#475e0185f642af60d71db7e606bfad5bc1f49c63"
 dependencies = [
  "vo-core",
  "vo-scene",
@@ -6491,7 +6491,7 @@ dependencies = [
 [[package]]
 name = "vo-host"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=3d7f74ba5a38114785db2066c4e563185fe3a705#3d7f74ba5a38114785db2066c4e563185fe3a705"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=475e0185f642af60d71db7e606bfad5bc1f49c63#475e0185f642af60d71db7e606bfad5bc1f49c63"
 dependencies = [
  "vo-scene",
  "wgpu 30.0.1",
@@ -6500,7 +6500,7 @@ dependencies = [
 [[package]]
 name = "vo-host-wayland"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=3d7f74ba5a38114785db2066c4e563185fe3a705#3d7f74ba5a38114785db2066c4e563185fe3a705"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=475e0185f642af60d71db7e606bfad5bc1f49c63#475e0185f642af60d71db7e606bfad5bc1f49c63"
 dependencies = [
  "libc",
  "pollster",
@@ -6515,7 +6515,7 @@ dependencies = [
 [[package]]
 name = "vo-render"
 version = "0.0.1"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=3d7f74ba5a38114785db2066c4e563185fe3a705#3d7f74ba5a38114785db2066c4e563185fe3a705"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=475e0185f642af60d71db7e606bfad5bc1f49c63#475e0185f642af60d71db7e606bfad5bc1f49c63"
 dependencies = [
  "bytemuck",
  "half",
@@ -6530,7 +6530,7 @@ dependencies = [
 [[package]]
 name = "vo-scene"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=3d7f74ba5a38114785db2066c4e563185fe3a705#3d7f74ba5a38114785db2066c4e563185fe3a705"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=475e0185f642af60d71db7e606bfad5bc1f49c63#475e0185f642af60d71db7e606bfad5bc1f49c63"
 dependencies = [
  "harfrust",
  "kurbo",
