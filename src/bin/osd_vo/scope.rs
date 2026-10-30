@@ -1145,8 +1145,10 @@ impl Popup {
             _ => format!("{}{}", status.state, status.detail),
         };
         panel.child(
+            // Keyed once, not by state: a new key per state faded the old
+            // row out under the new one ("Loading" over "Listening").
             label(
-                format!("status-{}", status.state),
+                "status".into(),
                 text,
                 mono(13.0 * S * 1.2),
                 hex(0xc6f3dc),
