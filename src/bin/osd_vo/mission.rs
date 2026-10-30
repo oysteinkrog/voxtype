@@ -1095,20 +1095,20 @@ impl Popup {
                 .trim()
                 .to_string(),
         };
+        // One state label and one detail label whose text changes in place:
+        // keyed by state, the old pair faded out where the new pair faded in,
+        // and the two texts crossed ("Loading" over "Listening").
         let mut words = Element::row("words")
             .align_items(AlignItems::CENTER)
-            .child(
-                Element::label(format!("state-{state}"), state.as_str())
-                    .text_style(big)
-                    .color(hex(INK))
-                    .presence(Transition::fade().offset(0.0, 6.0), Transition::fade()),
-            );
+            .child(Element::label("state", state.as_str()).text_style(big).color(hex(INK)));
         if !detail.is_empty() {
             words = words.child(
-                Element::label(format!("detail-{state}"), format!("  \u{b7}  {detail}"))
+                Element::label("detail", format!("  \u{b7}  {detail}"))
                     .text_style(small)
                     .color(hex(LABEL))
-                    .presence(Transition::fade().offset(0.0, 6.0), Transition::fade()),
+                    // Its x follows the state word's width: a slide from
+                    // the old width put the dot against the new word.
+                    .motion(Prop::Position, Motion::Snap),
             );
         }
         let mut left = Element::column("left").gap(5.0).child(words);
