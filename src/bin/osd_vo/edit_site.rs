@@ -135,11 +135,30 @@ pub(crate) trait EditSite {
     fn place(&self, look: &Look, el: Element<Msg>, view: &EditView) -> Element<Msg> {
         let decor = styled(view.decor.clone(), self.caret(look));
         el.map_live_texts(&mut |e| {
+            if !shows_window(&e, view) {
+                return e;
+            }
             e.live_source(view.text.clone())
                 .edit(decor.clone())
                 .still_motion(true)
         })
     }
+}
+
+/// Whether live text `e` is the look's transcript, which shows the edit
+/// window: not a status row or detail line (keyed `status*` or
+/// `detail-*`), and every word it holds is a window word. Those keep their
+/// own text and get no second caret.
+pub(crate) fn shows_window(e: &Element<Msg>, view: &EditView) -> bool {
+    let key = &e.key().0;
+    if key.starts_with("status") || key.starts_with("detail-") {
+        return false;
+    }
+    let window: HashSet<&str> = view.text.split_whitespace().collect();
+    e.live_words()
+        .unwrap_or_default()
+        .iter()
+        .all(|w| window.contains(w.text.as_str()))
 }
 
 /// `decor` in a look's caret, selection and mark colours.
@@ -349,6 +368,37 @@ mod tests {
         p.edit.as_mut().unwrap().resume();
         p.sync_quiet();
         assert!(p.look.on(MORPH) && p.look.on(BREATH));
+    }
+
+    /// edit-fw's finding: the default place gives the window and the caret
+    /// to the transcript only, not to a status row or a detail line.
+    #[test]
+    fn the_default_place_leaves_status_rows_alone() {
+        use vo::scene::element::Element;
+        use vo_core::words::Word;
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut p, _) = popup(&dir, OsdTheme::Swiss);
+        sync(&mut p, Some("editing"), "alpha beta gamma");
+        let view = p.edit_view.clone().unwrap();
+        let words = |ws: &[&str]| -> Vec<Word> {
+            ws.iter()
+                .enumerate()
+                .map(|(i, w)| Word {
+                    id: 100 + i as u32,
+                    text: (*w).into(),
+                })
+                .collect()
+        };
+        let text = Element::live_text("words", &words(&["alpha", "beta", "gamma"]));
+        assert!(shows_window(&text, &view));
+        for (key, ws) in [
+            ("detail-paused", vec!["Paused"]),
+            ("status-editing", vec![]),
+            ("hint", vec!["Shift", "to", "edit"]),
+        ] {
+            let row = Element::<Msg>::live_text(key, &words(&ws));
+            assert!(!shows_window(&row, &view), "{key}");
+        }
     }
 
     #[test]
