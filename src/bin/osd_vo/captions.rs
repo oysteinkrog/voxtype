@@ -13,6 +13,10 @@
 //!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
+//!
+//! While editing ([`CaptionsSite`]) both lines are full size and flat, the
+//! newest word is part of its line, and a line keeps its left edge while
+//! you type (the sticky centring of `EditView::centre`).
 
 use super::*;
 
@@ -65,14 +69,13 @@ struct Fonts {
 }
 
 fn fonts(reg: &FontRegistry) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |pattern: &str, or: u32| reg.add_system(pattern).unwrap_or(or);
-        Fonts {
-            text: add("Nunito:medium", SANS),
-            ui: add("Nunito", SANS),
-        }
-    })
+    // Added to the registry once (`FontRegistry::system`), so every
+    // registry, such as a test's, has its own ids.
+    let add = |pattern: &str, or: u32| reg.system(pattern).unwrap_or(or);
+    Fonts {
+        text: add("Nunito:medium", SANS),
+        ui: add("Nunito", SANS),
+    }
 }
 
 fn reduced() -> bool {
@@ -301,7 +304,7 @@ impl Popup {
 
     fn captions_back_target(&self) -> Rect {
         let style = self.look.text_style();
-        let all = self.stable_lines(&style, WRAP);
+        let all = self.text_lines(&style, WRAP);
         let shown = &all[all.len().saturating_sub(MAX_LINES as usize)..];
         let widest = shown.iter().map(|l| l.1).fold(0.0f32, f32::max).max(260.0);
         let lines = shown.len().max(1) as f32;
@@ -378,7 +381,14 @@ impl Popup {
         let mode = c.mode.unwrap_or(Mode::Loading);
         let f = fonts(&l.fonts);
         let style = l.text_style();
-        let all = self.stable_lines(&style, WRAP);
+        // While editing: the window's lines, each with its sticky centring
+        // width.
+        let all = self.text_lines(&style, WRAP);
+        let editing = self.edit_view.is_some();
+        // From a tap until the edit is handed back, a line whose first word
+        // changes (an edit reflowed it) swaps to its new node at once, so no
+        // word shows twice.
+        let tapped = self.edit_tapped();
         // With fold-under (MO-33) the line that leaves the top stays in the
         // last slot, turned away about its baseline, instead of fading up.
         let fold = matches!(l.overflow(), Overflow::Fold(_));
@@ -398,7 +408,7 @@ impl Popup {
             .glyphs
             .first()
             .map_or(LINE * 0.7, |g| g.pos.y);
-        let live = mode == Mode::Listening;
+        let live = mode == Mode::Listening && !tapped;
         let newest = if live {
             self.model.words().last().map(|w| w.id)
         } else {
@@ -412,6 +422,8 @@ impl Popup {
         for (i, (words, w)) in lines.iter().enumerate() {
             let age = n - 1 - i;
             let (cy, opacity) = SLOTS[age.min(SLOTS.len() - 1)];
+            // Both edited lines are full ink, so either can hold the caret.
+            let opacity = if editing { 1.0 } else { opacity };
             let lx = (BAND_W - w) / 2.0;
             let ly = cy - LINE / 2.0;
             let leaving = age + 1 >= SLOTS.len();
@@ -435,7 +447,11 @@ impl Popup {
                     .motion(Prop::TextColor, Spring::critical_to_98(0.15))
                     .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                     .motion(Prop::Offset, Spring::POP)
-                    .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 6.0)));
+                    .word_enter(if tapped {
+                        Transition::NONE
+                    } else {
+                        self.ghost_enter(Transition::fade().offset(0.0, 6.0))
+                    });
                 // MO-14 and the other word channels.
                 self.typo_words(text)
             };
@@ -447,10 +463,16 @@ impl Popup {
             let space = self.measure.layout("x x", &style, None).size.w
                 - 2.0 * self.measure.layout("x", &style, None).size.w;
             let bw = if body.is_empty() { 0.0 } else { width(body) - 2.0 + space };
-            let mut row = Element::column(format!("line-{}", words[0].id))
+            // An edited line is the buffer's own text, spaces and all, so it
+            // gets the whole wrap width: its own words' width could wrap it.
+            let body_w = if editing { WRAP } else { width(body) };
+            let key = words
+                .first()
+                .map_or_else(|| format!("slot-{i}"), |w| w.id.to_string());
+            let mut row = Element::column(format!("line-{key}"))
                 .size(*w + 4.0, LINE)
                 .child(at(
-                    line_el("body".into(), body, hex(WHITE)).width(width(body)),
+                    line_el("body".into(), body, hex(WHITE)).width(body_w),
                     0.0,
                     0.0,
                 ));
@@ -490,7 +512,14 @@ impl Popup {
                     // A new row comes in through its words' own entry: a fade
                     // and rise of the whole row put the newest words 10 px low
                     // at 4 % ink, past the reading-line envelope (RD-09).
-                    .presence(Transition::NONE, Transition::fade().offset(0.0, -18.0)),
+                    .presence(
+                        Transition::NONE,
+                        if tapped {
+                            Transition::NONE
+                        } else {
+                            Transition::fade().offset(0.0, -18.0)
+                        },
+                    ),
             );
             // Unsure words on this line get the underline.
             if live && !leaving {
@@ -605,5 +634,80 @@ impl Popup {
             );
         }
         panel
+    }
+}
+
+/// Captions' edit adapter (plan section 4.5): one node per line, the hot
+/// word merged into its line, the default caret.
+pub(crate) struct CaptionsSite;
+
+impl edit_site::EditSite for CaptionsSite {
+    fn place(&self, look: &Look, el: Element<Msg>, view: &edit::EditView) -> Element<Msg> {
+        edit_site::place_lines(self, look, el, view)
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::scope::edit_tests::check_edit_envelope;
+    use super::super::swiss_look::edit_check::Rig;
+    use super::*;
+
+    /// M7.L8: Captions edits in its own band. With the caret on the newest
+    /// and the top line, at both widths: the caret on its glyph within 1 px
+    /// in every frame, the popup's size unchanged, and the golden
+    /// `tests/fixtures/osd-vo/edit-captions.txt`.
+    #[test]
+    fn captions_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Captions, "captions");
+    }
+
+    /// While editing, a line is one live text with the newest word in it,
+    /// and both lines are at full ink.
+    #[test]
+    fn captions_edit_lines_are_whole_and_full_ink() {
+        let mut r = Rig::new(OsdTheme::Captions, false);
+        r.dictate(40);
+        r.enter(1.0);
+        let view = r.p.view(&vo::Tokens::default());
+        let mut keys = Vec::new();
+        let _ = view.map_live_texts(&mut |e| {
+            keys.push(e.key().to_string());
+            e
+        });
+        assert!(!keys.iter().any(|k| k.starts_with("hot-")), "{keys:?}");
+        let n = r.p.edit_view.as_ref().unwrap().lines;
+        assert_eq!(n, MAX_LINES);
+        assert_eq!(keys.iter().filter(|k| *k == "body").count(), n as usize);
+    }
+
+    /// A centred line keeps its left edge while you type, and re-centres
+    /// 0.5 s after the last key.
+    #[test]
+    fn captions_lines_hold_still_while_typing() {
+        use vo_core::edit::EditAction;
+        let mut r = Rig::new(OsdTheme::Captions, false);
+        // A short newest line, so typing does not run it past the box.
+        r.dictate(30);
+        r.enter(1.0);
+        let left = |r: &Rig| {
+            let v = r.p.edit_view.as_ref().unwrap();
+            v.centred_left(v.caret_line as usize, BAND_W)
+        };
+        let before = left(&r);
+        r.act(EditAction::Insert("abc".into()), 2.0);
+        assert_eq!(left(&r), before, "while typing");
+        r.act(EditAction::Insert("d".into()), 2.2);
+        assert_eq!(left(&r), before, "while typing");
+        r.show(2.8);
+        assert!(r.p.edit_text(2.8));
+        assert!(left(&r) < before, "re-centred: {} then {before}", left(&r));
+    }
+
+    /// R35: the edit moment with the caret on the newest and the top line
+    /// stays inside the reading-line envelope, at both widths.
+    #[test]
+    fn captions_edit_moment_keeps_the_envelope() {
+        check_edit_envelope(OsdTheme::Captions, &[0, 1]);
     }
 }

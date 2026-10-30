@@ -249,6 +249,7 @@ impl EditSite for DefaultSite {}
 /// the rest use [`DefaultSite`].
 pub(crate) fn site(theme: OsdTheme) -> &'static dyn EditSite {
     match theme {
+        OsdTheme::Captions => &super::captions::CaptionsSite,
         OsdTheme::Cyberpunk => &super::cyberpunk::CyberpunkSite,
         OsdTheme::Island => &super::island::IslandSite,
         OsdTheme::Palette => &super::palette::PaletteSite,
