@@ -1259,7 +1259,7 @@ fn parse_prefixed_keycode(s: &str) -> Result<Option<Key>, HotkeyError> {
 /// one of these; grabbing it back is pointless and, when the tool tears down its
 /// short-lived uinput device, leaves a stale fd that spins fetch_events() at 100%
 /// CPU. See issue #445.
-fn is_injection_keyboard(name: &str) -> bool {
+pub(crate) fn is_injection_keyboard(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n.contains("dotool") || n.contains("wtype") || n.contains("xdotool")
 }

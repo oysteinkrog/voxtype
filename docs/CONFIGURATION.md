@@ -96,6 +96,51 @@ new engine to take effect.
 
 ---
 
+## live_preview_warm_secs
+
+**Type:** Integer (seconds)
+**Default:** `0`
+**Required:** No
+
+With a live preview (`live_preview_model`), keep a live worker with the preview model loaded for this many seconds after each recording, and load one when the daemon starts. The next recording then shows words at once instead of after the model's load time (about 1.6 s for `parakeet-unified-en-0.6b-int8`, longer under load). A waiting worker holds the preview model in RAM (about 1 GB, no VRAM). `0` loads a fresh worker for every recording.
+
+Not used when `live_preview_warm_idle_secs` is set.
+
+```toml
+live_preview_warm_secs = 7200
+```
+
+## live_preview_warm_idle_secs
+
+**Type:** Integer (seconds)
+**Default:** `0` (off)
+**Required:** No
+
+Keep a warm live worker for as long as you use the computer, and release it after this many seconds with no keyboard, mouse or touchpad input. The worker loads when the daemon starts, again after a recording that used it up or a worker that exited, and at your first input after a release (a key at the lock screen counts, and so does waking from suspend). Start the dictation a second or two after you come back and the model is already loaded.
+
+Presence comes from reading the keyboards, mice and touchpads under `/dev/input` (no grab), so the user needs the `input` group, as for the evdev hotkey. Without it, only recordings count as activity. When set, `live_preview_warm_secs` is not used.
+
+```toml
+# Keep the live model loaded while I am at the computer; free the RAM after 30 min away.
+live_preview_warm_idle_secs = 1800
+```
+
+The daemon log shows each load and release with its reason, for example `Loading the warm live worker (you are back: keyboard or mouse input)` and `Releasing the warm live worker: no keyboard or mouse input for 1800s`.
+
+## live_preview_warm_release_command
+
+**Type:** String (shell command)
+**Default:** unset
+**Required:** No
+
+Run with `sh -c` every 10 s while a warm worker waits (and, with `live_preview_warm_idle_secs`, while you are present). Exit status 0 releases the worker, for example to give the RAM back under memory pressure. With `live_preview_warm_idle_secs`, no new worker loads while the command keeps exiting 0.
+
+```toml
+live_preview_warm_release_command = "grep -q 'level=pause' ~/.local/state/pressure/level"
+```
+
+---
+
 ## [hotkey]
 
 Controls which key triggers push-to-talk recording.

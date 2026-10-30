@@ -76,6 +76,9 @@ pub struct SubprocessTranscriber {
     /// wait for one (`live_preview_warm_secs`, 0 = off).
     warm: WarmSlot,
     warm_secs: u64,
+    /// `live_preview_warm_idle_secs`: keep a worker while the user is
+    /// present instead (0 = off). Started by [`Transcriber::keep_warm`].
+    warm_idle_secs: u64,
     /// `live_preview_warm_release_command`: checked while a warm worker waits.
     warm_release: Option<String>,
     /// Pre-spawned worker (from prepare())
@@ -99,6 +102,7 @@ impl SubprocessTranscriber {
             live_model: None,
             warm: WarmSlot::default(),
             warm_secs: 0,
+            warm_idle_secs: 0,
             warm_release: None,
             prepared_worker: Mutex::new(None),
             last_language: Arc::new(Mutex::new(None)),
@@ -121,6 +125,7 @@ impl SubprocessTranscriber {
                 .flatten(),
             warm: WarmSlot::default(),
             warm_secs: config.live_preview_warm_secs,
+            warm_idle_secs: config.live_preview_warm_idle_secs,
             warm_release: config.live_preview_warm_release_command.clone(),
             prepared_worker: Mutex::new(None),
             last_language: Arc::new(Mutex::new(None)),
@@ -136,50 +141,12 @@ impl SubprocessTranscriber {
 
     /// Build the command to spawn a worker
     fn build_worker_command(&self) -> Result<Command, TranscribeError> {
-        let exe_path = Self::get_executable_path()?;
-
-        let mut cmd = Command::new(&exe_path);
-
-        // Pass config path BEFORE the subcommand — --config is a parent-level
-        // arg in clap, so it must appear before "transcribe-worker"
-        if let Some(ref config_path) = self.config_path {
-            cmd.arg("--config").arg(config_path);
-        }
-
-        if let Some((ref engine, ref model)) = self.engine_args {
-            // --engine and --model are parent-level args too. ONNX Runtime
-            // logs to stderr, so let it through to the daemon's log rather
-            // than into a pipe nobody drains.
-            cmd.arg("--engine").arg(engine).arg("--model").arg(model);
-            cmd.arg("transcribe-worker")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit());
-            if let Some(ref live) = self.live_model {
-                cmd.arg("--live-model").arg(live);
-            }
-            return Ok(cmd);
-        }
-
-        cmd.arg("transcribe-worker")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        // Pass essential config via command-line arguments
-        cmd.arg("--model").arg(&self.config.model);
-        // Serialize language config as comma-separated string for CLI
-        // Single: "en", Auto: "auto", Multiple: "en,fr,de"
-        let language_str = self.config.language.as_vec().join(",");
-        cmd.arg("--language").arg(&language_str);
-        if self.config.translate {
-            cmd.arg("--translate");
-        }
-        if let Some(threads) = self.config.threads {
-            cmd.arg("--threads").arg(threads.to_string());
-        }
-
-        Ok(cmd)
+        worker_command(
+            &self.config,
+            self.config_path.as_deref(),
+            self.engine_args.as_ref(),
+            self.live_model.as_deref(),
+        )
     }
 
     /// Spawn a worker process and wait for it to be ready
@@ -285,6 +252,59 @@ impl SubprocessTranscriber {
             ))
         })
     }
+}
+
+/// The command that starts a `transcribe-worker`.
+fn worker_command(
+    config: &WhisperConfig,
+    config_path: Option<&std::path::Path>,
+    engine_args: Option<&(String, String)>,
+    live_model: Option<&str>,
+) -> Result<Command, TranscribeError> {
+    let exe_path = SubprocessTranscriber::get_executable_path()?;
+
+    let mut cmd = Command::new(&exe_path);
+
+    // Pass config path BEFORE the subcommand — --config is a parent-level
+    // arg in clap, so it must appear before "transcribe-worker"
+    if let Some(config_path) = config_path {
+        cmd.arg("--config").arg(config_path);
+    }
+
+    if let Some((engine, model)) = engine_args {
+        // --engine and --model are parent-level args too. ONNX Runtime
+        // logs to stderr, so let it through to the daemon's log rather
+        // than into a pipe nobody drains.
+        cmd.arg("--engine").arg(engine).arg("--model").arg(model);
+        cmd.arg("transcribe-worker")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        if let Some(live) = live_model {
+            cmd.arg("--live-model").arg(live);
+        }
+        return Ok(cmd);
+    }
+
+    cmd.arg("transcribe-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Pass essential config via command-line arguments
+    cmd.arg("--model").arg(&config.model);
+    // Serialize language config as comma-separated string for CLI
+    // Single: "en", Auto: "auto", Multiple: "en,fr,de"
+    let language_str = config.language.as_vec().join(",");
+    cmd.arg("--language").arg(&language_str);
+    if config.translate {
+        cmd.arg("--translate");
+    }
+    if let Some(threads) = config.threads {
+        cmd.arg("--threads").arg(threads.to_string());
+    }
+
+    Ok(cmd)
 }
 
 impl Transcriber for SubprocessTranscriber {
@@ -397,6 +417,45 @@ impl Transcriber for SubprocessTranscriber {
         self.last_language.lock().ok().and_then(|g| g.clone())
     }
 
+    fn keep_warm(&self) {
+        if self.live_model.is_none() {
+            return;
+        }
+        if self.warm_idle_secs > 0 {
+            let config = self.config.clone();
+            let config_path = self.config_path.clone();
+            let engine_args = self.engine_args.clone();
+            let live_model = self.live_model.clone();
+            self.warm.start_keeper(
+                move || {
+                    worker_command(
+                        &config,
+                        config_path.as_deref(),
+                        engine_args.as_ref(),
+                        live_model.as_deref(),
+                    )
+                },
+                std::time::Duration::from_secs(self.warm_idle_secs),
+                self.warm_release.clone(),
+            );
+        } else if self.warm_secs > 0 && self.warm.is_empty() {
+            match self.build_worker_command() {
+                Ok(cmd) => {
+                    tracing::info!(
+                        "Loading the warm live worker (daemon start), kept for {}s",
+                        self.warm_secs
+                    );
+                    self.warm.refill(
+                        cmd,
+                        std::time::Duration::from_secs(self.warm_secs),
+                        self.warm_release.clone(),
+                    );
+                }
+                Err(e) => tracing::warn!("Could not start a warm live worker: {}", e),
+            }
+        }
+    }
+
     fn as_streaming(&self) -> Option<&dyn StreamingTranscriber> {
         self.live_model
             .as_ref()
@@ -406,6 +465,18 @@ impl Transcriber for SubprocessTranscriber {
 
 /// How often a waiting warm worker runs its release check.
 const WARM_RELEASE_CHECK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often the presence keeper looks at a waiting worker, to load a new one
+/// if it died.
+const KEEPER_CHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// While the user is away, the keeper still wakes this often, so it ends
+/// soon after its transcriber is dropped.
+const KEEPER_AWAY_CHECK: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The keeper stops reloading after this many warm workers in a row exited
+/// on their own, until the next recording.
+const KEEPER_MAX_EXITS: u32 = 3;
 
 /// Run the release check (`sh -c`). Success means: stop the warm worker now.
 fn release_requested(command: &str) -> bool {
@@ -433,34 +504,211 @@ struct WarmWorker {
     spawned_at: std::time::Instant,
 }
 
-/// Holds at most one warm worker. A timer kills it after the keep time unless
-/// a recording took it or a newer one replaced it.
-#[derive(Clone, Default)]
-struct WarmSlot {
-    inner: Arc<Mutex<Option<WarmWorker>>>,
-    generation: Arc<AtomicU64>,
-}
-
-impl WarmSlot {
-    fn take_alive(&self) -> Option<WarmWorker> {
-        let mut worker = self.inner.lock().ok()?.take()?;
-        match worker.child.try_wait() {
-            Ok(None) => Some(worker),
-            _ => None,
-        }
-    }
-
-    fn refill(&self, mut cmd: Command, keep: std::time::Duration, release: Option<String>) {
+impl WarmWorker {
+    fn spawn(mut cmd: Command) -> Option<(Child, ChildStdin, BufReader<ChildStdout>)> {
         let Ok(mut child) = cmd.spawn() else {
             tracing::warn!("Could not start a warm live worker");
-            return;
+            return None;
         };
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             let _ = child.kill();
             let _ = child.wait();
+            return None;
+        };
+        Some((child, stdin, BufReader::new(stdout)))
+    }
+
+    fn stop(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Whether the worker has said READY, without reading it.
+    fn loaded(&self) -> bool {
+        if !self.stdout.buffer().is_empty() {
+            return true;
+        }
+        let mut pfd = libc::pollfd {
+            fd: std::os::fd::AsRawFd::as_raw_fd(self.stdout.get_ref()),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        unsafe { libc::poll(&mut pfd, 1, 0) > 0 }
+    }
+}
+
+/// Why the slot is empty: named in the log line of the next load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmptyBecause {
+    /// Nothing loaded one yet.
+    Start,
+    /// Released after the user was away.
+    Away,
+    /// Released because the release command asked.
+    ReleaseCommand,
+    /// A recording used the worker and could not hand it back.
+    Consumed,
+    /// The worker exited on its own.
+    Exited,
+}
+
+#[derive(Default)]
+struct SlotState {
+    worker: Option<WarmWorker>,
+    /// A recording holds the worker (presence keeper only).
+    busy: bool,
+    why_empty: Option<EmptyBecause>,
+    /// Recordings that ended, so the keeper can tell a working worker from
+    /// one that keeps dying.
+    recordings: u64,
+}
+
+#[derive(Default)]
+struct SlotShared {
+    state: Mutex<SlotState>,
+    generation: AtomicU64,
+    /// Wakes the presence keeper; set once one runs for this slot.
+    keeper: std::sync::OnceLock<std::sync::mpsc::Sender<()>>,
+}
+
+impl Drop for SlotShared {
+    fn drop(&mut self) {
+        if let Some(w) = self.state.get_mut().ok().and_then(|st| st.worker.take()) {
+            w.stop();
+        }
+    }
+}
+
+/// Holds at most one warm worker. Either a timer kills it after the keep
+/// time (`live_preview_warm_secs`), or the presence keeper keeps it while the
+/// user is at the computer (`live_preview_warm_idle_secs`).
+#[derive(Clone, Default)]
+struct WarmSlot(Arc<SlotShared>);
+
+/// What the presence keeper does next.
+#[derive(Debug, PartialEq, Eq)]
+enum WarmAction {
+    Load,
+    Release,
+    Keep,
+}
+
+/// Keep a worker loaded while the user was active within `idle_limit`, and
+/// none while they are away or the release command asks for the memory.
+fn warm_action(
+    idle_for: std::time::Duration,
+    idle_limit: std::time::Duration,
+    has_worker: bool,
+    busy: bool,
+    release_says: bool,
+) -> WarmAction {
+    if busy {
+        return WarmAction::Keep;
+    }
+    let wanted = idle_for < idle_limit && !release_says;
+    match (has_worker, wanted) {
+        (true, false) => WarmAction::Release,
+        (false, true) => WarmAction::Load,
+        _ => WarmAction::Keep,
+    }
+}
+
+/// How long the keeper may sleep: until the user counts as away, and at
+/// most [`KEEPER_CHECK`] (or [`WARM_RELEASE_CHECK`] with a release command)
+/// while they are here. While away it waits for their return.
+fn keeper_wait(
+    idle_for: std::time::Duration,
+    idle_limit: std::time::Duration,
+    release_command: bool,
+) -> std::time::Duration {
+    if idle_for >= idle_limit {
+        return KEEPER_AWAY_CHECK;
+    }
+    let check = if release_command {
+        WARM_RELEASE_CHECK
+    } else {
+        KEEPER_CHECK
+    };
+    (idle_limit - idle_for)
+        .min(check)
+        .max(std::time::Duration::from_millis(100))
+}
+
+impl WarmSlot {
+    fn presence_mode(&self) -> bool {
+        self.0.keeper.get().is_some()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0
+            .state
+            .lock()
+            .map(|st| st.worker.is_none())
+            .unwrap_or(true)
+    }
+
+    fn wake_keeper(&self) {
+        if let Some(tx) = self.0.keeper.get() {
+            let _ = tx.send(());
+        }
+    }
+
+    /// The waiting worker, if it is still alive. With the presence keeper,
+    /// the slot counts as busy until [`WarmSlot::hand_back`], so the keeper
+    /// does not load a second worker meanwhile.
+    fn take_alive(&self) -> Option<WarmWorker> {
+        let mut st = self.0.state.lock().ok()?;
+        if self.presence_mode() {
+            st.busy = true;
+        }
+        let worker = st.worker.take()?;
+        st.why_empty = Some(EmptyBecause::Consumed);
+        let mut worker = worker;
+        match worker.child.try_wait() {
+            Ok(None) => Some(worker),
+            _ => {
+                worker.stop();
+                None
+            }
+        }
+    }
+
+    /// Presence keeper: the recording is over. Keep its worker if it is
+    /// still usable; otherwise the keeper loads a new one.
+    fn hand_back(
+        &self,
+        worker: Option<(
+            Child,
+            ChildStdin,
+            BufReader<ChildStdout>,
+            std::time::Instant,
+        )>,
+    ) {
+        if let Ok(mut st) = self.0.state.lock() {
+            st.busy = false;
+            st.recordings += 1;
+            if let Some((child, stdin, stdout, spawned_at)) = worker {
+                tracing::info!("Keeping the live worker warm for the next recording");
+                let generation = self.0.generation.fetch_add(1, Ordering::SeqCst) + 1;
+                if let Some(old) = st.worker.replace(WarmWorker {
+                    child,
+                    stdin,
+                    stdout,
+                    generation,
+                    spawned_at,
+                }) {
+                    old.stop();
+                }
+                st.why_empty = None;
+            }
+        }
+        self.wake_keeper();
+    }
+
+    fn refill(&self, cmd: Command, keep: std::time::Duration, release: Option<String>) {
+        let Some((child, stdin, stdout)) = WarmWorker::spawn(cmd) else {
             return;
         };
-        let stdout = BufReader::new(stdout);
         self.park(
             child,
             stdin,
@@ -481,7 +729,7 @@ impl WarmSlot {
         keep: std::time::Duration,
         release: Option<String>,
     ) {
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.0.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let worker = WarmWorker {
             child,
             stdin,
@@ -489,13 +737,12 @@ impl WarmSlot {
             generation,
             spawned_at,
         };
-        if let Ok(mut slot) = self.inner.lock() {
-            if let Some(mut old) = slot.replace(worker) {
-                let _ = old.child.kill();
-                let _ = old.child.wait();
+        if let Ok(mut st) = self.0.state.lock() {
+            if let Some(old) = st.worker.replace(worker) {
+                old.stop();
             }
         }
-        let inner = Arc::clone(&self.inner);
+        let shared = Arc::downgrade(&self.0);
         std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + keep;
             let reason = loop {
@@ -504,10 +751,13 @@ impl WarmSlot {
                     break format!("idle for {}s", keep.as_secs());
                 }
                 std::thread::sleep(left.min(WARM_RELEASE_CHECK));
-                let still_ours = inner
-                    .lock()
-                    .map(|slot| slot.as_ref().is_some_and(|w| w.generation == generation))
-                    .unwrap_or(false);
+                let still_ours = shared.upgrade().is_some_and(|s| {
+                    s.state.lock().is_ok_and(|st| {
+                        st.worker
+                            .as_ref()
+                            .is_some_and(|w| w.generation == generation)
+                    })
+                });
                 if !still_ours {
                     return;
                 }
@@ -515,16 +765,171 @@ impl WarmSlot {
                     break "release command said so".to_string();
                 }
             };
-            let Ok(mut slot) = inner.lock() else { return };
-            if slot.as_ref().is_some_and(|w| w.generation == generation) {
-                if let Some(mut w) = slot.take() {
+            let Some(shared) = shared.upgrade() else {
+                return;
+            };
+            let Ok(mut st) = shared.state.lock() else {
+                return;
+            };
+            if st
+                .worker
+                .as_ref()
+                .is_some_and(|w| w.generation == generation)
+            {
+                if let Some(w) = st.worker.take() {
                     tracing::info!("Stopping the warm live worker: {}", reason);
-                    let _ = w.child.kill();
-                    let _ = w.child.wait();
+                    w.stop();
                 }
             }
         });
     }
+
+    /// Start the presence keeper: from now on a worker stays loaded while
+    /// the user was active within `idle_limit`. Does nothing if one runs.
+    fn start_keeper(
+        &self,
+        command: impl Fn() -> Result<Command, TranscribeError> + Send + 'static,
+        idle_limit: std::time::Duration,
+        release: Option<String>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self.0.keeper.set(tx.clone()).is_err() {
+            return;
+        }
+        let presence = crate::presence::global();
+        presence.watch(tx);
+        let shared = Arc::downgrade(&self.0);
+        let spawned = std::thread::Builder::new()
+            .name("voxtype-warm".into())
+            .spawn(move || keep_warm(shared, rx, presence, command, idle_limit, release));
+        if let Err(e) = spawned {
+            tracing::warn!("Cannot keep a live worker warm: {}", e);
+        }
+    }
+}
+
+/// The presence keeper's loop. See [`WarmSlot::start_keeper`].
+fn keep_warm(
+    shared: std::sync::Weak<SlotShared>,
+    wake: std::sync::mpsc::Receiver<()>,
+    presence: Arc<crate::presence::Presence>,
+    command: impl Fn() -> Result<Command, TranscribeError>,
+    idle_limit: std::time::Duration,
+    release: Option<String>,
+) {
+    tracing::info!(
+        "Keeping a live worker warm while you use the computer (released after {}s without input)",
+        idle_limit.as_secs()
+    );
+    let mut release_says = false;
+    let mut release_checked: Option<std::time::Instant> = None;
+    // Workers that exited on their own in a row, and the recording count
+    // when the last one did.
+    let mut exits = 0u32;
+    let mut exits_at_recording = 0u64;
+    loop {
+        let Some(slot) = shared.upgrade() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        let (last, kind) = presence.last();
+        let idle_for = now.saturating_duration_since(last);
+        if let Some(ref cmd) = release {
+            let due = release_checked.is_none_or(|t| now.duration_since(t) >= WARM_RELEASE_CHECK);
+            if idle_for < idle_limit && due {
+                release_says = release_requested(cmd);
+                release_checked = Some(now);
+            }
+        }
+        {
+            let Ok(mut st) = slot.state.lock() else {
+                return;
+            };
+            if let Some(w) = st.worker.as_mut() {
+                if let Ok(Some(status)) = w.child.try_wait() {
+                    tracing::warn!("The warm live worker exited on its own ({})", status);
+                    st.worker = None;
+                    st.why_empty = Some(EmptyBecause::Exited);
+                    if st.recordings != exits_at_recording {
+                        exits = 0;
+                    }
+                    exits += 1;
+                    exits_at_recording = st.recordings;
+                    if exits == KEEPER_MAX_EXITS {
+                        tracing::warn!(
+                            "{} warm live workers in a row exited; not loading another until the next recording",
+                            exits
+                        );
+                    }
+                }
+            }
+            let gave_up = exits >= KEEPER_MAX_EXITS && st.recordings == exits_at_recording;
+            match warm_action(
+                idle_for,
+                idle_limit,
+                st.worker.is_some(),
+                st.busy,
+                release_says,
+            ) {
+                WarmAction::Load if gave_up => {}
+                WarmAction::Load => {
+                    let reason = match st.why_empty.unwrap_or(EmptyBecause::Start) {
+                        EmptyBecause::Start => "daemon start".to_string(),
+                        EmptyBecause::Away => format!("you are back: {}", kind.describe()),
+                        EmptyBecause::ReleaseCommand => {
+                            "the release command no longer asks for the memory".to_string()
+                        }
+                        EmptyBecause::Consumed => "the last recording used it up".to_string(),
+                        EmptyBecause::Exited => "the last one exited".to_string(),
+                    };
+                    let spawned = command().ok().and_then(WarmWorker::spawn);
+                    if let Some((child, stdin, stdout)) = spawned {
+                        tracing::info!("Loading the warm live worker ({})", reason);
+                        let generation = slot.generation.fetch_add(1, Ordering::SeqCst) + 1;
+                        st.worker = Some(WarmWorker {
+                            child,
+                            stdin,
+                            stdout,
+                            generation,
+                            spawned_at: now,
+                        });
+                        st.why_empty = None;
+                    }
+                }
+                WarmAction::Release => {
+                    if let Some(w) = st.worker.take() {
+                        w.stop();
+                    }
+                    if release_says {
+                        tracing::info!("Releasing the warm live worker: the release command asked");
+                        st.why_empty = Some(EmptyBecause::ReleaseCommand);
+                    } else {
+                        tracing::info!(
+                            "Releasing the warm live worker: no keyboard or mouse input for {}s",
+                            idle_for.as_secs()
+                        );
+                        st.why_empty = Some(EmptyBecause::Away);
+                    }
+                }
+                WarmAction::Keep => {}
+            }
+        }
+        drop(slot);
+        let wait = keeper_wait(idle_for, idle_limit, release.is_some());
+        if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) = wake.recv_timeout(wait) {
+            return;
+        }
+    }
+}
+
+/// What happens to a live worker after its recording.
+enum Refill {
+    /// Stop it.
+    None,
+    /// `live_preview_warm_secs`: keep it (or a fresh one) for this long.
+    Timer(Box<Command>, WarmSlot, std::time::Duration, Option<String>),
+    /// `live_preview_warm_idle_secs`: give it back to the presence keeper.
+    Keeper(WarmSlot),
 }
 
 /// Live preview: audio goes to the worker in blocks while recording, its
@@ -536,38 +941,72 @@ impl StreamingTranscriber for SubprocessTranscriber {
         &self,
         mut samples_rx: mpsc::Receiver<Vec<f32>>,
     ) -> Result<StreamHandle, TranscribeError> {
-        let (mut child, mut stdin, stdout, spawned_at) = match self.warm.take_alive() {
+        let kept = self.warm.presence_mode();
+        let taken = self.warm.take_alive();
+        if kept {
+            crate::presence::global().mark(crate::presence::Activity::Recording);
+        }
+        let (mut child, mut stdin, stdout, spawned_at) = match taken {
             Some(w) => {
-                tracing::info!("Using the warm live worker");
+                if w.loaded() {
+                    tracing::info!(
+                        "Using the warm live worker (loaded, started {:.1}s ago)",
+                        w.spawned_at.elapsed().as_secs_f32()
+                    );
+                } else {
+                    tracing::info!(
+                        "Using the warm live worker (still loading, started {:.1}s ago)",
+                        w.spawned_at.elapsed().as_secs_f32()
+                    );
+                }
                 (w.child, w.stdin, w.stdout, w.spawned_at)
             }
             None => {
-                let mut cmd = self.build_worker_command()?;
-                let spawned_at = std::time::Instant::now();
-                let mut child = cmd.spawn().map_err(|e| {
-                    TranscribeError::InitFailed(format!("Failed to spawn transcribe-worker: {}", e))
-                })?;
-                let stdin = child.stdin.take().ok_or_else(|| {
-                    TranscribeError::InitFailed("Worker stdin not available".to_string())
-                })?;
-                let stdout = child.stdout.take().ok_or_else(|| {
-                    TranscribeError::InitFailed("Worker stdout not available".to_string())
-                })?;
-                (child, stdin, BufReader::new(stdout), spawned_at)
+                tracing::info!("No warm live worker; loading the live model now");
+                let spawned = (|| {
+                    let mut cmd = self.build_worker_command()?;
+                    let spawned_at = std::time::Instant::now();
+                    let mut child = cmd.spawn().map_err(|e| {
+                        TranscribeError::InitFailed(format!(
+                            "Failed to spawn transcribe-worker: {}",
+                            e
+                        ))
+                    })?;
+                    let stdin = child.stdin.take().ok_or_else(|| {
+                        TranscribeError::InitFailed("Worker stdin not available".to_string())
+                    })?;
+                    let stdout = child.stdout.take().ok_or_else(|| {
+                        TranscribeError::InitFailed("Worker stdout not available".to_string())
+                    })?;
+                    Ok((child, stdin, BufReader::new(stdout), spawned_at))
+                })();
+                match spawned {
+                    Ok(w) => w,
+                    Err(e) => {
+                        if kept {
+                            self.warm.hand_back(None);
+                        }
+                        return Err(e);
+                    }
+                }
             }
         };
         let loading = LoadingStatus::start(spawned_at);
         let pid = nix::unistd::Pid::from_raw(child.id() as i32);
         // The next recording's worker: this one if it is still alive when
         // done, else a fresh one.
-        let refill = match self.warm_secs {
-            0 => None,
-            secs => Some((
-                self.build_worker_command()?,
-                self.warm.clone(),
-                std::time::Duration::from_secs(secs),
-                self.warm_release.clone(),
-            )),
+        let refill = if kept {
+            Refill::Keeper(self.warm.clone())
+        } else {
+            match self.warm_secs {
+                0 => Refill::None,
+                secs => Refill::Timer(
+                    Box::new(self.build_worker_command()?),
+                    self.warm.clone(),
+                    std::time::Duration::from_secs(secs),
+                    self.warm_release.clone(),
+                ),
+            }
         };
 
         let (events_tx, events_rx) = mpsc::channel::<StreamingEvent>(64);
@@ -686,17 +1125,21 @@ impl StreamingTranscriber for SubprocessTranscriber {
                         .ok()
                 })
                 .flatten();
-            match (stdin, refill) {
-                (Some(stdin), Some((_, slot, keep, release)))
-                    if matches!(child.try_wait(), Ok(None)) =>
-                {
+            let alive = matches!(child.try_wait(), Ok(None));
+            match (stdin.filter(|_| alive), refill) {
+                (Some(stdin), Refill::Timer(_, slot, keep, release)) => {
                     slot.park(child, stdin, stdout, spawned_at, keep, release);
+                }
+                (Some(stdin), Refill::Keeper(slot)) => {
+                    slot.hand_back(Some((child, stdin, stdout, spawned_at)));
                 }
                 (_, refill) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    if let Some((cmd, slot, keep, release)) = refill {
-                        slot.refill(cmd, keep, release);
+                    match refill {
+                        Refill::Timer(cmd, slot, keep, release) => slot.refill(*cmd, keep, release),
+                        Refill::Keeper(slot) => slot.hand_back(None),
+                        Refill::None => {}
                     }
                 }
             }
@@ -738,6 +1181,184 @@ mod tests {
             serde_json::from_str(r#"{"ok": false, "error": "Model not found"}"#).unwrap();
         assert!(!error.ok);
         assert_eq!(error.error, Some("Model not found".to_string()));
+    }
+
+    use crate::presence::{Activity, Presence};
+    use std::time::{Duration, Instant};
+
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    #[test]
+    fn the_keeper_loads_while_present_and_releases_when_away() {
+        let s = Duration::from_secs;
+        assert_eq!(
+            warm_action(s(10), HOUR, false, false, false),
+            WarmAction::Load
+        );
+        assert_eq!(
+            warm_action(s(10), HOUR, true, false, false),
+            WarmAction::Keep
+        );
+        assert_eq!(
+            warm_action(HOUR, HOUR, true, false, false),
+            WarmAction::Release
+        );
+        assert_eq!(
+            warm_action(HOUR, HOUR, false, false, false),
+            WarmAction::Keep
+        );
+        // A recording holds the worker: never load a second one.
+        assert_eq!(
+            warm_action(s(10), HOUR, false, true, false),
+            WarmAction::Keep
+        );
+        // The release command wins over presence.
+        assert_eq!(
+            warm_action(s(10), HOUR, true, false, true),
+            WarmAction::Release
+        );
+        assert_eq!(
+            warm_action(s(10), HOUR, false, false, true),
+            WarmAction::Keep
+        );
+    }
+
+    #[test]
+    fn the_keeper_wakes_when_the_user_turns_away() {
+        let s = Duration::from_secs;
+        assert_eq!(keeper_wait(s(1790), s(1800), false), s(10));
+        assert_eq!(keeper_wait(s(0), s(1800), false), KEEPER_CHECK);
+        assert_eq!(keeper_wait(s(0), s(1800), true), WARM_RELEASE_CHECK);
+        assert_eq!(keeper_wait(s(1800), s(1800), false), KEEPER_AWAY_CHECK);
+    }
+
+    /// A stand-in worker: waits on stdin like a loaded live worker.
+    fn fake_worker() -> Result<Command, TranscribeError> {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo READY; cat > /dev/null")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        Ok(cmd)
+    }
+
+    fn worker_pid(slot: &WarmSlot) -> Option<u32> {
+        let st = slot.0.state.lock().unwrap();
+        st.worker.as_ref().map(|w| w.child.id())
+    }
+
+    /// Wait up to 5 s for the keeper to reach `want`.
+    fn wait_for(slot: &WarmSlot, want: impl Fn(Option<u32>) -> bool) -> Option<u32> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let pid = worker_pid(slot);
+            if want(pid) || Instant::now() > deadline {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn start_test_keeper(slot: &WarmSlot, presence: &Arc<Presence>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        slot.0.keeper.set(tx.clone()).unwrap();
+        presence.watch(tx);
+        let shared = Arc::downgrade(&slot.0);
+        let presence = Arc::clone(presence);
+        std::thread::spawn(move || keep_warm(shared, rx, presence, fake_worker, HOUR, None));
+    }
+
+    #[test]
+    fn the_keeper_follows_the_user() {
+        let presence = Arc::new(Presence::new(Instant::now()));
+        let slot = WarmSlot::default();
+        start_test_keeper(&slot, &presence);
+
+        // Daemon start: a worker loads at once.
+        let first = wait_for(&slot, |p| p.is_some()).expect("loaded at start");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !slot
+            .0
+            .state
+            .lock()
+            .unwrap()
+            .worker
+            .as_ref()
+            .unwrap()
+            .loaded()
+        {
+            assert!(Instant::now() < deadline, "the stand-in never said READY");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Away for over the limit: released.
+        presence.set_last(
+            Instant::now() - HOUR - Duration::from_secs(1),
+            Activity::Input,
+        );
+        slot.wake_keeper();
+        assert_eq!(wait_for(&slot, |p| p.is_none()), None, "released when away");
+
+        // Back: the first input loads one again.
+        presence.mark(Activity::Input);
+        let back = wait_for(&slot, |p| p.is_some());
+        assert!(back.is_some(), "reloaded on input");
+        assert_ne!(back, Some(first));
+
+        // A recording takes it; no second worker loads meanwhile.
+        let taken = slot.take_alive().expect("a live worker");
+        slot.wake_keeper();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            worker_pid(&slot),
+            None,
+            "no second worker during a recording"
+        );
+
+        // The recording hands it back: kept.
+        slot.hand_back(Some((
+            taken.child,
+            taken.stdin,
+            taken.stdout,
+            taken.spawned_at,
+        )));
+        assert_eq!(worker_pid(&slot), back);
+
+        // A recording that used it up: the keeper loads a new one.
+        let used = slot.take_alive().unwrap();
+        used.stop();
+        slot.hand_back(None);
+        let after = wait_for(&slot, |p| p.is_some_and(|p| Some(p) != back));
+        assert!(after.is_some() && after != back);
+
+        // A worker that dies on its own is replaced.
+        let pid = after.unwrap();
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let replaced = loop {
+            slot.wake_keeper();
+            let now = worker_pid(&slot);
+            if now.is_some_and(|p| p != pid) || Instant::now() > deadline {
+                break now;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(replaced.is_some_and(|p| p != pid), "replaced after it died");
+    }
+
+    #[test]
+    fn dropping_the_slot_stops_its_worker() {
+        let slot = WarmSlot::default();
+        let (child, stdin, stdout) = WarmWorker::spawn(fake_worker().unwrap()).unwrap();
+        let pid = child.id();
+        slot.hand_back(Some((child, stdin, stdout, Instant::now())));
+        drop(slot);
+        // Killed and reaped by the drop, so the pid is gone.
+        let pid = nix::unistd::Pid::from_raw(pid as i32);
+        assert!(nix::sys::signal::kill(pid, None).is_err());
     }
 
     #[test]

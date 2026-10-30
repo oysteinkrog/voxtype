@@ -66,6 +66,15 @@ pub struct Config {
     #[serde(default)]
     pub live_preview_warm_secs: u64,
 
+    /// Keep a live worker loaded while you use the computer, and release it
+    /// after this many seconds with no keyboard, mouse or touchpad input.
+    /// The worker loads when the daemon starts and again at your first
+    /// input after a release, so a recording never waits for the model.
+    /// Needs read access to /dev/input (the `input` group). When set,
+    /// `live_preview_warm_secs` is not used. 0 = off.
+    #[serde(default)]
+    pub live_preview_warm_idle_secs: u64,
+
     /// Shell command run every 10 s while a warm worker waits. If it exits
     /// 0, the worker stops early, e.g. to give the RAM back under memory
     /// pressure: `grep -q 'level=pause' /path/to/pressure-level`.
@@ -190,6 +199,7 @@ impl Default for Config {
             live_preview_model: None,
             live_typing: false,
             live_preview_warm_secs: 0,
+            live_preview_warm_idle_secs: 0,
             live_preview_warm_release_command: None,
             live_preview_corpus_dir: None,
             live_preview_revisions_dir: None,
