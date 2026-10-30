@@ -10,8 +10,6 @@
 use super::kit::{at, ease_out, hex, mix, reduced, Levels, Mode};
 use super::*;
 
-use std::sync::OnceLock;
-
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::Point;
@@ -111,15 +109,14 @@ struct Fonts {
     dots: u32,
 }
 
+/// The look's fonts, added to `reg` once (`FontRegistry::system`), so
+/// every registry, such as a test's, has its own ids.
 fn fonts(reg: &FontRegistry) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |pattern: &str, or: u32| reg.add_system(pattern).unwrap_or(or);
-        Fonts {
-            text: add("Inter", SANS),
-            dots: add("Doto:extralight", MONO),
-        }
-    })
+    let add = |pattern: &str, or: u32| reg.system(pattern).unwrap_or(or);
+    Fonts {
+        text: add("Inter", SANS),
+        dots: add("Doto:extralight", MONO),
+    }
 }
 
 pub(crate) fn text_style(look: &Look) -> TextStyle {
@@ -740,6 +737,38 @@ impl Popup {
             row.child(count)
         } else {
             row
+        }
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::super::*;
+
+    /// A look's font ids belong to the registry it draws with: tests that
+    /// each load their own registry must not draw with another's ids.
+    #[test]
+    fn each_registry_has_its_own_font_ids() {
+        let plasma = PlasmaTheme::default();
+        for theme in [OsdTheme::Dotmatrix, OsdTheme::Swissfi, OsdTheme::Amber] {
+            let cfg = OsdConfig {
+                theme,
+                ..OsdConfig::default()
+            };
+            let a = load_fonts(&plasma).unwrap();
+            let b = load_fonts(&plasma).unwrap();
+            // One more face in b moves the ids the look adds there.
+            b.add_system("monospace").unwrap();
+            let font = |fonts: &FontRegistry| {
+                Look::new(&cfg, &plasma, String::new(), fonts)
+                    .text_style()
+                    .font
+            };
+            let (fa, fb) = (font(&a), font(&b));
+            if fa == SANS {
+                continue; // the look's font is not installed here
+            }
+            assert_eq!(fb, fa + 1, "{theme:?}");
         }
     }
 }

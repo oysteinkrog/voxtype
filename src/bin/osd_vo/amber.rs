@@ -118,17 +118,16 @@ struct Fonts {
 /// Oswald Light, the closest free match to the concept's condensed face,
 /// Barlow for the small labels and IBM Plex Sans JP for the side labels
 /// (2.4 MB, where Noto Sans CJK is 19 MB; any Japanese face when missing),
-/// or the look's own sans when one is not installed.
+/// or the look's own sans when one is not installed. Added to the look's
+/// registry once (`FontRegistry::system`), so every registry, such as a
+/// test's, has its own ids.
 fn fonts(look: &Look) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |family: &str| look.fonts.add_system(family).unwrap_or(SANS);
-        Fonts {
-            text: add("Oswald:light"),
-            small: add("Barlow:regular"),
-            jp: add("IBM Plex Sans JP:regular:lang=ja"),
-        }
-    })
+    let add = |family: &str| look.fonts.system(family).unwrap_or(SANS);
+    Fonts {
+        text: add("Oswald:light"),
+        small: add("Barlow:regular"),
+        jp: add("IBM Plex Sans JP:regular:lang=ja"),
+    }
 }
 
 /// Sizes in logical pixels, from the concept's.

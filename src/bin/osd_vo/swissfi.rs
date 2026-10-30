@@ -14,8 +14,6 @@
 use super::kit::{at, ease_in_out, ease_out, hex, mix, reduced, Levels, Mode};
 use super::*;
 
-use std::sync::OnceLock;
-
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
@@ -83,17 +81,15 @@ struct Fonts {
     mono: u32,
 }
 
-/// The look's fonts, added to the shared registry once. A family that is
+/// The look's fonts, added to `reg` once (`FontRegistry::system`), so
+/// every registry, such as a test's, has its own ids. A family that is
 /// missing falls back to the popup's own fonts.
 fn fonts(reg: &FontRegistry) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |pattern: &str, or: u32| reg.add_system(pattern).unwrap_or(or);
-        Fonts {
-            text: add("Inter", SANS),
-            mono: add("JetBrains Mono:extralight", MONO),
-        }
-    })
+    let add = |pattern: &str, or: u32| reg.system(pattern).unwrap_or(or);
+    Fonts {
+        text: add("Inter", SANS),
+        mono: add("JetBrains Mono:extralight", MONO),
+    }
 }
 
 /// The transcript: a huge tight grotesk.
