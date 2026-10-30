@@ -277,6 +277,12 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_REALTIME")]
     realtime: Option<bool>,
 
+    /// Mark a word as unsure when the engine's confidence in it is below
+    /// this, 0 to 1 (default 0.45, about 1 % of real words). Also `[osd]
+    /// doubt_below`.
+    #[arg(long, env = "VOXTYPE_OSD_DOUBT_BELOW")]
+    doubt_below: Option<f32>,
+
     /// Look to draw: `swiss` (default here), `showcase`, a rich look that
     /// shows off the GPU renderer, or `type`, led by type and line. Also
     /// `[osd] theme`. Other themes draw swiss.
@@ -715,6 +721,8 @@ struct Look {
     /// `[osd] keyboard_edit`: the badge strip is there for the edit badge,
     /// so the popup keeps its size when an edit starts (R53).
     edit_badge: bool,
+    /// `[osd] doubt_below`: a word under this confidence is drawn unsure.
+    doubt_below: f32,
     /// `Swiss`, `Showcase` or `Type`; anything else draws swiss.
     theme: OsdTheme,
     /// The icon theme's microphone as a registered path and its viewBox, or `None` to draw
@@ -789,6 +797,7 @@ impl Look {
             word_fade: cfg.word_fade,
             badge: cfg.look_badge,
             edit_badge: cfg.keyboard_edit,
+            doubt_below: cfg.doubt_below,
             theme: cfg.theme,
             mic: load_mic_icon(fonts),
             reading_line: (cfg.anchor == OsdAnchor::ReadingLine)
@@ -2814,6 +2823,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(r) = args.realtime {
         cfg.realtime = r;
     }
+    if let Some(d) = args.doubt_below {
+        cfg.doubt_below = d;
+    }
     if let Some(a) = args.anchor.as_deref().and_then(OsdAnchor::from_name) {
         cfg.anchor = a;
     }
@@ -3537,6 +3549,47 @@ fn cut_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A word is unsure below `[osd] doubt_below`: at the measured default
+    /// 0.45 a 0.5 word is not, at the old 0.6 it is.
+    #[test]
+    fn unsure_words_follow_doubt_below() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let unsure = |doubt_below: f32| {
+            let cfg = OsdConfig {
+                theme: OsdTheme::Type,
+                doubt_below,
+                ..OsdConfig::default()
+            };
+            let look = Look::new(&cfg, &plasma, String::new(), &fonts);
+            let mut p = Popup::new(look, &fonts);
+            let text = "one two three";
+            p.files.preview = text.into();
+            p.text(text);
+            let word = |w: &str, conf: f32| voxtype::osd::live::LiveWord {
+                text: w.into(),
+                start: None,
+                end: None,
+                conf: Some(conf),
+                since: 0,
+                changes: 0,
+                detail: None,
+            };
+            p.files.live = Some(voxtype::osd::live::LiveDoc {
+                text: text.into(),
+                words: vec![word("one", 0.99), word("two", 0.5), word("three", 0.4)],
+                ..Default::default()
+            });
+            p.word_info();
+            p.note_doubtful(0.0);
+            p.extra.doubtful.len()
+        };
+        assert_eq!(voxtype::osd::config::DOUBT_BELOW, 0.45);
+        assert_eq!(unsure(voxtype::osd::config::DOUBT_BELOW), 1);
+        assert_eq!(unsure(0.6), 2);
+        assert_eq!(unsure(0.3), 0);
+    }
 
     /// The warm-up's scripted dictation logs nothing, so the log shows only
     /// real dictations ending and delivering.

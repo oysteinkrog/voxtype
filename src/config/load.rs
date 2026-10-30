@@ -226,6 +226,11 @@ fn load_config_with_env(path: Option<&Path>, env: Env) -> Result<Config, Voxtype
     if let Ok(val) = env("VOXTYPE_OSD_KEYBOARD_EDIT") {
         config.osd.keyboard_edit = parse_bool_env(&val);
     }
+    if let Ok(val) = env("VOXTYPE_OSD_DOUBT_BELOW") {
+        if let Ok(v) = val.parse::<f32>() {
+            config.osd.doubt_below = v;
+        }
+    }
 
     // Whisper / engine
     if let Ok(model) = env("VOXTYPE_MODEL") {
@@ -436,11 +441,13 @@ mod tests {
             ("VOXTYPE_EDIT_KEY", "F9"),
             ("VOXTYPE_EDIT_QUIET_MS", "220"),
             ("VOXTYPE_OSD_KEYBOARD_EDIT", "true"),
+            ("VOXTYPE_OSD_DOUBT_BELOW", "0.3"),
         ]);
         let config = load_config_with_env(Some(&path), &env).unwrap();
         assert_eq!(config.hotkey.edit_key(), Some("F9"));
         assert_eq!(config.hotkey.edit_quiet_ms, 220);
         assert!(config.osd.keyboard_edit);
+        assert_eq!(config.osd.doubt_below, 0.3);
     }
 
     use super::*;

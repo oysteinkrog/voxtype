@@ -57,8 +57,6 @@ const SLOTS: [(f32, f32); 3] = [(108.0, 1.0), (54.0, 0.75), (0.0, 0.0)];
 const ROLL_SECS: f64 = 0.3;
 const STATUS_Y: f32 = 160.0;
 const TICK_HZ: f64 = 60.0;
-/// Below this confidence a word gets the thin underline.
-const DOUBT: f32 = 0.6;
 /// MO-33: the fold's spring; it nears edge-on in about 220 ms.
 const FOLD_SECS: f64 = 0.22;
 
@@ -536,7 +534,7 @@ impl Popup {
                 for (k, wd) in words.iter().enumerate() {
                     let ww = self.measure.layout(&wd.text, &style, None).size.w;
                     let conf = self.model.info(wd.id).and_then(|i| i.conf);
-                    if conf.is_some_and(|c| c < DOUBT) && newest != Some(wd.id) {
+                    if conf.is_some_and(|c| c < self.look.doubt_below) && newest != Some(wd.id) {
                         doubts.push((px + ww * 0.15, cy + LINE * 0.34, ww * 0.55));
                     }
                     let gap = if k + 1 < words.len() { space } else { 0.0 };
