@@ -260,16 +260,17 @@ impl StreamingSession {
         .await
     }
 
-    /// [`Self::commit_exact`], asking `confirm` right before the post-output
-    /// hook and skipping the hook when it says no. A skipped hook does not
-    /// run at the end of the stream either.
+    /// [`Self::commit_exact`], asking `confirm` right before the text is
+    /// typed and right before the post-output hook (see
+    /// [`crate::output::output_via_confirmed`]). A skipped hook does not run
+    /// at the end of the stream either.
     pub async fn commit_exact_confirmed(
         &mut self,
         chain: &[Box<dyn TextOutput>],
         text: &str,
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
-        confirm: impl FnOnce() -> futures_util::future::BoxFuture<'static, bool>,
+        confirm: impl Fn() -> futures_util::future::BoxFuture<'static, bool>,
     ) -> Result<(), OutputError> {
         if text.is_empty() {
             self.clear_partial();

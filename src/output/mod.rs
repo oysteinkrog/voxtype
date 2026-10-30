@@ -504,15 +504,17 @@ pub async fn output_via(
     output_via_confirmed(chain, text, options, || Box::pin(async { true })).await
 }
 
-/// Like [`output_via`], and asks `confirm` right before the post-output
-/// hook. When it says no, the hook is skipped: after a keyboard edit, a hook
-/// that presses Enter must not run once the target window lost focus (plan
-/// R28). `confirm` is asked only when there is a post-output hook.
+/// Like [`output_via`], and asks `confirm` after the pre-output hook, right
+/// before the text is typed, and again right before the post-output hook.
+/// After a keyboard edit nothing may be typed, and no hook may press Enter,
+/// once the target window lost focus (plan R28). A no before typing gives
+/// [`OutputError::TargetChanged`] and runs no post-output hook; a no before
+/// the hook skips it. The second ask comes only with a post-output hook.
 pub async fn output_via_confirmed(
     chain: &[Box<dyn TextOutput>],
     text: &str,
     options: OutputOptions<'_>,
-    confirm: impl FnOnce() -> futures_util::future::BoxFuture<'static, bool>,
+    confirm: impl Fn() -> futures_util::future::BoxFuture<'static, bool>,
 ) -> Result<&'static str, OutputError> {
     // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
     let normalized_text = if options.normalize {
@@ -564,6 +566,12 @@ pub async fn output_via_confirmed(
             tracing::warn!("{}", e);
             // Continue anyway - best effort
         }
+    }
+
+    // The hook can take a while or move focus itself.
+    if !confirm().await {
+        tracing::warn!("Target window changed before the text was typed; nothing typed");
+        return Err(OutputError::TargetChanged);
     }
 
     // Try each output method

@@ -2370,7 +2370,8 @@ impl Daemon {
     /// Deliver a keyboard-edited dictation, only into the window it was
     /// dictated for. After the popup gave focus back, that window must be
     /// active again within 500 ms (R27), and still be active right before
-    /// the paste, after the modifiers and Enter are up (R28, R30). Otherwise,
+    /// the paste, after the modifiers and Enter are up and after the
+    /// pre-output hook (R28, R30). Otherwise,
     /// when it was closed (R29), or when a key that finished the edit is
     /// still held, the text goes to `clipboard` only and neither
     /// output hook runs, so an Enter hook cannot press Enter in the wrong
@@ -2404,10 +2405,13 @@ impl Daemon {
         if verdict.confirmed() {
             let pre = self.config.output.pre_output_command.as_deref();
             let post = self.config.output.post_output_command.as_deref();
-            let before_hook = Arc::new(std::sync::Mutex::new(None));
-            let (windows, seen) = (self.edit_link.windows.clone(), before_hook.clone());
+            // The checks after the pre-output hook and before the
+            // post-output hook, in order.
+            let checks = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (windows, seen) = (self.edit_link.windows.clone(), checks.clone());
             let id = self.edit_window.as_ref().map(|w| w.id.clone());
             let confirm = move || -> futures_util::future::BoxFuture<'static, bool> {
+                let (id, windows, seen) = (id.clone(), windows.clone(), seen.clone());
                 Box::pin(async move {
                     let v = match id {
                         Some(id) => tokio::task::spawn_blocking(move || {
@@ -2418,19 +2422,27 @@ impl Daemon {
                         .unwrap_or(Verdict::Failed),
                         None => Verdict::Failed,
                     };
-                    *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+                    seen.lock().unwrap_or_else(|e| e.into_inner()).push(v);
                     v.confirmed()
                 })
             };
             let result = session
                 .commit_exact_confirmed(chain, text, pre, post, confirm)
                 .await;
-            let before_hook = *before_hook.lock().unwrap_or_else(|e| e.into_inner());
-            return EditDelivery {
-                paste: verdict,
-                before_hook,
-                result,
-            };
+            let checks = checks.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            match result {
+                // Focus moved during the pre-output hook: nothing was typed.
+                Err(crate::error::OutputError::TargetChanged) => {
+                    verdict = checks.first().copied().unwrap_or(Verdict::Failed);
+                }
+                result => {
+                    return EditDelivery {
+                        paste: verdict,
+                        before_hook: checks.get(1).copied(),
+                        result,
+                    };
+                }
+            }
         }
         tracing::warn!("Copied, not pasted: {}", verdict.reason());
         session.skip_post_hook();
@@ -7330,11 +7342,12 @@ mod tests {
     #[tokio::test]
     async fn focus_lost_after_the_paste_skips_the_post_output_hook() {
         use crate::osd::target::Verdict;
-        // Confirmed for the hand-back and the paste; "b" (the same app)
-        // has focus by the time the hook would press Enter.
+        // Confirmed for the hand-back, the paste and after the pre-output
+        // hook; "b" (the same app) has focus by the time the hook would
+        // press Enter.
         let d = deliver_edited_with(
             &[("a", "term"), ("b", "term")],
-            &[Some("a"), Some("a"), Some("b")],
+            &[Some("a"), Some("a"), Some("a"), Some("b")],
             true,
             true,
         )
@@ -7342,6 +7355,25 @@ mod tests {
         assert_eq!(d.verdict, Verdict::Confirmed);
         assert_eq!(d.pasted.as_deref(), Some("edited text"));
         assert_eq!(d.before_hook, Some(Verdict::Mismatch));
+        assert_eq!(d.hooks, "pre\n", "no post-output hook, also not at the end");
+    }
+
+    #[tokio::test]
+    async fn focus_lost_during_the_pre_output_hook_types_nothing() {
+        use crate::osd::target::Verdict;
+        // Confirmed for the hand-back and the paste; the pre-output hook
+        // runs, and then "b" has focus.
+        let d = deliver_edited_with(
+            &[("a", "term"), ("b", "term")],
+            &[Some("a"), Some("a"), Some("b")],
+            true,
+            true,
+        )
+        .await;
+        assert_eq!(d.verdict, Verdict::Mismatch);
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.before_hook, None);
         assert_eq!(d.hooks, "pre\n", "no post-output hook, also not at the end");
     }
 

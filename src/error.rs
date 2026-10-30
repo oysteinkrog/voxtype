@@ -158,6 +158,9 @@ pub enum OutputError {
         "All output methods failed. Ensure wtype, dotool, ydotool, wl-copy, or xclip is available."
     )]
     AllMethodsFailed,
+
+    #[error("The target window lost focus before the text was typed; nothing was typed.")]
+    TargetChanged,
 }
 
 /// Errors related to meeting transcription
