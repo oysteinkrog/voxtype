@@ -119,6 +119,16 @@ fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
 }
 
 impl Popup {
+    /// [`Popup::room`], except while editing: then every window word draws,
+    /// or the caret could sit past the last drawn word (plan section 4.5).
+    pub(super) fn edit_room(&self) -> usize {
+        if self.edit_view.is_some() {
+            self.shown.len()
+        } else {
+            self.room()
+        }
+    }
+
     /// The header's height: the larger rolling digits over their captions,
     /// the title or the status icon, whichever is tallest.
     fn type_header_height(look: &Look) -> f32 {
@@ -479,7 +489,7 @@ impl Popup {
         // enters from nearly full opacity: the reading line asks 70 % of the
         // settled ink from the first frame.
         let enter_ink = if self.look.on(crate::channels::CONFIDENCE) { 0.95 } else { 0.0 };
-        let words = Element::live_text("words", &self.shown[..self.room()])
+        let words = Element::live_text("words", &self.shown[..self.edit_room()])
             .line_motion(&self.look)
             .revision_motion(revision::motion(&self.look))
             .word_revise(revision::revise(&self.look))
@@ -501,10 +511,13 @@ impl Popup {
         let mut text = Element::column("text")
             .height(self.lines as f32 * l.text_line)
             .child(words);
-        for overlay in self.paths_overlays() {
+        // While editing the glyphs stay at their laid-out places and doubt
+        // no longer follows the model.
+        let editing = self.edit_view.is_some();
+        for overlay in self.paths_overlays().into_iter().filter(|_| !editing) {
             text = text.child(overlay);
         }
-        for line in self.doubt_lines() {
+        for line in self.doubt_lines().into_iter().filter(|_| !editing) {
             text = text.child(line);
         }
         text = text.children(self.line_marks(
@@ -516,7 +529,7 @@ impl Popup {
         let text = self.typo_marks(text, l.text_width());
         let text = self.signal_marks(
             text,
-            &self.shown[..self.room()],
+            &self.shown[..self.edit_room()],
             l.text_width(),
             (0.0, 0.0),
             l.foreground,
@@ -627,5 +640,55 @@ impl Popup {
             .word_enter(Transition::fade().offset(0.0, LABEL_SLIDE))
             .word_change(Transition::fade().opacity(0.2).offset(0.0, -LABEL_SLIDE))
             .presence(Transition::fade(), Transition::fade())
+    }
+}
+
+#[cfg(test)]
+pub(super) mod edit_tests {
+    use super::super::swiss_look::edit_check::{envelope, Rig};
+    use std::collections::HashSet;
+    use voxtype::osd::config::OsdTheme;
+
+    /// M7.L3: Type edits in its own layout, with its doubt lines and glyph
+    /// paths off. With the caret on the newest, a middle and the top line,
+    /// at both widths: the caret on its glyph within 1 px in every frame,
+    /// the popup's size unchanged, and the golden
+    /// `tests/fixtures/osd-vo/edit-type.txt`.
+    #[test]
+    fn type_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Type, "type");
+    }
+
+    /// M7.L3: the edit moment keeps the reading-line envelope (R35).
+    #[test]
+    fn type_edits_within_the_envelope() {
+        envelope(OsdTheme::Type, "type");
+    }
+
+    /// Just after the panel grows a line, `room()` holds back the words of
+    /// that line for a moment. While editing every window word draws, or
+    /// the caret could sit past the last drawn word.
+    pub(in super::super) fn every_word_draws(theme: OsdTheme) {
+        let mut r = Rig::new(theme, false);
+        r.dictate(40);
+        let lines = r.p.lines;
+        r.p.grew = Some((1.0, lines - 1));
+        r.p.extra.now = 1.0;
+        assert!(r.p.room() < r.p.shown.len(), "the hold-back is on");
+        r.enter(1.0);
+        let dl = r.scene.sample(1.5);
+        let drawn: HashSet<u32> = Rig::glyphs(&dl).iter().map(|g| g.0).collect();
+        let shown = &r.p.shown;
+        let missing: Vec<&str> = shown
+            .iter()
+            .filter(|w| !drawn.contains(&w.id))
+            .map(|w| w.text.as_str())
+            .collect();
+        assert!(missing.is_empty(), "{theme:?} leaves out {missing:?}");
+    }
+
+    #[test]
+    fn type_draws_every_word_while_editing() {
+        every_word_draws(OsdTheme::Type);
     }
 }
