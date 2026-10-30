@@ -1164,7 +1164,9 @@ impl Popup {
             c.lines_at = t;
         }
         // A word whose text changed, other than by growing, is a revision.
-        if self.extra.final_at.is_none() && t - c.revised_at > BURST_GAP {
+        // An edit is not one: no glitch burst and no roll while editing.
+        let editing = self.edit_view.is_some();
+        if !editing && self.extra.final_at.is_none() && t - c.revised_at > BURST_GAP {
             let bare = |w: &str| w.trim_start_matches('…').to_string();
             let revised = self.shown.iter().find(|w| {
                 c.words.iter().any(|o| {
@@ -1181,7 +1183,7 @@ impl Popup {
         }
         // Every changed word rolls its old text up and out.
         c.rolls.retain(|r| t < r.2 + ROLL_SECS);
-        for w in &self.shown {
+        for w in self.shown.iter().filter(|_| !editing) {
             if let Some(o) = c.words.iter().find(|o| o.id == w.id && o.text != w.text) {
                 c.rolls.push((w.id, o.text.clone(), t));
             }
@@ -1295,9 +1297,10 @@ impl Popup {
         .declare_reach(DECO_REACH);
 
         // A burst also glitches the transcript and the waveform for a moment.
+        // Not while editing: the text stays where it is laid out.
         let burst_on = !reduced()
-            && (t - c.mode_at < 0.16
-                || t - self.shown_at < OPEN_GLITCH_SECS);
+            && self.edit_view.is_none()
+            && (t - c.mode_at < 0.16 || t - self.shown_at < OPEN_GLITCH_SECS);
 
         let exit = if mode == Mode::Cancelled {
             Transition::fade().scale(0.97)
@@ -1754,5 +1757,66 @@ impl Popup {
             x,
             y,
         )
+    }
+}
+
+/// Cyberpunk's edit adapter (plan section 4.5): the yellow caret of the
+/// joint ticks is the edit caret, and the ticks, which follow the sound,
+/// are off.
+pub(crate) struct CyberpunkSite;
+
+impl edit_site::EditSite for CyberpunkSite {
+    fn caret(&self, _look: &Look) -> edit_site::CaretStyle {
+        edit_site::CaretStyle {
+            caret: vo::scene::flow::Caret {
+                color: Some(hex(YELLOW)),
+                ..vo::scene::flow::Caret::default()
+            },
+            selection: Color::hex(YELLOW, 0.35),
+            mark: hex(YELLOW),
+        }
+    }
+
+    fn quiet(&self) -> &'static [&'static str] {
+        &[sounding::ONSET_JOINT]
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::swiss_look::edit_check::{envelope, Rig};
+    use super::{hex, sounding, YELLOW};
+    use voxtype::osd::config::OsdTheme;
+
+    /// M7.L4: Cyberpunk edits in its own layout, its yellow caret as the edit caret, its glitch bursts, rolls and joint ticks off. With the caret on the
+    /// newest, a middle and the top line, at both widths: the caret on its
+    /// glyph within 1 px in every frame, the popup's size unchanged, and the
+    /// golden `tests/fixtures/osd-vo/edit-cyberpunk.txt`.
+    #[test]
+    fn cyberpunk_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Cyberpunk, "cyberpunk");
+    }
+
+    /// The edit caret is the look's yellow; with the joint on, its ticks
+    /// and their caret are off while editing, so one caret shows.
+    #[test]
+    fn cyberpunk_edits_with_one_yellow_caret() {
+        for joint in [false, true] {
+            let mut r = Rig::new(OsdTheme::Cyberpunk, false);
+            if joint {
+                let mut on = r.p.look.features.to_vec();
+                on.push(sounding::ONSET_JOINT.into());
+                r.p.look.features = on.into();
+            }
+            r.dictate(160);
+            r.enter(1.0);
+            assert_eq!(r.carets(hex(YELLOW)), 1, "joint {joint}");
+        }
+    }
+
+    /// M7.L4: the edit moment keeps the reading-line envelope (R35).
+    #[test]
+    fn cyberpunk_edits_within_the_envelope() {
+        envelope(OsdTheme::Cyberpunk, "cyberpunk");
     }
 }

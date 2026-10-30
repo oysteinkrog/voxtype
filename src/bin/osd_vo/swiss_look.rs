@@ -852,6 +852,27 @@ pub(crate) mod edit_check {
             }
         }
 
+        /// How many carets in `color` are drawn just after the last change,
+        /// before any blink: upright bars at most 4 px wide.
+        pub(crate) fn carets(&self, color: vo::scene::geom::Color) -> usize {
+            let dl = self.scene.sample(self.t + 0.1);
+            let near = |c: vo::scene::geom::Color| {
+                c.a > 0.5
+                    && (c.r - color.r).abs() < 0.02
+                    && (c.g - color.g).abs() < 0.02
+                    && (c.b - color.b).abs() < 0.02
+            };
+            dl.shapes
+                .iter()
+                .filter(|s| {
+                    s.kind == vo::scene::display::ShapeKind::RRect
+                        && s.geom[2] <= 4.0
+                        && s.geom[3] >= 8.0
+                        && near(s.fill.c0)
+                })
+                .count()
+        }
+
         /// The golden's words for the view now: the window and where the
         /// caret settles.
         pub(crate) fn golden_part(&self) -> String {

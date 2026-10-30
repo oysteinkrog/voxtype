@@ -237,8 +237,9 @@ impl EditSite for DefaultSite {}
 /// The adapter of `theme`. A look with its own adapter gets an arm here;
 /// the rest use [`DefaultSite`].
 pub(crate) fn site(theme: OsdTheme) -> &'static dyn EditSite {
-    #[allow(clippy::match_single_binding)]
     match theme {
+        OsdTheme::Cyberpunk => &super::cyberpunk::CyberpunkSite,
+        OsdTheme::Palette => &super::palette::PaletteSite,
         _ => &DefaultSite,
     }
 }
