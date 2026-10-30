@@ -68,7 +68,9 @@ impl<M> WildMotion for Element<M> {
         let accent = Color::hex(ACCENT, 1.0);
         let mut words = self;
         let physics = look.on(LETTER_PHYSICS);
-        let magnet = look.on(MAGNETIC_CARET);
+        // While a keyboard edit is pending or under way the edit layer draws
+        // the one caret, so the end-of-text caret and its field are off.
+        let magnet = look.on(MAGNETIC_CARET) && look.quiet.is_empty();
         if (physics || magnet) && !reduced {
             // The physics or the snap is the arrival: the word is readable at once.
             words = words.word_enter(Transition::fade().opacity(0.7));
@@ -280,4 +282,75 @@ pub(crate) fn letter_specimen(p: &Popup, _: &vo::Tokens) -> Element<Msg> {
         .child(at(caption("cap-read", "READING LINE  /  3 PX ENVELOPE"), pad, read_top - 22.0))
         .child(at(reading, pad, read_top))
         .signals(p.signals.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::edit_site::quiet_list;
+    use super::super::wild_space::DEPTH_STACK;
+    use super::*;
+    use vo::scene::scene::Scene;
+    use vo::scene::text::ShapedLayout;
+
+    fn popup(theme: OsdTheme, features: &[&str]) -> (Popup, FontRegistry) {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let cfg = OsdConfig {
+            theme,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        look.features = features.iter().map(|f| f.to_string()).collect();
+        look.look_set = true;
+        (Popup::new(look, &fonts), fonts)
+    }
+
+    /// The end-of-text caret of a live text set with `wild_motion`, or
+    /// `None` when it draws none.
+    fn end_caret(p: &Popup, fonts: &FontRegistry) -> Option<(vo::scene::geom::Rect, f32)> {
+        let words: Vec<Word> = ["one", "two", "three"]
+            .iter()
+            .enumerate()
+            .map(|(i, w)| Word {
+                id: i as WordId,
+                text: (*w).into(),
+            })
+            .collect();
+        let el: Element<Msg> = Element::live_text("t", &words).width(400.0).wild_motion(p);
+        let mut scene: Scene<Msg> =
+            Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+        scene.set_viewport(0.0, Size::new(400.0, 200.0), 1.0);
+        scene.apply(el, 0.0);
+        scene.caret(scene.find(&["t"]).unwrap(), 1.0)
+    }
+
+    /// R34 with M7.5: letter physics, variable breath and the depth stack
+    /// are off while an edit is pending or under way, and the wild-motion
+    /// end caret is hidden so only the edit caret shows.
+    #[test]
+    fn the_shared_effects_obey_edit_mode() {
+        let wild = [LETTER_PHYSICS, VARIABLE_BREATH, MAGNETIC_CARET, DEPTH_STACK];
+        for theme in [OsdTheme::Swissfi, OsdTheme::Showcase, OsdTheme::Jarvis] {
+            let (mut p, fonts) = popup(theme, &wild);
+            for f in wild {
+                assert!(p.look.on(f), "{theme:?} {f}");
+            }
+            assert!(
+                end_caret(&p, &fonts).is_some(),
+                "{theme:?}: the end caret shows"
+            );
+            p.look.quiet = quiet_list(theme).into();
+            for f in [LETTER_PHYSICS, VARIABLE_BREATH, DEPTH_STACK] {
+                assert!(!p.look.on(f), "{theme:?} {f}");
+            }
+            assert!(
+                end_caret(&p, &fonts).is_none(),
+                "{theme:?}: no end caret while editing"
+            );
+            // Resume or a cancelled tap: everything comes back.
+            p.look.quiet = Arc::from([]);
+            assert!(wild.iter().all(|f| p.look.on(f)), "{theme:?}");
+            assert!(end_caret(&p, &fonts).is_some(), "{theme:?}");
+        }
+    }
 }
