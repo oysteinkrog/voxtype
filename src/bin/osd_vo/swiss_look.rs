@@ -654,6 +654,14 @@ pub(crate) mod edit_check {
         /// Shows the view at `t`.
         pub(crate) fn show(&mut self, t: f64) {
             self.t = t;
+            self.p.extra.now = t;
+            // The state that `update` keeps for these looks, such as
+            // Island's form. Each returns at once for another look.
+            self.p.sync_amber(t);
+            self.p.sync_radial(t);
+            self.p.sync_tron(t);
+            self.p.sync_island(t);
+            self.p.sync_cyber(t);
             let view = self.p.view(&self.tokens);
             self.scene.apply(view, t);
         }
@@ -704,7 +712,7 @@ pub(crate) mod edit_check {
         /// One edit action at `t`, then the view.
         pub(crate) fn act(&mut self, action: EditAction, t: f64) {
             let site = edit_site::site(self.p.look.theme);
-            let tb = site.text_box(&self.p.look);
+            let tb = site.text_box_in(&self.p);
             let text = self.buffer_text();
             let lines = self
                 .p
