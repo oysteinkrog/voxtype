@@ -1157,6 +1157,7 @@ impl Popup {
                 )
                 .size(side, side)
                 .light_head(0.7, 1.1, hex(CYAN), 0.0)
+                .motion(Prop::Position, Motion::Snap)
                 .presence(Transition::fade().scale(0.6), Transition::fade()),
             );
         } else {
@@ -1167,6 +1168,7 @@ impl Popup {
                     .radius(d / 2.0)
                     .fill(hex(0x5fd0ff))
                     .glow(hex(CYAN), 5.0 * s, 0.6)
+                    .motion(Prop::Position, Motion::Snap)
                     .presence(Transition::fade().scale(0.6), Transition::fade()),
             );
         }
@@ -1179,7 +1181,11 @@ impl Popup {
                 // A fade only, like the hint: the row already rises into
                 // place, and the word's own 5 px drop settled so slowly that
                 // it sat below the hint's baseline while the panel grew.
-                .presence(Transition::fade(), Transition::fade()),
+                .presence(Transition::fade(), Transition::fade())
+                // The row is centred, so a hint that comes in later moves
+                // the word left. Sliding there, it ran into the hint
+                // ("Finishing" over "4 s of audio left"), which snaps.
+                .motion(Prop::Position, Motion::Snap),
         );
         let detail = status.detail.trim().trim_start_matches('·').trim();
         if !detail.is_empty() {
