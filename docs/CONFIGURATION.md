@@ -3113,6 +3113,40 @@ A separate TOML file of `"from" = "to"` lines, added to `replacements`. Use it t
 replacements_file = "~/private/voxtype-words.toml"
 ```
 
+### learn_corrections
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Learn words from spoken corrections (see `correction_key`). Each correction that changes the pasted text is written to `corrections_log`. When the same fix is made a second time, it becomes a rule in `learned_words_file` and applies from then on, like a `replacements` entry. A fix whose right words look like a name (an inner capital such as "GlimBot", a digit, all capitals, or a letter outside ASCII) is learned the first time. The popup says "Learned" instead of "Corrected" when a correction will be learned.
+
+A fix that only adds words ("test" corrected to "quiet test") is never learned, since the rule would rewrite every "test". `replacements` and `replacements_file` win over a learned rule with the same words. Learned words only change the output text: they are not sent to a transcription engine or a post-processing command as a word list.
+
+List the learned words with `voxtype glossary learned`, and remove one with `voxtype glossary forget <words>`. A removed word stops at the next recording.
+
+### corrections_log
+
+**Type:** String (path)
+**Default:** `~/.local/share/voxtype/corrections.jsonl`
+**Required:** No
+
+Where spoken corrections are logged, one JSON line each: the time, the wrong and right words, the live text, the final engine's text, the pasted text, and the hold's start and end in seconds. No audio is kept. A leading `~/` is expanded.
+
+### learned_words_file
+
+**Type:** String (path)
+**Default:** `~/.local/share/voxtype/words-learned.toml`
+**Required:** No
+
+Where learned words are kept, as `"from" = "to"` lines in the same form as `replacements_file`. You can edit it by hand. A leading `~/` is expanded.
+
+```toml
+[text]
+corrections_log = "~/private/voxtype/corrections.jsonl"
+learned_words_file = "~/private/voxtype/words-learned.toml"
+```
+
 ### smart_auto_submit
 
 **Type:** Boolean

@@ -3,7 +3,7 @@
 use clap::builder::PossibleValuesParser;
 use clap::Subcommand;
 
-use super::{ConfigAction, InfoAction, MeetingAction, RecordAction, SetupAction};
+use super::{ConfigAction, GlossaryAction, InfoAction, MeetingAction, RecordAction, SetupAction};
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -119,6 +119,12 @@ pub enum Commands {
     Config {
         #[command(subcommand)]
         action: Option<ConfigAction>,
+    },
+
+    /// Words learned from spoken corrections
+    Glossary {
+        #[command(subcommand)]
+        action: GlossaryAction,
     },
 
     /// Inspect runtime/install information

@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::osd::live::{TimedWord, WordDetail};
 use crate::text::align::{self, Refused};
+use crate::text::learn;
 
 /// How long after the key comes up a correction waits for the live model's
 /// words of the hold, when no word after the hold has arrived sooner.
@@ -52,6 +53,9 @@ pub struct CorrectionNote {
     pub to: String,
     /// Why nothing changed; None when the correction was placed.
     pub dropped: Option<String>,
+    /// The correction will be learned ([`crate::text::learn`]) once pasted.
+    #[serde(default)]
+    pub learned: bool,
 }
 
 /// A live word and its detail.
@@ -124,6 +128,8 @@ pub struct Corrections {
     note: Option<CorrectionNote>,
     /// The final engine's text of each hold, when the worker gave them.
     clips: Vec<FinalClip>,
+    /// The corrections [`Corrections::apply_final`] made, for the log.
+    applied: Vec<learn::Entry>,
 }
 
 fn middle(w: &TimedWord) -> f32 {
@@ -241,6 +247,7 @@ impl Corrections {
             from: String::new(),
             to: heard.join(" "),
             dropped: None,
+            learned: false,
         };
         let placed = if heard.is_empty() {
             Err("nothing heard")
@@ -255,6 +262,8 @@ impl Corrections {
         let state = match placed {
             Ok(span) => {
                 note.from = texts[span.start..span.end].join(" ");
+                let right = clip_words(&note.to, &note.from).join(" ");
+                note.learned = learn::active().is_some_and(|l| l.would_learn(&note.from, &right));
                 State::Placed {
                     from: before[span.start].start,
                     to: before[span.end - 1].end,
@@ -316,6 +325,7 @@ impl Corrections {
     /// correction places nowhere, its note says so.
     pub fn apply_final(&mut self, text: &str) -> String {
         self.render_with(None, true);
+        self.applied.clear();
         // Each placed hold with the words to try: the clip's, then the live
         // words for when the clip's words fit nowhere in the final text.
         let placed: Vec<(f32, f32, Vec<Vec<String>>, bool)> = self
@@ -373,6 +383,21 @@ impl Corrections {
             });
             if let Some((span, right)) = found {
                 shift += right.len() as isize - (span.end - span.start) as isize;
+                self.applied.push(learn::Entry {
+                    time: learn::now(),
+                    wrong: words[span.start..span.end].join(" "),
+                    right: right.join(" "),
+                    live: self
+                        .raw
+                        .iter()
+                        .map(|(w, _)| w.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    final_text: text.to_string(),
+                    t0,
+                    t1,
+                    ..learn::Entry::default()
+                });
                 words.splice(span.start..span.end, right);
             } else {
                 tracing::warn!(t0, "Correction not found in the final text");
@@ -386,9 +411,14 @@ impl Corrections {
                 note.id = self.notes;
                 note.from.clear();
                 note.dropped = Some("not in the final text".into());
+                note.learned = false;
             }
         }
-        words.join(" ")
+        let pasted = words.join(" ");
+        for entry in &mut self.applied {
+            entry.pasted = pasted.clone();
+        }
+        pasted
     }
 }
 
@@ -561,6 +591,11 @@ pub fn view() -> Option<CorrectionView> {
 /// The final text with this dictation's corrections made.
 pub fn apply_final(text: &str) -> String {
     with(|c| c.apply_final(text))
+}
+
+/// The corrections the last [`apply_final`] made, for the corrections log.
+pub fn applied() -> Vec<learn::Entry> {
+    with(|c| c.applied.clone())
 }
 
 #[cfg(test)]
@@ -833,6 +868,29 @@ mod tests {
         let pasted = c.apply_final("This is a longer test of voice.");
         assert_eq!(pasted, "This is a longer quiet test of voice.");
         assert_eq!(c.note.and_then(|n| n.dropped), None);
+    }
+
+    #[test]
+    fn the_corrections_made_are_kept_for_the_log() {
+        let mut c = Corrections::default();
+        let mut raw = spoken(0.0, "this is a glim bot test");
+        raw.extend(spoken(2.4, "GlimBot"));
+        c.start(2.3);
+        c.end(3.0, Instant::now());
+        c.overlay(raw, Instant::now());
+        let pasted = c.apply_final("This is a glim bot test. GlimBot.");
+        assert_eq!(pasted, "This is a GlimBot test.");
+        let [entry] = c.applied.as_slice() else {
+            panic!("{:?}", c.applied);
+        };
+        assert_eq!(
+            (entry.wrong.as_str(), entry.right.as_str()),
+            ("glim bot", "GlimBot")
+        );
+        assert_eq!(entry.live, "this is a glim bot test GlimBot");
+        assert_eq!(entry.final_text, "This is a glim bot test. GlimBot.");
+        assert_eq!(entry.pasted, pasted);
+        assert_eq!((entry.t0, entry.t1), (2.3, 3.0));
     }
 
     #[test]

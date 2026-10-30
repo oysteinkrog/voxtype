@@ -1224,6 +1224,17 @@ voxtype --initial-prompt "Discussion about Terraform and AWS Lambda" daemon
 
 ---
 
+### Learning From Spoken Corrections
+
+With `correction_key` set (see the Configuration Guide), you can hold the key while recording and say the right words; voxtype puts them over the words they sound like. Each correction that changes the pasted text is logged, and a fix you make twice becomes a learned word that applies from then on. A name such as "GlimBot" is learned the first time. The popup says "Learned" when that happens.
+
+```bash
+voxtype glossary learned            # list the learned words
+voxtype glossary forget glim bot    # remove one
+```
+
+The log and the learned words live under `~/.local/share/voxtype/` unless `corrections_log` and `learned_words_file` in `[text]` point elsewhere. Set `learn_corrections = false` to turn it off.
+
 ## Whisper Models
 
 ### Model Comparison

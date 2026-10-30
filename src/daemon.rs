@@ -1095,6 +1095,8 @@ pub struct Daemon {
     pid_file_path: Option<PathBuf>,
     audio_feedback: Option<AudioFeedback>,
     text_processor: TextProcessor,
+    /// Where spoken corrections are logged and learned.
+    learning: crate::text::learn::Learning,
     post_processor: Option<PostProcessor>,
     /// Last post-processed text and when it was produced, for context in subsequent dictations
     last_dictation: Option<(String, Instant)>,
@@ -1212,8 +1214,11 @@ impl Daemon {
         // Pass the active engine's language so filler filtering can skip
         // words that are ordinary vocabulary there rather than disfluencies
         // (#566).
-        let text_processor =
+        let mut text_processor =
             TextProcessor::new_for_language(&config.text, config.active_language());
+        let learning = crate::text::learn::Learning::from_config(&config.text);
+        text_processor.set_learned(learning.rules());
+        crate::text::learn::set_active(Some(learning.clone()));
         if config.text.spoken_punctuation {
             tracing::info!("Spoken punctuation enabled");
         }
@@ -1267,6 +1272,7 @@ impl Daemon {
             pid_file_path: None,
             audio_feedback,
             text_processor,
+            learning,
             post_processor,
             last_dictation: None,
             level_hub: None,
@@ -1464,6 +1470,12 @@ impl Daemon {
             })
     }
 
+    /// Reads the learned words again, so a rule removed with `voxtype
+    /// glossary forget` stops at the next recording.
+    fn refresh_learned(&mut self) {
+        self.text_processor.set_learned(self.learning.rules());
+    }
+
     /// Start a batch (non-streaming) audio capture. `track_silence` arms
     /// silence-based auto-stop when the session is external-trigger and the
     /// feature is configured (see `new_speech_tracker`) — pass `false` for
@@ -1482,6 +1494,7 @@ impl Daemon {
         // ever apply to a recording that was live, or already requested,
         // when it was issued (#606).
         discard_stale_cancel(self.start_request);
+        self.refresh_learned();
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
@@ -2191,6 +2204,7 @@ impl Daemon {
         track_silence: bool,
     ) -> std::result::Result<(Box<dyn AudioCapture>, tokio::sync::mpsc::Receiver<Vec<f32>>), ()>
     {
+        self.refresh_learned();
         match audio::create_capture(&self.config.audio) {
             Ok(mut capture) => match capture.start().await {
                 Ok(chunk_rx) => {
@@ -5072,6 +5086,17 @@ impl Daemon {
                                         // Spoken corrections, before the
                                         // clear below forgets them.
                                         corrected = crate::osd::correction::apply_final(&text);
+                                        for entry in crate::osd::correction::applied() {
+                                            match self.learning.record(&entry) {
+                                                Ok(Some((from, to))) => self.text_processor.learn(&from, &to),
+                                                Ok(None) => {}
+                                                Err(e) => tracing::warn!(
+                                                    "Could not log a spoken correction to {:?}: {}",
+                                                    self.learning.log,
+                                                    e
+                                                ),
+                                            }
+                                        }
                                         // The text is ready: let the OSD hide.
                                         clear_live_preview();
                                         &corrected

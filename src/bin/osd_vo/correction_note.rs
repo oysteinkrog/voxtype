@@ -3,7 +3,8 @@
 //! While the correction key is held, the live words dim and the look's
 //! status row says "Correcting" with the respoken words as they arrive.
 //! When the hold is placed, the row shows the words it replaced and the new
-//! ones for [`NOTE_SECS`]; when it was dropped, it says why. The words in
+//! ones for [`NOTE_SECS`] ("Learned" when the pair becomes a learned word,
+//! COR-6); when it was dropped, it says why. The words in
 //! the look are already the corrected ones: the daemon makes the correction
 //! in the preview. A dictation without corrections looks as before.
 
@@ -71,7 +72,7 @@ pub(crate) fn status(
     let note = view.note.as_ref().filter(|_| state.note_shown(now))?;
     Some(match &note.dropped {
         None => (
-            "Corrected".into(),
+            if note.learned { "Learned" } else { "Corrected" }.into(),
             format!("  ·  {} → {}", note.from, note.to),
         ),
         Some(why) => ("Not changed".into(), format!("  ·  {why}: {}", note.to)),
@@ -92,6 +93,7 @@ mod tests {
                 from: "franken term".into(),
                 to: "FrankenTerm".into(),
                 dropped: dropped.map(str::to_string),
+                learned: false,
             }),
         }
     }
@@ -136,6 +138,15 @@ mod tests {
         assert_eq!(
             status(Some(&dropped), &s, 3.1),
             Some(("Not changed".into(), "  ·  no match: FrankenTerm".into()))
+        );
+        let mut learned = note(3, None);
+        if let Some(n) = &mut learned.note {
+            n.learned = true;
+        }
+        s.files(Some(&learned), 5.0);
+        assert_eq!(
+            status(Some(&learned), &s, 5.1),
+            Some(("Learned".into(), "  ·  franken term → FrankenTerm".into()))
         );
     }
 }

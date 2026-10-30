@@ -862,6 +862,7 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
                     from: from.into(),
                     to: to.into(),
                     dropped: dropped.map(str::to_string),
+                    learned: false,
                 }),
             };
             k.record(s0);
