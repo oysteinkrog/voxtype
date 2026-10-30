@@ -12,6 +12,8 @@ pub mod feedback;
 pub mod features;
 pub mod levels;
 pub mod media;
+#[cfg(target_os = "linux")]
+pub mod pipewire_node;
 pub mod resampler;
 
 pub use dual_capture::{AudioSourceType, DualCapture, DualSamples, SourcedSample};

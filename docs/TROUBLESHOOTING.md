@@ -257,10 +257,23 @@ aplay test.wav
 If test recording works, check your Voxtype config:
 ```toml
 [audio]
-device = "default"  # Or specific device name from pactl
+device = "default"  # Or an ALSA name from `voxtype info devices`
 ```
 
-#### 2. Microphone muted or volume too low
+To record from one PipeWire source, use its name from `pactl list sources short`
+with a `pipewire:` prefix, for example
+`device = "pipewire:alsa_input.usb-046d_Logitech_StreamCam_1EEAC645-02.analog-stereo"`.
+
+#### 2. Start of speech cut off, or quiet speech missing
+
+If the default source is a noise-suppression filter with a voice gate (RNNoise
+with a VAD threshold, for example), it outputs exact silence until it decides you
+are speaking. That cuts off the first word, and quiet speech can vanish entirely.
+Check what the default source is with `pactl get-default-source`. Point voxtype at
+the raw microphone instead with `device = "pipewire:<node name>"` (see above).
+Other apps keep using the filter.
+
+#### 3. Microphone muted or volume too low
 
 ```bash
 # Check PulseAudio/PipeWire volume
@@ -269,7 +282,7 @@ pavucontrol
 pactl list sources | grep -A 10 "Default"
 ```
 
-#### 3. PipeWire/PulseAudio not running
+#### 4. PipeWire/PulseAudio not running
 
 ```bash
 # Check audio server status

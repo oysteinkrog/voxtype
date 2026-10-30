@@ -228,7 +228,8 @@ pub struct Cli {
     pub correction_hold_ms: Option<u64>,
 
     // -- Audio --
-    /// Audio input device name (or "default" for system default)
+    /// Audio input device: an ALSA name from `voxtype info devices`, "default"
+    /// for the system default, or "pipewire:<node>" for one PipeWire node
     #[arg(long, value_name = "DEVICE", help_heading = "Audio")]
     pub audio_device: Option<String>,
 

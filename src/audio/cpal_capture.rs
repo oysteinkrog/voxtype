@@ -15,7 +15,7 @@ use std::thread;
 use tokio::sync::{mpsc, oneshot};
 
 /// Commands sent to the audio capture thread
-enum CaptureCommand {
+pub(super) enum CaptureCommand {
     Stop(oneshot::Sender<Vec<f32>>),
     /// Get current samples and clear the buffer (for continuous recording)
     GetSamples(oneshot::Sender<Vec<f32>>),
@@ -154,6 +154,15 @@ impl AudioCapture for CpalCapture {
     async fn start(&mut self) -> Result<mpsc::Receiver<Vec<f32>>, AudioError> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+        #[cfg(target_os = "linux")]
+        if let Some(node) = super::pipewire_node::node_name(&self.config.device) {
+            let (cmd_tx, thread_handle, chunk_rx) =
+                super::pipewire_node::start(node, self.config.sample_rate)?;
+            self.cmd_tx = Some(cmd_tx);
+            self.thread_handle = Some(thread_handle);
+            return Ok(chunk_rx);
+        }
+
         // Get the device info before spawning the thread
         let host = cpal::default_host();
 
@@ -274,66 +283,14 @@ impl AudioCapture for CpalCapture {
 
             tracing::debug!("Audio capture thread started");
 
-            // Handle commands in a loop
-            loop {
-                match cmd_rx.recv() {
-                    Ok(CaptureCommand::Stop(response_tx)) => {
-                        // Stop the stream (drop it)
-                        drop(stream);
-
-                        // A stream error is terminal: cpal stops delivering
-                        // callbacks, so whatever was captured before the error
-                        // is all there is. Saying so beats handing back a
-                        // truncated recording as though it were complete
-                        // (#642).
-                        if stream_dead.load(Ordering::SeqCst) {
-                            tracing::error!(
-                                "Audio device '{}' failed during this recording; \
-                                 the transcript will be short or empty. \
-                                 Reconnect the device and record again.",
-                                device_label
-                            );
-                        }
-
-                        // Drain whatever the resampler still holds. Its delay
-                        // line is a chunk deep, so skipping this drops the end
-                        // of every recording.
-                        if let Ok(mut guard) = resampler_for_stop.lock() {
-                            if let Some(r) = guard.as_mut() {
-                                let tail = r.flush();
-                                if !tail.is_empty() {
-                                    if let Ok(mut s) = samples_clone.lock() {
-                                        s.extend_from_slice(&tail);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Get collected samples
-                        let collected = {
-                            let guard = samples_clone.lock().unwrap();
-                            guard.clone()
-                        };
-
-                        // Send samples back
-                        let _ = response_tx.send(collected);
-                        break;
-                    }
-                    Ok(CaptureCommand::GetSamples(response_tx)) => {
-                        // Get and clear current samples (for continuous recording)
-                        let samples = {
-                            let mut guard = samples_clone.lock().unwrap();
-                            std::mem::take(&mut *guard)
-                        };
-                        let _ = response_tx.send(samples);
-                    }
-                    Err(_) => {
-                        // Channel closed, exit thread
-                        tracing::debug!("Command channel closed");
-                        break;
-                    }
-                }
-            }
+            run_commands(
+                cmd_rx,
+                &samples_clone,
+                &resampler_for_stop,
+                &stream_dead,
+                &device_label,
+                move || drop(stream),
+            );
 
             tracing::debug!("Audio capture thread stopped");
         });
@@ -444,25 +401,7 @@ where
                     })
                     .collect();
 
-                // Resample if needed. The resampler is stateful and lives as
-                // long as the stream: converting each callback independently
-                // reset the read position ~100 times a second and produced a
-                // discontinuity at every chunk boundary (#641).
-                let resampled = match resampler.lock() {
-                    Ok(mut r) => match r.as_mut() {
-                        Some(r) => r.push(&mono_f32),
-                        None => mono_f32,
-                    },
-                    Err(_) => mono_f32,
-                };
-
-                // Store samples
-                if let Ok(mut guard) = samples.lock() {
-                    guard.extend_from_slice(&resampled);
-                }
-
-                // Send chunk for streaming (ignore errors - receiver might be gone)
-                let _ = tx.try_send(resampled);
+                deliver(mono_f32, &resampler, &samples, &tx);
             },
             err_fn,
             None,
@@ -470,6 +409,98 @@ where
         .map_err(|e| AudioError::StreamError(e.to_string()))?;
 
     Ok(stream)
+}
+
+/// Resample one chunk of mono input, store it, and send it for streaming.
+pub(super) fn deliver(
+    mono_f32: Vec<f32>,
+    resampler: &Mutex<Option<super::resampler::StreamResampler>>,
+    samples: &Mutex<Vec<f32>>,
+    tx: &mpsc::Sender<Vec<f32>>,
+) {
+    // The resampler is stateful and lives as long as the stream: converting
+    // each callback independently reset the read position ~100 times a second
+    // and produced a discontinuity at every chunk boundary (#641).
+    let resampled = match resampler.lock() {
+        Ok(mut r) => match r.as_mut() {
+            Some(r) => r.push(&mono_f32),
+            None => mono_f32,
+        },
+        Err(_) => mono_f32,
+    };
+
+    if let Ok(mut guard) = samples.lock() {
+        guard.extend_from_slice(&resampled);
+    }
+
+    // Ignore errors: the receiver might be gone
+    let _ = tx.try_send(resampled);
+}
+
+/// Serve stop and drain commands until stop or until the command channel
+/// closes. `stop_source` ends capture; every sample it produced must be
+/// delivered by the time it returns.
+pub(super) fn run_commands(
+    cmd_rx: std::sync::mpsc::Receiver<CaptureCommand>,
+    samples: &Mutex<Vec<f32>>,
+    resampler: &Mutex<Option<super::resampler::StreamResampler>>,
+    stream_dead: &AtomicBool,
+    device_label: &str,
+    stop_source: impl FnOnce(),
+) {
+    let mut stop_source = Some(stop_source);
+    loop {
+        match cmd_rx.recv() {
+            Ok(CaptureCommand::Stop(response_tx)) => {
+                if let Some(stop) = stop_source.take() {
+                    stop();
+                }
+
+                // A stream error is terminal: no further samples arrive, so
+                // whatever was captured before the error is all there is.
+                // Saying so beats handing back a truncated recording as
+                // though it were complete (#642).
+                if stream_dead.load(Ordering::SeqCst) {
+                    tracing::error!(
+                        "Audio device '{}' failed during this recording; \
+                         the transcript will be short or empty. \
+                         Reconnect the device and record again.",
+                        device_label
+                    );
+                }
+
+                // Drain whatever the resampler still holds. Its delay line is
+                // a chunk deep, so skipping this drops the end of every
+                // recording.
+                if let Ok(mut guard) = resampler.lock() {
+                    if let Some(r) = guard.as_mut() {
+                        let tail = r.flush();
+                        if !tail.is_empty() {
+                            if let Ok(mut s) = samples.lock() {
+                                s.extend_from_slice(&tail);
+                            }
+                        }
+                    }
+                }
+
+                let collected = samples.lock().unwrap().clone();
+                let _ = response_tx.send(collected);
+                break;
+            }
+            Ok(CaptureCommand::GetSamples(response_tx)) => {
+                // Get and clear current samples (for continuous recording)
+                let drained = std::mem::take(&mut *samples.lock().unwrap());
+                let _ = response_tx.send(drained);
+            }
+            Err(_) => {
+                tracing::debug!("Command channel closed");
+                break;
+            }
+        }
+    }
+    if let Some(stop) = stop_source.take() {
+        stop();
+    }
 }
 
 #[cfg(test)]

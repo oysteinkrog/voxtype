@@ -526,7 +526,29 @@ arecord -L               # the same names, from ALSA directly
 
 `audio.device` takes an **ALSA** device name. PulseAudio and PipeWire source
 names, such as those from `pactl list sources short`, are a different namespace
-and will not match — a name like `alsa_input.usb-...` looks plausible but fails.
+and will not match as they are. To record from one PipeWire node, put
+`pipewire:` in front of its name (Linux only):
+
+```bash
+pactl list sources short    # second column is the node name
+```
+
+```toml
+[audio]
+# The microphone itself, whatever the system default source is
+device = "pipewire:alsa_input.usb-046d_Logitech_StreamCam_1EEAC645-02.analog-stereo"
+```
+
+Use this when the default source is not the raw microphone, for example a
+noise-suppression filter chain or a remote-desktop microphone. Noise
+suppression with a voice gate (such as RNNoise's VAD threshold) writes silence
+until it is sure you are speaking, which cuts off the first word. The speech
+models handle background noise themselves, so they do best on the raw
+microphone. The setting changes only voxtype's capture stream: the system
+default source, other apps and voxtype's feedback sounds are not affected.
+The node name of a USB microphone includes its serial number, so it stays the
+same when you unplug and replug it. If the node does not exist, PipeWire
+records from the default source instead.
 
 **Example:**
 ```toml
