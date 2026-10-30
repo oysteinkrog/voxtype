@@ -154,6 +154,7 @@ fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
     })
 }
 
+#[derive(Clone, Copy)]
 struct Fonts {
     text: u32,
     ui: u32,
@@ -161,15 +162,14 @@ struct Fonts {
 
 /// Google Sans Flex (OFL) for the words and the status, through fontconfig; the Plasma
 /// font when it is not installed.
-fn fonts(reg: &FontRegistry) -> &'static Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    FONTS.get_or_init(|| {
-        let add = |pattern: &str| reg.add_system(pattern).unwrap_or(SANS);
-        Fonts {
-            text: add("Google Sans Flex:medium"),
-            ui: add("Google Sans Flex"),
-        }
-    })
+fn fonts(reg: &FontRegistry) -> Fonts {
+    // Added to the registry once (`FontRegistry::system`), so every
+    // registry, such as a test's, has its own ids.
+    let add = |pattern: &str| reg.system(pattern).unwrap_or(SANS);
+    Fonts {
+        text: add("Google Sans Flex:medium"),
+        ui: add("Google Sans Flex"),
+    }
 }
 
 fn scale(look: &Look) -> f32 {
@@ -177,8 +177,14 @@ fn scale(look: &Look) -> f32 {
 }
 
 pub(crate) fn text_style(look: &Look) -> TextStyle {
+    left_style(look).centered()
+}
+
+/// The words' style before centring: an edited line is placed by its own
+/// node, at its sticky centred place.
+fn left_style(look: &Look) -> TextStyle {
     let s = scale(look);
-    TextStyle::new(fonts(&look.fonts).text, TEXT_PX * s, TEXT_LINE * s).centered()
+    TextStyle::new(fonts(&look.fonts).text, TEXT_PX * s, TEXT_LINE * s)
 }
 
 pub(crate) fn text_width(look: &Look) -> f32 {
@@ -833,8 +839,47 @@ impl Popup {
         ends
     }
 
+    /// While editing: one plain node per window line, each at its sticky
+    /// centred place, with no particles, letter motion or newest-word mark.
+    fn particles_edit_words(&self, x0: f32, y0: f32) -> Element<Msg> {
+        let l = &self.look;
+        let s = scale(l);
+        let (style, w) = (left_style(l), text_width(l));
+        let tapped = self.edit_tapped();
+        let exit = if tapped {
+            Transition::NONE
+        } else {
+            Transition::fade()
+        };
+        let mut text = Element::column("text").size(w, self.lines as f32 * TEXT_LINE * s);
+        for (i, (words, lw)) in self.text_lines(&style, w).iter().enumerate() {
+            let key = words
+                .first()
+                .map_or_else(|| format!("slot-{i}"), |w| w.id.to_string());
+            let line = Element::live_text(format!("line-{key}"), words)
+                .text_style(style)
+                .color(hex(INK))
+                .width(w)
+                .word_enter(Transition::NONE)
+                .presence(Transition::NONE, exit);
+            text = text.child(at(
+                line,
+                ((w - lw) / 2.0).max(0.0),
+                i as f32 * TEXT_LINE * s,
+            ));
+        }
+        let (x, y) = self.particles_text_at(x0, y0);
+        at(text, x, y)
+    }
+
     /// The words, centred, forming from particles.
     fn particles_words(&self, phase: Phase, x0: f32, y0: f32) -> Element<Msg> {
+        if self.edit_view.is_some() {
+            return self.particles_edit_words(x0, y0);
+        }
+        // From a tap on, the newest word is whole, and the words go at once
+        // when the edit's lines take their place.
+        let tapped = self.edit_tapped();
         let l = &self.look;
         let s = scale(l);
         let words = Element::live_text("words", &self.shown)
@@ -871,11 +916,26 @@ impl Popup {
                 dot_area: 5.0,
                 // The newest word keeps its last 40 % as dots until the next word or the
                 // final text, as "polis" and "hed" in the mock-up.
-                hold: if phase == Phase::Done { 0.0 } else { 0.4 },
+                hold: if phase == Phase::Done || tapped {
+                    0.0
+                } else {
+                    0.4
+                },
                 ..WordParticles::default()
             })
         }
-        .presence(Transition::fade(), Transition::fade().dissolve(1.0))
+        .presence(
+            if tapped {
+                Transition::NONE
+            } else {
+                Transition::fade()
+            },
+            if tapped {
+                Transition::NONE
+            } else {
+                Transition::fade().dissolve(1.0)
+            },
+        )
         .wild_motion_with(self, letters());
         let (style, w) = (text_style(l), text_width(l));
         // For a rewind the live text turns clear rather than fading: particle text that
@@ -933,7 +993,7 @@ impl Popup {
         let mut layer = Element::layer("trail")
             .size(surface.w, surface.h)
             .blend(BlendMode::Add);
-        if phase != Phase::Listening || self.still() {
+        if phase != Phase::Listening || self.still() || self.edit_view.is_some() {
             return at(layer, 0.0, 0.0);
         }
         let tx = x0 + (l.width - TEXT_W * s) / 2.0;
@@ -1199,5 +1259,63 @@ impl Popup {
                     .text_style(style)
                     .color(Color::hex(HINT, 0.8)),
             )
+    }
+}
+
+/// Particles' edit adapter (plan section 4.5): plain left-set lines, one
+/// node per line, each at its sticky centred place.
+pub(crate) struct ParticlesSite;
+
+impl edit_site::EditSite for ParticlesSite {
+    fn text_box(&self, look: &Look) -> edit_site::TextBox {
+        edit_site::TextBox {
+            style: left_style(look),
+            width: text_width(look),
+        }
+    }
+
+    fn place(&self, look: &Look, el: Element<Msg>, view: &edit::EditView) -> Element<Msg> {
+        edit_site::place_lines(self, look, el, view)
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::scope::edit_tests::check_edit_envelope;
+    use super::super::swiss_look::edit_check::Rig;
+    use super::*;
+
+    /// M7.L11: Particles edits in its own card. With the caret on the
+    /// newest, a middle and the top line, at both widths: the caret on its
+    /// glyph within 1 px in every frame, the popup's size unchanged, and
+    /// the golden `tests/fixtures/osd-vo/edit-particles.txt`.
+    #[test]
+    fn particles_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Particles, "particles");
+    }
+
+    /// While editing every glyph is solid ink: no particles, no held dots,
+    /// no newest-word mark.
+    #[test]
+    fn particles_edit_words_are_plain() {
+        let mut r = Rig::new(OsdTheme::Particles, false);
+        r.dictate(40);
+        r.enter(1.0);
+        let dl = r.scene.sample(3.0);
+        assert!(Rig::glyphs(&dl).len() > 40);
+        let n = r.p.edit_view.as_ref().unwrap().lines as usize;
+        let mut lines = 0;
+        let _ = r.p.view(&vo::Tokens::default()).map_live_texts(&mut |e| {
+            lines += e.key().to_string().starts_with("line-") as usize;
+            e
+        });
+        assert_eq!(lines, n);
+    }
+
+    /// R35: the edit moment with the caret on each line stays inside the
+    /// reading-line envelope, at both widths.
+    #[test]
+    fn particles_edit_moment_keeps_the_envelope() {
+        check_edit_envelope(OsdTheme::Particles, &[0, 1, 2]);
     }
 }
