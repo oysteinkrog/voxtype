@@ -25,9 +25,9 @@ use std::sync::Mutex;
 /// Internal enum to hold either CTC or TDT model instance
 enum ParakeetModel {
     /// CTC model (character-level, faster)
-    Ctc(Mutex<Parakeet>),
+    Ctc(Box<Mutex<Parakeet>>),
     /// TDT model (token-level, better quality output)
-    Tdt(Mutex<ParakeetTDT>),
+    Tdt(Box<Mutex<ParakeetTDT>>),
 }
 
 /// Parakeet-based transcriber using ONNX Runtime
@@ -64,14 +64,14 @@ impl ParakeetTranscriber {
                     Parakeet::from_pretrained(&model_path, exec_config).map_err(|e| {
                         TranscribeError::InitFailed(format!("Parakeet CTC init failed: {}", e))
                     })?;
-                ParakeetModel::Ctc(Mutex::new(parakeet))
+                ParakeetModel::Ctc(Box::new(Mutex::new(parakeet)))
             }
             ParakeetModelType::Tdt => {
                 let parakeet =
                     ParakeetTDT::from_pretrained(&model_path, exec_config).map_err(|e| {
                         TranscribeError::InitFailed(format!("Parakeet TDT init failed: {}", e))
                     })?;
-                ParakeetModel::Tdt(Mutex::new(parakeet))
+                ParakeetModel::Tdt(Box::new(Mutex::new(parakeet)))
             }
         };
 
@@ -237,11 +237,9 @@ impl Transcriber for ParakeetTranscriber {
         // Each sentence gets the time span of its corresponding token range.
         let total_sentences = sentences.len();
         let total_tokens = tokens.len();
-        let tokens_per_sentence = if total_sentences > 0 {
-            total_tokens / total_sentences
-        } else {
-            total_tokens
-        };
+        let tokens_per_sentence = total_tokens
+            .checked_div(total_sentences)
+            .unwrap_or(total_tokens);
 
         let mut segments = Vec::new();
         let mut token_idx = 0;
