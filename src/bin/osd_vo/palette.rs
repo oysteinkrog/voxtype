@@ -716,9 +716,9 @@ impl Popup {
                 .text_style(small)
                 .color(hex(SOFT))
                 .margin_edges(0.0, 0.0, 0.0, 9.0)
-                // Its x follows the state word's width.
+                // Its x follows the state word's width. No presence: the
+                // "tap" words fading out sat under the next state's hint.
                 .motion(Prop::Position, Motion::Snap)
-                .presence(Transition::fade().offset(0.0, 6.0), Transition::fade())
         };
         let badge = |key: String, s: &str| {
             Element::panel(key)
@@ -730,7 +730,7 @@ impl Popup {
                 .fill(hex(BADGE))
                 .border(hex(CHIP_EDGE), 1.0)
                 .margin_edges(0.0, 0.0, 0.0, 9.0)
-                .presence(Transition::fade().offset(0.0, 6.0), Transition::fade())
+                .motion(Prop::Position, Motion::Snap)
                 .child(
                     Element::label("key", s.to_string())
                         .text_style(TextStyle::new(f.mono, 12.0, 16.0))
