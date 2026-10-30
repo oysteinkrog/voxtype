@@ -4753,6 +4753,13 @@ impl Daemon {
                                 refresh_live_correction();
                             }
                         }
+
+                        // === KEYBOARD EDIT TAP ===
+                        // Only sent while edit_armed is set, which nothing
+                        // sets until keyboard editing is wired in.
+                        (event @ (HotkeyEvent::EditTapPending | HotkeyEvent::EditTapConfirmed | HotkeyEvent::EditTapCancelled), _) => {
+                            tracing::debug!("Edit tap event {:?} ignored", event);
+                        }
                     }
                 }
 

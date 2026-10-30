@@ -47,6 +47,13 @@ pub struct EvdevListener {
     correction: Option<(Key, Duration)>,
     /// Set by the daemon while it records; holds count only then
     correction_armed: Arc<AtomicBool>,
+    /// `HotkeyConfig::double_tap_ms`: the longest tap, and the wait for a
+    /// second tap of a key that has a double-tap meaning
+    tap_ms: Duration,
+    /// Edit key, its wait and its quiet-before guard (`set_edit_tap`)
+    edit: Option<EditTapSetting>,
+    /// Set by the daemon while a single edit tap means something
+    edit_armed: Arc<AtomicBool>,
     /// Signal to stop the listener task
     stop_signal: Option<oneshot::Sender<()>>,
 }
@@ -132,6 +139,9 @@ impl EvdevListener {
             look_chord: config.look_chord,
             correction,
             correction_armed: Arc::new(AtomicBool::new(false)),
+            tap_ms: Duration::from_millis(config.double_tap_ms),
+            edit: None,
+            edit_armed: Arc::new(AtomicBool::new(false)),
             stop_signal: None,
         })
     }
@@ -140,6 +150,61 @@ impl EvdevListener {
     pub fn set_secondary_model(&mut self, model: Option<String>) {
         self.secondary_model = model;
     }
+
+    /// Watch for single clean taps of `key` (the keyboard edit gesture),
+    /// with no other key pressed in the `quiet` before it. A key that also
+    /// has a double-tap meaning is confirmed `double_tap_ms` after its
+    /// release; any other key on release. Call before `start`. A key that
+    /// starts, stops or cancels on its own press is refused with a warning.
+    pub fn set_edit_tap(&mut self, key: &str, quiet: Duration) -> Result<(), HotkeyError> {
+        let key = parse_key_name(key)?;
+        let single_press_key = self.double_tap.is_none() && key == self.target_key;
+        if single_press_key || self.cancel_key == Some(key) {
+            tracing::warn!(
+                "edit_key {:?} also starts, stops or cancels recording on a press; \
+                 keyboard editing by tap is off",
+                key
+            );
+            self.edit = None;
+            return Ok(());
+        }
+        let double_tapped = self.double_tap.is_some()
+            && [
+                Some(self.target_key),
+                self.double_tap_alt,
+                self.double_tap_cancel,
+            ]
+            .contains(&Some(key));
+        let wait = if double_tapped {
+            self.tap_ms
+        } else {
+            Duration::ZERO
+        };
+        tracing::info!(
+            "A single tap of {:?} asks for a keyboard edit after {:?}",
+            key,
+            wait
+        );
+        self.edit = Some(EditTapSetting {
+            key,
+            tap: self.tap_ms,
+            wait,
+            quiet,
+        });
+        Ok(())
+    }
+}
+
+/// The edit tap as `EvdevListener::set_edit_tap` set it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EditTapSetting {
+    key: Key,
+    /// Longest press that is a tap.
+    tap: Duration,
+    /// Wait after the release for a second tap.
+    wait: Duration,
+    /// No other key pressed this long before the tap.
+    quiet: Duration,
 }
 
 impl HotkeyListener for EvdevListener {
@@ -161,6 +226,7 @@ impl HotkeyListener for EvdevListener {
         let correction = self
             .correction
             .map(|(key, hold)| (key, hold, self.correction_armed.clone()));
+        let edit = self.edit.map(|e| (e, self.edit_armed.clone()));
 
         // Spawn the listener task
         tokio::task::spawn_blocking(move || {
@@ -176,6 +242,7 @@ impl HotkeyListener for EvdevListener {
                 double_tap_cancel,
                 look_chord,
                 correction,
+                edit,
                 tx,
                 stop_rx,
             ) {
@@ -195,6 +262,10 @@ impl HotkeyListener for EvdevListener {
 
     fn correction_armed(&self) -> Option<Arc<AtomicBool>> {
         self.correction.map(|_| self.correction_armed.clone())
+    }
+
+    fn edit_armed(&self) -> Option<Arc<AtomicBool>> {
+        self.edit.map(|_| self.edit_armed.clone())
     }
 }
 
@@ -712,6 +783,119 @@ impl From<HoldEvent> for HotkeyEvent {
     }
 }
 
+/// What the edit tap did.
+#[derive(Debug, PartialEq, Eq)]
+enum TapEvent {
+    Pending,
+    Confirmed,
+    Cancelled,
+}
+
+impl From<TapEvent> for HotkeyEvent {
+    fn from(event: TapEvent) -> Self {
+        match event {
+            TapEvent::Pending => HotkeyEvent::EditTapPending,
+            TapEvent::Confirmed => HotkeyEvent::EditTapConfirmed,
+            TapEvent::Cancelled => HotkeyEvent::EditTapCancelled,
+        }
+    }
+}
+
+/// Detects a single clean tap of the edit key while armed: a press and
+/// release within `tap`, with no other key held as it goes down, no other
+/// key pressed in the `quiet` before it or while it is down. The release
+/// makes it pending; it is confirmed once `wait` passes with no key pressed,
+/// and cancelled by any press before that (the edit key's own press is the
+/// start of a double tap, a hold or a dead-zone press). It only watches, so
+/// `DoubleTap` and `CleanHold` see the same keys as without it.
+struct EditTap {
+    setting: EditTapSetting,
+    /// Other keys down now.
+    held: HashSet<Key>,
+    /// When another key last went down.
+    other_down: Option<Instant>,
+    /// When the edit key went down, while the press can still be a tap.
+    down_at: Option<Instant>,
+    /// When the pending tap was released.
+    pending: Option<Instant>,
+}
+
+impl EditTap {
+    fn new(setting: EditTapSetting) -> Self {
+        Self {
+            setting,
+            held: HashSet::new(),
+            other_down: None,
+            down_at: None,
+            pending: None,
+        }
+    }
+
+    /// Feed one key event. `armed` is whether a tap means something now.
+    fn event(&mut self, key: Key, value: i32, now: Instant, armed: bool) -> Option<TapEvent> {
+        if key != self.setting.key {
+            match value {
+                1 => {
+                    self.held.insert(key);
+                    self.other_down = Some(now);
+                    self.down_at = None;
+                    return self.pending.take().map(|_| TapEvent::Cancelled);
+                }
+                0 => {
+                    self.held.remove(&key);
+                }
+                _ => {}
+            }
+            return None;
+        }
+        match value {
+            1 => {
+                if self.pending.take().is_some() {
+                    self.down_at = None;
+                    return Some(TapEvent::Cancelled);
+                }
+                let quiet = self
+                    .other_down
+                    .is_none_or(|t| now.duration_since(t) >= self.setting.quiet);
+                self.down_at = (armed && quiet && self.held.is_empty()).then_some(now);
+                None
+            }
+            0 => {
+                let tap = self
+                    .down_at
+                    .take()
+                    .is_some_and(|down| now.duration_since(down) <= self.setting.tap);
+                (tap && armed).then(|| {
+                    self.pending = Some(now);
+                    TapEvent::Pending
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Call after every event and every poll: confirms the pending tap once
+    /// its wait has passed, and drops it when the daemon disarmed.
+    fn tick(&mut self, now: Instant, armed: bool) -> Option<TapEvent> {
+        let up = self.pending?;
+        if !armed {
+            self.pending = None;
+            return Some(TapEvent::Cancelled);
+        }
+        (now.duration_since(up) >= self.setting.wait).then(|| {
+            self.pending = None;
+            TapEvent::Confirmed
+        })
+    }
+
+    /// Devices changed: what was held is gone, and a pending tap is dropped.
+    fn reset(&mut self) -> Option<TapEvent> {
+        self.held.clear();
+        self.down_at = None;
+        self.pending.take().map(|_| TapEvent::Cancelled)
+    }
+}
+
 /// Left Ctrl and Right Ctrl held, then Down or Up: the popup's next or
 /// previous look (`crate::osd::look_step`).
 ///
@@ -755,6 +939,7 @@ fn evdev_listener_loop(
     double_tap_cancel: Option<Key>,
     look_chord: bool,
     correction: Option<(Key, Duration, Arc<AtomicBool>)>,
+    edit: Option<(EditTapSetting, Arc<AtomicBool>)>,
     tx: mpsc::Sender<HotkeyEvent>,
     mut stop_rx: oneshot::Receiver<()>,
 ) -> Result<(), HotkeyError> {
@@ -804,6 +989,8 @@ fn evdev_listener_loop(
             .collect();
         (CleanHold::new(key, hold, hotkeys), armed)
     });
+
+    let mut edit = edit.map(|(setting, armed)| (EditTap::new(setting), armed));
 
     if let Some(cancel) = cancel_key {
         tracing::info!(
@@ -867,6 +1054,11 @@ fn evdev_listener_loop(
                     return Ok(()); // Channel closed
                 }
             }
+            if let Some(event) = edit.as_mut().and_then(|(tap, _)| tap.reset()) {
+                if tx.blocking_send(event.into()).is_err() {
+                    return Ok(()); // Channel closed
+                }
+            }
             manager.handle_device_changes();
         }
 
@@ -881,6 +1073,11 @@ fn evdev_listener_loop(
                 is_pressed = false;
                 if let Some(chord) = look_chord.as_mut() {
                     *chord = LookChord::default();
+                }
+                if let Some(event) = edit.as_mut().and_then(|(tap, _)| tap.reset()) {
+                    if tx.blocking_send(event.into()).is_err() {
+                        return Ok(()); // Channel closed
+                    }
                 }
                 tracing::debug!("Stale devices removed during validation");
             }
@@ -957,6 +1154,26 @@ fn evdev_listener_loop(
                     .flatten()
                 {
                     tracing::debug!("Correction hold: {:?}", event);
+                    if tx.blocking_send(event.into()).is_err() {
+                        return Ok(()); // Channel closed
+                    }
+                }
+            }
+
+            // The edit tap is decided before the double taps, so a second
+            // tap cancels the pending edit before its double tap fires.
+            if let Some((tap, armed)) = edit.as_mut() {
+                let now = Instant::now();
+                let armed = armed.load(Ordering::Relaxed);
+                for event in [
+                    tap.tick(now, armed),
+                    tap.event(key, value, now, armed),
+                    tap.tick(now, armed),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    tracing::debug!("Edit tap: {:?}", event);
                     if tx.blocking_send(event.into()).is_err() {
                         return Ok(()); // Channel closed
                     }
@@ -1064,6 +1281,16 @@ fn evdev_listener_loop(
         if let Some((hold, armed)) = correction.as_mut() {
             if let Some(event) = hold.tick(Instant::now(), armed.load(Ordering::Relaxed)) {
                 tracing::debug!("Correction hold: {:?}", event);
+                if tx.blocking_send(event.into()).is_err() {
+                    return Ok(()); // Channel closed
+                }
+            }
+        }
+
+        // Likewise a pending edit tap is confirmed with no key event.
+        if let Some((tap, armed)) = edit.as_mut() {
+            if let Some(event) = tap.tick(Instant::now(), armed.load(Ordering::Relaxed)) {
+                tracing::debug!("Edit tap: {:?}", event);
                 if tx.blocking_send(event.into()).is_err() {
                     return Ok(()); // Channel closed
                 }
@@ -1336,8 +1563,12 @@ mod tests {
         cancel: DoubleTap,
         /// Right Shift is also the correction key, held 450 ms.
         hold: CleanHold,
+        /// And the edit key: a single tap, confirmed 300 ms after release.
+        edit: EditTap,
         /// Whether the daemon is recording.
         armed: bool,
+        /// Whether a single edit tap means something.
+        edit_armed: bool,
         t: Instant,
         /// Look steps (`true` = next), double taps and correction events
         /// fired, in order.
@@ -1357,7 +1588,14 @@ mod tests {
                     Duration::from_millis(450),
                     vec![Key::KEY_RIGHTCTRL, Key::KEY_RIGHTALT],
                 ),
+                edit: EditTap::new(EditTapSetting {
+                    key: Key::KEY_RIGHTSHIFT,
+                    tap: w,
+                    wait: w,
+                    quiet: Duration::from_millis(150),
+                }),
                 armed: false,
+                edit_armed: false,
                 t: Instant::now(),
                 fired: Vec::new(),
             }
@@ -1365,6 +1603,36 @@ mod tests {
 
         fn recording(&mut self, armed: bool) -> &mut Keys {
             self.armed = armed;
+            self
+        }
+
+        /// Keyboard editing on: the edit tap is armed. `correction` is
+        /// whether the correction hold is armed too (Listening) or not
+        /// (Settling, Editing, Detached).
+        fn editing(&mut self, correction: bool) -> &mut Keys {
+            self.edit_armed = true;
+            self.armed = correction;
+            self
+        }
+
+        fn push_tap(&mut self, event: Option<TapEvent>, now: Instant) {
+            let name = match event {
+                Some(TapEvent::Pending) => "pending".to_string(),
+                Some(TapEvent::Confirmed) => {
+                    format!("confirmed@{}", now.duration_since(self.t).as_millis())
+                }
+                Some(TapEvent::Cancelled) => "edit-cancelled".into(),
+                None => return,
+            };
+            self.fired.push(name);
+        }
+
+        /// Devices changed, as the loop handles it.
+        fn device_change(&mut self) -> &mut Keys {
+            let event = self.hold.reset();
+            self.push_hold(event);
+            let event = self.edit.reset();
+            self.push_tap(event, self.t);
             self
         }
 
@@ -1385,6 +1653,8 @@ mod tests {
             let now = self.t + Duration::from_millis(ms);
             let event = self.hold.tick(now, self.armed);
             self.push_hold(event);
+            let event = self.edit.tick(now, self.edit_armed);
+            self.push_tap(event, now);
             self
         }
 
@@ -1399,6 +1669,12 @@ mod tests {
                 self.fired
                     .push(if forward { "next" } else { "prev" }.into());
             }
+            let event = self.edit.tick(now, self.edit_armed);
+            self.push_tap(event, now);
+            let event = self.edit.event(key, value, now, self.edit_armed);
+            self.push_tap(event, now);
+            let event = self.edit.tick(now, self.edit_armed);
+            self.push_tap(event, now);
             if self.main.event(key == Key::KEY_RIGHTCTRL, value, now) {
                 self.fired.push("main".into());
             }
@@ -1715,6 +1991,407 @@ mod tests {
             correction_setting(&cancel, Key::KEY_RIGHTCTRL, Some(Key::KEY_ESC)).unwrap(),
             None
         );
+    }
+
+    // The edit tap harness streams (plan 8.2). Right Shift is the edit key,
+    // the alt double-tap key and the correction key at once.
+
+    const A: Key = Key::KEY_A;
+    const RSHIFT: Key = Key::KEY_RIGHTSHIFT;
+
+    #[test]
+    fn edit_tap_confirms_a_single_clean_tap_after_the_window() {
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, RSHIFT, 1)
+            .key(100, RSHIFT, 0)
+            .at(250)
+            .at(399)
+            .at(400)
+            .at(900);
+        assert_eq!(k.fired, ["pending", "confirmed@400"]);
+    }
+
+    #[test]
+    fn edit_tap_double_tap_is_only_the_alt_double_tap() {
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, RSHIFT, 1)
+            .key(80, RSHIFT, 0)
+            .key(200, RSHIFT, 1)
+            .key(260, RSHIFT, 0)
+            .at(900);
+        assert_eq!(k.fired, ["pending", "edit-cancelled", "alt"]);
+    }
+
+    #[test]
+    fn edit_tap_then_a_hold_is_only_a_correction() {
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, RSHIFT, 1)
+            .key(80, RSHIFT, 0)
+            .key(200, RSHIFT, 1)
+            .at(700)
+            .key(1200, RSHIFT, 0)
+            .at(1600);
+        assert_eq!(k.fired, ["pending", "edit-cancelled", "start@200", "end"]);
+    }
+
+    #[test]
+    fn edit_tap_then_a_dead_zone_press_does_nothing_else() {
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, RSHIFT, 1)
+            .key(80, RSHIFT, 0)
+            .key(200, RSHIFT, 1)
+            .at(400)
+            .key(550, RSHIFT, 0)
+            .at(1200);
+        assert_eq!(k.fired, ["pending", "edit-cancelled"]);
+    }
+
+    #[test]
+    fn edit_tap_ignores_a_dead_zone_press_alone() {
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, RSHIFT, 1)
+            .at(200)
+            .key(350, RSHIFT, 0)
+            .at(1000);
+        assert!(k.fired.is_empty(), "{:?}", k.fired);
+    }
+
+    #[test]
+    fn edit_tap_never_fires_for_shift_as_a_modifier() {
+        // Shift+A, Shift+Left, Ctrl+Shift+Z, and Shift released after the
+        // letter's release.
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, RSHIFT, 1)
+            .key(40, A, 1)
+            .key(60, A, 0)
+            .key(100, RSHIFT, 0)
+            .at(1000)
+            .key(2000, RSHIFT, 1)
+            .key(2030, Key::KEY_LEFT, 1)
+            .key(2050, Key::KEY_LEFT, 0)
+            .key(2080, RSHIFT, 0)
+            .at(3000)
+            .key(4000, Key::KEY_LEFTCTRL, 1)
+            .key(4200, RSHIFT, 1)
+            .key(4230, Key::KEY_Z, 1)
+            .key(4250, Key::KEY_Z, 0)
+            .key(4270, RSHIFT, 0)
+            .key(4290, Key::KEY_LEFTCTRL, 0)
+            .at(5000);
+        assert!(k.fired.is_empty(), "{:?}", k.fired);
+    }
+
+    #[test]
+    fn edit_tap_held_key_guard() {
+        // "a" still down when Right Shift is tapped (rollover).
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, A, 1)
+            .key(300, RSHIFT, 1)
+            .key(380, RSHIFT, 0)
+            .key(400, A, 0)
+            .at(1000);
+        assert!(k.fired.is_empty(), "{:?}", k.fired);
+    }
+
+    #[test]
+    fn edit_tap_quiet_before_guard() {
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, A, 1)
+            .key(30, A, 0)
+            .key(100, RSHIFT, 1)
+            .key(180, RSHIFT, 0)
+            .at(1000);
+        assert!(k.fired.is_empty(), "{:?}", k.fired);
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, A, 1)
+            .key(30, A, 0)
+            .key(200, RSHIFT, 1)
+            .key(280, RSHIFT, 0)
+            .at(579)
+            .at(580)
+            .at(1000);
+        assert_eq!(k.fired, ["pending", "confirmed@580"]);
+    }
+
+    #[test]
+    fn edit_tap_cancelled_by_another_key_in_the_window() {
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, RSHIFT, 1)
+            .key(80, RSHIFT, 0)
+            .key(180, A, 1)
+            .key(200, A, 0)
+            .at(1000);
+        assert_eq!(k.fired, ["pending", "edit-cancelled"]);
+    }
+
+    #[test]
+    fn edit_tap_does_nothing_when_not_armed() {
+        let mut k = Keys::new();
+        k.key(0, RSHIFT, 1).key(80, RSHIFT, 0).at(1000);
+        assert!(k.fired.is_empty(), "{:?}", k.fired);
+        // Disarmed while pending: cancelled, so every pending is answered.
+        let mut k = Keys::new();
+        k.editing(true).key(0, RSHIFT, 1).key(80, RSHIFT, 0).at(200);
+        k.edit_armed = false;
+        k.at(250).at(1000);
+        assert_eq!(k.fired, ["pending", "edit-cancelled"]);
+    }
+
+    #[test]
+    fn edit_tap_look_chord_cancels_and_steps_once() {
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, RSHIFT, 1)
+            .key(80, RSHIFT, 0)
+            .key(150, Key::KEY_LEFTCTRL, 1)
+            .key(170, Key::KEY_RIGHTCTRL, 1)
+            .key(200, Key::KEY_DOWN, 1)
+            .key(220, Key::KEY_DOWN, 0)
+            .key(240, Key::KEY_RIGHTCTRL, 0)
+            .key(260, Key::KEY_LEFTCTRL, 0)
+            .at(1000);
+        assert_eq!(k.fired, ["pending", "edit-cancelled", "next"]);
+    }
+
+    #[test]
+    fn edit_tap_both_ctrls_alone_do_nothing() {
+        let mut k = Keys::new();
+        k.editing(true)
+            .key(0, Key::KEY_LEFTCTRL, 1)
+            .key(20, Key::KEY_RIGHTCTRL, 1)
+            .key(80, Key::KEY_RIGHTCTRL, 0)
+            .key(100, Key::KEY_LEFTCTRL, 0)
+            .at(1000);
+        assert!(k.fired.is_empty(), "{:?}", k.fired);
+    }
+
+    #[test]
+    fn edit_tap_right_ctrl_double_tap_while_editing_only_finishes() {
+        // Editing: the correction hold is disarmed.
+        let mut k = Keys::new();
+        k.editing(false)
+            .key(0, Key::KEY_RIGHTCTRL, 1)
+            .key(60, Key::KEY_RIGHTCTRL, 0)
+            .key(150, Key::KEY_RIGHTCTRL, 1)
+            .key(200, Key::KEY_RIGHTCTRL, 0)
+            .at(1000);
+        assert_eq!(k.fired, ["main"]);
+    }
+
+    #[test]
+    fn edit_tap_hold_while_editing_does_nothing() {
+        let mut k = Keys::new();
+        k.editing(false)
+            .key(0, RSHIFT, 1)
+            .at(500)
+            .key(900, RSHIFT, 0)
+            .at(1500);
+        assert!(k.fired.is_empty(), "{:?}", k.fired);
+    }
+
+    #[test]
+    fn edit_tap_cancelled_by_a_device_change() {
+        let mut k = Keys::new();
+        k.editing(true).key(0, RSHIFT, 1).key(80, RSHIFT, 0);
+        k.device_change().at(1000);
+        assert_eq!(k.fired, ["pending", "edit-cancelled"]);
+    }
+
+    #[test]
+    fn edit_tap_without_a_double_tap_meaning_confirms_on_release() {
+        let mut tap = EditTap::new(EditTapSetting {
+            key: Key::KEY_F9,
+            tap: Duration::from_millis(300),
+            wait: Duration::ZERO,
+            quiet: Duration::from_millis(150),
+        });
+        let t = Instant::now();
+        let ms = |n| t + Duration::from_millis(n);
+        assert_eq!(tap.event(Key::KEY_F9, 1, ms(0), true), None);
+        assert_eq!(
+            tap.event(Key::KEY_F9, 0, ms(80), true),
+            Some(TapEvent::Pending)
+        );
+        assert_eq!(tap.tick(ms(80), true), Some(TapEvent::Confirmed));
+        assert_eq!(tap.tick(ms(500), true), None);
+    }
+
+    #[test]
+    fn existing_gestures_unchanged_with_the_edit_tap_armed() {
+        // Each sequence fires the same non-edit events with the edit tap
+        // armed as without it.
+        type Seq = fn(&mut Keys);
+        let seqs: [Seq; 6] = [
+            // Right Shift double tap: stop, paste only.
+            |k| {
+                k.key(0, RSHIFT, 1)
+                    .key(50, RSHIFT, 0)
+                    .key(100, RSHIFT, 1)
+                    .key(150, RSHIFT, 0)
+                    .at(900);
+            },
+            // Right Shift clean hold: spoken correction.
+            |k| {
+                k.key(100, RSHIFT, 1)
+                    .at(400)
+                    .at(550)
+                    .key(600, RSHIFT, 2)
+                    .key(2000, RSHIFT, 0)
+                    .at(2600);
+            },
+            // Right Ctrl double tap: stop, paste and Enter.
+            |k| {
+                k.key(0, Key::KEY_RIGHTCTRL, 1)
+                    .key(60, Key::KEY_RIGHTCTRL, 0)
+                    .key(150, Key::KEY_RIGHTCTRL, 1)
+                    .key(200, Key::KEY_RIGHTCTRL, 0)
+                    .at(900);
+            },
+            // Right Alt double tap: discard.
+            |k| {
+                k.key(0, Key::KEY_RIGHTALT, 1)
+                    .key(50, Key::KEY_RIGHTALT, 0)
+                    .key(100, Key::KEY_RIGHTALT, 1)
+                    .key(150, Key::KEY_RIGHTALT, 0)
+                    .at(900);
+            },
+            // Look chord.
+            |k| {
+                k.key(0, Key::KEY_LEFTCTRL, 1)
+                    .key(20, Key::KEY_RIGHTCTRL, 1)
+                    .key(60, Key::KEY_DOWN, 1)
+                    .key(80, Key::KEY_DOWN, 0)
+                    .key(140, Key::KEY_UP, 1)
+                    .key(150, Key::KEY_UP, 0)
+                    .key(170, Key::KEY_RIGHTCTRL, 0)
+                    .key(180, Key::KEY_LEFTCTRL, 0)
+                    .at(900);
+            },
+            // A tap, then a long hold.
+            |k| {
+                k.key(0, RSHIFT, 1)
+                    .key(80, RSHIFT, 0)
+                    .key(200, RSHIFT, 1)
+                    .at(700)
+                    .key(1200, RSHIFT, 0)
+                    .at(1800);
+            },
+        ];
+        for (i, seq) in seqs.iter().enumerate() {
+            let mut off = Keys::new();
+            off.recording(true);
+            seq(&mut off);
+            let mut on = Keys::new();
+            on.editing(true);
+            seq(&mut on);
+            let not_edit: Vec<_> = on
+                .fired
+                .iter()
+                .filter(|e| !matches!(e.as_str(), "pending" | "edit-cancelled"))
+                .cloned()
+                .collect();
+            assert_eq!(not_edit, off.fired, "sequence {i}");
+            assert!(
+                !on.fired.iter().any(|e| e.starts_with("confirmed")),
+                "sequence {i}: {:?}",
+                on.fired
+            );
+        }
+    }
+
+    #[test]
+    fn every_pending_edit_tap_is_answered_once() {
+        // Random key streams on a small key set: after each Pending exactly
+        // one Confirmed or Cancelled comes before the next Pending.
+        let keys = [
+            RSHIFT,
+            A,
+            Key::KEY_RIGHTCTRL,
+            Key::KEY_LEFTCTRL,
+            Key::KEY_DOWN,
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..500 {
+            let mut k = Keys::new();
+            k.editing(next() % 2 == 0);
+            let mut down: HashSet<Key> = HashSet::new();
+            let mut t = 0;
+            for _ in 0..40 {
+                t += next() % 400;
+                let key = keys[(next() % keys.len() as u64) as usize];
+                let value = if down.remove(&key) {
+                    0
+                } else {
+                    down.insert(key);
+                    1
+                };
+                k.key(t, key, value);
+                if next() % 4 == 0 {
+                    k.edit_armed = !k.edit_armed;
+                }
+                k.at(t + 1);
+            }
+            k.edit_armed = true;
+            k.at(t + 5000);
+            let mut open = false;
+            for e in &k.fired {
+                match e.as_str() {
+                    "pending" => {
+                        assert!(!open, "{:?}", k.fired);
+                        open = true;
+                    }
+                    "edit-cancelled" => {
+                        assert!(open, "{:?}", k.fired);
+                        open = false;
+                    }
+                    e if e.starts_with("confirmed") => {
+                        assert!(open, "{:?}", k.fired);
+                        open = false;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(!open, "{:?}", k.fired);
+        }
+    }
+
+    #[test]
+    fn set_edit_tap_waits_only_for_keys_with_a_double_tap_meaning() {
+        let cfg = hotkey_config(
+            "key = \"RIGHTCTRL\"\ndouble_tap = true\ndouble_tap_alt_key = \"RIGHTSHIFT\"",
+        );
+        let Ok(mut l) = EvdevListener::new(&cfg) else {
+            return; // no /dev/input here
+        };
+        assert!(l.edit_armed().is_none());
+        l.set_edit_tap("RIGHTSHIFT", Duration::from_millis(150))
+            .unwrap();
+        assert_eq!(l.edit.unwrap().wait, Duration::from_millis(300));
+        assert!(l.edit_armed().is_some());
+        l.set_edit_tap("F9", Duration::from_millis(150)).unwrap();
+        assert_eq!(l.edit.unwrap().wait, Duration::ZERO);
+        // A push-to-talk key without double tap is refused.
+        let ptt = hotkey_config("key = \"RIGHTSHIFT\"");
+        let mut l = EvdevListener::new(&ptt).unwrap();
+        l.set_edit_tap("RIGHTSHIFT", Duration::from_millis(150))
+            .unwrap();
+        assert!(l.edit.is_none());
     }
 
     #[test]
