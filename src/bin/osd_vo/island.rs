@@ -100,8 +100,13 @@ const CARD_RADIUS: f32 = 34.0;
 
 /// The dot the capsule opens from and shrinks back to.
 const DOT_SIZE: f32 = 40.0;
-/// The small pill while the model loads.
+/// The small pill while the model loads, at least this wide.
 const LOAD_W: f32 = 250.0;
+/// Room after the loading label for the forming cue (about 2 letters),
+/// and for the percentage with the pill's right end.
+const LOAD_CUE: f32 = 18.0;
+const LOAD_PCT: f32 = 58.0;
+const LOAD_STEP: f32 = 16.0;
 const LOAD_H: f32 = 46.0;
 
 /// Waveform bars.
@@ -763,7 +768,7 @@ impl Popup {
         let finishing = matches!(mode, Mode::Finishing) && self.files.fraction.is_some();
         match mode {
             Mode::Loading => Geo {
-                w: LOAD_W,
+                w: self.load_w(),
                 h: LOAD_H,
                 r: LOAD_H / 2.0,
             },
@@ -1056,7 +1061,7 @@ impl Popup {
             .presence(Transition::fade(), exit)
             .child(canvas);
         if matches!(mode, Mode::Loading) {
-            return panel.child(self.island_loading(ox, oy, k, &status));
+            return panel.child(self.island_loading(ox, oy, g.w, k, &status));
         }
         if mode == Mode::Cancelled {
             return panel;
@@ -1164,16 +1169,13 @@ impl Popup {
         panel.child(row(&text, swap_in))
     }
 
-    /// The loading pill: the spinner, "Loading" and the percentage.
-    fn island_loading(&self, ox: f32, oy: f32, k: f32, status: &StatusLine) -> Element<Msg> {
+    fn loading_style(&self) -> TextStyle {
         let f = fonts(&self.look.fonts);
-        let style = TextStyle::new(f.text, 13.0, 18.0).tracking(0.1);
-        let pct = self
-            .files
-            .fraction
-            .map(|f| format!("{}%", (f.clamp(0.0, 1.0) * 100.0).round() as u32))
-            .unwrap_or_default();
-        let label = if status.detail.trim().is_empty() {
+        TextStyle::new(f.text, 13.0, 18.0).tracking(0.1)
+    }
+
+    fn loading_label(status: &StatusLine) -> String {
+        if status.detail.trim().is_empty() {
             "Loading model".to_string()
         } else {
             format!(
@@ -1181,12 +1183,44 @@ impl Popup {
                 status.state,
                 status.detail.trim_start_matches("  ·  ")
             )
-        };
+        }
+    }
+
+    /// The loading pill's width: the spinner, the label, room for the
+    /// forming cue and the percentage. In steps of `LOAD_STEP`, so the
+    /// seconds counting up do not move its edge each time.
+    fn load_w(&self) -> f32 {
+        let label = Self::loading_label(&self.status());
+        let lw = self
+            .measure
+            .layout(&label, &self.loading_style(), None)
+            .size
+            .w;
+        let w = 42.0 + lw + 4.0 + LOAD_CUE + LOAD_PCT;
+        ((w / LOAD_STEP).ceil() * LOAD_STEP).clamp(LOAD_W, WIDTH)
+    }
+
+    /// The loading pill: the spinner, "Loading" and the percentage.
+    fn island_loading(
+        &self,
+        ox: f32,
+        oy: f32,
+        w: f32,
+        k: f32,
+        status: &StatusLine,
+    ) -> Element<Msg> {
+        let style = self.loading_style();
+        let pct = self
+            .files
+            .fraction
+            .map(|f| format!("{}%", (f.clamp(0.0, 1.0) * 100.0).round() as u32))
+            .unwrap_or_default();
+        let label = Self::loading_label(status);
         // The forming cue after the label, as far as the percentage. Its
         // place stays free while there is none yet: the percentage rolls in
         // there a moment later.
         let from = ox + 42.0 + self.measure.layout(&label, &style, None).size.w + 4.0;
-        let to = ox + LOAD_W - 58.0;
+        let to = ox + w - LOAD_PCT;
         let tail = model_signals::TailText {
             style,
             width: (to - from).max(0.0),
@@ -1202,7 +1236,7 @@ impl Popup {
             ))
             .child(at(
                 digit_roll("pct", &pct, style, hex(STATE), Spring::critical_to_98(0.25)),
-                ox + LOAD_W - 54.0,
+                ox + w - LOAD_PCT + 4.0,
                 oy + LOAD_H / 2.0 - 9.0,
             ));
         // The cue shows from the voice onset on, ahead of the label's fade in.
