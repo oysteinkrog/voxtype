@@ -1182,10 +1182,11 @@ impl Popup {
                 status.detail.trim_start_matches("  ·  ")
             )
         };
-        // The forming cue after the label, as far as the percentage or the
-        // pill's end.
+        // The forming cue after the label, as far as the percentage. Its
+        // place stays free while there is none yet: the percentage rolls in
+        // there a moment later.
         let from = ox + 42.0 + self.measure.layout(&label, &style, None).size.w + 4.0;
-        let to = ox + LOAD_W - if pct.is_empty() { 18.0 } else { 58.0 };
+        let to = ox + LOAD_W - 58.0;
         let tail = model_signals::TailText {
             style,
             width: (to - from).max(0.0),
