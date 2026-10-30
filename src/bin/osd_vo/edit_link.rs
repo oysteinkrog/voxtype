@@ -92,6 +92,10 @@ pub(crate) struct EditLink {
     rev: u64,
     /// The buffer and selection last written.
     written: Option<(u64, Selection)>,
+    /// The daemon's phase when the popup moved on by itself (resume,
+    /// finish, focus lost). The popup's phase stands until the daemon
+    /// publishes another.
+    ahead_of: Option<Phase>,
 }
 
 impl EditLink {
@@ -130,6 +134,10 @@ impl EditLink {
             self.rev = 0;
         }
         let phase = Phase::parse(&block.phase);
+        if phase.is_some() && phase == self.ahead_of {
+            return Change::Nothing;
+        }
+        self.ahead_of = None;
         let was = std::mem::replace(&mut self.phase, phase);
         let Some(phase) = phase.filter(|p| p.owns_text()) else {
             self.tail.clear();
@@ -160,6 +168,7 @@ impl EditLink {
 
     fn leave(&mut self) -> Change {
         self.phase = None;
+        self.ahead_of = None;
         self.tail.clear();
         self.written = None;
         if self.buffer.take().is_some() {
@@ -266,11 +275,22 @@ impl EditLink {
         }
     }
 
-    /// Hand the text back and listen again.
+    /// Collapse the selection to its focus (Esc with a selection).
+    pub(crate) fn collapse(&mut self) {
+        if let Some(buffer) = self.buffer.as_mut() {
+            let focus = buffer.selection().focus;
+            buffer.set_selection(Selection::caret(focus));
+            self.write();
+        }
+    }
+
+    /// Hand the text back and listen again. The text takes no more keys
+    /// until the daemon says how it goes on.
     pub(crate) fn resume(&mut self) {
         if self.buffer.is_some() {
             self.write();
             self.send(EditCmd::Resume { rev: self.rev });
+            self.move_on(Phase::Releasing);
         }
     }
 
@@ -282,7 +302,22 @@ impl EditLink {
                 mode,
                 rev: self.rev,
             });
+            self.move_on(Phase::Releasing);
         }
+    }
+
+    /// The compositor took focus away while editing: keep the text and
+    /// caret, stay paused, and tell the daemon.
+    pub(crate) fn detach(&mut self) {
+        if self.editable() {
+            self.move_on(Phase::Detached);
+            self.send(EditCmd::Detached);
+        }
+    }
+
+    fn move_on(&mut self, phase: Phase) {
+        self.ahead_of = self.ahead_of.or(self.phase);
+        self.phase = Some(phase);
     }
 
     /// The popup destroyed its focus proxy.

@@ -157,10 +157,13 @@ mod display;
 mod realtime;
 #[path = "osd_vo/correction_note.rs"]
 mod correction_note;
-// The popup's side of the keyboard edit link; the focus proxy uses it.
+// Parts of the keyboard edit link the edit layer (M7.3) draws from.
 #[allow(dead_code)]
 #[path = "osd_vo/edit_link.rs"]
 mod edit_link;
+
+#[path = "osd_vo/edit_focus.rs"]
+mod edit_focus;
 
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;
@@ -1442,6 +1445,10 @@ struct Popup {
     signal_state: model_signals::State,
     /// The outcome of the newest spoken correction, while it shows.
     correction_note: correction_note::State,
+    /// The keyboard edit link, in a live popup with `[osd] keyboard_edit`.
+    edit: Option<edit_link::EditLink>,
+    /// Keyboard focus for an edit (the focus proxy).
+    focus: edit_focus::Focus,
 }
 
 impl Popup {
@@ -1460,6 +1467,8 @@ impl Popup {
             model_signals: None,
             signal_state: model_signals::State::default(),
             correction_note: correction_note::State::default(),
+            edit: None,
+            focus: edit_focus::Focus::default(),
             recorder: None,
             measure: vo::ShapedLayout::new(fonts.clone()),
             levels: VecDeque::new(),
@@ -1912,6 +1921,10 @@ impl App for Popup {
                     self.word_info();
                     self.note_doubtful(t);
                 }
+                if let (true, Some(link)) = (live_changed, self.edit.as_mut()) {
+                    link.sync(self.files.live.as_ref().and_then(|l| l.edit.as_ref()));
+                    self.focus.follow(link, cx, t);
+                }
                 if live_changed {
                     let view = self.files.live.as_ref().and_then(|l| l.correction.as_ref());
                     if let Some(wait) = self.correction_note.files(view, t) {
@@ -2007,6 +2020,23 @@ impl App for Popup {
 
     fn frame_pace(&self) -> Option<f64> {
         self.pace
+    }
+
+    fn key(&mut self, ev: &vo::scene::input::KeyEvent, cx: &mut Cx<Msg>) -> bool {
+        let Some(link) = self.edit.as_mut() else {
+            return false;
+        };
+        let used = self.focus.key(ev, link);
+        self.focus.follow(link, cx, ev.t);
+        used
+    }
+
+    fn keyboard_focus(&mut self, gained: bool, requested: bool, cx: &mut Cx<Msg>) {
+        if let Some(link) = self.edit.as_mut() {
+            let t = cx.t();
+            self.focus.changed(gained, requested, link, t);
+            self.focus.follow(link, cx, t);
+        }
     }
 
     /// A look picked with the look chord has its own size and place.
@@ -2649,6 +2679,9 @@ fn main() -> anyhow::Result<()> {
         popup.recorder = args.record.as_deref().and_then(replay::recorder);
         popup.osd = Some(cfg.clone());
         popup.live_surface = true;
+        if cfg.keyboard_edit {
+            popup.edit = Some(edit_link::EditLink::new(edit_link::Paths::default()));
+        }
         let boost = realtime::raise(cfg.realtime);
         let result = resident.run(popup, live_spec(&cfg, &look), options);
         drop(boost);
