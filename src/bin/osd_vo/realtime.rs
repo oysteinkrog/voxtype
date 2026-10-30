@@ -145,11 +145,7 @@ fn raise_thread(tid: libc::pid_t) -> Result<Raised, std::io::Error> {
     if policy & !libc::SCHED_RESET_ON_FORK != libc::SCHED_OTHER {
         return Err(std::io::Error::other("not a normal thread"));
     }
-    if set_scheduler(
-        tid,
-        libc::SCHED_RR | libc::SCHED_RESET_ON_FORK,
-        RT_PRIORITY,
-    ) {
+    if set_scheduler(tid, libc::SCHED_RR | libc::SCHED_RESET_ON_FORK, RT_PRIORITY) {
         return Ok(Raised::Realtime);
     }
     let rr = std::io::Error::last_os_error();

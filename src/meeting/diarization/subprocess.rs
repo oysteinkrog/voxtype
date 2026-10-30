@@ -7,7 +7,7 @@ use super::{DiarizationConfig, DiarizedSegment, Diarizer, SpeakerId};
 use crate::meeting::data::AudioSource;
 use crate::meeting::TranscriptSegment;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 /// Subprocess-based diarizer wrapper
 pub struct SubprocessDiarizer {
     /// Diarization configuration
@@ -22,9 +22,9 @@ impl SubprocessDiarizer {
 
     /// Spawn the worker subprocess, returning the child handle
     fn spawn_worker(config: &DiarizationConfig) -> Result<Child, String> {
-        let exe = std::env::current_exe().map_err(|e| format!("Failed to get exe path: {}", e))?;
-
-        let mut cmd = Command::new(exe);
+        // Survives a package upgrade replacing the binary (see self_command).
+        let mut cmd = crate::transcribe::subprocess::self_command()
+            .map_err(|e| format!("Failed to get exe path: {}", e))?;
         cmd.arg("--diarization-worker")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

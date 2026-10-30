@@ -1045,6 +1045,20 @@ async fn deliver_to_file(
     delivery
 }
 
+/// The post-output hook at the end of a streaming dictation, ended or
+/// cancelled, which resets a compositor submap entered for it. Skipped when
+/// an output call of the session already ran it, so it runs once (R31).
+async fn end_streaming_hook(cfg: &crate::config::OutputConfig, session: Option<&StreamingSession>) {
+    if session.is_some_and(StreamingSession::post_hook_ran) {
+        return;
+    }
+    if let Some(cmd) = &cfg.post_output_command {
+        if let Err(e) = output::run_hook(cmd, "post_output").await {
+            tracing::warn!("{}", e);
+        }
+    }
+}
+
 /// Read and consume the model override file
 /// Returns the model name if the file exists, None otherwise
 fn read_model_override() -> Option<String> {
@@ -1154,6 +1168,17 @@ pub struct Daemon {
     // instance (#643) — get_transcriber_for_recording re-creates it on the
     // next recording when it finds this empty.
     transcriber_preloaded: Option<Arc<dyn Transcriber>>,
+    // Where the last transcription task saved its audio after a failure
+    // (see transcribe::rescue), so the result handler can say where it is.
+    rescued_audio: Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+    // A live preview session's whole recording, kept from the capture at
+    // stop, and the stream's error if it failed: together they let a
+    // failed stream be transcribed again instead of lost.
+    streaming_samples: Option<Vec<f32>>,
+    // The streaming session's audio gate: holds or drops the mic audio for
+    // a keyboard edit, and says which audio the backend really got.
+    audio_gate: Option<audio::levels::SharedGate>,
+    streaming_failure: Option<String>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -1289,6 +1314,10 @@ impl Daemon {
             transcription_task: None,
             active_transcriber: None,
             transcriber_preloaded: None,
+            rescued_audio: Arc::new(std::sync::Mutex::new(None)),
+            streaming_samples: None,
+            audio_gate: None,
+            streaming_failure: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -1705,6 +1734,7 @@ impl Daemon {
             finalized_text: String::new(),
             typed_chars: 0,
             file_output_path,
+            pause: Default::default(),
         };
         self.update_state("streaming");
         self.play_feedback(SoundEvent::RecordingStart);
@@ -1900,6 +1930,11 @@ impl Daemon {
         if let Some(handle) = self.level_emitter_task.take() {
             handle.abort();
         }
+        // The aborted task no longer drops the backend's sender; the gate
+        // holds it.
+        if let Some(Ok(mut gate)) = self.audio_gate.as_ref().map(|g| g.lock()) {
+            gate.close();
+        }
     }
 
     /// Abort the OSD draining pump (if running) so the visualizer can
@@ -1918,9 +1953,21 @@ impl Daemon {
         self.cut_streaming_audio();
         self.start_streaming_drain_pump();
         if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
+            self.keep_streaming_samples(c.stop().await.ok());
         }
         self.restore_recording_media();
+    }
+
+    /// Keep a live preview session's recording until the stream ends, in
+    /// case it fails and the audio must be transcribed again.
+    fn keep_streaming_samples(&mut self, samples: Option<Vec<f32>>) {
+        // After a keyboard edit pause, only the audio the backend got.
+        let gate = self.audio_gate.take();
+        let samples = samples.and_then(|s| match gate.as_ref().map(|g| g.lock()) {
+            Some(Ok(mut gate)) => gate.rescue_audio(s),
+            _ => Some(s),
+        });
+        self.streaming_samples = samples.filter(|_| self.config.live_preview_active());
     }
 
     async fn end_streaming(
@@ -1932,7 +1979,8 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
     ) {
         if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
+            let samples = c.stop().await.ok();
+            self.keep_streaming_samples(samples);
         }
         self.restore_recording_media();
         if let Some(h) = streaming_handle.take() {
@@ -1942,6 +1990,31 @@ impl Daemon {
         }
         self.stop_streaming_drain_pump();
         clear_live_preview();
+
+        // The stream failed: transcribe its audio again rather than lose it.
+        let file_output = matches!(
+            &state,
+            State::Streaming {
+                file_output_path: Some(_),
+                ..
+            }
+        );
+        if let Some(failure) = self.streaming_failure.take() {
+            if !file_output && self.rescue_stream(state, failure.clone()).await {
+                *streaming_session = None;
+                *streaming_chain = None;
+                return;
+            }
+            send_notification(
+                "Streaming Error",
+                &failure,
+                self.config.output.notification.show_engine_icon,
+                self.config.engine,
+                "normal",
+            )
+            .await;
+        }
+        self.streaming_samples = None;
 
         // File-output sessions (`--file=path`) never typed anything as
         // they went — see the event pump's `file_output` branch — so the
@@ -1997,16 +2070,12 @@ impl Daemon {
             return;
         }
 
-        *streaming_session = None;
+        let session = streaming_session.take();
         *streaming_chain = None;
 
         self.play_feedback(SoundEvent::TranscriptionComplete);
 
-        if let Some(cmd) = &self.config.output.post_output_command {
-            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                tracing::warn!("{}", e);
-            }
-        }
+        end_streaming_hook(&self.config.output, session.as_ref()).await;
 
         *state = State::Idle;
         self.update_state("idle");
@@ -2164,7 +2233,7 @@ impl Daemon {
             }
         }
         self.stop_streaming_drain_pump();
-        *streaming_session = None;
+        let session = streaming_session.take();
         *streaming_chain = None;
 
         discard_recording_overrides();
@@ -2172,11 +2241,7 @@ impl Daemon {
         self.update_state("idle");
         self.play_feedback(SoundEvent::Cancelled);
 
-        if let Some(cmd) = &self.config.output.post_output_command {
-            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                tracing::warn!("{}", e);
-            }
-        }
+        end_streaming_hook(&self.config.output, session.as_ref()).await;
 
         if self.config.output.notification.on_recording_stop {
             send_notification(
@@ -2218,34 +2283,20 @@ impl Daemon {
                     self.is_external_trigger = track_silence;
                     let speech_tracker = self.new_speech_tracker(track_silence);
                     self.silence_tracker = speech_tracker.clone();
+                    // Nothing pauses the gate yet, so it keeps no copy.
+                    let gate = audio::levels::AudioGate::new(streaming_tx, false).shared();
+                    self.audio_gate = Some(gate.clone());
                     let handle = if let Some(hub) = &self.level_hub {
                         audio::levels::spawn_emitter_with_streaming_tap(
                             chunk_rx,
                             hub.frame_sink(),
-                            Some(streaming_tx),
+                            Some(gate),
                             speech_tracker,
                         )
                     } else {
-                        // No OSD: still need to drive chunk_rx → streaming_tx,
+                        // No OSD: still need to drive chunk_rx → the backend,
                         // and optionally bucket for silence tracking too.
-                        tokio::spawn(async move {
-                            let mut rx = chunk_rx;
-                            let mut bucketer = audio::levels::LevelBucketer::new();
-                            let mut out = Vec::with_capacity(8);
-                            while let Some(chunk) = rx.recv().await {
-                                if let Some(tracker) = &speech_tracker {
-                                    out.clear();
-                                    bucketer.push(&chunk, &mut out);
-                                    for frame in out.drain(..) {
-                                        tracker.observe(frame.peak_dbfs).await;
-                                    }
-                                }
-                                if let Err(e) = streaming_tx.try_send(chunk) {
-                                    // Backend slow or gone; drop and keep going.
-                                    tracing::trace!("streaming sample tap try_send failed: {}", e);
-                                }
-                            }
-                        })
+                        audio::levels::spawn_streaming_tap(chunk_rx, gate, speech_tracker)
                     };
                     self.level_emitter_task = Some(handle);
                     Ok((capture, streaming_rx))
@@ -3347,6 +3398,57 @@ impl Daemon {
 
     /// Start transcription task (non-blocking, stores JoinHandle for later completion)
     /// Returns true if transcription was started, false if skipped (too short)
+    /// Transcribe in the background; on failure the audio is saved and
+    /// transcribed once more (see [`crate::transcribe::rescue`]). `failed`
+    /// says the first try already failed elsewhere (a live stream).
+    fn spawn_rescuable(
+        &self,
+        transcriber: Arc<dyn Transcriber>,
+        samples: Vec<f32>,
+        failed: Option<String>,
+    ) -> tokio::task::JoinHandle<TranscriptionResult> {
+        let dir = crate::transcribe::rescue::failed_audio_dir(
+            self.config.live_preview_corpus_dir.as_deref(),
+        );
+        let saved = Arc::clone(&self.rescued_audio);
+        if let Ok(mut s) = saved.lock() {
+            *s = None;
+        }
+        tokio::task::spawn_blocking(move || {
+            crate::transcribe::rescue::transcribe_or_rescue(
+                &*transcriber,
+                &samples,
+                failed.as_deref(),
+                &dir,
+                &saved,
+            )
+        })
+    }
+
+    /// A failed live stream left its audio: transcribe it again in the
+    /// background, as a batch recording. False if there is nothing to do it
+    /// with.
+    async fn rescue_stream(&mut self, state: &mut State, failure: String) -> bool {
+        let Some(samples) = self.streaming_samples.take().filter(|s| s.len() >= 4800) else {
+            return false;
+        };
+        let Some(transcriber) = self.transcriber_preloaded.clone() else {
+            return false;
+        };
+        tracing::info!(
+            "Live stream failed ({}); transcribing its {:.1}s of audio again",
+            failure,
+            samples.len() as f32 / 16000.0
+        );
+        *state = State::Transcribing {
+            audio: samples.clone(),
+        };
+        self.update_state("transcribing");
+        self.active_transcriber = Some(transcriber.clone());
+        self.transcription_task = Some(self.spawn_rescuable(transcriber, samples, Some(failure)));
+        true
+    }
+
     async fn start_transcription_task(
         &mut self,
         state: &mut State,
@@ -3433,9 +3535,8 @@ impl Daemon {
                     // for layout hints, issue #180) without re-fetching
                     // the transcriber.
                     self.active_transcriber = Some(transcriber.clone());
-                    self.transcription_task = Some(tokio::task::spawn_blocking(move || {
-                        transcriber.transcribe(&samples)
-                    }));
+                    self.transcription_task =
+                        Some(self.spawn_rescuable(transcriber, samples, None));
                     true
                 }
                 Err(e) => {
@@ -3475,6 +3576,8 @@ impl Daemon {
         // task error). The Ok(Ok(_)) branch consults it for the language
         // layout hint before letting it drop.
         let active_transcriber = self.active_transcriber.take();
+        // Set only when this task saved its audio after a failure.
+        let saved_audio = self.rescued_audio.lock().ok().and_then(|mut s| s.take());
         let audio_s = match &*state {
             State::Transcribing { audio } => Some(audio.len() as f32 / 16000.0),
             _ => None,
@@ -3809,6 +3912,23 @@ impl Daemon {
             }
             Ok(Err(e)) => {
                 tracing::error!("Transcription failed: {}", e);
+                let body = match saved_audio {
+                    Some(path) => format!("The audio is saved: {}", path.display()),
+                    None if audio_s.is_some_and(|s| s > 0.0) => {
+                        "The audio could not be saved.".to_string()
+                    }
+                    None => e.to_string(),
+                };
+                crate::osd::outcome::write(crate::osd::outcome::Outcome::Failed);
+                send_notification_with_lifetime(
+                    "Dictation failed",
+                    &body,
+                    self.config.output.notification.show_engine_icon,
+                    self.config.engine,
+                    "normal",
+                    Lifetime::Millis(4000),
+                )
+                .await;
                 self.reset_to_idle(state).await;
             }
             Err(e) => {
@@ -4288,11 +4408,13 @@ impl Daemon {
                                                     chunks_sent: 0,
                                                     chunk_results: Vec::new(),
                                                     tasks_in_flight: 0,
+                                                    pause: Default::default(),
                                                 };
                                             } else {
                                                 state = State::Recording {
                                                     started_at: std::time::Instant::now(),
                                                     model_override: model_override.clone(),
+                                                    pause: Default::default(),
                                                 };
                                             }
                                             self.update_state("recording");
@@ -4439,11 +4561,13 @@ impl Daemon {
                                                     chunks_sent: 0,
                                                     chunk_results: Vec::new(),
                                                     tasks_in_flight: 0,
+                                                    pause: Default::default(),
                                                 };
                                             } else {
                                                 state = State::Recording {
                                                     started_at: std::time::Instant::now(),
                                                     model_override: model_override.clone(),
+                                                    pause: Default::default(),
                                                 };
                                             }
                                             self.update_state("recording");
@@ -4629,6 +4753,13 @@ impl Daemon {
                                 crate::osd::correction::cancel();
                                 refresh_live_correction();
                             }
+                        }
+
+                        // === KEYBOARD EDIT TAP ===
+                        // Only sent while edit_armed is set, which nothing
+                        // sets until keyboard editing is wired in.
+                        (event @ (HotkeyEvent::EditTapPending | HotkeyEvent::EditTapConfirmed | HotkeyEvent::EditTapCancelled), _) => {
+                            tracing::debug!("Edit tap event {:?} ignored", event);
                         }
                     }
                 }
@@ -4905,11 +5036,13 @@ impl Daemon {
                                             chunks_sent: 0,
                                             chunk_results: Vec::new(),
                                             tasks_in_flight: 0,
+                                            pause: Default::default(),
                                         };
                                     } else {
                                         state = State::Recording {
                                             started_at: std::time::Instant::now(),
                                             model_override,
+                                            pause: Default::default(),
                                         };
                                     }
                                     self.update_state("recording");
@@ -5164,6 +5297,11 @@ impl Daemon {
                                 // speaking: the popup says so, nothing else.
                                 tracing::info!("Streaming session ended with no speech");
                                 crate::osd::outcome::write(crate::osd::outcome::Outcome::Empty);
+                            } else if self.config.live_preview_active() {
+                                // end_streaming transcribes the audio again
+                                // and reports the outcome.
+                                tracing::error!("Streaming backend error: {}", err);
+                                self.streaming_failure = Some(err.to_string());
                             } else {
                                 tracing::error!("Streaming backend error: {}", err);
                                 // Not "critical": KDE and GNOME keep critical
@@ -5496,6 +5634,83 @@ mod tests {
         assert_eq!(fs::read_to_string(&log).unwrap(), "pre:nofile\npost:file\n");
     }
 
+    /// Lines the hooks of `hooked_output_config` wrote.
+    fn hook_lines(log: &Path) -> Vec<String> {
+        fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.split(':').next().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// R31: a live preview dictation sends its text as one Final, which runs
+    /// the output hooks once; ending the stream must not run the post hook
+    /// a second time.
+    #[tokio::test]
+    async fn streaming_dictation_runs_each_output_hook_once() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &dir.path().join("none"));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: Arc::new(std::sync::Mutex::new(None)),
+            succeed: true,
+        })];
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(
+                &chain,
+                "hello world",
+                None,
+                cfg.pre_output_command.as_deref(),
+                cfg.post_output_command.as_deref(),
+            )
+            .await
+            .unwrap();
+        end_streaming_hook(&cfg, Some(&session)).await;
+        assert_eq!(hook_lines(&log), ["pre", "post"]);
+    }
+
+    /// R31: when the text could not be typed and nothing took it, the post
+    /// hook ran inside the output call; the end of the stream adds none.
+    #[tokio::test]
+    async fn failed_streaming_output_still_runs_the_post_hook_once() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &dir.path().join("none"));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: Arc::new(std::sync::Mutex::new(None)),
+            succeed: false,
+        })];
+        let mut session = StreamingSession::new();
+        assert!(session
+            .commit_segment(
+                &chain,
+                "hello",
+                None,
+                cfg.pre_output_command.as_deref(),
+                cfg.post_output_command.as_deref(),
+            )
+            .await
+            .is_err());
+        end_streaming_hook(&cfg, Some(&session)).await;
+        assert_eq!(hook_lines(&log), ["pre", "post"]);
+    }
+
+    /// R31: a stream that typed nothing (no speech, a cancel, an error)
+    /// still resets the submap at its end, once.
+    #[tokio::test]
+    async fn streaming_dictation_without_output_runs_the_post_hook_once() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &dir.path().join("none"));
+        let session = StreamingSession::new();
+        end_streaming_hook(&cfg, Some(&session)).await;
+        assert_eq!(hook_lines(&log), ["post"]);
+        fs::remove_file(&log).unwrap();
+        end_streaming_hook(&cfg, None).await;
+        assert_eq!(hook_lines(&log), ["post"]);
+    }
+
     #[tokio::test]
     async fn failed_file_write_falls_back_and_still_resets_the_submap() {
         let dir = TempDir::new().unwrap();
@@ -5573,6 +5788,7 @@ mod tests {
             State::Recording {
                 started_at: now,
                 model_override: None,
+                pause: Default::default(),
             },
             State::EagerRecording {
                 started_at: now,
@@ -5581,6 +5797,7 @@ mod tests {
                 chunks_sent: 0,
                 chunk_results: Vec::new(),
                 tasks_in_flight: 0,
+                pause: Default::default(),
             },
             State::Streaming {
                 started_at: now,
@@ -5589,6 +5806,7 @@ mod tests {
                 finalized_text: String::new(),
                 typed_chars: 0,
                 file_output_path: None,
+                pause: Default::default(),
             },
             State::Transcribing { audio: Vec::new() },
         ];

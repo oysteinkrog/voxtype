@@ -151,6 +151,8 @@ mod ruler;
 mod model_signals;
 #[path = "osd_vo/forming.rs"]
 mod forming;
+#[path = "osd_vo/display.rs"]
+mod display;
 #[path = "osd_vo/realtime.rs"]
 mod realtime;
 #[path = "osd_vo/correction_note.rs"]
@@ -2314,6 +2316,8 @@ struct Sink {
     files: Files,
     /// The live model's latest step, for the next popup.
     model_signals: Option<voxtype::osd::live::ModelSignals>,
+    /// The compositor's socket was created since the last warm-up.
+    display_new: bool,
 }
 
 /// Most audio batches held while no popup is open: about a second.
@@ -2569,26 +2573,42 @@ fn main() -> anyhow::Result<()> {
     // The display connection, GPU device and renderer stay warm between
     // dictations, so every popup after the first draws on the GPU at once.
     let mut resident = vo::Resident::new();
+    let mut retry = display::Retry::default();
     if !args.no_prewarm {
-        let warm = Options::<Msg> {
-            fonts: fonts.clone(),
-            renderer_setup: Some(Arc::new(vo_3d::install)),
-            ..Options::default()
-        };
-        let (look, fonts) = (look.clone(), fonts.clone());
-        if let Err(e) = resident.warm_up(&warm, move || warm_frames(look, fonts)) {
-            // Not fatal: the first dictation connects again.
-            tracing::warn!("cannot get the popup ready: {e}");
-        }
+        prewarm(&mut resident, &look, &fonts, &mut retry);
+        // A compositor that starts after us, or restarts: get ready again.
+        let shared = shared.clone();
+        display::watch(move || {
+            let (lock, cv) = &*shared;
+            lock.lock().unwrap().display_new = true;
+            cv.notify_all();
+        });
     }
     loop {
         // Wait for a dictation, then hand everything held so far to a new
-        // popup and route later messages straight to it.
+        // popup and route later messages straight to it. While hidden, get
+        // ready again when the display comes or a failed warm-up is due.
         let inbox = {
             let (lock, cv) = &*shared;
-            let mut sink = cv
-                .wait_while(lock.lock().unwrap(), |s| !s.wants_popup())
-                .unwrap();
+            let mut sink = lock.lock().unwrap();
+            while !sink.wants_popup() && !sink.display_new && !retry.due() {
+                sink = match retry.wait() {
+                    Some(t) => cv.wait_timeout(sink, t).unwrap().0,
+                    None => cv.wait(sink).unwrap(),
+                };
+            }
+            if !sink.wants_popup() {
+                let new_display = std::mem::take(&mut sink.display_new);
+                drop(sink);
+                if new_display {
+                    tracing::info!("the display started; getting the popup ready");
+                    resident.release();
+                }
+                prewarm(&mut resident, &look, &fonts, &mut retry);
+                continue;
+            }
+            // The show connects to the compositor that is there now.
+            sink.display_new = false;
             let (proxy, inbox) = vo::channel();
             // Audio first: frames that come before the daemon's state file
             // says "recording" must not let the popup close at once.
@@ -2647,6 +2667,9 @@ fn main() -> anyhow::Result<()> {
                 // the next dictation rather than exit, so the supervisor does
                 // not give up on us.
                 tracing::warn!("overlay failed: {e}");
+                if !args.no_prewarm {
+                    retry.failed();
+                }
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
@@ -2658,6 +2681,33 @@ fn main() -> anyhow::Result<()> {
 /// dictation needs. The long-silence moment adds what only a long pause
 /// draws, such as the gathered pause marks, so their pipelines are not
 /// built in the middle of a dictation.
+/// Connects and makes the GPU device and renderer in the background, so
+/// the next popup draws on the GPU at once. A failure is retried later.
+fn prewarm(
+    resident: &mut vo::Resident,
+    look: &Look,
+    fonts: &FontRegistry,
+    retry: &mut display::Retry,
+) {
+    let warm = Options::<Msg> {
+        fonts: fonts.clone(),
+        renderer_setup: Some(Arc::new(vo_3d::install)),
+        ..Options::default()
+    };
+    let (look, fonts) = (look.clone(), fonts.clone());
+    match resident.warm_up(&warm, move || warm_frames(look, fonts)) {
+        Ok(_) => retry.succeeded(),
+        // Not fatal: tried again later, and a dictation connects anyway.
+        Err(e) => {
+            if retry.failed() {
+                tracing::warn!("cannot get the popup ready yet: {e}");
+            } else {
+                tracing::debug!("cannot get the popup ready yet: {e}");
+            }
+        }
+    }
+}
+
 fn warm_frames(look: Look, fonts: FontRegistry) -> vo::WarmFrames {
     let size = look.surface();
     let options = || Options {

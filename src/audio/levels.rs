@@ -899,6 +899,8 @@ pub struct SpeechTracker {
 struct SpeechTrackerInner {
     last_speech_at: Instant,
     consecutive_loud: u32,
+    /// Set while a keyboard edit pauses the recording.
+    paused_at: Option<Instant>,
 }
 
 /// A frame's peak at/above the threshold only counts as speech once this
@@ -914,6 +916,7 @@ impl SpeechTracker {
             inner: Arc::new(Mutex::new(SpeechTrackerInner {
                 last_speech_at: Instant::now(),
                 consecutive_loud: 0,
+                paused_at: None,
             })),
             threshold_dbfs,
         }
@@ -937,10 +940,228 @@ impl SpeechTracker {
     }
 
     /// Time elapsed since the last speech burst (or since construction, if
-    /// none has arrived yet).
+    /// none has arrived yet), without time spent paused.
     pub async fn silence_elapsed(&self) -> Duration {
-        self.inner.lock().await.last_speech_at.elapsed()
+        let inner = self.inner.lock().await;
+        match inner.paused_at {
+            Some(t) => t.saturating_duration_since(inner.last_speech_at),
+            None => inner.last_speech_at.elapsed(),
+        }
     }
+
+    /// A keyboard edit paused the recording: the silence clock stops.
+    pub async fn pause(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.paused_at.get_or_insert_with(Instant::now);
+        inner.consecutive_loud = 0;
+    }
+
+    /// The recording listens again: the silence clock goes on from where
+    /// it stopped.
+    pub async fn resume(&self) {
+        let mut inner = self.inner.lock().await;
+        if let Some(t) = inner.paused_at.take() {
+            inner.last_speech_at += t.elapsed();
+        }
+    }
+}
+
+/// Where [`AudioGate`] sends the mic audio now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateMode {
+    /// Every chunk goes on, as without a gate.
+    Open,
+    /// A single edit tap is pending: chunks wait, in order.
+    Hold,
+    /// Paused for a keyboard edit: chunks are dropped.
+    Closed,
+}
+
+/// The gate as the tap task and the daemon share it.
+pub type SharedGate = Arc<std::sync::Mutex<AudioGate>>;
+
+/// Most audio held while an edit tap is pending: 400 ms.
+pub const GATE_HOLD_CAP: usize = 6400;
+
+/// Holds, drops or passes the mic audio on its way to the streaming
+/// backend, for the keyboard edit pause. It owns the backend's sender, so
+/// held audio and newer audio always leave in order. While open it passes
+/// each chunk as the tap did without it.
+///
+/// It keeps an audio clock (samples the backend was given) and the ranges
+/// of that clock that are silence padding, so times from the backend can
+/// be mapped back to speech.
+pub struct AudioGate {
+    tx: Option<mpsc::Sender<Vec<f32>>>,
+    mode: GateMode,
+    held: Vec<Vec<f32>>,
+    held_len: usize,
+    overflowed: bool,
+    sent: usize,
+    pads: Vec<std::ops::Range<usize>>,
+    /// The mic audio the backend was given, when kept for a rescue.
+    kept: Option<Vec<f32>>,
+    paused: bool,
+}
+
+impl AudioGate {
+    /// `keep`: keep a copy of the mic audio passed on, so a rescue after a
+    /// pause never sees audio that was held back or dropped.
+    pub fn new(tx: mpsc::Sender<Vec<f32>>, keep: bool) -> Self {
+        Self {
+            tx: Some(tx),
+            mode: GateMode::Open,
+            held: Vec::new(),
+            held_len: 0,
+            overflowed: false,
+            sent: 0,
+            pads: Vec::new(),
+            kept: keep.then(Vec::new),
+            paused: false,
+        }
+    }
+
+    pub fn shared(self) -> SharedGate {
+        Arc::new(std::sync::Mutex::new(self))
+    }
+
+    pub fn mode(&self) -> GateMode {
+        self.mode
+    }
+
+    /// One mic chunk.
+    pub fn push(&mut self, chunk: Vec<f32>) {
+        match self.mode {
+            GateMode::Open => self.pass(chunk),
+            GateMode::Hold if self.held_len + chunk.len() > GATE_HOLD_CAP => {
+                self.overflowed = true;
+                self.release();
+                self.pass(chunk);
+            }
+            GateMode::Hold => {
+                self.held_len += chunk.len();
+                self.held.push(chunk);
+            }
+            GateMode::Closed => {}
+        }
+    }
+
+    /// An edit tap is pending: hold the audio from now on.
+    pub fn hold(&mut self) {
+        if self.mode == GateMode::Open {
+            self.mode = GateMode::Hold;
+        }
+    }
+
+    /// The pending tap was cancelled: the held audio goes on, in order,
+    /// and the gate opens.
+    pub fn release(&mut self) {
+        for chunk in std::mem::take(&mut self.held) {
+            self.pass(chunk);
+        }
+        self.held_len = 0;
+        if self.mode == GateMode::Hold {
+            self.mode = GateMode::Open;
+        }
+    }
+
+    /// The edit starts: drop the held audio, send `pad` samples of
+    /// silence so the backend decodes every word before the pause, and drop
+    /// mic audio until [`Self::resume`].
+    pub fn pause(&mut self, pad: usize) {
+        self.held.clear();
+        self.held_len = 0;
+        self.mode = GateMode::Closed;
+        self.paused = true;
+        let start = self.sent;
+        for block in vec![0.0f32; pad].chunks(1600) {
+            if !self.send(block.to_vec()) {
+                tracing::warn!("Silence pad not fully sent; the last words may wait");
+                break;
+            }
+        }
+        if self.sent > start {
+            self.pads.push(start..self.sent);
+        }
+    }
+
+    /// Listen again: mic audio goes on from now.
+    pub fn resume(&mut self) {
+        self.release();
+        self.mode = GateMode::Open;
+    }
+
+    /// Whether the hold passed [`GATE_HOLD_CAP`] since the last call. The
+    /// audio went on, so the pending tap counts as cancelled.
+    pub fn take_overflow(&mut self) -> bool {
+        std::mem::take(&mut self.overflowed)
+    }
+
+    /// Samples the backend was given, mic audio and padding.
+    pub fn clock(&self) -> usize {
+        self.sent
+    }
+
+    /// The silence pads, as ranges of [`Self::clock`].
+    pub fn pads(&self) -> &[std::ops::Range<usize>] {
+        &self.pads
+    }
+
+    /// The audio to transcribe again if the stream fails, given the
+    /// capture's own copy. After a pause that copy has audio the backend
+    /// never got, so the gate's kept copy is used, or nothing when there is
+    /// none.
+    pub fn rescue_audio(&mut self, captured: Vec<f32>) -> Option<Vec<f32>> {
+        if self.paused {
+            self.kept.take()
+        } else {
+            Some(captured)
+        }
+    }
+
+    /// The recording stopped: drop the sender, so the backend's stream
+    /// ends, and anything still held.
+    pub fn close(&mut self) {
+        self.tx = None;
+        self.held.clear();
+        self.held_len = 0;
+    }
+
+    fn pass(&mut self, chunk: Vec<f32>) {
+        if let Some(kept) = self.kept.as_mut() {
+            kept.extend_from_slice(&chunk);
+        }
+        self.send(chunk);
+    }
+
+    fn send(&mut self, chunk: Vec<f32>) -> bool {
+        let Some(tx) = &self.tx else {
+            return false;
+        };
+        let len = chunk.len();
+        match tx.try_send(chunk) {
+            Ok(()) => {
+                self.sent += len;
+                true
+            }
+            Err(e) => {
+                tracing::trace!("streaming sample tap try_send failed: {}", e);
+                false
+            }
+        }
+    }
+}
+
+/// Feeds one chunk through the shared gate.
+fn gate_chunk(gate: &SharedGate, chunk: Vec<f32>) {
+    if let Ok(mut gate) = gate.lock() {
+        gate.push(chunk);
+    }
+}
+
+/// The speech tracker hears audio only while the gate is open.
+fn gate_open(gate: Option<&SharedGate>) -> bool {
+    gate.is_none_or(|g| g.lock().is_ok_and(|g| g.mode() == GateMode::Open))
 }
 
 /// Spawn a forwarder task that reads from an `mpsc::Receiver<Vec<f32>>`
@@ -956,20 +1177,20 @@ pub fn spawn_emitter(
     spawn_emitter_with_streaming_tap(chunk_rx, sink, None, None)
 }
 
-/// Like [`spawn_emitter`] but also forwards every chunk to an optional
-/// `streaming_tx` (used by the streaming transcription pipeline to feed
-/// audio into a backend without disturbing the OSD level emitter) and
-/// updates an optional [`SpeechTracker`] from each bucketed frame's peak
-/// level (used for silence-based auto-stop).
+/// Like [`spawn_emitter`] but also passes every chunk through an optional
+/// [`AudioGate`] (which feeds the streaming transcription backend without
+/// disturbing the OSD level emitter) and updates an optional
+/// [`SpeechTracker`] from each bucketed frame's peak level (used for
+/// silence-based auto-stop) while the gate is open.
 ///
-/// When `streaming_tx` is `Some`, each chunk is cloned and `try_send`'d to
-/// it. Failure to send (closed receiver, full bounded channel) is logged at
-/// trace and never blocks the level emitter. When both optional args are
-/// `None`, behavior is identical to [`spawn_emitter`].
+/// The gate `try_send`s each chunk it passes. Failure to send (closed
+/// receiver, full bounded channel) is logged at trace and never blocks the
+/// level emitter. When both optional args are `None`, behavior is identical
+/// to [`spawn_emitter`].
 pub fn spawn_emitter_with_streaming_tap(
     mut chunk_rx: mpsc::Receiver<Vec<f32>>,
     sink: FrameSink,
-    streaming_tx: Option<mpsc::Sender<Vec<f32>>>,
+    gate: Option<SharedGate>,
     speech_tracker: Option<SpeechTracker>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -981,20 +1202,51 @@ pub fn spawn_emitter_with_streaming_tap(
         while let Some(chunk) = chunk_rx.recv().await {
             out.clear();
             bucketer.push_rich(&chunk, &mut out);
+            let hear = gate_open(gate.as_ref());
             for frame in out.drain(..) {
-                if let Some(tracker) = &speech_tracker {
+                if let Some(tracker) = speech_tracker.as_ref().filter(|_| hear) {
                     tracker.observe(frame.frame.peak_dbfs).await;
                 }
                 sink.publish_rich(frame);
             }
 
-            if let Some(ref tx) = streaming_tx {
-                if let Err(e) = tx.try_send(chunk) {
-                    tracing::trace!("streaming sample tap try_send failed: {}", e);
-                }
+            if let Some(gate) = &gate {
+                gate_chunk(gate, chunk);
             }
         }
+        // The mic stopped: end the backend's stream, as dropping its sender
+        // did before the gate held it.
+        if let Some(Ok(mut gate)) = gate.as_ref().map(|g| g.lock()) {
+            gate.close();
+        }
         tracing::trace!("Audio level emitter task ended");
+    })
+}
+
+/// [`spawn_emitter_with_streaming_tap`] with no OSD to publish levels to:
+/// passes each chunk through `gate`, and buckets it for `speech_tracker`
+/// when there is one.
+pub fn spawn_streaming_tap(
+    mut chunk_rx: mpsc::Receiver<Vec<f32>>,
+    gate: SharedGate,
+    speech_tracker: Option<SpeechTracker>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut bucketer = LevelBucketer::new();
+        let mut out = Vec::with_capacity(8);
+        while let Some(chunk) = chunk_rx.recv().await {
+            if let Some(tracker) = speech_tracker.as_ref().filter(|_| gate_open(Some(&gate))) {
+                out.clear();
+                bucketer.push(&chunk, &mut out);
+                for frame in out.drain(..) {
+                    tracker.observe(frame.peak_dbfs).await;
+                }
+            }
+            gate_chunk(&gate, chunk);
+        }
+        if let Ok(mut gate) = gate.lock() {
+            gate.close();
+        }
     })
 }
 
@@ -1511,5 +1763,178 @@ mod tests {
         });
 
         hub.cleanup();
+    }
+
+    // The keyboard edit audio gate.
+
+    fn gate(keep: bool) -> (AudioGate, mpsc::Receiver<Vec<f32>>) {
+        let (tx, rx) = mpsc::channel(64);
+        (AudioGate::new(tx, keep), rx)
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<Vec<f32>>) -> Vec<Vec<f32>> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    fn chunk(v: f32, n: usize) -> Vec<f32> {
+        vec![v; n]
+    }
+
+    #[test]
+    fn open_gate_passes_every_chunk_unchanged() {
+        let (mut g, mut rx) = gate(false);
+        for i in 0..5 {
+            g.push(chunk(i as f32, 320));
+        }
+        let got = drain(&mut rx);
+        assert_eq!(
+            got,
+            (0..5).map(|i| chunk(i as f32, 320)).collect::<Vec<_>>()
+        );
+        assert_eq!(g.clock(), 1600);
+        assert!(g.pads().is_empty());
+        assert_eq!(g.rescue_audio(vec![1.0; 3]), Some(vec![1.0; 3]));
+    }
+
+    #[test]
+    fn a_cancelled_hold_sends_the_held_audio_first_in_order() {
+        let (mut g, mut rx) = gate(false);
+        g.push(chunk(1.0, 320));
+        g.hold();
+        g.push(chunk(2.0, 320));
+        g.push(chunk(3.0, 320));
+        assert_eq!(drain(&mut rx), [chunk(1.0, 320)]);
+        g.release();
+        g.push(chunk(4.0, 320));
+        assert_eq!(
+            drain(&mut rx),
+            [chunk(2.0, 320), chunk(3.0, 320), chunk(4.0, 320)]
+        );
+        assert_eq!(g.mode(), GateMode::Open);
+        assert_eq!(g.clock(), 1280);
+    }
+
+    #[test]
+    fn a_confirmed_hold_drops_the_held_audio_and_pads() {
+        let (mut g, mut rx) = gate(false);
+        g.push(chunk(1.0, 1000));
+        g.hold();
+        g.push(chunk(2.0, 320));
+        g.pause(17920);
+        let got = drain(&mut rx);
+        assert_eq!(got[0], chunk(1.0, 1000));
+        // The pad, in 0.1 s blocks, and nothing held.
+        assert!(got[1..].iter().all(|b| b.iter().all(|&x| x == 0.0)));
+        assert_eq!(got[1..].iter().map(Vec::len).sum::<usize>(), 17920);
+        assert_eq!(g.pads().len(), 1);
+        assert_eq!(g.pads()[0], 1000..18920);
+        // Closed: the mic audio is dropped.
+        g.push(chunk(3.0, 320));
+        assert!(drain(&mut rx).is_empty());
+        assert_eq!(g.clock(), 18920);
+        // Resume: it flows again, and the clock goes on.
+        g.resume();
+        g.push(chunk(4.0, 320));
+        assert_eq!(drain(&mut rx), [chunk(4.0, 320)]);
+        assert_eq!(g.clock(), 19240);
+        // A second pause records a second pad.
+        g.pause(1600);
+        assert_eq!(g.pads(), [1000..18920, 19240..20840]);
+    }
+
+    #[test]
+    fn a_hold_past_its_cap_sends_everything_and_counts_as_cancelled() {
+        let (mut g, mut rx) = gate(false);
+        g.hold();
+        for i in 0..20 {
+            g.push(chunk(i as f32, 320));
+        }
+        assert!(drain(&mut rx).is_empty());
+        assert!(!g.take_overflow());
+        g.push(chunk(20.0, 320));
+        assert_eq!(
+            drain(&mut rx),
+            (0..21).map(|i| chunk(i as f32, 320)).collect::<Vec<_>>()
+        );
+        assert!(g.take_overflow());
+        assert!(!g.take_overflow());
+        assert_eq!(g.mode(), GateMode::Open);
+    }
+
+    #[test]
+    fn rescue_audio_after_a_pause_is_only_what_the_backend_got() {
+        let (mut g, _rx) = gate(true);
+        g.push(chunk(1.0, 10));
+        g.hold();
+        g.push(chunk(2.0, 10)); // held, then dropped
+        g.pause(1600);
+        g.push(chunk(3.0, 10)); // paused
+        g.resume();
+        g.push(chunk(4.0, 10));
+        g.hold();
+        g.push(chunk(5.0, 10)); // held, then released
+        g.release();
+        let captured = [1.0, 2.0, 3.0, 4.0, 5.0]
+            .iter()
+            .flat_map(|&v| chunk(v, 10))
+            .collect();
+        let want: Vec<f32> = [1.0, 4.0, 5.0].iter().flat_map(|&v| chunk(v, 10)).collect();
+        assert_eq!(g.rescue_audio(captured), Some(want));
+        // Without a kept copy, a paused recording gives no rescue audio.
+        let (mut g, _rx) = gate(false);
+        g.pause(1600);
+        assert_eq!(g.rescue_audio(vec![1.0; 10]), None);
+    }
+
+    #[test]
+    fn closing_the_gate_ends_the_backend_stream() {
+        let (mut g, mut rx) = gate(false);
+        g.hold();
+        g.push(chunk(1.0, 10));
+        g.close();
+        assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Disconnected));
+        g.release();
+        g.push(chunk(2.0, 10));
+        assert_eq!(g.clock(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_tap_ends_the_backend_stream_when_the_mic_stops() {
+        let (mic_tx, mic_rx) = mpsc::channel(8);
+        let (g, mut rx) = gate(false);
+        let g = g.shared();
+        let task = spawn_streaming_tap(mic_rx, g.clone(), None);
+        mic_tx.send(chunk(1.0, 10)).await.unwrap();
+        drop(mic_tx);
+        task.await.unwrap();
+        assert_eq!(rx.recv().await, Some(chunk(1.0, 10)));
+        assert_eq!(rx.recv().await, None);
+    }
+
+    #[test]
+    fn only_an_open_gate_lets_the_speech_tracker_hear() {
+        assert!(gate_open(None));
+        let (g, _rx) = gate(false);
+        let g = g.shared();
+        assert!(gate_open(Some(&g)));
+        g.lock().unwrap().hold();
+        assert!(!gate_open(Some(&g)));
+        g.lock().unwrap().pause(0);
+        assert!(!gate_open(Some(&g)));
+        g.lock().unwrap().resume();
+        assert!(gate_open(Some(&g)));
+    }
+
+    #[tokio::test]
+    async fn the_silence_clock_stops_while_paused() {
+        let tracker = SpeechTracker::new(-30.0);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        tracker.pause().await;
+        let a = tracker.silence_elapsed().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(tracker.silence_elapsed().await, a);
+        tracker.resume().await;
+        let b = tracker.silence_elapsed().await;
+        assert!(b >= a && b < a + Duration::from_millis(50), "{a:?} {b:?}");
     }
 }

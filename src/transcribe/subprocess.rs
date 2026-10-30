@@ -133,13 +133,6 @@ impl SubprocessTranscriber {
         }
     }
 
-    /// Get the path to the voxtype executable
-    fn get_executable_path() -> Result<std::path::PathBuf, TranscribeError> {
-        std::env::current_exe().map_err(|e| {
-            TranscribeError::InitFailed(format!("Cannot find voxtype executable: {}", e))
-        })
-    }
-
     /// Build the command to spawn a worker
     fn build_worker_command(&self) -> Result<Command, TranscribeError> {
         worker_command(
@@ -255,6 +248,33 @@ impl SubprocessTranscriber {
     }
 }
 
+/// A command that runs this same voxtype binary again, for a worker.
+///
+/// On Linux it executes `/proc/self/exe`, which names the running binary
+/// even after a package upgrade replaced or deleted its file; a path from
+/// `current_exe()` then points at nothing (or at a newer build), and every
+/// worker spawn failed with "No such file or directory". `argv[0]` stays the
+/// binary's path, as before, since ONNX Runtime looks for its provider
+/// libraries next to it.
+pub fn self_command() -> std::io::Result<Command> {
+    let exe = std::env::current_exe();
+    #[cfg(target_os = "linux")]
+    {
+        let proc_exe = std::path::Path::new("/proc/self/exe");
+        if proc_exe.exists() {
+            use std::os::unix::process::CommandExt;
+            let mut cmd = Command::new(proc_exe);
+            if let Ok(ref path) = exe {
+                // After a replace the link reads "<path> (deleted)".
+                let path = path.to_string_lossy();
+                cmd.arg0(path.strip_suffix(" (deleted)").unwrap_or(&path));
+            }
+            return Ok(cmd);
+        }
+    }
+    Ok(Command::new(exe?))
+}
+
 /// The command that starts a `transcribe-worker`.
 fn worker_command(
     config: &WhisperConfig,
@@ -262,9 +282,9 @@ fn worker_command(
     engine_args: Option<&(String, String)>,
     live_model: Option<&str>,
 ) -> Result<Command, TranscribeError> {
-    let exe_path = SubprocessTranscriber::get_executable_path()?;
-
-    let mut cmd = Command::new(&exe_path);
+    let mut cmd = self_command().map_err(|e| {
+        TranscribeError::InitFailed(format!("Cannot find voxtype executable: {}", e))
+    })?;
 
     // Pass config path BEFORE the subcommand — --config is a parent-level
     // arg in clap, so it must appear before "transcribe-worker"
@@ -1040,6 +1060,9 @@ fn keep_warm(
     }
 }
 
+/// The error a live stream ends with when its worker gave no answer.
+pub const LIVE_WORKER_DIED: &str = "The live worker ended without a final text";
+
 /// What happens to a live worker after its recording.
 enum Refill {
     /// Stop it.
@@ -1150,8 +1173,11 @@ impl StreamingTranscriber for SubprocessTranscriber {
         });
 
         // Cancel kills the worker; the reader below then sees EOF.
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_flag = Arc::clone(&cancelled);
         tokio::spawn(async move {
             if cancel_rx.await.is_ok() {
+                cancel_flag.store(true, Ordering::SeqCst);
                 let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
             }
         });
@@ -1232,6 +1258,13 @@ impl StreamingTranscriber for SubprocessTranscriber {
                     ))),
                 }
                 break;
+            }
+            if !answered && !cancelled.load(Ordering::SeqCst) {
+                // Crashed or killed: say so, so the daemon can rescue the
+                // audio instead of ending quietly with nothing typed.
+                send(StreamingEvent::Error(TranscribeError::InferenceFailed(
+                    LIVE_WORKER_DIED.to_string(),
+                )));
             }
             loading.ready();
             // The pump hands stdin back right after the end marker, which
@@ -1582,6 +1615,75 @@ mod tests {
         // Killed and reaped by the drop, so the pid is gone.
         let pid = nix::unistd::Pid::from_raw(pid as i32);
         assert!(nix::sys::signal::kill(pid, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_live_worker_that_dies_ends_the_stream_with_an_error() {
+        let mut t = SubprocessTranscriber::new(&WhisperConfig::default(), None).unwrap();
+        t.live_model = Some("stand-in".into());
+        // A stand-in worker: says READY, then dies without an answer.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo READY; exit 3")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let (child, stdin, stdout) = WarmWorker::spawn(cmd).unwrap();
+        t.warm
+            .park(child, stdin, stdout, Instant::now(), HOUR, None);
+        let (tx, rx) = mpsc::channel(4);
+        let mut handle = t.start_stream(rx).unwrap();
+        drop(tx);
+        let mut error = None;
+        while let Some(event) = handle.events.recv().await {
+            if let StreamingEvent::Error(e) = event {
+                error = Some(e.to_string());
+            }
+        }
+        assert!(error.is_some_and(|e| e.contains(LIVE_WORKER_DIED)));
+    }
+
+    /// Env var that makes [`self_command_survives_a_deleted_binary`] the
+    /// harness inside a linked copy of the test binary.
+    const SELF_EXEC_HARNESS: &str = "VOXTYPE_TEST_SELF_EXEC_HARNESS";
+
+    /// A package upgrade replaces the binary under a running daemon. Run a
+    /// hard-linked copy of this test binary, delete the copy's file from
+    /// inside it, then spawn "itself" again: the path from current_exe() is
+    /// gone, /proc/self/exe still works.
+    #[test]
+    fn self_command_survives_a_deleted_binary() {
+        if std::env::var_os(SELF_EXEC_HARNESS).is_some() {
+            let exe = std::env::current_exe().unwrap();
+            std::fs::remove_file(&exe).unwrap();
+            let by_path = Command::new(&exe).arg("--list").output();
+            assert!(by_path.is_err(), "the deleted path should not run");
+            let out = self_command()
+                .unwrap()
+                .arg("--list")
+                .stderr(Stdio::null())
+                .output()
+                .expect("spawn via /proc/self/exe");
+            assert!(out.status.success());
+            assert!(String::from_utf8_lossy(&out.stdout).contains("self_command_survives"));
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        // Same file system as the test binary, so a hard link works (no copy).
+        let dir = tempfile::tempdir_in(exe.parent().unwrap()).unwrap();
+        let copy = dir.path().join("voxtype-self-exec-test");
+        std::fs::hard_link(&exe, &copy).unwrap();
+        let status = Command::new(&copy)
+            .args([
+                "transcribe::subprocess::tests::self_command_survives_a_deleted_binary",
+                "--exact",
+                "--quiet",
+            ])
+            .env(SELF_EXEC_HARNESS, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "harness failed: {}", status);
+        assert!(!copy.exists(), "the harness deleted its own file");
     }
 
     #[test]

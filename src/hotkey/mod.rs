@@ -39,6 +39,15 @@ pub enum HotkeyEvent {
     /// Another key was pressed during the hold (a typed capital, a
     /// shortcut): drop the correction and keep its words as dictation.
     CorrectionCancel,
+    /// A clean single tap of the edit key ended. Exactly one
+    /// `EditTapConfirmed` or `EditTapCancelled` follows.
+    EditTapPending,
+    /// The pending tap stayed single for the double-tap window: it asks
+    /// for the keyboard edit.
+    EditTapConfirmed,
+    /// The pending tap turned into something else (a double tap, a hold,
+    /// another key) or the recording ended.
+    EditTapCancelled,
 }
 
 /// Trait for hotkey detection implementations
@@ -53,6 +62,12 @@ pub trait HotkeyListener: Send {
     /// A flag the daemon sets while it records. Correction holds are only
     /// watched while it is set. None when no correction key is configured.
     fn correction_armed(&self) -> Option<Arc<AtomicBool>> {
+        None
+    }
+
+    /// A flag the daemon sets while a single edit-key tap means something
+    /// (recording with keyboard editing on). None when no edit key is set.
+    fn edit_armed(&self) -> Option<Arc<AtomicBool>> {
         None
     }
 }
