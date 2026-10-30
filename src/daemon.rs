@@ -1268,6 +1268,8 @@ pub struct Daemon {
     edit: EditPause,
     // The current recording's text once a keyboard edit froze part of it.
     edit_doc: Option<crate::osd::edit_doc::EditDoc>,
+    /// Pauses for a keyboard edit in this recording.
+    edit_pauses: u32,
     edit_link: EditLink,
     streaming_failure: Option<String>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
@@ -1412,6 +1414,7 @@ impl Daemon {
             keyboard_edit,
             edit: EditPause::default(),
             edit_doc: None,
+            edit_pauses: 0,
             edit_link: EditLink::default(),
             streaming_failure: None,
             eager_chunk_tasks: Vec::new(),
@@ -1777,6 +1780,7 @@ impl Daemon {
         let _ = check_edit_requested();
         self.edit = EditPause::default();
         self.edit_doc = None;
+        self.edit_pauses = 0;
         self.edit_link.reader = Default::default();
         // An override model has its own transcriber, which records in batch
         // mode; streaming would run the default model instead.
@@ -2104,6 +2108,7 @@ impl Daemon {
                     } else {
                         String::new()
                     },
+                    pause: self.edit_pauses,
                 })
             }
             (None, Some(Phase::Pending)) => Some(crate::osd::edit_ipc::EditBlock {
@@ -2189,6 +2194,7 @@ impl Daemon {
             dropped_tap: false,
         };
         state.set_phase(Phase::Settling, now);
+        self.edit_pauses += 1;
         self.edit_freeze();
         self.edit_publish(state);
         tracing::info!("Paused for a keyboard edit");
@@ -6586,6 +6592,7 @@ mod tests {
         let block = link.last().unwrap();
         assert_eq!(block.phase, "settling");
         assert_eq!(block.frozen, "so the \"quote\"");
+        assert_eq!(block.pause, 1);
         // The tail lands while settling, then is frozen too.
         link.show("so the \u{201C}quote\u{201D} ends");
         daemon.edit_tick(&mut state, Instant::now(), None).await;
@@ -6624,6 +6631,7 @@ mod tests {
             rev,
             text: text.into(),
             sel: (0, 0),
+            pause: 1,
         };
         write_buffer_to(&daemon.edit_link.buffer, &buffer(1, "hello world")).unwrap();
         append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev: 2 }).unwrap();
@@ -6655,6 +6663,7 @@ mod tests {
                 rev: 3,
                 text: "Send this.".into(),
                 sel: (0, 0),
+                pause: 1,
             },
         )
         .unwrap();
@@ -6707,6 +6716,7 @@ mod tests {
                     rev: 1,
                     text: typed.into(),
                     sel: (0, 0),
+                    pause: 1,
                 },
             )
             .unwrap();
@@ -6770,6 +6780,7 @@ mod tests {
                 rev: 9,
                 text: "final text\n".into(),
                 sel: (0, 0),
+                pause: 1,
             },
         )
         .unwrap();
@@ -6789,6 +6800,7 @@ mod tests {
                 rev: 1,
                 text: "stale".into(),
                 sel: (0, 0),
+                pause: 1,
             },
         )
         .unwrap();
@@ -6816,6 +6828,7 @@ mod tests {
                 rev: 3,
                 text: "typed fix".into(),
                 sel: (0, 0),
+                pause: 1,
             },
         )
         .unwrap();

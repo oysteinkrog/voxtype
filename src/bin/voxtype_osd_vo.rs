@@ -157,6 +157,10 @@ mod display;
 mod realtime;
 #[path = "osd_vo/correction_note.rs"]
 mod correction_note;
+// The popup's side of the keyboard edit link; the focus proxy uses it.
+#[allow(dead_code)]
+#[path = "osd_vo/edit_link.rs"]
+mod edit_link;
 
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;

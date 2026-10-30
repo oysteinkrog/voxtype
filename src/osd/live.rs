@@ -971,11 +971,12 @@ mod tests {
             phase: "editing".into(),
             frozen: "Hi.".into(),
             tail: "there".into(),
+            pause: 1,
         });
         let new = serde_json::to_string(&doc).unwrap();
-        assert!(
-            new.contains(r#""edit":{"session":2,"phase":"editing","frozen":"Hi.","tail":"there"}"#)
-        );
+        assert!(new.contains(
+            r#""edit":{"session":2,"phase":"editing","frozen":"Hi.","tail":"there","pause":1}"#
+        ));
         // Readers of either shape parse the other.
         let back: LiveDoc = serde_json::from_str(&new).unwrap();
         assert_eq!(back, doc);

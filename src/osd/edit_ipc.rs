@@ -31,6 +31,10 @@ pub struct EditBlock {
     /// Words still settling after it, not yet editable.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tail: String,
+    /// Counts the pauses of this session. A buffer written in the same
+    /// pause is the popup's own, so a popup started again reloads it.
+    #[serde(default)]
+    pub pause: u32,
 }
 
 /// `edit-buffer.json`: the popup's text while it owns it.
@@ -42,6 +46,9 @@ pub struct EditBuffer {
     pub text: String,
     /// Selection anchor and focus, byte offsets into `text`.
     pub sel: (usize, usize),
+    /// The [`EditBlock::pause`] the popup was editing.
+    #[serde(default)]
+    pub pause: u32,
 }
 
 /// How a finish delivers the text.
@@ -208,6 +215,7 @@ mod tests {
             rev,
             text: text.into(),
             sel: (text.len(), text.len()),
+            pause: 1,
         }
     }
 
@@ -218,10 +226,11 @@ mod tests {
             phase: "pending".into(),
             frozen: "Hello.".into(),
             tail: String::new(),
+            pause: 2,
         };
         assert_eq!(
             serde_json::to_string(&block).unwrap(),
-            r#"{"session":3,"phase":"pending","frozen":"Hello."}"#
+            r#"{"session":3,"phase":"pending","frozen":"Hello.","pause":2}"#
         );
         let line = EditCmdLine {
             session: 3,
@@ -240,8 +249,12 @@ mod tests {
         assert_eq!(closed.cmd, EditCmd::ProxyClosed);
         assert_eq!(
             serde_json::to_string(&buffer(1, 2, "hi")).unwrap(),
-            r#"{"session":1,"rev":2,"text":"hi","sel":[2,2]}"#
+            r#"{"session":1,"rev":2,"text":"hi","sel":[2,2],"pause":1}"#
         );
+        // Files from before the pause count still parse.
+        let old: EditBuffer =
+            serde_json::from_str(r#"{"session":1,"rev":2,"text":"hi","sel":[2,2]}"#).unwrap();
+        assert_eq!(old.pause, 0);
     }
 
     #[test]
