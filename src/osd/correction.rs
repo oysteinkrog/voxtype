@@ -13,7 +13,6 @@
 //! [`overlay`], and `preview.json` carries a [`CorrectionView`] for the popup.
 
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -21,9 +20,11 @@ use crate::osd::live::{TimedWord, WordDetail};
 use crate::text::align::{self, Refused};
 use crate::text::{learn, spell};
 
-/// How long after the key comes up a correction waits for the live model's
-/// words of the hold, when no word after the hold has arrived sooner.
-pub const SETTLE: Duration = Duration::from_millis(1200);
+/// How much audio past the key coming up the live model hears before a
+/// correction stops waiting for the words of the hold, when no word after
+/// the hold has arrived sooner. In seconds of the recording's audio clock,
+/// so a keyboard edit's pause, which stops that clock, does not count.
+pub const SETTLE: f32 = 1.2;
 
 /// Words of slack when a correction is placed in the final text, which has
 /// no timing: its search ends this many words after the live word count.
@@ -68,8 +69,8 @@ pub type Word = (TimedWord, Option<WordDetail>);
 #[derive(Debug, Clone, PartialEq)]
 enum State {
     Open,
-    /// The key came up at this moment.
-    Pending(Instant),
+    /// The key came up; the hold waits for its words.
+    Pending,
     /// Words timed `from..=to` (`wrong`) are replaced by `right`.
     Placed {
         from: f32,
@@ -162,11 +163,11 @@ impl Corrections {
         }
     }
 
-    /// The key came up `t1` seconds into the recording, at `now`.
-    pub fn end(&mut self, t1: f32, now: Instant) {
+    /// The key came up `t1` seconds into the recording.
+    pub fn end(&mut self, t1: f32) {
         if let Some(w) = self.open() {
             w.t1 = t1.max(w.t0);
-            w.state = State::Pending(now);
+            w.state = State::Pending;
         }
     }
 
@@ -204,11 +205,11 @@ impl Corrections {
     }
 
     /// A new live word list: the words to show, with the corrections made.
-    /// Holds that ended `SETTLE` before `now`, or that the live model has
-    /// heard past, are placed now.
-    pub fn overlay(&mut self, raw: Vec<Word>, now: Instant) -> Vec<Word> {
+    /// `heard`: seconds of audio the live model has decoded. Holds it has
+    /// heard `SETTLE` past, or heard words after, are placed now.
+    pub fn overlay(&mut self, raw: Vec<Word>, heard: f32) -> Vec<Word> {
         self.raw = raw;
-        self.render(Some(now))
+        self.render(Some(heard))
     }
 
     /// The words to show for the current list, placing nothing new.
@@ -216,21 +217,22 @@ impl Corrections {
         self.render(None)
     }
 
-    /// `settle_at`: place pending holds that are ready at this moment; None
-    /// places none, and `force` (in [`Self::apply_final`]) places all.
-    fn render(&mut self, settle_at: Option<Instant>) -> Vec<Word> {
-        self.render_with(settle_at, false)
+    /// `heard`: place pending holds that are ready with this much audio
+    /// decoded; None places none, and `force` (in [`Self::apply_final`])
+    /// places all.
+    fn render(&mut self, heard: Option<f32>) -> Vec<Word> {
+        self.render_with(heard, false)
     }
 
-    fn render_with(&mut self, settle_at: Option<Instant>, force: bool) -> Vec<Word> {
+    fn render_with(&mut self, heard: Option<f32>, force: bool) -> Vec<Word> {
         let mut out = self.raw.clone();
         for i in 0..self.windows.len() {
             let Window { t0, t1, .. } = self.windows[i];
             out.retain(|(w, _)| !inside(w, t0, t1));
-            if let State::Pending(ended) = self.windows[i].state {
+            if self.windows[i].state == State::Pending {
                 let heard_past = self.raw.iter().any(|(w, _)| w.start >= t1);
-                let due = settle_at.is_some_and(|now| now >= ended + SETTLE);
-                if force || (settle_at.is_some() && (heard_past || due)) {
+                let due = heard.is_some_and(|h| h >= t1 + SETTLE);
+                if force || (heard.is_some() && (heard_past || due)) {
                     self.windows[i].state = self.place(&out, t0, t1);
                 }
             }
@@ -352,10 +354,7 @@ impl Corrections {
                 .as_deref()
                 .and_then(spell::letters)
                 .map(|(letters, _)| letters),
-            pending: self
-                .windows
-                .iter()
-                .any(|w| matches!(w.state, State::Pending(_))),
+            pending: self.windows.iter().any(|w| w.state == State::Pending),
             note: self.note.clone(),
         })
     }
@@ -551,10 +550,9 @@ fn clip_words(text: &str, wrong: &str) -> Vec<String> {
 /// test"). None for a hold that places nowhere or replaces only such words.
 pub fn wrong_spans(raw: Vec<Word>, holds: &[(f32, f32)]) -> Vec<Option<String>> {
     let mut c = Corrections::default();
-    let now = Instant::now();
     for &(t0, t1) in holds {
         c.start(t0);
-        c.end(t1, now);
+        c.end(t1);
     }
     c.raw = raw;
     c.render_with(None, true);
@@ -628,7 +626,7 @@ pub fn start(t0: f32) {
 /// The hold ended `t1` seconds into the recording.
 pub fn end(t1: f32) {
     with(|c| {
-        c.end(t1, Instant::now());
+        c.end(t1);
         write_windows(c);
     });
 }
@@ -657,9 +655,10 @@ pub fn clear() {
     let _ = std::fs::remove_file(windows_path());
 }
 
-/// A new live word list, with the corrections made.
-pub fn overlay(raw: Vec<Word>) -> Vec<Word> {
-    with(|c| c.overlay(raw, Instant::now()))
+/// A new live word list, with the corrections made. `heard`: seconds of
+/// audio the live model has decoded.
+pub fn overlay(raw: Vec<Word>, heard: f32) -> Vec<Word> {
+    with(|c| c.overlay(raw, heard))
 }
 
 /// The current word list with the corrections made, placing nothing new.
@@ -732,7 +731,7 @@ mod tests {
             (1.3, "FrankenTerm"),
             (2.4, "and run it"),
         ]);
-        let t = Instant::now();
+        let t = 0.0;
         let mut c = Corrections::default();
         assert_eq!(
             text(&c.overlay(lists[0].clone(), t)),
@@ -744,7 +743,7 @@ mod tests {
         assert_eq!(text(&shown), "use franken term here");
         assert_eq!(c.view().unwrap().hearing.as_deref(), Some("FrankenTerm"));
 
-        c.end(2.0, t);
+        c.end(2.0);
         assert!(c.view().unwrap().pending);
         // The next words after the hold settle it.
         let shown = c.overlay(lists[2].clone(), t);
@@ -767,10 +766,10 @@ mod tests {
             (1.3, "FrankenTerm"),
             (2.4, "and"),
         ]);
-        let t = Instant::now();
+        let t = 0.0;
         let mut c = Corrections::default();
         c.start(1.2);
-        c.end(2.0, t);
+        c.end(2.0);
         c.overlay(lists[2].clone(), t);
         // The live model revises "franken term" to "frank and term".
         let mut revised = lists[2].clone();
@@ -779,18 +778,24 @@ mod tests {
         assert_eq!(text(&c.overlay(revised, t)), "use FrankenTerm here and");
     }
 
+    /// R20: the wait is audio the live model decoded past the key coming
+    /// up, so a keyboard edit's pause, which stops that clock, does not
+    /// place a hold early.
     #[test]
     fn a_hold_settles_after_the_wait_with_no_words_after_it() {
         let lists = steps(&[(0.0, "use franken term here"), (1.3, "FrankenTerm")]);
-        let t = Instant::now();
         let mut c = Corrections::default();
         c.start(1.2);
-        c.end(2.0, t);
-        assert_eq!(
-            text(&c.overlay(lists[1].clone(), t)),
-            "use franken term here"
-        );
-        let later = t + SETTLE;
+        c.end(2.0);
+        for heard in [1.6, 2.0, 2.0 + SETTLE - 0.05] {
+            assert_eq!(
+                text(&c.overlay(lists[1].clone(), heard)),
+                "use franken term here",
+                "{heard} s decoded"
+            );
+            assert!(c.view().unwrap().pending);
+        }
+        let later = 2.0 + SETTLE;
         assert_eq!(
             text(&c.overlay(lists[1].clone(), later)),
             "use FrankenTerm here"
@@ -804,10 +809,10 @@ mod tests {
             (1.8, "Kubernetes"),
             (2.6, "again"),
         ]);
-        let t = Instant::now();
+        let t = 0.0;
         let mut c = Corrections::default();
         c.start(1.7);
-        c.end(2.4, t);
+        c.end(2.4);
         assert_eq!(
             text(&c.overlay(lists[2].clone(), t)),
             "the cat sat on the mat again"
@@ -820,7 +825,7 @@ mod tests {
     #[test]
     fn a_cancelled_hold_gives_its_words_back() {
         let lists = steps(&[(0.0, "use franken term here"), (1.3, "FrankenTerm")]);
-        let t = Instant::now();
+        let t = 0.0;
         let mut c = Corrections::default();
         c.start(1.2);
         assert_eq!(
@@ -840,10 +845,10 @@ mod tests {
             (1.3, "FrankenTerm"),
             (2.4, "and run it"),
         ]);
-        let t = Instant::now();
+        let t = 0.0;
         let mut c = Corrections::default();
         c.start(1.2);
-        c.end(2.0, t);
+        c.end(2.0);
         c.overlay(lists[2].clone(), t);
         assert_eq!(
             c.apply_final("Use Franken Term here. FrankenTerm And run it."),
@@ -856,11 +861,11 @@ mod tests {
         // The key came up and the dictation stopped before the live model
         // caught up: the final text places the correction on its own.
         let lists = steps(&[(0.0, "use franken term here"), (1.3, "FrankenTerm")]);
-        let t = Instant::now();
+        let t = 0.0;
         let mut c = Corrections::default();
         c.start(1.2);
         c.overlay(lists[1].clone(), t);
-        c.end(2.0, t);
+        c.end(2.0);
         assert_eq!(
             c.apply_final("use franken term here FrankenTerm"),
             "use FrankenTerm here"
@@ -873,10 +878,10 @@ mod tests {
             (1.3, "FrankenTerm"),
             (2.4, "and run it"),
         ]);
-        let t = Instant::now();
+        let t = 0.0;
         let mut c = Corrections::default();
         c.start(1.2);
-        c.end(2.0, t);
+        c.end(2.0);
         c.overlay(lists[2].clone(), t);
         c
     }
@@ -945,8 +950,8 @@ mod tests {
         let mut raw = spoken(0.0, "this is a longer test of voice");
         raw.extend(spoken(2.4, "quiet test"));
         c.start(2.3);
-        c.end(3.0, Instant::now());
-        c.overlay(raw, Instant::now());
+        c.end(3.0);
+        c.overlay(raw, 0.0);
         c.clips = vec![FinalClip {
             t0: 2.3,
             t1: 3.0,
@@ -964,8 +969,8 @@ mod tests {
         let mut raw = spoken(0.0, "this is a glim bot test");
         raw.extend(spoken(2.4, "GlimBot"));
         c.start(2.3);
-        c.end(3.0, Instant::now());
-        c.overlay(raw, Instant::now());
+        c.end(3.0);
+        c.overlay(raw, 0.0);
         let pasted = c.apply_final("This is a glim bot test. GlimBot.");
         assert_eq!(pasted, "This is a GlimBot test.");
         let [entry] = c.applied.as_slice() else {
@@ -989,11 +994,11 @@ mod tests {
         let mut raw = spoken(0.0, "ask the glim bot for the logs");
         c.start(2.0);
         raw.extend(spoken(2.1, SPELLED));
-        c.overlay(raw.clone(), Instant::now());
+        c.overlay(raw.clone(), 0.0);
         let view = c.view().unwrap();
         assert_eq!(view.spelling.as_deref(), Some("Glimbot"));
-        c.end(4.5, Instant::now());
-        c.overlay(raw, Instant::now() + SETTLE);
+        c.end(4.5);
+        c.overlay(raw, 4.5 + SETTLE);
         c
     }
 
@@ -1037,8 +1042,8 @@ mod tests {
         let mut raw = spoken(0.0, "ask the glim bot for the logs");
         c.start(2.0);
         raw.extend(spoken(2.1, "spell golf banana lima"));
-        c.end(3.5, Instant::now());
-        c.overlay(raw, Instant::now() + SETTLE);
+        c.end(3.5);
+        c.overlay(raw, 3.5 + SETTLE);
         let note = c.view().and_then(|v| v.note).unwrap();
         assert_eq!(note.dropped.as_deref(), Some("not letters"));
     }
@@ -1049,8 +1054,8 @@ mod tests {
         let mut raw = spoken(0.0, "this is a longer test of voice");
         raw.extend(spoken(2.4, "quiet test"));
         c.start(2.3);
-        c.end(3.0, Instant::now());
-        c.overlay(raw, Instant::now() + SETTLE);
+        c.end(3.0);
+        c.overlay(raw, 3.0 + SETTLE);
         let live = c.view().and_then(|v| v.note).expect("a live note");
         assert_eq!(live.dropped, None);
         assert_eq!(
@@ -1067,7 +1072,7 @@ mod tests {
         let mut c = Corrections::default();
         c.start(1.0);
         assert_eq!(c.specs(), [WindowSpec { t0: 1.0, t1: None }]);
-        c.end(2.0, Instant::now());
+        c.end(2.0);
         assert_eq!(
             c.specs(),
             [WindowSpec {
@@ -1080,7 +1085,7 @@ mod tests {
     #[test]
     fn a_final_text_without_corrections_is_unchanged() {
         let mut c = Corrections::default();
-        c.overlay(spoken(0.0, "hello  there"), Instant::now());
+        c.overlay(spoken(0.0, "hello  there"), 0.0);
         assert_eq!(c.apply_final("Hello,  there.\n"), "Hello,  there.\n");
         c.start(1.0);
         c.cancel();
@@ -1095,14 +1100,14 @@ mod tests {
             (3.0, "FrankenTerm"),
             (3.6, "done"),
         ]);
-        let t = Instant::now();
+        let t = 0.0;
         let mut c = Corrections::default();
         c.overlay(lists[1].clone(), t);
         // A keyboard edit froze everything before 2.0 s.
         c.freeze(2.0);
         c.start(2.9);
         c.overlay(lists[2].clone(), t);
-        c.end(3.4, t);
+        c.end(3.4);
         let shown = c.overlay(lists[3].clone(), t);
         assert_eq!(text(&shown), "use franken term here and then more done");
         let note = c.view().unwrap().note.unwrap();
@@ -1123,13 +1128,13 @@ mod tests {
             (3.0, "FrankenTerm"),
             (3.6, "done"),
         ]);
-        let t = Instant::now();
+        let t = 0.0;
         let mut c = Corrections::default();
         c.overlay(lists[1].clone(), t);
         c.freeze(0.9);
         c.start(2.9);
         c.overlay(lists[2].clone(), t);
-        c.end(3.4, t);
+        c.end(3.4);
         let shown = c.overlay(lists[3].clone(), t);
         assert_eq!(text(&shown), "use franken term then FrankenTerm again done");
     }
@@ -1137,12 +1142,12 @@ mod tests {
     #[test]
     fn a_hold_that_ended_before_the_freeze_is_placed_by_it() {
         let lists = steps(&[(0.0, "use franken term here"), (1.3, "FrankenTerm")]);
-        let t = Instant::now();
+        let t = 0.0;
         let mut c = Corrections::default();
         c.overlay(lists[0].clone(), t);
         c.start(1.2);
         c.overlay(lists[1].clone(), t);
-        c.end(2.0, t);
+        c.end(2.0);
         // The edit tap came before the live model heard past the hold.
         c.freeze(2.0);
         assert_eq!(text(&c.current()), "use FrankenTerm here");
@@ -1172,7 +1177,6 @@ mod tests {
             "FrankenTerm",
             "run",
         ];
-        let t = Instant::now();
         for _ in 0..300 {
             let mut words: Vec<Word> = Vec::new();
             let mut c = Corrections::default();
@@ -1184,7 +1188,7 @@ mod tests {
                     0 if frozen.is_none() || rand(2) == 0 => {
                         c.start(at);
                     }
-                    1 => c.end(at, t),
+                    1 => c.end(at),
                     _ => {}
                 }
                 for _ in 0..=rand(2) {
@@ -1192,7 +1196,7 @@ mod tests {
                     words.extend(spoken(at, w));
                     at += 0.25;
                 }
-                let shown = c.overlay(words.clone(), t);
+                let shown = c.overlay(words.clone(), at);
                 if step == freeze_after {
                     c.freeze(at);
                     let kept = c
