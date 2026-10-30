@@ -549,11 +549,15 @@ impl Popup {
         let line = l.mono_line(l.status_px);
         // One key for the state word, so a new state's word replaces the old
         // one in place. Keyed by state, the old word rolled out over the new one.
+        // The slot is the word's own width, so the hint starts one gap after
+        // it: a slot sized for "FINISHING" left a gap after "Loading". It
+        // snaps on a state change rather than sliding the hint along.
         let state = status.state.as_str();
-        let label_w = 0.62 * l.status_px * "FINISHING".len() as f32 + 4.0;
+        let label_w = self.measure.layout(state, &style, None).size.w.ceil() + 2.0;
         let label = Element::layer("state")
             .clip()
             .size(label_w, line)
+            .motion(Prop::Size, Motion::Snap)
             .margin_edges(0.0, 0.0, 0.0, 10.0)
             .child(
                 at(
