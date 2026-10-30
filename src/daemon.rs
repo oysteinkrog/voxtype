@@ -1716,6 +1716,7 @@ impl Daemon {
         }
 
         if self.config.output.notification.on_recording_start {
+            pause: Default::default(),
             send_notification(
                 "Streaming Active",
                 "Listening...",
@@ -4399,11 +4400,13 @@ impl Daemon {
                                 }
                                 // Write profile override file if a profile modifier was held
                                 if let Some(ref profile_name) = profile_override {
+                                                    pause: Default::default(),
                                     write_profile_override(profile_name);
                                 }
 
                                 // Start recording
                                 tracing::info!("Recording started (toggle mode)");
+                                                    pause: Default::default(),
 
                                 if self.config.output.notification.on_recording_start {
                                     send_notification_with_lifetime("Recording Started", "Press hotkey again to stop", self.config.output.notification.show_engine_icon, self.config.engine, &self.config.output.notification.urgency, Lifetime::UntilClosed).await;
@@ -4550,11 +4553,13 @@ impl Daemon {
                                 // and disarm tracking.
                                 self.end_external_session(state.is_recording()).await;
 
+                                                    pause: Default::default(),
                                 // Stop recording and discard audio
                                 if let Some(mut capture) = audio_capture.take() {
                                     let _ = capture.stop().await;
                                 }
                                 self.restore_recording_media();
+                                                    pause: Default::default(),
 
                                 // Cancel any pending model load task
                                 if let Some(task) = self.model_load_task.take() {
@@ -5016,11 +5021,13 @@ impl Daemon {
                                     if let State::Streaming { typed_chars, .. } = &mut state {
                                         *typed_chars = s.typed_chars();
                                     }
+                                            pause: Default::default(),
                                 }
                             }
                         }
                         Some(StreamingEvent::Final { text, .. })
                             if self.config.live_preview_active() && self.config.live_typing && !file_output =>
+                                            pause: Default::default(),
                         {
                             // Swap the live text for the engine model's
                             // version: keep the prefix both agree on,
@@ -5689,6 +5696,7 @@ mod tests {
     }
 
     #[tokio::test]
+                pause: Default::default(),
     async fn eager_chunks_pick_up_a_finished_override_load() {
         let mut daemon = parakeet_daemon(false);
         let task: TranscriberLoadTask = tokio::task::spawn_blocking(|| {
@@ -5697,6 +5705,7 @@ mod tests {
         while !task.is_finished() {
             tokio::task::yield_now().await;
         }
+                pause: Default::default(),
         daemon.override_load_task = Some(("base.en".to_string(), task));
 
         // A different override's load isn't touched.
@@ -5705,6 +5714,7 @@ mod tests {
 
         let ready = daemon.ready_override("base.en").await.unwrap();
         assert_eq!(ready.transcribe(&[]).unwrap(), "loaded");
+                pause: Default::default(),
         assert!(daemon.override_load_task.is_none());
         assert!(matches!(&daemon.override_cache, Some((name, _)) if name == "base.en"));
     }
