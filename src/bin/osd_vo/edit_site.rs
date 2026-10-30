@@ -64,6 +64,9 @@ pub(crate) const QUIET: &[&str] = &[
     // Follow confidence.
     "onset-ink",
     "confidence-ink",
+    // Draw the glyphs as outlines of their own.
+    super::glyph_paths::MORPH,
+    super::glyph_paths::BREATH,
 ];
 
 /// Where a look's editable text sits: the style and the wrap width.
@@ -310,6 +313,24 @@ mod tests {
             let q = quiet_list(theme);
             assert!(QUIET.iter().all(|n| q.contains(n)), "{theme:?}");
         }
+    }
+
+    /// Outline glyphs asked for with `--motion` (glyph-morph, breath-line)
+    /// are off while editing, so the edit draws plain glyphs.
+    #[test]
+    fn outline_glyphs_are_off_while_editing() {
+        use super::super::glyph_paths::{BREATH, MORPH};
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut p, _) = popup(&dir, OsdTheme::Swiss);
+        p.look.features = [MORPH, BREATH].iter().map(|f| f.to_string()).collect();
+        assert!(p.look.on(MORPH) && p.look.on(BREATH));
+        sync(&mut p, Some("pending"), "");
+        assert!(!p.look.on(MORPH) && !p.look.on(BREATH));
+        sync(&mut p, Some("editing"), "some words");
+        assert!(!p.look.on(MORPH) && !p.look.on(BREATH));
+        p.edit.as_mut().unwrap().resume();
+        p.sync_quiet();
+        assert!(p.look.on(MORPH) && p.look.on(BREATH));
     }
 
     #[test]
