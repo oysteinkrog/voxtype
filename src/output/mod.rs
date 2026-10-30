@@ -111,7 +111,7 @@ pub fn find_ydotool_socket() -> Option<PathBuf> {
 /// keyboard simulation tools (wtype, dotool, ydotool). This function converts
 /// them to standard ASCII quotes to prevent unexpected line breaks or other
 /// typing artifacts.
-fn normalize_quotes(text: &str) -> Cow<'_, str> {
+pub(crate) fn normalize_quotes(text: &str) -> Cow<'_, str> {
     // Quick check to avoid allocation if no normalization needed
     let needs_normalization = text.chars().any(|c| {
         matches!(

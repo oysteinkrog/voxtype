@@ -114,6 +114,10 @@ pub struct LiveDoc {
     /// dictation has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correction: Option<crate::osd::correction::CorrectionView>,
+    /// The keyboard edit ([`crate::osd::edit_ipc`]); left out when the
+    /// dictation is not paused for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit: Option<crate::osd::edit_ipc::EditBlock>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -411,6 +415,7 @@ static LIVE: Mutex<Live> = Mutex::new(Live {
         target: None,
         meta: None,
         correction: None,
+        edit: None,
     },
     session: 0,
     timed: None,
@@ -628,6 +633,30 @@ pub fn read() -> Option<LiveDoc> {
 
 /// The current `preview-signals.json`, for a popup. None when there is none
 /// or it does not parse.
+/// The keyboard edit block of `preview.json`, None to drop it. Written
+/// only when it changes, so `preview.json` is not rewritten per key.
+pub fn set_edit(edit: Option<crate::osd::edit_ipc::EditBlock>) {
+    let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    if live.doc.edit != edit {
+        live.doc.edit = edit;
+        write(&live.doc);
+    }
+}
+
+/// Counts dictations: the session id of the keyboard edit link.
+pub fn session() -> u64 {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).session
+}
+
+/// The newest preview text as shown, spoken corrections made.
+pub fn shown_text() -> String {
+    LIVE.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .doc
+        .text
+        .clone()
+}
+
 /// How far the live model has decoded this dictation, in seconds of the
 /// audio it was given: the end of the newest committed frame. None before
 /// the first signals step, or without the OSD (no signals are sent).
@@ -929,6 +958,29 @@ mod tests {
 
     const RAW: &str =
         " um open franken term comma then run voxtipe \u{201C}now\u{201D} it\u{2019}s done period ";
+
+    #[test]
+    fn the_edit_block_is_optional_both_ways() {
+        let mut doc = LiveDoc::default();
+        doc.apply_preview("hi", None);
+        let old = serde_json::to_string(&doc).unwrap();
+        assert!(!old.contains("edit"));
+        doc.edit = Some(crate::osd::edit_ipc::EditBlock {
+            session: 2,
+            phase: "editing".into(),
+            frozen: "Hi.".into(),
+            tail: "there".into(),
+        });
+        let new = serde_json::to_string(&doc).unwrap();
+        assert!(
+            new.contains(r#""edit":{"session":2,"phase":"editing","frozen":"Hi.","tail":"there"}"#)
+        );
+        // Readers of either shape parse the other.
+        let back: LiveDoc = serde_json::from_str(&new).unwrap();
+        assert_eq!(back, doc);
+        let plain: LiveDoc = serde_json::from_str(&old).unwrap();
+        assert_eq!(plain.edit, None);
+    }
 
     #[test]
     fn preview_is_shown_unprocessed() {
