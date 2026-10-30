@@ -1166,10 +1166,10 @@ impl Popup {
             Element::label("state", status.state.clone())
                 .text_style(style)
                 .color(hex(LABEL))
-                .presence(
-                    Transition::fade().offset(0.0, 5.0),
-                    Transition::fade().offset(0.0, -5.0),
-                ),
+                // A fade only, like the hint: the row already rises into
+                // place, and the word's own 5 px drop settled so slowly that
+                // it sat below the hint's baseline while the panel grew.
+                .presence(Transition::fade(), Transition::fade()),
         );
         let detail = status.detail.trim().trim_start_matches('·').trim();
         if !detail.is_empty() {
