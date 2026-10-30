@@ -41,6 +41,7 @@
 # and exits 1 naming each look and state over a limit. Limits (env vars):
 #
 #   VOXTYPE_BUDGET_IDLE_CPU_PCT  default 2    idle-open CPU, % of one core
+#   VOXTYPE_BUDGET_SHOWCASE_IDLE_CPU_PCT  default 3   the same for Showcase (see below)
 #   VOXTYPE_BUDGET_IDLE_FPS      default 30   idle-open frames per second
 #   VOXTYPE_BUDGET_REC_CPU_PCT   default 10   recording CPU, % of one core
 #   VOXTYPE_BUDGET_GPU_MS        default 1    GPU p95 per frame (lowest of 3 runs), both states
@@ -60,6 +61,13 @@ runs=${VOXTYPE_BUDGET_RUNS:-2}
 gpu_runs=${VOXTYPE_BUDGET_GPU_RUNS:-3}
 idle_cpu=${VOXTYPE_BUDGET_IDLE_CPU_PCT:-2}
 idle_fps=${VOXTYPE_BUDGET_IDLE_FPS:-30}
+# Showcase animates at idle (particle trail, breathing dots and shapes), and its idle cost
+# is accepted at 3 % (giyy, 2026-10-30): the looks stay alive, no frame-rate cut at idle.
+# Measured at 48cb3e4 (vo bc9e935), 7 interleaved runs: idle-open median 2.44 %. With every
+# offscreen layer pass and its bloom skipped (the most a layer cache could save) the median
+# is 2.20 %, so no layer cache brings it under 2 %. The rest is per-frame scene sampling,
+# view, encoding and submit.
+showcase_idle_cpu=${VOXTYPE_BUDGET_SHOWCASE_IDLE_CPU_PCT:-3}
 rec_cpu=${VOXTYPE_BUDGET_REC_CPU_PCT:-10}
 gpu_ms=${VOXTYPE_BUDGET_GPU_MS:-1}
 gpu_p99=${VOXTYPE_BUDGET_GPU_P99_MS:-0}
@@ -181,6 +189,7 @@ for look in "${looks[@]}"; do
             moment=dictation from=1.5 to=6.5 cpu_max=$rec_cpu fps_max=
         else
             moment=long-silence from=1.8 to=5.9 cpu_max=$idle_cpu fps_max=$idle_fps
+            [[ ${look,,} == showcase ]] && cpu_max=$showcase_idle_cpu
         fi
         cpu=- fps=-
         for _ in $(seq "$runs"); do
