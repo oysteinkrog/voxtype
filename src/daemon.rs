@@ -2202,6 +2202,14 @@ impl Daemon {
 
     /// Pass mic audio again; new speech goes after the edited text.
     async fn edit_resume(&mut self, state: &mut State) {
+        // A resume by tap or `record edit` takes the popup's text from its
+        // buffer file; a Resume command has already put the same text in.
+        let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
+        if let (Some(doc), Some(snap)) = (self.edit_doc.as_mut(), snapshot) {
+            if snap.session == doc.session() && snap.pause == self.edit_pauses {
+                doc.replace_frozen(&snap.text);
+            }
+        }
         self.with_gate(|g| g.resume());
         if let Some(tracker) = &self.silence_tracker {
             tracker.resume().await;
@@ -2334,6 +2342,12 @@ impl Daemon {
                 }
                 Accepted::ProxyClosed => {
                     tracing::debug!("Edit focus proxy closed");
+                }
+                Accepted::Detached => {
+                    if matches!(state.phase(), Some(Phase::Settling | Phase::Editing)) {
+                        state.set_phase(Phase::Detached, Instant::now());
+                        self.edit_publish(state);
+                    }
                 }
             }
         }
@@ -6808,6 +6822,61 @@ mod tests {
             daemon.edit_final_text(state.phase()).as_deref(),
             Some("draft text")
         );
+    }
+
+    #[tokio::test]
+    async fn a_resume_by_tap_takes_the_popup_text() {
+        use crate::osd::edit_ipc::{write_buffer_to, EditBuffer};
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("helo world");
+        daemon.edit_toggle(&mut state).await;
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        let snap = |pause, text: &str| EditBuffer {
+            session,
+            rev: 2,
+            text: text.into(),
+            sel: (0, 0),
+            pause,
+        };
+        // A snapshot of an earlier pause is not this edit.
+        write_buffer_to(&daemon.edit_link.buffer, &snap(0, "stale")).unwrap();
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        assert_eq!(daemon.edit_doc.as_ref().unwrap().frozen(), "helo world");
+        // The second pause's edit, then a Right Shift tap to listen again.
+        daemon.edit_toggle(&mut state).await;
+        write_buffer_to(&daemon.edit_link.buffer, &snap(2, "hello world")).unwrap();
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        link.show("helo world and more");
+        assert_eq!(
+            daemon.edit_final_text(state.phase()).as_deref(),
+            Some("hello world and more")
+        );
+    }
+
+    #[tokio::test]
+    async fn focus_taken_away_detaches_until_a_tap() {
+        use crate::osd::edit_ipc::{append_cmd_to, EditCmd};
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("text");
+        daemon.edit_toggle(&mut state).await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Detached).unwrap();
+        assert!(!daemon.edit_handle_commands(&mut state).await);
+        assert_eq!(state.phase(), Some(Phase::Detached));
+        assert_eq!(link.last().unwrap().phase, "detached");
+        // A tap edits again.
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Editing));
+        // Detached only applies while the popup has the text.
+        daemon.edit_toggle(&mut state).await;
+        append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Detached).unwrap();
+        daemon.edit_handle_commands(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
     }
 
     #[tokio::test]

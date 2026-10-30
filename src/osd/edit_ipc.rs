@@ -71,6 +71,9 @@ pub enum EditCmd {
     Finish { mode: FinishMode, rev: u64 },
     /// The popup destroyed its focus proxy, so focus is going back.
     ProxyClosed,
+    /// The compositor took focus from the popup while editing (a click
+    /// elsewhere, Alt+Tab, the lock screen): stay paused, keep the text.
+    Detached,
 }
 
 /// One line of `edit-cmd`.
@@ -139,6 +142,7 @@ pub enum Accepted {
     Resume { text: String },
     Finish { mode: FinishMode, text: String },
     ProxyClosed,
+    Detached,
 }
 
 impl CmdReader {
@@ -194,6 +198,7 @@ pub fn accept(cmd: EditCmd, session: u64, buffer: Option<&EditBuffer>) -> Option
         EditCmd::Resume { rev } => text(rev).map(|text| Accepted::Resume { text }),
         EditCmd::Finish { mode, rev } => text(rev).map(|text| Accepted::Finish { mode, text }),
         EditCmd::ProxyClosed => Some(Accepted::ProxyClosed),
+        EditCmd::Detached => Some(Accepted::Detached),
     }
 }
 
