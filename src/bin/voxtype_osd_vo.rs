@@ -1481,6 +1481,9 @@ struct Popup {
     edit_marks: HashSet<vo_core::words::WordId>,
     /// Edits this popup has shown, for the hint.
     edit_entries: u32,
+    /// An edit was handed over to be delivered (Enter): the text is final,
+    /// so the quiet list stays on until the next recording.
+    edit_sent: bool,
     /// The text the words were last built from: the preview, or after an
     /// edit the edited text and the speech since.
     source: String,
@@ -1508,6 +1511,7 @@ impl Popup {
             edit_view: None,
             edit_marks: HashSet::new(),
             edit_entries: 0,
+            edit_sent: false,
             source: String::new(),
             recorder: None,
             measure: vo::ShapedLayout::new(fonts.clone()),
@@ -1864,15 +1868,23 @@ impl Popup {
     }
 
     /// R34: from a pending tap until resume or a cancelled tap, the look's
-    /// quiet list is off.
+    /// quiet list is off. Enter is neither: after it hands the text over
+    /// to be delivered, the list stays off until the next recording, so the
+    /// final text does not take the look's live motion back.
     fn sync_quiet(&mut self) {
         use edit_link::Phase;
-        let quiet = self.edit.as_ref().and_then(|l| l.phase()).is_some_and(|p| {
-            matches!(
-                p,
-                Phase::Pending | Phase::Settling | Phase::Editing | Phase::Detached
-            )
-        });
+        let link = self.edit.as_ref();
+        let phase = link.and_then(|l| l.phase());
+        if phase == Some(Phase::Releasing) && link.is_some_and(|l| l.sending()) {
+            self.edit_sent = true;
+        }
+        let quiet = self.edit_sent
+            || phase.is_some_and(|p| {
+                matches!(
+                    p,
+                    Phase::Pending | Phase::Settling | Phase::Editing | Phase::Detached
+                )
+            });
         // Made again each time: a look switched mid-edit has its own list.
         self.look.quiet = if quiet {
             edit_site::quiet_list(self.look.theme).into()
@@ -2038,8 +2050,10 @@ impl App for Popup {
                 }
                 self.extra.files(&self.files, &files, t);
                 if files.recording && !self.files.recording {
-                    // A new recording: the last dictation's edit marks go.
+                    // A new recording: the last dictation's edit marks go,
+                    // and its look's motion comes back.
                     self.edit_marks.clear();
+                    self.edit_sent = false;
                 }
                 self.was_recording |= files.recording;
                 self.was_finishing |= files.transcribing || (files.finishing && !files.recording);

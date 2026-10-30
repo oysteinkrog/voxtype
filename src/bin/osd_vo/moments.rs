@@ -1592,6 +1592,8 @@ mod tests {
         badge: Option<(&'static str, bool)>,
         drawn: bool,
         hint: Option<f32>,
+        /// The look's quiet list is on.
+        quiet: bool,
         /// The marked words' text in the edit view, or in the shown words
         /// once the view is gone.
         marked: Vec<String>,
@@ -1622,6 +1624,7 @@ mod tests {
                 badge: p.edit_badge(),
                 drawn: p.look_badge().is_some(),
                 hint: p.edit_hint(),
+                quiet: !p.look.quiet.is_empty(),
                 marked,
             });
         }
@@ -1756,6 +1759,9 @@ mod tests {
         // delivery, underlined (prio-lane's M7.L7 finding).
         for e in seen.iter().filter(|e| e.t >= enter) {
             assert_eq!(e.marked, ["quickly"], "at {:.2} s", e.t);
+            // The final text keeps the edit's stillness (R34: Enter is not
+            // a resume).
+            assert!(e.quiet, "quiet at {:.2} s", e.t);
         }
     }
 
