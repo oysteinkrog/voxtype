@@ -10,6 +10,11 @@ Type=simple
 ExecStart=/usr/bin/voxtype -q daemon
 Restart=on-failure
 RestartSec=5
+# Dictation is interactive: when the machine is busy, the daemon, its
+# speech-to-text worker and its popup get more CPU and disk time than other
+# apps (default weight 100).
+CPUWeight=1000
+IOWeight=1000
 
 # Note: User must be in 'input' group for evdev access
 # Before enabling this service, run: voxtype setup --download

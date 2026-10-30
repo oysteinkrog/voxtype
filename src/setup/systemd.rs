@@ -34,6 +34,11 @@ Type=simple
 ExecStart={voxtype_path} daemon
 Restart=on-failure
 RestartSec=5
+# Dictation is interactive: when the machine is busy, the daemon, its
+# speech-to-text worker and its popup get more CPU and disk time than other
+# apps (default weight 100).
+CPUWeight=1000
+IOWeight=1000
 
 # Ensure we have access to the display
 Environment=XDG_RUNTIME_DIR=%t
