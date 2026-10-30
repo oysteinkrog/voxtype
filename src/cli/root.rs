@@ -227,6 +227,26 @@ pub struct Cli {
     )]
     pub correction_hold_ms: Option<u64>,
 
+    /// Key whose single tap while recording pauses to fix the text by
+    /// keyboard, and resumes on the next tap [default: double_tap_alt_key]
+    #[arg(long, value_name = "KEY", help_heading = "Hotkey")]
+    pub edit_key: Option<String>,
+
+    /// The edit key's tap counts only with no other key pressed this long
+    /// before it [default: 150]
+    #[arg(
+        long,
+        value_name = "MS",
+        help_heading = "Hotkey",
+        hide_short_help = true
+    )]
+    pub edit_quiet_ms: Option<u64>,
+
+    /// Pause a live preview dictation to fix its text by keyboard in the vo
+    /// popup (single tap of the edit key, or `voxtype record edit`)
+    #[arg(long, help_heading = "Hotkey")]
+    pub osd_keyboard_edit: bool,
+
     // -- Audio --
     /// Audio input device: an ALSA name from `voxtype info devices`, "default"
     /// for the system default, or "pipewire:<node>" for one PipeWire node
@@ -589,6 +609,25 @@ mod tests {
     // =========================================================================
     // Engine flag tests
     // =========================================================================
+
+    #[test]
+    fn keyboard_edit_flags() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "--osd-keyboard-edit",
+            "--edit-key",
+            "F9",
+            "--edit-quiet-ms",
+            "200",
+        ]);
+        assert!(cli.osd_keyboard_edit);
+        assert_eq!(cli.edit_key.as_deref(), Some("F9"));
+        assert_eq!(cli.edit_quiet_ms, Some(200));
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(!cli.osd_keyboard_edit);
+        assert_eq!(cli.edit_key, None);
+        assert_eq!(cli.edit_quiet_ms, None);
+    }
 
     #[test]
     fn test_engine_flag_whisper() {

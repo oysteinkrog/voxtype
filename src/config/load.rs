@@ -205,6 +205,17 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
             config.hotkey.correction_hold_ms = ms;
         }
     }
+    if let Ok(key) = std::env::var("VOXTYPE_EDIT_KEY") {
+        config.hotkey.edit_key = Some(key);
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_EDIT_QUIET_MS") {
+        if let Ok(ms) = val.parse::<u64>() {
+            config.hotkey.edit_quiet_ms = ms;
+        }
+    }
+    if let Ok(val) = std::env::var("VOXTYPE_OSD_KEYBOARD_EDIT") {
+        config.osd.keyboard_edit = parse_bool_env(&val);
+    }
 
     // Whisper / engine
     if let Ok(model) = std::env::var("VOXTYPE_MODEL") {
@@ -386,6 +397,25 @@ pub fn save_config(config: &Config, path: &Path) -> Result<(), VoxtypeError> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn keyboard_edit_env_overrides() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[hotkey]\nkey = \"RIGHTCTRL\"\n").unwrap();
+        std::env::set_var("VOXTYPE_EDIT_KEY", "F9");
+        std::env::set_var("VOXTYPE_EDIT_QUIET_MS", "220");
+        std::env::set_var("VOXTYPE_OSD_KEYBOARD_EDIT", "true");
+        let config = load_config(Some(&path));
+        std::env::remove_var("VOXTYPE_EDIT_KEY");
+        std::env::remove_var("VOXTYPE_EDIT_QUIET_MS");
+        std::env::remove_var("VOXTYPE_OSD_KEYBOARD_EDIT");
+        let config = config.unwrap();
+        assert_eq!(config.hotkey.edit_key(), Some("F9"));
+        assert_eq!(config.hotkey.edit_quiet_ms, 220);
+        assert!(config.osd.keyboard_edit);
+    }
+
     use super::*;
 
     #[test]

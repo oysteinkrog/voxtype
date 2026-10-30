@@ -919,6 +919,24 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Correction hold",
         "Milliseconds the correction key must be held before a correction starts.",
     ),
+    spec(
+        "hotkey.edit_key",
+        "hotkey",
+        "edit_key",
+        open(HOTKEY_MODIFIER_CHOICES),
+        "Hotkey",
+        "Edit key",
+        "A single tap while recording pauses to fix the text by keyboard; tap again to listen. Unset: the alt double-tap key.",
+    ),
+    spec(
+        "hotkey.edit_quiet_ms",
+        "hotkey",
+        "edit_quiet_ms",
+        KeyType::Int { min: 0, max: 2000 },
+        "Hotkey",
+        "Edit tap quiet time",
+        "Milliseconds with no other key pressed before an edit tap counts.",
+    ),
     // -- Audio --------------------------------------------------------------
     spec(
         "audio.device",
@@ -1249,6 +1267,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "OSD",
         "On-screen display",
         "Spawn the floating waveform panel while recording.",
+    ),
+    spec(
+        "osd.keyboard_edit",
+        "osd",
+        "keyboard_edit",
+        KeyType::Bool,
+        "OSD",
+        "Keyboard editing",
+        "Pause a live preview dictation and fix its text by keyboard in the vo popup.",
     ),
     spec(
         "osd.frontend",
@@ -2617,6 +2644,8 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "hotkey.model_modifier" => opt_str(cfg.hotkey.model_modifier.as_ref()),
         "hotkey.correction_key" => opt_str(cfg.hotkey.correction_key.as_ref()),
         "hotkey.correction_hold_ms" => json!(cfg.hotkey.correction_hold_ms),
+        "hotkey.edit_key" => opt_str(cfg.hotkey.edit_key.as_ref()),
+        "hotkey.edit_quiet_ms" => json!(cfg.hotkey.edit_quiet_ms),
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
@@ -2675,6 +2704,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.notification.show_engine_icon" => json!(cfg.output.notification.show_engine_icon),
 
         "osd.enabled" => json!(cfg.osd.enabled),
+        "osd.keyboard_edit" => json!(cfg.osd.keyboard_edit),
         "osd.frontend" => serde_json::to_value(cfg.osd.frontend).ok()?,
         "osd.style" => json!(cfg.osd.style),
         "osd.plugin_path" => match &cfg.osd.plugin_path {

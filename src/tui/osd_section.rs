@@ -25,6 +25,7 @@ use crate::osd::style::{list_installed_styles, InstalledStyle};
 #[derive(Debug, Clone)]
 pub struct OsdState {
     pub enabled: bool,
+    pub keyboard_edit: bool,
     pub frontend: String,
     pub theme: String,
     pub style: String,
@@ -63,6 +64,7 @@ pub struct TextEdit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Enabled,
+    KeyboardEdit,
     Frontend,
     Theme,
     Style,
@@ -83,6 +85,7 @@ pub enum Field {
 impl Field {
     const ALL: &'static [Field] = &[
         Field::Enabled,
+        Field::KeyboardEdit,
         Field::Frontend,
         Field::Theme,
         Field::Style,
@@ -135,6 +138,7 @@ impl OsdState {
         let ed = ConfigEditor::load()?;
         Ok(Self {
             enabled: ed.get_bool(TABLE, "enabled").unwrap_or(true),
+            keyboard_edit: ed.get_bool(TABLE, "keyboard_edit").unwrap_or(false),
             frontend: ed
                 .get_string(TABLE, "frontend")
                 .unwrap_or_else(|| "gtk4".to_string()),
@@ -180,6 +184,12 @@ impl OsdState {
             }
         };
         ed.set_bool(TABLE, "enabled", self.enabled);
+        // Off is the default: leave the key out rather than write it.
+        if self.keyboard_edit {
+            ed.set_bool(TABLE, "keyboard_edit", true);
+        } else {
+            ed.unset(TABLE, "keyboard_edit");
+        }
         ed.set_string(TABLE, "frontend", &self.frontend);
         // Leave the key out until someone picks a theme, like palette.
         if self.theme == "default" {
@@ -243,6 +253,7 @@ impl OsdState {
     fn cycle(&mut self, delta: i32) {
         match self.field {
             Field::Enabled => self.enabled = !self.enabled,
+            Field::KeyboardEdit => self.keyboard_edit = !self.keyboard_edit,
             Field::Frontend => self.frontend = cycle_str(FRONTEND_CHOICES, &self.frontend, delta),
             Field::Theme => self.theme = cycle_str(THEME_CHOICES, &self.theme, delta),
             Field::Style => {
@@ -416,6 +427,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             yesno(state.enabled),
         ),
         FormRowSpec::new(
+            state.field == Field::KeyboardEdit,
+            "Keyboard editing",
+            yesno(state.keyboard_edit),
+        ),
+        FormRowSpec::new(
             state.field == Field::Frontend,
             "Frontend",
             state.frontend.clone(),
@@ -548,6 +564,17 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             ),
             Line::from(""),
             dim("Per-state visibility (idle/recording/transcribing) is fixed: the OSD always shows during recording."),
+        ],
+        Field::KeyboardEdit => vec![
+            heading("Keyboard editing"),
+            Line::from(""),
+            Line::from(
+                "While a live preview dictation records, one tap of the edit key \
+                 pauses it so you can fix the text by keyboard in the popup. Tap \
+                 again to keep talking. Needs live preview with live typing off.",
+            ),
+            Line::from(""),
+            dim("Off by default. The edit key is [hotkey] edit_key (default: the alt double-tap key)."),
         ],
         Field::Frontend => vec![
             heading("Frontend"),
@@ -848,6 +875,7 @@ mod tests {
             .iter()
             .map(|f| match f {
                 Field::Enabled => "osd.enabled",
+                Field::KeyboardEdit => "osd.keyboard_edit",
                 Field::Frontend => "osd.frontend",
                 Field::Theme => "osd.theme",
                 Field::Style => "osd.style",
@@ -888,6 +916,7 @@ mod tests {
     fn plugin_path_commit_trims_and_allows_empty() {
         let mut state = OsdState {
             enabled: true,
+            keyboard_edit: false,
             frontend: "quickshell".to_string(),
             theme: "default".to_string(),
             style: "default".to_string(),
@@ -932,6 +961,7 @@ mod tests {
     fn style_field_cycles_discovered_styles_but_not_custom_paths() {
         let mut state = OsdState {
             enabled: true,
+            keyboard_edit: false,
             frontend: "quickshell".to_string(),
             theme: "default".to_string(),
             style: "default".to_string(),

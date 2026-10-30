@@ -295,6 +295,16 @@ fn cleanup_pid_file(path: &PathBuf) {
 }
 
 /// Check if cancel has been requested (via file trigger)
+/// Keyboard editing pauses a live preview recording, so it needs one, and
+/// one that types nothing while it records.
+fn keyboard_edit_on(config: &Config) -> bool {
+    let usable = config.live_preview_active() && !config.live_typing;
+    if config.osd.keyboard_edit && !usable {
+        tracing::warn!("osd.keyboard_edit needs live_preview_model and no live_typing; it is off");
+    }
+    config.osd.keyboard_edit && usable
+}
+
 /// Trigger file `voxtype record edit` writes in the runtime dir.
 pub const EDIT_REQUEST_FILE: &str = "edit";
 
@@ -1347,6 +1357,7 @@ impl Daemon {
             None
         };
 
+        let keyboard_edit = keyboard_edit_on(&config);
         Self {
             start_request: None,
             config,
@@ -1375,7 +1386,7 @@ impl Daemon {
             rescued_audio: Arc::new(std::sync::Mutex::new(None)),
             streaming_samples: None,
             audio_gate: None,
-            keyboard_edit: false,
+            keyboard_edit,
             edit: EditPause::default(),
             edit_doc: None,
             edit_link: EditLink::default(),
@@ -2605,8 +2616,9 @@ impl Daemon {
                     self.is_external_trigger = track_silence;
                     let speech_tracker = self.new_speech_tracker(track_silence);
                     self.silence_tracker = speech_tracker.clone();
-                    // Nothing pauses the gate yet, so it keeps no copy.
-                    let gate = audio::levels::AudioGate::new(streaming_tx, false).shared();
+                    // Only a gate that can pause keeps a rescue copy.
+                    let gate =
+                        audio::levels::AudioGate::new(streaming_tx, self.keyboard_edit).shared();
                     self.audio_gate = Some(gate.clone());
                     let handle = if let Some(hub) = &self.level_hub {
                         audio::levels::spawn_emitter_with_streaming_tap(
@@ -4467,6 +4479,7 @@ impl Daemon {
                 Some(hotkey::create_listener(
                     &self.config.hotkey,
                     secondary_model,
+                    self.keyboard_edit,
                 )?)
             } else {
                 tracing::info!(
@@ -6718,6 +6731,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got.lock().unwrap().as_deref(), Some("It's \"exact\""));
+    }
+
+    #[test]
+    fn keyboard_edit_needs_a_live_preview_that_types_nothing() {
+        let mut config = Config::default();
+        assert!(!keyboard_edit_on(&config));
+        config.osd.keyboard_edit = true;
+        assert!(!keyboard_edit_on(&config), "no live preview");
+        config.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v2");
+        config.live_preview_model = Some("parakeet-unified-en-0.6b-int8".into());
+        config.engine_isolation = true;
+        assert!(keyboard_edit_on(&config));
+        config.live_typing = true;
+        assert!(!keyboard_edit_on(&config));
     }
 
     #[tokio::test]

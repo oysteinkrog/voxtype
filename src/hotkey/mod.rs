@@ -12,7 +12,7 @@ use crate::config::HotkeyConfig;
 use crate::error::HotkeyError;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// Events emitted by the hotkey listener
@@ -72,12 +72,17 @@ pub trait HotkeyListener: Send {
     }
 }
 
-/// Factory function to create the appropriate hotkey listener
+/// Factory function to create the appropriate hotkey listener.
+/// `keyboard_edit`: watch for single taps of the edit key.
 pub fn create_listener(
     config: &HotkeyConfig,
     secondary_model: Option<String>,
+    keyboard_edit: bool,
 ) -> Result<Box<dyn HotkeyListener>, HotkeyError> {
     let mut listener = evdev_listener::EvdevListener::new(config)?;
     listener.set_secondary_model(secondary_model);
+    if let Some(key) = config.edit_key().filter(|_| keyboard_edit) {
+        listener.set_edit_tap(key, Duration::from_millis(config.edit_quiet_ms))?;
+    }
     Ok(Box::new(listener))
 }

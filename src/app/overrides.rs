@@ -142,6 +142,15 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(ms) = cli.correction_hold_ms {
         config.hotkey.correction_hold_ms = ms;
     }
+    if let Some(ref edit_key) = cli.edit_key {
+        config.hotkey.edit_key = Some(edit_key.clone());
+    }
+    if let Some(ms) = cli.edit_quiet_ms {
+        config.hotkey.edit_quiet_ms = ms;
+    }
+    if cli.osd_keyboard_edit {
+        config.osd.keyboard_edit = true;
+    }
 
     // Whisper overrides
     if let Some(delay) = cli.pre_type_delay {

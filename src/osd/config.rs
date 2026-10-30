@@ -633,6 +633,10 @@ pub struct OsdConfig {
     /// `RLIMIT_RTPRIO` (the `audio` or `realtime` group); without it the
     /// popup takes the lowest nice value it may, down to -10. On by default.
     pub realtime: bool,
+    /// Pause a live preview dictation and fix its text by keyboard in the
+    /// vo popup: a single tap of `[hotkey] edit_key`, or `voxtype record
+    /// edit`. Off by default.
+    pub keyboard_edit: bool,
     /// Motion features of the vo popup: `"look"` (each look's own set),
     /// `"none"`, or a list of names (see [`OsdMotion`]).
     pub motion: OsdMotion,
@@ -682,6 +686,7 @@ impl Default for OsdConfig {
             word_fade: false,
             look_badge: false,
             realtime: true,
+            keyboard_edit: false,
             motion: OsdMotion::Look,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,
@@ -700,6 +705,15 @@ impl Default for OsdConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_edit_is_off_unless_set() {
+        assert!(!OsdConfig::default().keyboard_edit);
+        let old: OsdConfig = toml::from_str("look_badge = true").unwrap();
+        assert!(!old.keyboard_edit);
+        let on: OsdConfig = toml::from_str("keyboard_edit = true").unwrap();
+        assert!(on.keyboard_edit);
+    }
 
     #[test]
     fn defaults_match_brief() {
