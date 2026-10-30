@@ -76,9 +76,10 @@ pub struct SubprocessTranscriber {
     /// wait for one (`live_preview_warm_secs`, 0 = off).
     warm: WarmSlot,
     warm_secs: u64,
-    /// `live_preview_warm_idle_secs`: keep a worker while the user is
-    /// present instead (0 = off). Started by [`Transcriber::keep_warm`].
-    warm_idle_secs: u64,
+    /// `live_preview_warm_idle_secs` or `live_preview_warm_presence_file`:
+    /// keep a worker while the user is present instead. Started by
+    /// [`Transcriber::keep_warm`].
+    keep_policy: Option<KeepPolicy>,
     /// `live_preview_warm_release_command`: checked while a warm worker waits.
     warm_release: Option<String>,
     /// Pre-spawned worker (from prepare())
@@ -102,7 +103,7 @@ impl SubprocessTranscriber {
             live_model: None,
             warm: WarmSlot::default(),
             warm_secs: 0,
-            warm_idle_secs: 0,
+            keep_policy: None,
             warm_release: None,
             prepared_worker: Mutex::new(None),
             last_language: Arc::new(Mutex::new(None)),
@@ -125,7 +126,7 @@ impl SubprocessTranscriber {
                 .flatten(),
             warm: WarmSlot::default(),
             warm_secs: config.live_preview_warm_secs,
-            warm_idle_secs: config.live_preview_warm_idle_secs,
+            keep_policy: KeepPolicy::from_config(config),
             warm_release: config.live_preview_warm_release_command.clone(),
             prepared_worker: Mutex::new(None),
             last_language: Arc::new(Mutex::new(None)),
@@ -421,7 +422,7 @@ impl Transcriber for SubprocessTranscriber {
         if self.live_model.is_none() {
             return;
         }
-        if self.warm_idle_secs > 0 {
+        if let Some(ref policy) = self.keep_policy {
             let config = self.config.clone();
             let config_path = self.config_path.clone();
             let engine_args = self.engine_args.clone();
@@ -435,7 +436,7 @@ impl Transcriber for SubprocessTranscriber {
                         live_model.as_deref(),
                     )
                 },
-                std::time::Duration::from_secs(self.warm_idle_secs),
+                policy.clone(),
                 self.warm_release.clone(),
             );
         } else if self.warm_secs > 0 && self.warm.is_empty() {
@@ -593,35 +594,125 @@ enum WarmAction {
     Keep,
 }
 
-/// Keep a worker loaded while the user was active within `idle_limit`, and
-/// none while they are away or the release command asks for the memory.
-fn warm_action(
-    idle_for: std::time::Duration,
+/// The presence keeper's rules.
+#[derive(Clone, Debug)]
+struct KeepPolicy {
+    /// Without a trusted presence file: release after this long with no
+    /// input (`live_preview_warm_idle_secs`).
     idle_limit: std::time::Duration,
-    has_worker: bool,
-    busy: bool,
-    release_says: bool,
-) -> WarmAction {
+    /// `live_preview_warm_presence_file`.
+    presence_file: Option<std::path::PathBuf>,
+    /// `live_preview_warm_presence_keep`: states that keep a worker.
+    keep_states: Vec<String>,
+    /// `live_preview_warm_presence_grace_secs`: how long another state
+    /// (and no local input) lasts before the worker goes.
+    grace: std::time::Duration,
+    /// How often the keeper reads the presence file.
+    file_check: std::time::Duration,
+}
+
+/// The input timer's limit when only the presence file is set.
+const DEFAULT_IDLE_FALLBACK: std::time::Duration = std::time::Duration::from_secs(1800);
+
+/// How often the keeper reads the presence file.
+const PRESENCE_FILE_CHECK: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl KeepPolicy {
+    /// None when neither `live_preview_warm_idle_secs` nor
+    /// `live_preview_warm_presence_file` is set.
+    fn from_config(config: &crate::config::Config) -> Option<Self> {
+        let presence_file = config
+            .live_preview_warm_presence_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(super::revisions::expand_home);
+        let idle = config.live_preview_warm_idle_secs;
+        if idle == 0 && presence_file.is_none() {
+            return None;
+        }
+        Some(Self {
+            idle_limit: match idle {
+                0 => DEFAULT_IDLE_FALLBACK,
+                secs => std::time::Duration::from_secs(secs),
+            },
+            presence_file,
+            keep_states: config.live_preview_warm_presence_keep.clone(),
+            grace: std::time::Duration::from_secs(config.live_preview_warm_presence_grace_secs),
+            file_check: PRESENCE_FILE_CHECK,
+        })
+    }
+}
+
+/// What the presence rules say now: keep a worker or not, and why.
+#[derive(Debug, PartialEq, Eq)]
+struct Want {
+    keep: bool,
+    why: String,
+}
+
+/// With a trusted presence file: keep a worker in a keep state, and in any
+/// other state until it (and the quiet on this machine's own keyboard and
+/// mouse) lasted the grace period. Remote-desktop input does not count
+/// then. Without one: keep while there was any input within the idle limit.
+fn want_warm(
+    policy: &KeepPolicy,
+    file: Option<&crate::presence::FileReading>,
+    idle_for: std::time::Duration,
+    local_idle_for: std::time::Duration,
+) -> Want {
+    match file {
+        Some(f) if policy.keep_states.contains(&f.state) => Want {
+            keep: true,
+            why: format!("presence {}: {}", f.state, f.reason),
+        },
+        Some(f) => {
+            let away_for = f
+                .since_age
+                .map_or(local_idle_for, |age| age.min(local_idle_for));
+            Want {
+                keep: away_for < policy.grace,
+                why: format!(
+                    "presence {} for {}s: {}",
+                    f.state,
+                    away_for.as_secs(),
+                    f.reason
+                ),
+            }
+        }
+        None => Want {
+            keep: idle_for < policy.idle_limit,
+            why: format!("no keyboard or mouse input for {}s", idle_for.as_secs()),
+        },
+    }
+}
+
+/// Load a worker when one is wanted and none waits, release it when it is
+/// not wanted or the release command asks for the memory.
+fn warm_action(wanted: bool, has_worker: bool, busy: bool, release_says: bool) -> WarmAction {
     if busy {
         return WarmAction::Keep;
     }
-    let wanted = idle_for < idle_limit && !release_says;
-    match (has_worker, wanted) {
+    match (has_worker, wanted && !release_says) {
         (true, false) => WarmAction::Release,
         (false, true) => WarmAction::Load,
         _ => WarmAction::Keep,
     }
 }
 
-/// How long the keeper may sleep: until the user counts as away, and at
-/// most [`KEEPER_CHECK`] (or [`WARM_RELEASE_CHECK`] with a release command)
-/// while they are here. While away it waits for their return.
+/// How long the keeper may sleep. With a presence file, until its next
+/// read. Otherwise until the user counts as away, and at most
+/// [`KEEPER_CHECK`] (or [`WARM_RELEASE_CHECK`] with a release command)
+/// while they are here; while away it waits for their return.
 fn keeper_wait(
+    policy: &KeepPolicy,
     idle_for: std::time::Duration,
-    idle_limit: std::time::Duration,
     release_command: bool,
 ) -> std::time::Duration {
-    if idle_for >= idle_limit {
+    if policy.presence_file.is_some() {
+        return policy.file_check;
+    }
+    if idle_for >= policy.idle_limit {
         return KEEPER_AWAY_CHECK;
     }
     let check = if release_command {
@@ -629,7 +720,7 @@ fn keeper_wait(
     } else {
         KEEPER_CHECK
     };
-    (idle_limit - idle_for)
+    (policy.idle_limit - idle_for)
         .min(check)
         .max(std::time::Duration::from_millis(100))
 }
@@ -785,11 +876,11 @@ impl WarmSlot {
     }
 
     /// Start the presence keeper: from now on a worker stays loaded while
-    /// the user was active within `idle_limit`. Does nothing if one runs.
+    /// `policy` says the user is here. Does nothing if one runs.
     fn start_keeper(
         &self,
         command: impl Fn() -> Result<Command, TranscribeError> + Send + 'static,
-        idle_limit: std::time::Duration,
+        policy: KeepPolicy,
         release: Option<String>,
     ) {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -801,7 +892,7 @@ impl WarmSlot {
         let shared = Arc::downgrade(&self.0);
         let spawned = std::thread::Builder::new()
             .name("voxtype-warm".into())
-            .spawn(move || keep_warm(shared, rx, presence, command, idle_limit, release));
+            .spawn(move || keep_warm(shared, rx, presence, command, policy, release));
         if let Err(e) = spawned {
             tracing::warn!("Cannot keep a live worker warm: {}", e);
         }
@@ -814,29 +905,60 @@ fn keep_warm(
     wake: std::sync::mpsc::Receiver<()>,
     presence: Arc<crate::presence::Presence>,
     command: impl Fn() -> Result<Command, TranscribeError>,
-    idle_limit: std::time::Duration,
+    policy: KeepPolicy,
     release: Option<String>,
 ) {
-    tracing::info!(
-        "Keeping a live worker warm while you use the computer (released after {}s without input)",
-        idle_limit.as_secs()
-    );
+    match policy.presence_file {
+        Some(ref path) => tracing::info!(
+            "Keeping a live worker warm while {} says {:?} (else released after {}s); \
+             without a fresh file, released after {}s without input",
+            path.display(),
+            policy.keep_states,
+            policy.grace.as_secs(),
+            policy.idle_limit.as_secs()
+        ),
+        None => tracing::info!(
+            "Keeping a live worker warm while you use the computer (released after {}s without input)",
+            policy.idle_limit.as_secs()
+        ),
+    }
     let mut release_says = false;
     let mut release_checked: Option<std::time::Instant> = None;
     // Workers that exited on their own in a row, and the recording count
     // when the last one did.
     let mut exits = 0u32;
     let mut exits_at_recording = 0u64;
+    // The presence file's last state (None: missing or stale), for the log.
+    let mut seen: Option<Option<String>> = None;
     loop {
         let Some(slot) = shared.upgrade() else {
             return;
         };
         let now = std::time::Instant::now();
         let (last, kind) = presence.last();
+        let (last_local, kind_local) = presence.last_local();
         let idle_for = now.saturating_duration_since(last);
+        let local_idle_for = now.saturating_duration_since(last_local);
+        let file = policy
+            .presence_file
+            .as_deref()
+            .and_then(crate::presence::read_presence_file);
+        if policy.presence_file.is_some() {
+            let state = file.as_ref().map(|f| f.state.clone());
+            if seen.as_ref() != Some(&state) {
+                match file {
+                    Some(ref f) => tracing::info!("Presence: {} ({})", f.state, f.reason),
+                    None => tracing::info!(
+                        "Presence file missing or stale; going by keyboard and mouse input"
+                    ),
+                }
+                seen = Some(state);
+            }
+        }
+        let want = want_warm(&policy, file.as_ref(), idle_for, local_idle_for);
         if let Some(ref cmd) = release {
             let due = release_checked.is_none_or(|t| now.duration_since(t) >= WARM_RELEASE_CHECK);
-            if idle_for < idle_limit && due {
+            if want.keep && due {
                 release_says = release_requested(cmd);
                 release_checked = Some(now);
             }
@@ -864,18 +986,17 @@ fn keep_warm(
                 }
             }
             let gave_up = exits >= KEEPER_MAX_EXITS && st.recordings == exits_at_recording;
-            match warm_action(
-                idle_for,
-                idle_limit,
-                st.worker.is_some(),
-                st.busy,
-                release_says,
-            ) {
+            match warm_action(want.keep, st.worker.is_some(), st.busy, release_says) {
                 WarmAction::Load if gave_up => {}
                 WarmAction::Load => {
+                    let back = match file {
+                        Some(ref f) if policy.keep_states.contains(&f.state) => want.why.clone(),
+                        Some(_) => kind_local.describe().to_string(),
+                        None => kind.describe().to_string(),
+                    };
                     let reason = match st.why_empty.unwrap_or(EmptyBecause::Start) {
                         EmptyBecause::Start => "daemon start".to_string(),
-                        EmptyBecause::Away => format!("you are back: {}", kind.describe()),
+                        EmptyBecause::Away => format!("you are back: {}", back),
                         EmptyBecause::ReleaseCommand => {
                             "the release command no longer asks for the memory".to_string()
                         }
@@ -904,10 +1025,7 @@ fn keep_warm(
                         tracing::info!("Releasing the warm live worker: the release command asked");
                         st.why_empty = Some(EmptyBecause::ReleaseCommand);
                     } else {
-                        tracing::info!(
-                            "Releasing the warm live worker: no keyboard or mouse input for {}s",
-                            idle_for.as_secs()
-                        );
+                        tracing::info!("Releasing the warm live worker: {}", want.why);
                         st.why_empty = Some(EmptyBecause::Away);
                     }
                 }
@@ -915,7 +1033,7 @@ fn keep_warm(
             }
         }
         drop(slot);
-        let wait = keeper_wait(idle_for, idle_limit, release.is_some());
+        let wait = keeper_wait(&policy, idle_for, release.is_some());
         if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) = wake.recv_timeout(wait) {
             return;
         }
@@ -1188,48 +1306,81 @@ mod tests {
 
     const HOUR: Duration = Duration::from_secs(3600);
 
+    fn policy(file: Option<std::path::PathBuf>) -> KeepPolicy {
+        KeepPolicy {
+            idle_limit: HOUR,
+            presence_file: file,
+            keep_states: vec!["here".to_string()],
+            grace: Duration::from_secs(600),
+            file_check: Duration::from_millis(20),
+        }
+    }
+
+    fn reading(state: &str, since_age: u64) -> crate::presence::FileReading {
+        crate::presence::FileReading {
+            state: state.to_string(),
+            since_age: Some(Duration::from_secs(since_age)),
+            reason: "test".to_string(),
+        }
+    }
+
     #[test]
-    fn the_keeper_loads_while_present_and_releases_when_away() {
-        let s = Duration::from_secs;
-        assert_eq!(
-            warm_action(s(10), HOUR, false, false, false),
-            WarmAction::Load
-        );
-        assert_eq!(
-            warm_action(s(10), HOUR, true, false, false),
-            WarmAction::Keep
-        );
-        assert_eq!(
-            warm_action(HOUR, HOUR, true, false, false),
-            WarmAction::Release
-        );
-        assert_eq!(
-            warm_action(HOUR, HOUR, false, false, false),
-            WarmAction::Keep
-        );
+    fn the_keeper_acts_on_what_is_wanted() {
+        assert_eq!(warm_action(true, false, false, false), WarmAction::Load);
+        assert_eq!(warm_action(true, true, false, false), WarmAction::Keep);
+        assert_eq!(warm_action(false, true, false, false), WarmAction::Release);
+        assert_eq!(warm_action(false, false, false, false), WarmAction::Keep);
         // A recording holds the worker: never load a second one.
-        assert_eq!(
-            warm_action(s(10), HOUR, false, true, false),
-            WarmAction::Keep
-        );
+        assert_eq!(warm_action(true, false, true, false), WarmAction::Keep);
         // The release command wins over presence.
-        assert_eq!(
-            warm_action(s(10), HOUR, true, false, true),
-            WarmAction::Release
-        );
-        assert_eq!(
-            warm_action(s(10), HOUR, false, false, true),
-            WarmAction::Keep
-        );
+        assert_eq!(warm_action(true, true, false, true), WarmAction::Release);
+        assert_eq!(warm_action(true, false, false, true), WarmAction::Keep);
+    }
+
+    #[test]
+    fn without_a_presence_file_input_decides() {
+        let p = policy(None);
+        let s = Duration::from_secs;
+        assert!(want_warm(&p, None, s(10), s(10)).keep);
+        let away = want_warm(&p, None, HOUR, HOUR);
+        assert!(!away.keep);
+        assert_eq!(away.why, "no keyboard or mouse input for 3600s");
+    }
+
+    #[test]
+    fn a_keep_state_keeps_even_without_input() {
+        let p = policy(None);
+        let w = want_warm(&p, Some(&reading("here", 9000)), HOUR * 5, HOUR * 5);
+        assert!(w.keep);
+        assert_eq!(w.why, "presence here: test");
+    }
+
+    #[test]
+    fn another_state_releases_after_the_grace() {
+        let p = policy(None);
+        let s = Duration::from_secs;
+        assert!(want_warm(&p, Some(&reading("away", 599)), HOUR, HOUR).keep);
+        let w = want_warm(&p, Some(&reading("away", 601)), HOUR, HOUR);
+        assert!(!w.keep);
+        assert_eq!(w.why, "presence away for 601s: test");
+        // Remote-desktop input (only `idle_for` is recent) keeps nothing.
+        assert!(!want_warm(&p, Some(&reading("remote", 3000)), s(1), HOUR).keep);
+        // Local keyboard or mouse input starts the grace again.
+        assert!(want_warm(&p, Some(&reading("remote", 3000)), s(1), s(1)).keep);
     }
 
     #[test]
     fn the_keeper_wakes_when_the_user_turns_away() {
         let s = Duration::from_secs;
-        assert_eq!(keeper_wait(s(1790), s(1800), false), s(10));
-        assert_eq!(keeper_wait(s(0), s(1800), false), KEEPER_CHECK);
-        assert_eq!(keeper_wait(s(0), s(1800), true), WARM_RELEASE_CHECK);
-        assert_eq!(keeper_wait(s(1800), s(1800), false), KEEPER_AWAY_CHECK);
+        let mut p = policy(None);
+        p.idle_limit = s(1800);
+        assert_eq!(keeper_wait(&p, s(1790), false), s(10));
+        assert_eq!(keeper_wait(&p, s(0), false), KEEPER_CHECK);
+        assert_eq!(keeper_wait(&p, s(0), true), WARM_RELEASE_CHECK);
+        assert_eq!(keeper_wait(&p, s(1800), false), KEEPER_AWAY_CHECK);
+        // With a presence file, it reads the file on its own beat.
+        let p = policy(Some("/x".into()));
+        assert_eq!(keeper_wait(&p, s(1800), false), p.file_check);
     }
 
     /// A stand-in worker: waits on stdin like a loaded live worker.
@@ -1260,20 +1411,92 @@ mod tests {
         }
     }
 
-    fn start_test_keeper(slot: &WarmSlot, presence: &Arc<Presence>) {
+    fn start_test_keeper(slot: &WarmSlot, presence: &Arc<Presence>, policy: KeepPolicy) {
         let (tx, rx) = std::sync::mpsc::channel();
         slot.0.keeper.set(tx.clone()).unwrap();
         presence.watch(tx);
         let shared = Arc::downgrade(&slot.0);
         let presence = Arc::clone(presence);
-        std::thread::spawn(move || keep_warm(shared, rx, presence, fake_worker, HOUR, None));
+        std::thread::spawn(move || keep_warm(shared, rx, presence, fake_worker, policy, None));
+    }
+
+    /// Write a presence file as presence-detect does: `updated` now,
+    /// `since` that many seconds ago (`updated_ago` makes it stale).
+    fn write_presence(path: &std::path::Path, state: &str, since_ago: f64, updated_ago: f64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+        let tmp = path.with_extension("tmp");
+        std::fs::write(
+            &tmp,
+            format!(
+                r#"{{"state": "{}", "since": {}, "updated": {}, "reason": "test {}"}}"#,
+                state,
+                now - since_ago,
+                now - updated_ago,
+                state
+            ),
+        )
+        .unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
+    #[test]
+    fn the_keeper_follows_the_presence_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state");
+        write_presence(&file, "here", 10.0, 0.0);
+        let presence = Arc::new(Presence::new(Instant::now()));
+        let slot = WarmSlot::default();
+        start_test_keeper(&slot, &presence, policy(Some(file.clone())));
+
+        // here: loaded.
+        let first = wait_for(&slot, |p| p.is_some());
+        assert!(first.is_some(), "loaded while here");
+
+        // away past the grace, nobody at the local keyboard: released.
+        presence.set_last(Instant::now() - HOUR, Activity::Input);
+        write_presence(&file, "away", 700.0, 0.0);
+        assert_eq!(wait_for(&slot, |p| p.is_none()), None, "released when away");
+
+        // remote, with remote-desktop input: stays released.
+        write_presence(&file, "remote", 3000.0, 0.0);
+        presence.mark(Activity::RemoteInput);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(worker_pid(&slot), None, "remote input keeps nothing warm");
+
+        // here again: loaded at once.
+        write_presence(&file, "here", 0.0, 0.0);
+        let back = wait_for(&slot, |p| p.is_some());
+        assert!(back.is_some() && back != first, "reloaded on here");
+
+        // A stale file: the input rule decides. No input for over the idle
+        // limit, so the worker goes.
+        write_presence(&file, "here", 0.0, 120.0);
+        presence.set_last(
+            Instant::now() - HOUR - Duration::from_secs(1),
+            Activity::Input,
+        );
+        assert_eq!(
+            wait_for(&slot, |p| p.is_none()),
+            None,
+            "stale file: input rule"
+        );
+
+        // Still stale: the next local input loads it again.
+        presence.mark(Activity::Input);
+        assert!(
+            wait_for(&slot, |p| p.is_some()).is_some(),
+            "stale file: reload on input"
+        );
     }
 
     #[test]
     fn the_keeper_follows_the_user() {
         let presence = Arc::new(Presence::new(Instant::now()));
         let slot = WarmSlot::default();
-        start_test_keeper(&slot, &presence);
+        start_test_keeper(&slot, &presence, policy(None));
 
         // Daemon start: a worker loads at once.
         let first = wait_for(&slot, |p| p.is_some()).expect("loaded at start");

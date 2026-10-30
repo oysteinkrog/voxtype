@@ -75,6 +75,25 @@ pub struct Config {
     #[serde(default)]
     pub live_preview_warm_idle_secs: u64,
 
+    /// A file another program keeps up to date with whether the user is at
+    /// this computer: JSON with `"state"` and `"updated"` (Unix seconds),
+    /// optionally `"since"` and `"reason"`. While it is fresh (updated in the
+    /// last 60 s), it decides instead of the input timer: a warm live worker
+    /// stays loaded in the `live_preview_warm_presence_keep` states and goes
+    /// after `live_preview_warm_presence_grace_secs` in any other. `~` is
+    /// expanded. Unset or empty = off.
+    #[serde(default)]
+    pub live_preview_warm_presence_file: Option<String>,
+
+    /// Presence file states that keep a warm live worker.
+    #[serde(default = "default_warm_presence_keep")]
+    pub live_preview_warm_presence_keep: Vec<String>,
+
+    /// Seconds in another presence state, with no input on this computer's
+    /// own keyboard and mouse, before the warm live worker is released.
+    #[serde(default = "default_warm_presence_grace_secs")]
+    pub live_preview_warm_presence_grace_secs: u64,
+
     /// Shell command run every 10 s while a warm worker waits. If it exits
     /// 0, the worker stops early, e.g. to give the RAM back under memory
     /// pressure: `grep -q 'level=pause' /path/to/pressure-level`.
@@ -200,6 +219,9 @@ impl Default for Config {
             live_typing: false,
             live_preview_warm_secs: 0,
             live_preview_warm_idle_secs: 0,
+            live_preview_warm_presence_file: None,
+            live_preview_warm_presence_keep: default_warm_presence_keep(),
+            live_preview_warm_presence_grace_secs: default_warm_presence_grace_secs(),
             live_preview_warm_release_command: None,
             live_preview_corpus_dir: None,
             live_preview_revisions_dir: None,
@@ -639,6 +661,14 @@ impl Config {
     pub fn profile_names(&self) -> Vec<&String> {
         self.profiles.keys().collect()
     }
+}
+
+fn default_warm_presence_keep() -> Vec<String> {
+    vec!["here".to_string()]
+}
+
+fn default_warm_presence_grace_secs() -> u64 {
+    600
 }
 
 fn default_live_preview_final() -> String {

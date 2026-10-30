@@ -118,7 +118,7 @@ live_preview_warm_secs = 7200
 
 Keep a warm live worker for as long as you use the computer, and release it after this many seconds with no keyboard, mouse or touchpad input. The worker loads when the daemon starts, again after a recording that used it up or a worker that exited, and at your first input after a release (a key at the lock screen counts, and so does waking from suspend). Start the dictation a second or two after you come back and the model is already loaded.
 
-Presence comes from reading the keyboards, mice and touchpads under `/dev/input` (no grab), so the user needs the `input` group, as for the evdev hotkey. Without it, only recordings count as activity. When set, `live_preview_warm_secs` is not used.
+Presence comes from reading the keyboards, mice and touchpads under `/dev/input` (no grab), so the user needs the `input` group, as for the evdev hotkey. Without it, only recordings count as activity. When set, `live_preview_warm_secs` is not used. With a fresh `live_preview_warm_presence_file`, the file decides instead, and this timer is the fallback for when the file is missing or stale.
 
 ```toml
 # Keep the live model loaded while I am at the computer; free the RAM after 30 min away.
@@ -127,13 +127,70 @@ live_preview_warm_idle_secs = 1800
 
 The daemon log shows each load and release with its reason, for example `Loading the warm live worker (you are back: keyboard or mouse input)` and `Releasing the warm live worker: no keyboard or mouse input for 1800s`.
 
+## live_preview_warm_presence_file
+
+**Type:** String (path)
+**Default:** unset (off)
+**Required:** No
+
+A file that another program keeps up to date with whether you are at this computer. While it is fresh, it decides when a warm live worker is kept, instead of the input timer of `live_preview_warm_idle_secs`. Setting it turns the warm worker on by itself; the worker loads when the daemon starts.
+
+The file is JSON with these fields:
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `state` | yes | A word such as `here`, `remote` or `away` |
+| `updated` | yes | Unix time (seconds) of the last write |
+| `since` | no | Unix time (seconds) the state began |
+| `reason` | no | Free text, shown in the daemon log |
+
+```json
+{"state": "here", "since": 1793348751.0, "updated": 1793350218.7, "reason": "key press 4 s ago"}
+```
+
+The daemon reads it every 2 s and trusts it only while `updated` is less than 60 s old. Write it atomically (write a temporary file, then rename it). The rules:
+
+- In a state listed in `live_preview_warm_presence_keep`: a worker is kept, and loaded at once if there is none. Changing into such a state counts as coming back.
+- In any other state: the worker is released once the state has held for `live_preview_warm_presence_grace_secs` and there was no input on this computer's own keyboard and mouse for as long. Input from virtual (uinput) devices, such as a remote-desktop server's keyboard and mouse, does not count. Local input loads the worker again at once.
+- Missing, unreadable or stale file: `live_preview_warm_idle_secs` decides (1800 s when that is 0).
+
+`~` is expanded. An empty string turns it off.
+
+```toml
+live_preview_warm_presence_file = "~/.local/state/presence/state"
+```
+
+## live_preview_warm_presence_keep
+
+**Type:** List of strings
+**Default:** `["here"]`
+**Required:** No
+
+The `state` values of `live_preview_warm_presence_file` that keep a warm live worker.
+
+```toml
+live_preview_warm_presence_keep = ["here"]
+```
+
+## live_preview_warm_presence_grace_secs
+
+**Type:** Integer (seconds)
+**Default:** `600`
+**Required:** No
+
+How long the presence file may show any other state (with no input on this computer's own keyboard and mouse) before the warm live worker is released.
+
+```toml
+live_preview_warm_presence_grace_secs = 600
+```
+
 ## live_preview_warm_release_command
 
 **Type:** String (shell command)
 **Default:** unset
 **Required:** No
 
-Run with `sh -c` every 10 s while a warm worker waits (and, with `live_preview_warm_idle_secs`, while you are present). Exit status 0 releases the worker, for example to give the RAM back under memory pressure. With `live_preview_warm_idle_secs`, no new worker loads while the command keeps exiting 0.
+Run with `sh -c` every 10 s while a warm worker waits (and, with `live_preview_warm_idle_secs` or `live_preview_warm_presence_file`, while you are present). Exit status 0 releases the worker, for example to give the RAM back under memory pressure. With `live_preview_warm_idle_secs`, no new worker loads while the command keeps exiting 0.
 
 ```toml
 live_preview_warm_release_command = "grep -q 'level=pause' ~/.local/state/pressure/level"

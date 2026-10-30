@@ -37,8 +37,11 @@ const POLL_TIMEOUT_MS: i32 = 60_000;
 pub enum Activity {
     /// The daemon started.
     Start,
-    /// Keyboard, mouse or touchpad input.
+    /// Keyboard, mouse or touchpad input from a real device.
     Input,
+    /// Input from a virtual (uinput) device, such as a remote-desktop
+    /// server's keyboard and mouse.
+    RemoteInput,
     /// The computer woke from suspend.
     Resume,
     /// A recording started.
@@ -50,6 +53,7 @@ impl Activity {
         match self {
             Activity::Start => "daemon start",
             Activity::Input => "keyboard or mouse input",
+            Activity::RemoteInput => "remote-desktop input",
             Activity::Resume => "resume from suspend",
             Activity::Recording => "a recording",
         }
@@ -59,6 +63,9 @@ impl Activity {
 struct State {
     last: Instant,
     kind: Activity,
+    /// The same, leaving out [`Activity::RemoteInput`].
+    last_local: Instant,
+    kind_local: Activity,
 }
 
 /// The time of the user's last activity, and who to tell when they return.
@@ -73,24 +80,38 @@ impl Presence {
             state: Mutex::new(State {
                 last: now,
                 kind: Activity::Start,
+                last_local: now,
+                kind_local: Activity::Start,
             }),
             watchers: Mutex::new(Vec::new()),
         }
     }
 
     /// The user did something at `now`. Watchers are told when it ends a
-    /// pause of at least [`RETURN_GAP`], or when it is not plain input.
+    /// pause of at least [`RETURN_GAP`] (local input after local quiet, or
+    /// remote input after any quiet), or when it is not input.
     pub fn mark_at(&self, kind: Activity, now: Instant) {
         let returned = {
             let Ok(mut st) = self.state.lock() else {
                 return;
             };
             let gap = now.saturating_duration_since(st.last);
+            let local_gap = now.saturating_duration_since(st.last_local);
             if now > st.last {
                 st.last = now;
             }
             st.kind = kind;
-            kind != Activity::Input || gap >= RETURN_GAP
+            if kind != Activity::RemoteInput {
+                if now > st.last_local {
+                    st.last_local = now;
+                }
+                st.kind_local = kind;
+            }
+            match kind {
+                Activity::Input => local_gap >= RETURN_GAP,
+                Activity::RemoteInput => gap >= RETURN_GAP,
+                _ => true,
+            }
         };
         if returned {
             if let Ok(mut watchers) = self.watchers.lock() {
@@ -109,6 +130,8 @@ impl Presence {
         let mut st = self.state.lock().unwrap();
         st.last = last;
         st.kind = kind;
+        st.last_local = last;
+        st.kind_local = kind;
     }
 
     /// When the user was last active, and what showed it.
@@ -119,6 +142,15 @@ impl Presence {
             .unwrap_or((Instant::now(), Activity::Start))
     }
 
+    /// When the user was last active on this machine itself (no remote
+    /// input), and what showed it.
+    pub fn last_local(&self) -> (Instant, Activity) {
+        self.state
+            .lock()
+            .map(|st| (st.last_local, st.kind_local))
+            .unwrap_or((Instant::now(), Activity::Start))
+    }
+
     /// Send `()` to `tx` when the user returns after a pause. Dropped once
     /// its receiver is gone.
     pub fn watch(&self, tx: Sender<()>) {
@@ -126,6 +158,52 @@ impl Presence {
             watchers.push(tx);
         }
     }
+}
+
+/// A presence file older than this is not trusted.
+const FILE_FRESH_SECS: f64 = 60.0;
+
+/// One reading of an external presence file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileReading {
+    pub state: String,
+    /// How long the file says the state has held (from `"since"`).
+    pub since_age: Option<Duration>,
+    pub reason: String,
+}
+
+/// Parse a presence file: JSON with `"state"` and `"updated"` (Unix
+/// seconds), optionally `"since"` (Unix seconds) and `"reason"`. None when it
+/// is not that, or `updated` is not within the last [`FILE_FRESH_SECS`].
+pub fn parse_presence(text: &str, now_epoch: f64) -> Option<FileReading> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let state = v["state"].as_str()?.trim();
+    let updated = v["updated"].as_f64()?;
+    let age = now_epoch - updated;
+    if state.is_empty() || !(-5.0..FILE_FRESH_SECS).contains(&age) {
+        return None;
+    }
+    Some(FileReading {
+        state: state.to_string(),
+        since_age: v["since"]
+            .as_f64()
+            .map(|since| Duration::from_secs_f64((now_epoch - since).max(0.0))),
+        reason: v["reason"]
+            .as_str()
+            .unwrap_or("no reason given")
+            .to_string(),
+    })
+}
+
+/// Read and parse a presence file. None when it is missing, unreadable,
+/// malformed or stale.
+pub fn read_presence_file(path: &Path) -> Option<FileReading> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs_f64();
+    parse_presence(&text, now)
 }
 
 /// The daemon's presence tracker. The first call starts the input thread;
@@ -174,8 +252,19 @@ fn is_user_input(device: &evdev::Device) -> bool {
     keyboard || mouse || touch
 }
 
+/// Whether an event device is a uinput device (a remote-desktop server's,
+/// for example) rather than real hardware. Bluetooth LE input goes through
+/// uhid and stays real.
+fn is_virtual(path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    std::fs::canonicalize(Path::new("/sys/class/input").join(name).join("device"))
+        .is_ok_and(|p| p.to_string_lossy().contains("/devices/virtual/input/"))
+}
+
 /// The keyboards and pointers under `dir`, opened non-blocking.
-fn open_devices(dir: &Path) -> Vec<(PathBuf, evdev::Device)> {
+fn open_devices(dir: &Path) -> Vec<(PathBuf, evdev::Device, bool)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -201,7 +290,8 @@ fn open_devices(dir: &Path) -> Vec<(PathBuf, evdev::Device)> {
                 libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
             }
         }
-        devices.push((path, device));
+        let remote = is_virtual(&path);
+        devices.push((path, device, remote));
     }
     devices
 }
@@ -295,7 +385,7 @@ fn watch_input(presence: &Presence) {
     loop {
         let mut fds: Vec<libc::pollfd> = devices
             .iter()
-            .map(|(_, d)| libc::pollfd {
+            .map(|(_, d, _)| libc::pollfd {
                 fd: d.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
@@ -321,8 +411,9 @@ fn watch_input(presence: &Presence) {
             continue;
         }
         let mut input = false;
+        let mut remote_input = false;
         let mut gone = Vec::new();
-        for (i, (path, device)) in devices.iter().enumerate() {
+        for (i, (path, device, remote)) in devices.iter().enumerate() {
             let revents = fds[i].revents;
             if revents == 0 {
                 continue;
@@ -332,12 +423,13 @@ fn watch_input(presence: &Presence) {
                 continue;
             }
             match drain(device.as_raw_fd()) {
+                Some(got) if *remote => remote_input |= got,
                 Some(got) => input |= got,
                 None => gone.push(path.clone()),
             }
         }
         if !gone.is_empty() {
-            devices.retain(|(p, _)| !gone.contains(p));
+            devices.retain(|(p, _, _)| !gone.contains(p));
         }
         if let Some(ref mut i) = inotify {
             if fds.last().is_some_and(|f| f.revents != 0) {
@@ -351,15 +443,20 @@ fn watch_input(presence: &Presence) {
         if rescan {
             // udev sets the group a moment after the node appears.
             std::thread::sleep(Duration::from_millis(500));
-            for (path, device) in open_devices(dir) {
-                if !devices.iter().any(|(p, _)| *p == path) {
+            for (path, device, remote) in open_devices(dir) {
+                if !devices.iter().any(|(p, _, _)| *p == path) {
                     tracing::debug!("Presence: watching {:?}", path);
-                    devices.push((path, device));
+                    devices.push((path, device, remote));
                 }
             }
         }
+        if remote_input {
+            presence.mark(Activity::RemoteInput);
+        }
         if input {
             presence.mark(Activity::Input);
+        }
+        if input || remote_input {
             std::thread::sleep(INPUT_SAMPLE);
         }
     }
@@ -375,9 +472,48 @@ mod tests {
     #[test]
     #[ignore]
     fn list_devices() {
-        for (path, device) in open_devices(Path::new("/dev/input")) {
-            println!("{:?} {:?}", path, device.name());
+        for (path, device, remote) in open_devices(Path::new("/dev/input")) {
+            println!("{:?} {:?} remote={}", path, device.name(), remote);
         }
+    }
+
+    #[test]
+    fn a_fresh_presence_file_is_read() {
+        let text = r#"{"state": "remote", "since": 1000.0, "updated": 1990.0, "reason": "RDP client connected"}"#;
+        let r = parse_presence(text, 2000.0).unwrap();
+        assert_eq!(r.state, "remote");
+        assert_eq!(r.since_age, Some(Duration::from_secs(1000)));
+        assert_eq!(r.reason, "RDP client connected");
+    }
+
+    #[test]
+    fn a_stale_or_broken_presence_file_is_not_trusted() {
+        let text = r#"{"state": "here", "updated": 1000.0}"#;
+        assert!(parse_presence(text, 1059.0).is_some());
+        assert!(parse_presence(text, 1061.0).is_none(), "stale");
+        assert!(parse_presence(text, 900.0).is_none(), "from the future");
+        assert!(parse_presence(r#"{"state": "here"}"#, 1000.0).is_none());
+        assert!(parse_presence("here", 1000.0).is_none());
+        assert!(read_presence_file(Path::new("/nonexistent/presence")).is_none());
+    }
+
+    #[test]
+    fn remote_input_does_not_move_the_local_clock() {
+        let t0 = Instant::now();
+        let p = Presence::new(t0);
+        let (tx, rx) = mpsc::channel();
+        p.watch(tx);
+        p.mark_at(Activity::RemoteInput, t0 + Duration::from_secs(60));
+        assert!(rx.try_recv().is_ok(), "a return over remote desktop");
+        assert_eq!(p.last().0, t0 + Duration::from_secs(60));
+        assert_eq!(p.last_local(), (t0, Activity::Start));
+        // Local input after local quiet is a return, though remote input was recent.
+        p.mark_at(Activity::Input, t0 + Duration::from_secs(61));
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(
+            p.last_local(),
+            (t0 + Duration::from_secs(61), Activity::Input)
+        );
     }
 
     #[test]
