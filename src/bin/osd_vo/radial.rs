@@ -724,7 +724,9 @@ impl Popup {
                     .presence(Transition::fade().offset(0.0, 6.0 * k), Transition::fade()),
             );
         let y = (bottom - BOTTOM_GAP) * k - icon_h / 2.0;
-        at(row, 42.0 * k, y)
+        // The row snaps to a new line count, as the canvas's rule does: on a
+        // spring it slid down across the rule above it.
+        at(row, 42.0 * k, y).motion(Prop::Position, Motion::Snap)
     }
 }
 
