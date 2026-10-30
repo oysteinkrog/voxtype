@@ -168,6 +168,9 @@ mod edit_focus;
 #[path = "osd_vo/edit.rs"]
 mod edit;
 
+#[path = "osd_vo/edit_site.rs"]
+mod edit_site;
+
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;
 
@@ -723,6 +726,9 @@ struct Look {
     /// `no-` entries. Off in `Look::new`, so a station tile keeps exactly
     /// its exhibit's features; `set_motion` turns it on.
     look_set: bool,
+    /// Features switched off while a keyboard edit is pending or under way
+    /// (`edit_site::quiet_list`); empty otherwise.
+    quiet: Arc<[&'static str]>,
 }
 
 /// Letter spacing of a full newest line under type's margin bell (MO-31).
@@ -784,6 +790,7 @@ impl Look {
                 .then(|| cfg.reading_line.clamp(0.0, 1.0)),
             features: Arc::from([]),
             look_set: false,
+            quiet: Arc::from([]),
         }
     }
 
@@ -808,6 +815,9 @@ impl Look {
     /// Asked for, or in the current look's set and not taken out. Reads
     /// `self.theme` now, so a look switch mid-show answers the new look.
     fn asked_or_set(&self, name: &str) -> bool {
+        if self.quiet.contains(&name) {
+            return false;
+        }
         self.asked(name)
             || (self.look_set
                 && defaults::in_set(self.theme, name)
@@ -818,6 +828,9 @@ impl Look {
     /// that have motion features.
     #[allow(dead_code)]
     fn on(&self, name: &str) -> bool {
+        if self.quiet.contains(&name) {
+            return false;
+        }
         // MO-75: `look-choice` also turns on the motions this look picks.
         self.asked_or_set(name)
             || (self.asked_or_set(choice::LOOK_CHOICE)
@@ -1799,12 +1812,14 @@ impl Popup {
         };
         let text = buffer.text().to_string();
         self.model.update(&text);
+        let site = edit_site::site(self.look.theme);
+        let text_box = site.text_box(&self.look);
         let view = self.edit_layer.view(
             buffer,
             &self.measure,
-            self.look.text_style(),
-            self.look.text_width(),
-            self.look.max_lines(),
+            text_box.style,
+            text_box.width,
+            site.edit_lines(&self.look),
             t,
         );
         let window = view.start..view.start + view.text.len();
@@ -1814,6 +1829,24 @@ impl Popup {
         self.lines = self.lines.max(view.lines);
         self.edit_view = Some(view);
         true
+    }
+
+    /// R34: from a pending tap until resume or a cancelled tap, the look's
+    /// quiet list is off.
+    fn sync_quiet(&mut self) {
+        use edit_link::Phase;
+        let quiet = self.edit.as_ref().and_then(|l| l.phase()).is_some_and(|p| {
+            matches!(
+                p,
+                Phase::Pending | Phase::Settling | Phase::Editing | Phase::Detached
+            )
+        });
+        // Made again each time: a look switched mid-edit has its own list.
+        self.look.quiet = if quiet {
+            edit_site::quiet_list(self.look.theme).into()
+        } else {
+            Arc::from([])
+        };
     }
 
     /// The text the look shows when the popup does not own the edit text:
@@ -1980,6 +2013,7 @@ impl App for Popup {
                     link.sync(self.files.live.as_ref().and_then(|l| l.edit.as_ref()));
                     self.focus.follow(link, cx, t);
                 }
+                self.sync_quiet();
                 let editing = self.edit_text(t);
                 let source = self.source_text();
                 if !editing && source != self.source {
@@ -2103,17 +2137,20 @@ impl App for Popup {
         };
         // Up, Down, Home and End move by the lines the look draws.
         let lines = match link.buffer() {
-            Some(b) if self.edit_view.is_some() => Some(self.edit_layer.shaped(
-                b.text(),
-                &self.measure,
-                self.look.text_style(),
-                self.look.text_width(),
-            ) as &dyn vo_core::edit::Lines),
+            Some(b) if self.edit_view.is_some() => {
+                let text_box = edit_site::site(self.look.theme).text_box(&self.look);
+                Some(
+                    self.edit_layer
+                        .shaped(b.text(), &self.measure, text_box.style, text_box.width)
+                        as &dyn vo_core::edit::Lines,
+                )
+            }
             _ => None,
         };
         let used = self.focus.key(ev, link, lines);
         self.focus.follow(link, cx, ev.t);
         if used {
+            self.sync_quiet();
             self.edit_text(ev.t);
         }
         used
@@ -2124,6 +2161,8 @@ impl App for Popup {
             let t = cx.t();
             self.focus.changed(gained, requested, link, t);
             self.focus.follow(link, cx, t);
+            self.sync_quiet();
+            self.edit_text(t);
         }
     }
 
@@ -2141,11 +2180,11 @@ impl App for Popup {
         // the old look whole at once: no exit of it, its status row
         // included, draws over the new look.
         let look = match &self.edit_view {
-            Some(v) => look.map_live_texts(&mut |e| {
-                e.live_source(v.text.clone())
-                    .edit(v.decor.clone())
-                    .still_motion(true)
-            }),
+            Some(v) => edit_site::site(self.look.theme).place(&self.look, look, v),
+            // A pending tap or a detached edit: still, before and after.
+            None if !self.look.quiet.is_empty() => {
+                look.map_live_texts(&mut |e| e.still_motion(true))
+            }
             None => look,
         };
         let look = correction_note::dim(look, self.correction_view());
