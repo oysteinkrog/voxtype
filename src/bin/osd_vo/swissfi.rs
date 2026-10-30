@@ -70,7 +70,7 @@ const SETTLE_SECS: f64 = 0.3;
 /// the notch its casts land in.
 const COUNT_MIN_W: f32 = 32.0;
 const NOTCH_ROOM: f32 = 7.0;
-/// How far a new word rises, and the state label slides.
+/// How far a new word rises, and the state label as it first shows.
 const WORD_RISE: f32 = 8.0;
 const LABEL_SLIDE: f32 = 7.0;
 
@@ -598,7 +598,8 @@ impl Popup {
         let until = mark.until();
         let icon =
             Element::canvas("mark", until, move |t, r, p| mark.draw(t, r, p)).size(12.0, 12.0);
-        // The state label slides up and out as the next one slides in.
+        // One key for the state word, so a new state's word replaces the old
+        // one in place. Keyed by state, the old word rolled out over the new one.
         let label_w = 0.62 * 9.6 * "Cancelled".len() as f32 + 4.0;
         let label = Element::layer("state")
             .clip()
@@ -608,10 +609,12 @@ impl Popup {
                     .max(10.0),
                 13.0,
             )
+            // A clip that grew on a spring cut the longer word short.
+            .motion(Prop::Size, Motion::Snap)
             .margin_edges(0.0, 0.0, 0.0, 8.0)
             .child(
                 at(
-                    Element::label(format!("state-{state}"), state.as_str())
+                    Element::label("word", state.as_str())
                         .text_style(style)
                         .color(color),
                     0.0,
@@ -633,8 +636,9 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(Transition::fade().offset(0.0, LABEL_SLIDE))
-            .word_change(Transition::fade().opacity(0.2).offset(0.0, -LABEL_SLIDE))
-            .presence(Transition::fade(), Transition::fade());
+            // No presence, so a dropped line goes at once: an old line fading out
+            // sat under the new state's words, which still fade in one by one.
+            .word_change(Transition::fade().opacity(0.2).offset(0.0, -LABEL_SLIDE));
         let mut row = Element::row("status")
             .height(STATUS_H)
             .align_items(AlignItems::CENTER)

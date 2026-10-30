@@ -1423,13 +1423,15 @@ impl Popup {
         let state_style = TextStyle::new(f.status, 20.0 * k, 26.0 * k);
         let detail_style = TextStyle::new(f.text, 17.0 * k, 26.0 * k);
         let state_w = self.jarvis_text_w(&state, &state_style).ceil();
+        // One key for the state word, so a new state's word replaces the old
+        // one in place. Keyed by state, the old word rolled out over the new one.
         let label = Element::layer("state")
             .clip()
             .size(state_w + 2.0, 26.0 * k)
             .margin_edges(0.0, 0.0, 0.0, 10.0 * k)
             .child(
                 at(
-                    Element::label(format!("state-{state}"), state.as_str())
+                    Element::label("word", state.as_str())
                         .text_style(state_style)
                         .color(hex(CYAN, 1.0)),
                     0.0,
@@ -1462,8 +1464,9 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(Transition::fade().offset(0.0, 6.0 * k))
-            .word_change(Transition::fade().opacity(0.2).offset(0.0, -6.0 * k))
-            .presence(Transition::fade(), Transition::fade());
+            // No presence, so a dropped line goes at once: an old line fading out
+            // sat under the new state's words, which still fade in one by one.
+            .word_change(Transition::fade().opacity(0.2).offset(0.0, -6.0 * k));
         let (pad_l, pad_r, gap) = (30.0 * k, 34.0 * k, 10.0 * k);
         let w = pad_l + 22.0 * k + gap + state_w + 2.0 + gap + detail_w + 2.0 + pad_r;
         let row = Element::row("pill")

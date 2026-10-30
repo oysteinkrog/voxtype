@@ -25,7 +25,7 @@ use vo::scene::taffy::prelude::{auto, length};
 const FRAME_SECS: f64 = 0.45;
 /// How far a new word rises into place, in logical pixels.
 const WORD_RISE: f32 = 8.0;
-/// How far the state label slides when it changes.
+/// How far the state label slides as it first shows, and new detail words rise.
 const LABEL_SLIDE: f32 = 7.0;
 /// The digit size of the clock and the word count, against the swiss values.
 const STAT_SCALE: f32 = 1.3;
@@ -547,7 +547,8 @@ impl Popup {
         let l = &self.look;
         let style = l.mono(l.status_px);
         let line = l.mono_line(l.status_px);
-        // The state label slides up and out as the next one slides in.
+        // One key for the state word, so a new state's word replaces the old
+        // one in place. Keyed by state, the old word rolled out over the new one.
         let state = status.state.as_str();
         let label_w = 0.62 * l.status_px * "FINISHING".len() as f32 + 4.0;
         let label = Element::layer("state")
@@ -556,7 +557,7 @@ impl Popup {
             .margin_edges(0.0, 0.0, 0.0, 10.0)
             .child(
                 at(
-                    Element::label(format!("state-{state}"), state)
+                    Element::label("word", state)
                         .text_style(style)
                         .color(l.accent),
                     0.0,
@@ -636,8 +637,9 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(Transition::fade().offset(0.0, LABEL_SLIDE))
+            // No presence, so a dropped line goes at once: an old line fading out
+            // sat under the new state's words, which still fade in one by one.
             .word_change(Transition::fade().opacity(0.2).offset(0.0, -LABEL_SLIDE))
-            .presence(Transition::fade(), Transition::fade())
     }
 }
 

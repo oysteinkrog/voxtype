@@ -1161,7 +1161,9 @@ impl Popup {
             );
         }
         row = row.child(
-            Element::label(format!("state-{}", status.state), status.state.clone())
+            // Keyed once, not by state: a new key per state faded the old
+            // word out under the new one ("Loading" over "Listening").
+            Element::label("state", status.state.clone())
                 .text_style(style)
                 .color(hex(LABEL))
                 .presence(
@@ -1175,12 +1177,15 @@ impl Popup {
                 .child(
                     Element::label("sep", "·")
                         .text_style(style)
-                        .color(Color::hex(HINT, 0.7)),
+                        .color(Color::hex(HINT, 0.7))
+                        // Its x follows the state word's width.
+                        .motion(Prop::Position, Motion::Snap),
                 )
                 .child(
-                    Element::label(format!("detail-{}", status.state), detail)
+                    Element::label("detail", detail)
                         .text_style(style)
                         .color(hex(HINT))
+                        .motion(Prop::Position, Motion::Snap)
                         .presence(Transition::fade(), Transition::fade()),
                 );
         }
