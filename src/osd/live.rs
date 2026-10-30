@@ -936,6 +936,7 @@ mod tests {
             post_output_command: None,
             wait_for_modifier_release: false,
             modifier_release_timeout: std::time::Duration::ZERO,
+            normalize: true,
         };
         crate::output::output_via(&chain, text, opts).await.unwrap();
         let out = got.lock().unwrap().pop().unwrap();

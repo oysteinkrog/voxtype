@@ -123,6 +123,7 @@ impl StreamingSession {
             // applies to one-shot (non-streaming) output only.
             wait_for_modifier_release: false,
             modifier_release_timeout: std::time::Duration::from_millis(0),
+            normalize: true,
         };
         self.post_hook_ran |= post_output_command.is_some();
         output_with_fallback(chain, &new_partial, opts).await?;
@@ -222,6 +223,7 @@ impl StreamingSession {
             post_output_command,
             wait_for_modifier_release: false,
             modifier_release_timeout: std::time::Duration::from_millis(0),
+            normalize: true,
         };
         self.post_hook_ran |= post_output_command.is_some();
         output_with_fallback(chain, text, opts).await?;
@@ -231,6 +233,35 @@ impl StreamingSession {
         // committed text for cancel-rewind context.
         let finalized_tail = format!("{}{}", self.partial, text);
         self.finalized_text.push_str(&finalized_tail);
+        self.clear_partial();
+        Ok(())
+    }
+
+    /// Type `text` exactly: no text processing and no quote normalisation.
+    /// For keyboard-edited text, which was processed when it was frozen and
+    /// must arrive as the popup showed it.
+    pub async fn commit_exact(
+        &mut self,
+        chain: &[Box<dyn TextOutput>],
+        text: &str,
+        pre_output_command: Option<&str>,
+        post_output_command: Option<&str>,
+    ) -> Result<(), OutputError> {
+        if text.is_empty() {
+            self.clear_partial();
+            return Ok(());
+        }
+        let opts = OutputOptions {
+            pre_output_command,
+            post_output_command,
+            wait_for_modifier_release: false,
+            modifier_release_timeout: std::time::Duration::from_millis(0),
+            normalize: false,
+        };
+        self.post_hook_ran |= post_output_command.is_some();
+        output_with_fallback(chain, text, opts).await?;
+        self.typed_chars += text.chars().count();
+        self.finalized_text.push_str(text);
         self.clear_partial();
         Ok(())
     }
@@ -326,6 +357,7 @@ impl StreamingSession {
                 post_output_command,
                 wait_for_modifier_release: false,
                 modifier_release_timeout: std::time::Duration::from_millis(0),
+                normalize: true,
             };
             self.post_hook_ran |= post_output_command.is_some();
             output_with_fallback(chain, text, opts).await?;

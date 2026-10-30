@@ -1069,6 +1069,7 @@ async fn deliver_to_file(
                         post_output_command: None,
                         wait_for_modifier_release: false,
                         modifier_release_timeout: Duration::ZERO,
+                        normalize: true,
                     },
                 )
                 .await
@@ -2184,6 +2185,29 @@ impl Daemon {
             }
             _ => {}
         }
+    }
+
+    /// The text to paste for a dictation with a keyboard edit, None for one
+    /// without. The frozen region exactly as frozen or edited, then the
+    /// shown live text after the last resume, processed and normalised as
+    /// delivery would; the engine's final text is not used (preview
+    /// semantics). When the recording stopped while the popup still owned
+    /// the text (`phase` settling, editing or detached), its last buffer
+    /// snapshot is the frozen region.
+    fn edit_final_text(&mut self, phase: Option<Phase>) -> Option<String> {
+        let shown = (self.edit_link.shown)();
+        let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
+        let tp = &self.text_processor;
+        let doc = self.edit_doc.as_mut()?;
+        let popup_owned = matches!(
+            phase,
+            Some(Phase::Settling | Phase::Editing | Phase::Detached)
+        );
+        if let Some(snapshot) = snapshot.filter(|b| popup_owned && b.session == doc.session()) {
+            doc.replace_frozen(&snapshot.text);
+        }
+        doc.live(&shown);
+        Some(doc.final_text(|t| output::normalize_quotes(&tp.process(t)).into_owned()))
     }
 
     /// The popup's commands ready to act on: the buffer file holds the
@@ -4172,6 +4196,7 @@ impl Daemon {
                         modifier_release_timeout: std::time::Duration::from_millis(
                             output_config.modifier_release_timeout_ms,
                         ),
+                        normalize: true,
                     };
 
                     let output_started = Instant::now();
@@ -5550,6 +5575,13 @@ impl Daemon {
                                     // Right Ctrl to come up, or the paste
                                     // key becomes a different shortcut.
                                     let corrected;
+                                    // A dictation with a keyboard edit pastes
+                                    // what the popup showed, exactly.
+                                    let edited = self
+                                        .config
+                                        .live_preview_active()
+                                        .then(|| self.edit_final_text(state.phase()))
+                                        .flatten();
                                     let text = if self.config.live_preview_active() {
                                         // Spoken corrections, before the
                                         // clear below forgets them.
@@ -5576,13 +5608,13 @@ impl Daemon {
                                     {
                                         tracing::warn!("Modifier still held; sending the final text anyway");
                                     }
-                                    if let Err(e) = s.commit_segment(
-                                        chain,
-                                        text,
-                                        Some(&self.text_processor),
-                                        self.config.output.pre_output_command.as_deref(),
-                                        self.config.output.post_output_command.as_deref(),
-                                    ).await {
+                                    let pre = self.config.output.pre_output_command.as_deref();
+                                    let post = self.config.output.post_output_command.as_deref();
+                                    let committed = match &edited {
+                                        Some(edited) => s.commit_exact(chain, edited, pre, post).await,
+                                        None => s.commit_segment(chain, text, Some(&self.text_processor), pre, post).await,
+                                    };
+                                    if let Err(e) = committed {
                                         tracing::error!("Streaming commit_segment failed: {}", e);
                                     }
                                 }
@@ -6543,6 +6575,149 @@ mod tests {
         .unwrap();
         assert!(!daemon.edit_handle_commands(&mut state).await);
         assert_eq!(state.phase(), Some(Phase::Releasing));
+    }
+
+    #[tokio::test]
+    async fn edit_final_is_the_shown_text_byte_for_byte() {
+        use crate::osd::edit_ipc::{
+            append_cmd_to, write_buffer_to, EditBuffer, EditCmd, FinishMode,
+        };
+        for engine_final in [false, true] {
+            let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+            if engine_final {
+                daemon.config.live_preview_final = "engine".into();
+            }
+            link.show("um hello there");
+            daemon.edit_toggle(&mut state).await;
+            let session = daemon.edit_doc.as_ref().unwrap().session();
+            // Typed text processing or normalisation would change.
+            let typed = "Hello \u{2018}there\u{2019}, um comma";
+            write_buffer_to(
+                &daemon.edit_link.buffer,
+                &EditBuffer {
+                    session,
+                    rev: 1,
+                    text: typed.into(),
+                    sel: (0, 0),
+                },
+            )
+            .unwrap();
+            append_cmd_to(
+                &daemon.edit_link.cmds,
+                session,
+                EditCmd::Finish {
+                    mode: FinishMode::Paste,
+                    rev: 1,
+                },
+            )
+            .unwrap();
+            assert!(daemon.edit_handle_commands(&mut state).await);
+            assert_eq!(
+                daemon.edit_final_text(state.phase()).as_deref(),
+                Some(typed)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn edit_final_adds_the_speech_after_resume_processed() {
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        daemon.text_processor = crate::text::TextProcessor::new(&crate::config::TextConfig {
+            spoken_punctuation: true,
+            ..Default::default()
+        });
+        link.show("first part");
+        daemon.edit_toggle(&mut state).await;
+        daemon.edit.settle_by = Some(Instant::now());
+        daemon.edit_tick(&mut state, Instant::now(), None).await;
+        daemon
+            .edit_doc
+            .as_mut()
+            .unwrap()
+            .replace_frozen("First part.");
+        daemon.edit_toggle(&mut state).await; // resume
+        link.show("first part then \u{201C}more\u{201D} period");
+        assert_eq!(
+            daemon.edit_final_text(state.phase()).as_deref(),
+            Some("First part. then \"more\".")
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_stop_while_editing_pastes_the_last_snapshot() {
+        use crate::osd::edit_ipc::{write_buffer_to, EditBuffer};
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("draft text");
+        daemon.edit_toggle(&mut state).await;
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        // The popup edited, then a Right Shift double tap stopped the
+        // recording: no finish command, only the snapshot.
+        write_buffer_to(
+            &daemon.edit_link.buffer,
+            &EditBuffer {
+                session,
+                rev: 9,
+                text: "final text\n".into(),
+                sel: (0, 0),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            daemon.edit_final_text(state.phase()).as_deref(),
+            Some("final text\n")
+        );
+        // A snapshot of another dictation is never used.
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("draft text");
+        daemon.edit_toggle(&mut state).await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        write_buffer_to(
+            &daemon.edit_link.buffer,
+            &EditBuffer {
+                session: session + 1,
+                rev: 1,
+                text: "stale".into(),
+                sel: (0, 0),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            daemon.edit_final_text(state.phase()).as_deref(),
+            Some("draft text")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dictation_without_an_edit_is_delivered_as_before() {
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("plain text");
+        daemon.edit_tap_pending(&mut state).await;
+        daemon.edit_tap_cancelled(&mut state).await;
+        assert_eq!(daemon.edit_final_text(state.phase()), None);
+    }
+
+    #[tokio::test]
+    async fn exact_commits_skip_processing_and_normalisation() {
+        let got = Arc::new(std::sync::Mutex::new(None));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: got.clone(),
+            succeed: true,
+        })];
+        let text = "It\u{2019}s \u{201C}exact\u{201D}";
+        let mut session = StreamingSession::new();
+        session
+            .commit_exact(&chain, text, None, None)
+            .await
+            .unwrap();
+        assert_eq!(got.lock().unwrap().as_deref(), Some(text));
+        session
+            .commit_segment(&chain, text, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(got.lock().unwrap().as_deref(), Some("It's \"exact\""));
     }
 
     #[tokio::test]

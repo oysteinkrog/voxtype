@@ -463,6 +463,9 @@ pub struct OutputOptions<'a> {
     /// Maximum time to wait for modifier release before skipping keystroke
     /// methods and falling through to clipboard-only methods.
     pub modifier_release_timeout: std::time::Duration,
+    /// Turn curly quotes into ASCII first. Off for text that must arrive
+    /// exactly as shown, such as keyboard-edited text.
+    pub normalize: bool,
 }
 
 /// Output methods that synthesize keystrokes the compositor can interpret as
@@ -499,7 +502,11 @@ pub async fn output_via(
     options: OutputOptions<'_>,
 ) -> Result<&'static str, OutputError> {
     // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
-    let normalized_text = normalize_quotes(text);
+    let normalized_text = if options.normalize {
+        normalize_quotes(text)
+    } else {
+        Cow::Borrowed(text)
+    };
 
     // If the modifier guard is enabled, snapshot kernel-level key state and
     // wait for any held modifiers to be released. This prevents typed letters
