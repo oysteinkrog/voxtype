@@ -3119,7 +3119,7 @@ replacements_file = "~/private/voxtype-words.toml"
 **Default:** `true`
 **Required:** No
 
-Learn words from spoken corrections (see `correction_key`). Each correction that changes the pasted text is written to `corrections_log`. When the same fix is made a second time, it becomes a rule in `learned_words_file` and applies from then on, like a `replacements` entry. A fix whose right words look like a name (an inner capital such as "GlimBot", a digit, all capitals, or a letter outside ASCII) is learned the first time. The popup says "Learned" instead of "Corrected" when a correction will be learned.
+Learn words from spoken corrections (see `correction_key`). Each correction that changes the pasted text is written to `corrections_log`. When the same fix is made a second time, it becomes a rule in `learned_words_file` and applies from then on, like a `replacements` entry. A fix whose right words look like a name (an inner capital such as "GlimBot", a digit, all capitals, or a letter outside ASCII) is learned the first time, and so is a spelled word (a hold that starts with "spell", then NATO alphabet words or plain letters, with "capital" before a letter for upper case). The popup says "Learned" instead of "Corrected" when a correction will be learned.
 
 A fix that only adds words ("test" corrected to "quiet test") is never learned, since the rule would rewrite every "test". `replacements` and `replacements_file` win over a learned rule with the same words. Learned words only change the output text: they are not sent to a transcription engine or a post-processing command as a word list.
 

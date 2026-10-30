@@ -6,6 +6,7 @@
 
 pub mod align;
 pub mod learn;
+pub mod spell;
 
 use crate::config::TextConfig;
 use regex::Regex;

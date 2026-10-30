@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::osd::live::{TimedWord, WordDetail};
 use crate::text::align::{self, Refused};
-use crate::text::learn;
+use crate::text::{learn, spell};
 
 /// How long after the key comes up a correction waits for the live model's
 /// words of the hold, when no word after the hold has arrived sooner.
@@ -38,6 +38,10 @@ pub struct CorrectionView {
     /// A hold ended and waits for the live model's words.
     #[serde(default)]
     pub pending: bool,
+    /// The letters spelled so far, when the open hold starts with "spell"
+    /// ([`crate::text::spell`]).
+    #[serde(default)]
+    pub spelling: Option<String>,
     /// The newest outcome.
     pub note: Option<CorrectionNote>,
 }
@@ -72,6 +76,8 @@ enum State {
         to: f32,
         wrong: String,
         right: Vec<String>,
+        /// `right` is one word spelled in the hold, not the words heard.
+        spelled: bool,
     },
     Dropped,
 }
@@ -249,10 +255,18 @@ impl Corrections {
             dropped: None,
             learned: false,
         };
+        let spelling = spell::is_spelling(&heard);
+        let target: Vec<String> = if spelling {
+            spell::spelled(&heard).into_iter().collect()
+        } else {
+            heard.clone()
+        };
         let placed = if heard.is_empty() {
             Err("nothing heard")
+        } else if target.is_empty() {
+            Err("not letters")
         } else {
-            align::place(&texts, &heard).map_err(|r| match r {
+            align::place(&texts, &target).map_err(|r| match r {
                 Refused::Empty => "nothing to replace",
                 Refused::NoMatch { .. } => "no match",
                 Refused::Ambiguous { .. } => "two places fit",
@@ -262,13 +276,20 @@ impl Corrections {
         let state = match placed {
             Ok(span) => {
                 note.from = texts[span.start..span.end].join(" ");
-                let right = clip_words(&note.to, &note.from).join(" ");
-                note.learned = learn::active().is_some_and(|l| l.would_learn(&note.from, &right));
+                let right = if spelling {
+                    note.to = target.join(" ");
+                    note.to.clone()
+                } else {
+                    clip_words(&note.to, &note.from).join(" ")
+                };
+                note.learned =
+                    learn::active().is_some_and(|l| l.would_learn(&note.from, &right, spelling));
                 State::Placed {
                     from: before[span.start].start,
                     to: before[span.end - 1].end,
                     wrong: note.from.clone(),
-                    right: heard,
+                    right: target,
+                    spelled: spelling,
                 }
             }
             Err(reason) => {
@@ -291,20 +312,23 @@ impl Corrections {
         if self.is_empty() {
             return None;
         }
-        let hearing = self
-            .windows
-            .iter()
-            .find(|w| w.state == State::Open)
-            .map(|w| {
-                self.raw
-                    .iter()
-                    .filter(|(word, _)| inside(word, w.t0, w.t1))
-                    .map(|(word, _)| word.text.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            });
+        let heard: Option<Vec<&str>> =
+            self.windows
+                .iter()
+                .find(|w| w.state == State::Open)
+                .map(|w| {
+                    self.raw
+                        .iter()
+                        .filter(|(word, _)| inside(word, w.t0, w.t1))
+                        .map(|(word, _)| word.text.as_str())
+                        .collect()
+                });
         Some(CorrectionView {
-            hearing,
+            hearing: heard.as_ref().map(|h| h.join(" ")),
+            spelling: heard
+                .as_deref()
+                .and_then(spell::letters)
+                .map(|(letters, _)| letters),
             pending: self
                 .windows
                 .iter()
@@ -327,11 +351,25 @@ impl Corrections {
         self.render_with(None, true);
         self.applied.clear();
         // Each placed hold with the words to try: the clip's, then the live
-        // words for when the clip's words fit nowhere in the final text.
-        let placed: Vec<(f32, f32, Vec<Vec<String>>, bool)> = self
+        // words for when the clip's words fit nowhere in the final text. A
+        // spelled word is tried alone, as spelled.
+        let placed: Vec<FinalHold> = self
             .windows
             .iter()
             .filter_map(|w| match &w.state {
+                State::Placed {
+                    wrong,
+                    right,
+                    spelled: true,
+                    ..
+                } => {
+                    let cut = self
+                        .clips
+                        .iter()
+                        .any(|c| (c.t0 - w.t0).abs() < 0.05 && c.cut);
+                    (right.join(" ") != *wrong)
+                        .then(|| (w.t0, w.t1, vec![right.clone()], cut, true))
+                }
                 State::Placed { wrong, right, .. } => {
                     let clip = self.clips.iter().find(|c| (c.t0 - w.t0).abs() < 0.05);
                     let cut = clip.is_some_and(|c| c.cut);
@@ -346,7 +384,7 @@ impl Corrections {
                         tracing::info!(%wrong, "Correction heard as the same words: spell it");
                         return None;
                     }
-                    Some((w.t0, w.t1, tries, cut))
+                    Some((w.t0, w.t1, tries, cut, false))
                 }
                 _ => None,
             })
@@ -364,18 +402,34 @@ impl Corrections {
         };
         let newest = placed.last().map(|p| p.0);
         let mut newest_missed = false;
-        for (t0, t1, tries, cut) in placed {
+        for (t0, t1, tries, cut, spelled) in placed {
+            let said: Vec<String> = self
+                .raw
+                .iter()
+                .filter(|(w, _)| inside(w, t0, t1))
+                .map(|(w, _)| w.text.clone())
+                .collect();
+            // The copy of the hold in the final text: the letters as said
+            // when spelled, else the words tried.
+            let copies = if spelled {
+                std::slice::from_ref(&said)
+            } else {
+                &tries[..]
+            };
+            // The words before the hold, by the count before any of its
+            // respoken words go.
+            let mut hold_start = before(t0, shift);
             if cut {
                 // The live count includes the respoken words; the text not.
-                shift -= self.raw.iter().filter(|(w, _)| inside(w, t0, t1)).count() as isize;
-            } else if let Some(copy) = tries
+                shift -= said.len() as isize;
+            } else if let Some(copy) = copies
                 .iter()
                 .find_map(|right| align::place_before(&words, before(t1, shift), right).ok())
             {
                 words.drain(copy.start..copy.end);
                 shift -= (copy.end - copy.start) as isize;
+                hold_start = hold_start.min(copy.start);
             }
-            let hold_start = before(t0, shift);
             let found = tries.into_iter().find_map(|right| {
                 align::place_before(&words, hold_start, &right)
                     .ok()
@@ -396,6 +450,7 @@ impl Corrections {
                     final_text: text.to_string(),
                     t0,
                     t1,
+                    spelled,
                     ..learn::Entry::default()
                 });
                 words.splice(span.start..span.end, right);
@@ -421,6 +476,11 @@ impl Corrections {
         pasted
     }
 }
+
+/// A placed hold in [`Corrections::apply_final`]: its start and end, the
+/// words to try in turn, whether its audio was cut out of the final text,
+/// and whether the words were spelled.
+type FinalHold = (f32, f32, Vec<Vec<String>>, bool, bool);
 
 /// Whether `a` and `b` are the same words, ignoring case and punctuation.
 /// "FrankenTerm" and "franken term" are not: joining words is a fix.
@@ -891,6 +951,68 @@ mod tests {
         assert_eq!(entry.final_text, "This is a glim bot test. GlimBot.");
         assert_eq!(entry.pasted, pasted);
         assert_eq!((entry.t0, entry.t1), (2.3, 3.0));
+    }
+
+    const SPELLED: &str = "spell capital golf lima india mike bravo oscar tango";
+
+    /// "ask the glim bot for the logs", then a hold spelling "Glimbot".
+    fn spelled_hold() -> Corrections {
+        let mut c = Corrections::default();
+        let mut raw = spoken(0.0, "ask the glim bot for the logs");
+        c.start(2.0);
+        raw.extend(spoken(2.1, SPELLED));
+        c.overlay(raw.clone(), Instant::now());
+        let view = c.view().unwrap();
+        assert_eq!(view.spelling.as_deref(), Some("Glimbot"));
+        c.end(4.5, Instant::now());
+        c.overlay(raw, Instant::now() + SETTLE);
+        c
+    }
+
+    #[test]
+    fn a_spelled_word_replaces_the_words_it_sounds_like() {
+        let mut c = spelled_hold();
+        let shown: Vec<String> = c.current().into_iter().map(|(w, _)| w.text).collect();
+        assert_eq!(shown.join(" "), "ask the Glimbot for the logs");
+        let note = c.view().and_then(|v| v.note).unwrap();
+        assert_eq!(
+            (note.from.as_str(), note.to.as_str()),
+            ("glim bot", "Glimbot")
+        );
+        assert_eq!(note.dropped, None);
+        // The live words as the final text: the letters said go.
+        assert_eq!(
+            c.apply_final(&format!("Ask the glim bot for the logs. {SPELLED}.")),
+            "Ask the Glimbot for the logs."
+        );
+        assert!(c.applied[0].spelled);
+    }
+
+    #[test]
+    fn a_spelled_word_ignores_the_final_engines_clip() {
+        let mut c = spelled_hold();
+        c.clips = vec![FinalClip {
+            t0: 2.0,
+            t1: 4.5,
+            text: "Spell capital golf, Lima, India, Mike.".into(),
+            cut: true,
+        }];
+        assert_eq!(
+            c.apply_final("Ask the glim bot for the logs."),
+            "Ask the Glimbot for the logs."
+        );
+    }
+
+    #[test]
+    fn a_spelling_with_a_stray_word_is_dropped() {
+        let mut c = Corrections::default();
+        let mut raw = spoken(0.0, "ask the glim bot for the logs");
+        c.start(2.0);
+        raw.extend(spoken(2.1, "spell golf banana lima"));
+        c.end(3.5, Instant::now());
+        c.overlay(raw, Instant::now() + SETTLE);
+        let note = c.view().and_then(|v| v.note).unwrap();
+        assert_eq!(note.dropped.as_deref(), Some("not letters"));
     }
 
     #[test]

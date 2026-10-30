@@ -1233,6 +1233,8 @@ voxtype glossary learned            # list the learned words
 voxtype glossary forget glim bot    # remove one
 ```
 
+When the model keeps hearing the word wrong, spell it: hold the key and say "spell", then the letters in the NATO alphabet ("golf lima india mike") or as plain letters, with "capital" before a letter to make it upper case. The popup shows the letters as they come. A spelled word is always learned.
+
 The log and the learned words live under `~/.local/share/voxtype/` unless `corrections_log` and `learned_words_file` in `[text]` point elsewhere. Set `learn_corrections = false` to turn it off.
 
 ## Whisper Models

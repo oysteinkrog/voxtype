@@ -4,7 +4,8 @@
 //! status row says "Correcting" with the respoken words as they arrive.
 //! When the hold is placed, the row shows the words it replaced and the new
 //! ones for [`NOTE_SECS`] ("Learned" when the pair becomes a learned word,
-//! COR-6); when it was dropped, it says why. The words in
+//! COR-6); when it was dropped, it says why. A hold that starts with
+//! "spell" shows the letters so far instead of the words (COR-5). The words in
 //! the look are already the corrected ones: the daemon makes the correction
 //! in the preview. A dictation without corrections looks as before.
 
@@ -58,6 +59,14 @@ pub(crate) fn status(
     now: f64,
 ) -> Option<(String, String)> {
     let view = view?;
+    if let (Some(_), Some(letters)) = (&view.hearing, &view.spelling) {
+        let field = if letters.is_empty() {
+            "say the letters".to_string()
+        } else {
+            voxtype::text::spell::spaced(letters)
+        };
+        return Some(("Spelling".into(), format!("  ·  {field}")));
+    }
     if let Some(heard) = &view.hearing {
         let heard = if heard.is_empty() {
             "say the right words".to_string()
@@ -88,6 +97,7 @@ mod tests {
         CorrectionView {
             hearing: None,
             pending: false,
+            spelling: None,
             note: Some(CorrectionNote {
                 id,
                 from: "franken term".into(),
@@ -115,6 +125,7 @@ mod tests {
         let hold = |h: &str| CorrectionView {
             hearing: Some(h.into()),
             pending: false,
+            spelling: None,
             note: None,
         };
         assert_eq!(status(None, &s, 0.0), None);
@@ -138,6 +149,19 @@ mod tests {
         assert_eq!(
             status(Some(&dropped), &s, 3.1),
             Some(("Not changed".into(), "  ·  no match: FrankenTerm".into()))
+        );
+        let spelling = |h: &str, letters: &str| CorrectionView {
+            hearing: Some(h.into()),
+            spelling: Some(letters.into()),
+            ..CorrectionView::default()
+        };
+        assert_eq!(
+            status(Some(&spelling("Spell", "")), &s, 4.0),
+            Some(("Spelling".into(), "  ·  say the letters".into()))
+        );
+        assert_eq!(
+            status(Some(&spelling("Spell capital golf lima", "Gl")), &s, 4.0),
+            Some(("Spelling".into(), "  ·  G l".into()))
         );
         let mut learned = note(3, None);
         if let Some(n) = &mut learned.note {

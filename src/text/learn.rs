@@ -6,7 +6,8 @@
 //! ([`TextConfig::learned_words_file`], `"from" = "to"` lines like
 //! `replacements_file`) the second time it is logged, or the first time
 //! when the right words look like a name or a made-up word (an inner
-//! capital, a digit, a letter outside ASCII, or all capitals). A learned
+//! capital, a digit, a letter outside ASCII, or all capitals), or when it
+//! was spelled ([`crate::text::spell`]). A learned
 //! rule applies from the next text on; `text.replacements` and
 //! `replacements_file` win over it.
 //!
@@ -42,6 +43,9 @@ pub struct Entry {
     /// The hold, in seconds into the recording.
     pub t0: f32,
     pub t1: f32,
+    /// The right word was spelled ([`crate::text::spell`]): learned at once.
+    #[serde(default)]
+    pub spelled: bool,
 }
 
 /// Where corrections are logged and learned, from the config.
@@ -160,11 +164,13 @@ impl Learning {
             .count()
     }
 
-    /// Whether logging this correction once more learns it.
-    pub fn would_learn(&self, wrong: &str, right: &str) -> bool {
+    /// Whether logging this correction once more learns it. A spelled
+    /// word always is.
+    pub fn would_learn(&self, wrong: &str, right: &str, spelled: bool) -> bool {
         self.enabled
-            && rule(wrong, right)
-                .is_some_and(|(from, to)| looks_like_a_name(&to) || self.seen(&from, &to) >= 1)
+            && rule(wrong, right).is_some_and(|(from, to)| {
+                spelled || looks_like_a_name(&to) || self.seen(&from, &to) >= 1
+            })
     }
 
     /// Logs `entry` and learns its pair when it qualifies. Returns the new
@@ -173,7 +179,7 @@ impl Learning {
         if !self.enabled {
             return Ok(None);
         }
-        let learn = self.would_learn(&entry.wrong, &entry.right);
+        let learn = self.would_learn(&entry.wrong, &entry.right, entry.spelled);
         if let Some(dir) = self.log.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -268,10 +274,10 @@ mod tests {
     fn a_pair_seen_twice_writes_the_rule() {
         let dir = tempfile::tempdir().unwrap();
         let l = learning(dir.path());
-        assert!(!l.would_learn("blue barrel", "blueberry"));
+        assert!(!l.would_learn("blue barrel", "blueberry", false));
         assert_eq!(l.record(&entry("blue barrel", "blueberry")).unwrap(), None);
         assert!(l.rules().is_empty());
-        assert!(l.would_learn("Blue barrel,", "blueberry."));
+        assert!(l.would_learn("Blue barrel,", "blueberry.", false));
         assert_eq!(
             l.record(&entry("Blue barrel,", "blueberry.")).unwrap(),
             Some(("blue barrel".into(), "blueberry".into()))
@@ -293,10 +299,22 @@ mod tests {
             ("smorbrod", "Smørbrød"),
             ("pdq", "PDQ"),
         ] {
-            assert!(l.would_learn(wrong, right), "{right}");
+            assert!(l.would_learn(wrong, right, false), "{right}");
             assert!(l.record(&entry(wrong, right)).unwrap().is_some(), "{right}");
         }
         assert_eq!(l.rules().len(), 4);
+    }
+
+    #[test]
+    fn a_spelled_word_is_learned_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = learning(dir.path());
+        assert!(l.would_learn("blue barrel", "blueberry", true));
+        let spelled = Entry {
+            spelled: true,
+            ..entry("blue barrel", "blueberry")
+        };
+        assert!(l.record(&spelled).unwrap().is_some());
     }
 
     #[test]
@@ -309,7 +327,7 @@ mod tests {
         }
         assert!(l.rules().is_empty());
         // A change of case is a rule.
-        assert!(l.would_learn("pdq", "PDQ"));
+        assert!(l.would_learn("pdq", "PDQ", false));
     }
 
     #[test]
@@ -329,7 +347,7 @@ mod tests {
             enabled: false,
             ..learning(dir.path())
         };
-        assert!(!l.would_learn("glim bot", "GlimBot"));
+        assert!(!l.would_learn("glim bot", "GlimBot", false));
         assert_eq!(l.record(&entry("glim bot", "GlimBot")).unwrap(), None);
         assert!(!l.log.exists());
         assert!(!l.rules.exists());
