@@ -2205,7 +2205,18 @@ impl Daemon {
         }
         match state.phase() {
             Some(Phase::Listening | Phase::Pending) => self.edit_pause(state).await,
-            Some(Phase::Settling | Phase::Editing) => self.edit_resume(state).await,
+            Some(Phase::Settling | Phase::Editing) => {
+                // A resume by tap or `record edit` takes the popup's text
+                // from its buffer file.
+                let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
+                let session = self.edit_doc.as_ref().map(|d| d.session());
+                if let Some(snap) =
+                    snapshot.filter(|b| Some(b.session) == session && b.pause == self.edit_pauses)
+                {
+                    self.edit_take_buffer(&snap.text, snap.base.as_deref());
+                }
+                self.edit_resume(state).await
+            }
             Some(Phase::Detached) => {
                 state.set_phase(Phase::Editing, Instant::now());
                 self.edit_publish(state);
@@ -2239,16 +2250,18 @@ impl Daemon {
         tracing::info!("Paused for a keyboard edit");
     }
 
-    /// Pass mic audio again; new speech goes after the edited text.
-    async fn edit_resume(&mut self, state: &mut State) {
-        // A resume by tap or `record edit` takes the popup's text from its
-        // buffer file; a Resume command has already put the same text in.
-        let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
-        if let (Some(doc), Some(snap)) = (self.edit_doc.as_mut(), snapshot) {
-            if snap.session == doc.session() && snap.pause == self.edit_pauses {
-                doc.replace_frozen(&snap.text);
-            }
+    /// The popup's text replaces the frozen region, with the words frozen
+    /// after the popup last saw it (its `base`) added at the end.
+    fn edit_take_buffer(&mut self, text: &str, base: Option<&str>) {
+        if let Some(doc) = self.edit_doc.as_mut() {
+            let text = crate::osd::edit_ipc::with_unseen(text, base, &doc.frozen());
+            doc.replace_frozen(&text);
         }
+    }
+
+    /// Pass mic audio again; new speech goes after the edited text. The
+    /// caller has taken the popup's text.
+    async fn edit_resume(&mut self, state: &mut State) {
         self.with_gate(|g| g.resume());
         if let Some(tracker) = &self.silence_tracker {
             tracker.resume().await;
@@ -2314,7 +2327,12 @@ impl Daemon {
         if let Some(snapshot) =
             snapshot.filter(|b| popup_owned && b.session == doc.session() && b.pause == pause)
         {
-            doc.replace_frozen(&snapshot.text);
+            let text = crate::osd::edit_ipc::with_unseen(
+                &snapshot.text,
+                snapshot.base.as_deref(),
+                &doc.frozen(),
+            );
+            doc.replace_frozen(&text);
         }
         doc.live(&shown);
         Some(doc.final_text(|t| output::normalize_quotes(&tp.process(t)).into_owned()))
@@ -2534,14 +2552,15 @@ impl Daemon {
     }
 
     /// The popup's commands ready to act on: the buffer file holds the
-    /// revision they name.
-    fn edit_commands(&mut self) -> Vec<crate::osd::edit_ipc::Accepted> {
+    /// revision they name. Also the buffer's `base`, which their texts share.
+    fn edit_commands(&mut self) -> (Vec<crate::osd::edit_ipc::Accepted>, Option<String>) {
         let Some(doc) = &self.edit_doc else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let buffer = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
         let link = &mut self.edit_link;
-        link.reader.poll(&link.cmds, doc.session(), buffer.as_ref())
+        let ready = link.reader.poll(&link.cmds, doc.session(), buffer.as_ref());
+        (ready, buffer.and_then(|b| b.base))
     }
 
     /// Act on the popup's commands. Returns true when one asks to stop the
@@ -2549,20 +2568,17 @@ impl Daemon {
     async fn edit_handle_commands(&mut self, state: &mut State) -> bool {
         use crate::osd::edit_ipc::{Accepted, FinishMode};
         let mut finish = false;
-        for cmd in self.edit_commands() {
+        let (ready, base) = self.edit_commands();
+        for cmd in ready {
             match cmd {
                 Accepted::Resume { text } => {
-                    if let Some(doc) = self.edit_doc.as_mut() {
-                        doc.replace_frozen(&text);
-                    }
+                    self.edit_take_buffer(&text, base.as_deref());
                     if matches!(state.phase(), Some(p) if p.is_paused() && p != Phase::Pending) {
                         self.edit_resume(state).await;
                     }
                 }
                 Accepted::Finish { mode, text } => {
-                    if let Some(doc) = self.edit_doc.as_mut() {
-                        doc.replace_frozen(&text);
-                    }
+                    self.edit_take_buffer(&text, base.as_deref());
                     // How the output hook tells "paste" from "paste and
                     // Enter", as for the double taps.
                     let last = match mode {
@@ -6895,6 +6911,7 @@ mod tests {
             text: text.into(),
             sel: (0, 0),
             pause: 1,
+            base: None,
         };
         write_buffer_to(&daemon.edit_link.buffer, &buffer(1, "hello world")).unwrap();
         append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev: 2 }).unwrap();
@@ -6927,6 +6944,7 @@ mod tests {
                 text: "Send this.".into(),
                 sel: (0, 0),
                 pause: 1,
+                base: None,
             },
         )
         .unwrap();
@@ -6980,6 +6998,7 @@ mod tests {
                     text: typed.into(),
                     sel: (0, 0),
                     pause: 1,
+                    base: None,
                 },
             )
             .unwrap();
@@ -7044,6 +7063,7 @@ mod tests {
                 text: "final text\n".into(),
                 sel: (0, 0),
                 pause: 1,
+                base: None,
             },
         )
         .unwrap();
@@ -7064,6 +7084,7 @@ mod tests {
                 text: "stale".into(),
                 sel: (0, 0),
                 pause: 1,
+                base: None,
             },
         )
         .unwrap();
@@ -7089,6 +7110,7 @@ mod tests {
             text: text.into(),
             sel: (0, 0),
             pause,
+            base: None,
         };
         // A snapshot of an earlier pause is not this edit.
         write_buffer_to(&daemon.edit_link.buffer, &snap(0, "stale")).unwrap();
@@ -7146,6 +7168,7 @@ mod tests {
                 text: "first fixed".into(),
                 sel: (0, 0),
                 pause: 1,
+                base: None,
             },
         )
         .unwrap();
@@ -7197,6 +7220,55 @@ mod tests {
         );
     }
 
+    /// Enter while the tail settles: the daemon froze "two" after the popup
+    /// last looked, so the popup's text lacks it. The paste still has it.
+    #[tokio::test]
+    async fn words_frozen_after_the_popup_looked_are_kept() {
+        use crate::osd::edit_ipc::{
+            append_cmd_to, write_buffer_to, EditBuffer, EditCmd, FinishMode,
+        };
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("one");
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        let seen = link.last().unwrap().frozen;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        write_buffer_to(
+            &daemon.edit_link.buffer,
+            &EditBuffer {
+                session,
+                rev: 1,
+                text: format!("{seen}!"),
+                sel: (0, 0),
+                pause: 1,
+                base: Some(seen.clone()),
+            },
+        )
+        .unwrap();
+        // The tail settles and is frozen before the Finish is read.
+        link.show("one two");
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let frozen = link.last().unwrap().frozen;
+        let added = frozen.strip_prefix(seen.as_str()).unwrap().to_string();
+        assert!(!added.is_empty(), "{frozen}");
+        append_cmd_to(
+            &daemon.edit_link.cmds,
+            session,
+            EditCmd::Finish {
+                mode: FinishMode::PasteEnter,
+                rev: 1,
+            },
+        )
+        .unwrap();
+        assert!(daemon.edit_handle_commands(&mut state).await);
+        assert_eq!(
+            daemon.edit_final_text(state.phase()),
+            Some(format!("{seen}!{added}"))
+        );
+    }
+
     #[tokio::test]
     async fn discarding_an_edited_dictation_keeps_its_text() {
         use crate::osd::edit_ipc::{write_buffer_to, EditBuffer};
@@ -7216,6 +7288,7 @@ mod tests {
                 text: "typed fix".into(),
                 sel: (0, 0),
                 pause: 1,
+                base: None,
             },
         )
         .unwrap();

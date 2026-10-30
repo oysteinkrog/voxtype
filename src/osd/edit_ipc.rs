@@ -54,6 +54,21 @@ pub struct EditBuffer {
     /// The [`EditBlock::pause`] the popup was editing.
     #[serde(default)]
     pub pause: u32,
+    /// The daemon's frozen text the buffer has taken in. Words the daemon
+    /// froze after it are not in `text` yet ([`with_unseen`]). None from a
+    /// popup that does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
+/// The popup's `text` with the words the daemon froze after the popup last
+/// saw its frozen text (`base`), added at the end as the popup adds a
+/// settled tail. `frozen` is the daemon's frozen text now.
+pub fn with_unseen(text: &str, base: Option<&str>, frozen: &str) -> String {
+    match base.and_then(|base| frozen.strip_prefix(base)) {
+        Some(added) => format!("{text}{added}"),
+        None => text.to_string(),
+    }
 }
 
 /// How a finish delivers the text.
@@ -246,6 +261,7 @@ mod tests {
             text: text.into(),
             sel: (text.len(), text.len()),
             pause: 1,
+            base: None,
         }
     }
 
@@ -405,6 +421,15 @@ mod tests {
         // A buffer of another dictation answers nothing.
         append_cmd_to(&cmds, 1, EditCmd::Resume { rev: 1 }).unwrap();
         assert_eq!(reader.poll(&cmds, 1, Some(&buffer(2, 9, "other"))), []);
+    }
+
+    #[test]
+    fn words_frozen_after_the_popup_looked_are_added() {
+        assert_eq!(with_unseen("one!", Some("one"), "one two"), "one! two");
+        assert_eq!(with_unseen("one!", Some("one"), "one"), "one!");
+        // No base, or a frozen text that is not an extension of it.
+        assert_eq!(with_unseen("one!", None, "one two"), "one!");
+        assert_eq!(with_unseen("one!", Some("uno"), "one two"), "one!");
     }
 
     #[test]

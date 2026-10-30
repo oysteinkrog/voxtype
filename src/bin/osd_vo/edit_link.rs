@@ -293,6 +293,7 @@ impl EditLink {
             text: buffer.text().to_string(),
             sel: (now.1.anchor, now.1.focus),
             pause: self.pause,
+            base: Some(self.seeded.clone()),
         };
         let Some(paths) = &self.paths else {
             self.written = Some(now);
