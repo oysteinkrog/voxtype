@@ -799,7 +799,18 @@ pub(crate) mod edit_check {
                 .position(|r| r.start < caret && caret <= r.end)
             {
                 let own = pens(w);
-                let k = caret - ranges[w].start - 1;
+                // The glyph that holds the byte before the caret, counted by
+                // the shaped clusters: a ligature ("ij", "fi") is one glyph
+                // for several letters.
+                let tb = edit_site::site(self.p.look.theme).text_box_in(&self.p);
+                let style = edit::edit_style(tb.style);
+                let shaped = self.p.measure.layout(&v.text, &style, Some(tb.width));
+                let k = shaped
+                    .glyphs
+                    .iter()
+                    .filter(|g| (ranges[w].start..caret).contains(&(g.cluster as usize)))
+                    .count()
+                    .checked_sub(1)?;
                 let pen = *own.get(k)?;
                 let hi = own
                     .get(k + 1)
@@ -1039,6 +1050,27 @@ pub(crate) mod edit_check {
                     if wide { "wide" } else { "default" }
                 );
             }
+        }
+    }
+
+    /// A font's ligature ("ij" in Jarvis' Barlow) is one glyph for two
+    /// letters: the caret still finds its glyph, also inside the ligature.
+    #[test]
+    fn the_caret_follows_ligatures() {
+        let mut r = Rig::new(OsdTheme::Jarvis, false);
+        r.dictate(12);
+        r.enter(1.0);
+        r.act(EditAction::Insert(" fijord".into()), 1.2);
+        r.caret_follows(1.2, 1.8, "after a ligature");
+        let back = EditAction::MoveBy {
+            dir: vo_core::edit::Dir::Back,
+            unit: vo_core::edit::Unit::Grapheme,
+            extend: false,
+        };
+        for i in 0..5 {
+            let t = 1.8 + 0.6 * i as f64;
+            r.act(back.clone(), t);
+            r.caret_follows(t, t + 0.5, &format!("{} letters back", i + 1));
         }
     }
 
