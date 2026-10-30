@@ -29,9 +29,13 @@ pub(crate) fn revise(look: &Look) -> Revise {
 /// The revision motion `look` asks for.
 pub(crate) fn motion(look: &Look) -> RevisionMotion {
     let t = look.theme;
+    // A look's own revision motion is off with its feature while a
+    // keyboard edit is pending or under way (the quiet list, R34).
+    let on = |name: &str, own: bool| look.on(name) || (own && !look.quiet.contains(&name));
     RevisionMotion {
-        escrow: look.on("width-escrow")
-            || matches!(
+        escrow: on(
+            "width-escrow",
+            matches!(
                 t,
                 OsdTheme::Default
                     | OsdTheme::Swiss
@@ -39,15 +43,47 @@ pub(crate) fn motion(look: &Look) -> RevisionMotion {
                     | OsdTheme::Captions
                     | OsdTheme::Island
             ),
-        hinge: look.on("correction-hinge")
-            || matches!(
+        ),
+        hinge: on(
+            "correction-hinge",
+            matches!(
                 t,
                 OsdTheme::Mecha | OsdTheme::Mission | OsdTheme::Swissfi | OsdTheme::Jarvis
             ),
-        address: look.on("revision-address")
-            || matches!(
+        ),
+        address: on(
+            "revision-address",
+            matches!(
                 t,
                 OsdTheme::Captions | OsdTheme::Mission | OsdTheme::Swissfi | OsdTheme::Jarvis
             ),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R34: a look's own revision motions (the hinge in Jarvis, the
+    /// escrow in Swiss, the address in Captions) are off while a keyboard
+    /// edit is pending or under way, and back after it.
+    #[test]
+    fn a_looks_own_revision_motion_obeys_edit_mode() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let mut look = Look::new(&OsdConfig::default(), &plasma, String::new(), &fonts);
+        let none = |m: RevisionMotion| !m.escrow && !m.hinge && !m.address;
+        for theme in OsdTheme::VO_LOOKS {
+            look.theme = theme;
+            look.quiet = Arc::from([]);
+            let own = motion(&look);
+            look.quiet = super::super::edit_site::quiet_list(theme).into();
+            assert!(none(motion(&look)), "{theme:?} while editing");
+            look.quiet = Arc::from([]);
+            assert_eq!(motion(&look), own, "{theme:?} after");
+        }
+        look.theme = OsdTheme::Jarvis;
+        assert!(motion(&look).hinge && motion(&look).address);
     }
 }
