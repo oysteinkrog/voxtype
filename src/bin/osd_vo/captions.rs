@@ -409,6 +409,15 @@ impl Popup {
             .first()
             .map_or(LINE * 0.7, |g| g.pos.y);
         let live = mode == Mode::Listening && !tapped;
+        // The pitch channel lifts the newest word up to the reading line's
+        // 3 px; a rise on top of that starts it 5.5 px off its rest (RD-09),
+        // so with pitch a word only fades in.
+        let pitch = l.on(super::channels::PITCH) || l.on(super::channels::VOICE);
+        let enter_word = if pitch {
+            Transition::fade()
+        } else {
+            Transition::fade().offset(0.0, 6.0)
+        };
         let newest = if live {
             self.model.words().last().map(|w| w.id)
         } else {
@@ -450,7 +459,7 @@ impl Popup {
                     .word_enter(if tapped {
                         Transition::NONE
                     } else {
-                        self.ghost_enter(Transition::fade().offset(0.0, 6.0))
+                        self.ghost_enter(enter_word)
                     });
                 // MO-14 and the other word channels.
                 self.typo_words(text)
@@ -709,5 +718,45 @@ mod edit_tests {
     #[test]
     fn captions_edit_moment_keeps_the_envelope() {
         check_edit_envelope(OsdTheme::Captions, &[0, 1]);
+    }
+
+    /// RD-09 with the pitch channel on, as in a real dictation: a word that
+    /// comes in while its pitch lifts it stays inside the reading-line
+    /// envelope, at both widths. Words came in 5.5 px low when the entry
+    /// rose on top of the pitch.
+    #[test]
+    fn captions_pitched_words_keep_the_envelope() {
+        use super::super::moments::{scenario, Moment};
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        for wide in [false, true] {
+            let mut cfg = OsdConfig {
+                theme: OsdTheme::Captions,
+                ..OsdConfig::default()
+            };
+            if wide {
+                cfg.width_px = 600;
+                cfg.preview_font_pt = Some(17.0);
+            }
+            let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+            look.set_motion(&cfg.motion);
+            assert!(look.on(super::super::channels::PITCH));
+            let options = Options {
+                fonts: fonts.clone(),
+                default_motion: default_motion(&look),
+                ..Options::default()
+            };
+            let report = vo::envelope::check_scenario(
+                Popup::new(look.clone(), &fonts),
+                &scenario(&look, Moment::Cancel),
+                30.0,
+                options,
+                &vo::envelope::Envelope {
+                    transcript: 0..1 << 20,
+                    ..vo::envelope::Envelope::default()
+                },
+            );
+            assert!(report.is_ok(), "wide {wide}: {report}");
+        }
     }
 }
