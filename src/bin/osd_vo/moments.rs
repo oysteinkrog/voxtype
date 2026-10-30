@@ -1089,7 +1089,10 @@ pub(crate) fn edit_scenario(look: &Look, ups: usize) -> vo::Scenario<Msg> {
 fn edited_text(look: &Look, text: &str, ups: usize, typed: &str) -> String {
     use vo::scene::text::TextLayout;
     use vo_core::edit::{EditAction, EditBuffer};
-    let text_box = super::edit_site::site(look.theme).text_box(look);
+    // A popup showing the text, for a look whose box depends on its state.
+    let mut shown = Popup::scripted(look.clone(), &look.fonts);
+    shown.text(text);
+    let text_box = super::edit_site::site(look.theme).text_box_in(&shown);
     let measure = vo::ShapedLayout::new(look.fonts.clone());
     let lines = measure.layout(
         text,

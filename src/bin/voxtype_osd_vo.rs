@@ -1830,13 +1830,14 @@ impl Popup {
         }
         self.model.update(&text);
         let site = edit_site::site(self.look.theme);
-        let text_box = site.text_box(&self.look);
+        let text_box = site.text_box_in(self);
+        let edit_lines = site.edit_lines_in(self);
         let view = self.edit_layer.view(
             buffer,
             &self.measure,
             text_box.style,
             text_box.width,
-            site.edit_lines(&self.look),
+            edit_lines,
             t,
         );
         let window = view.start..view.start + view.text.len();
@@ -2176,19 +2177,18 @@ impl App for Popup {
     }
 
     fn key(&mut self, ev: &vo::scene::input::KeyEvent, cx: &mut Cx<Msg>) -> bool {
+        let text_box = edit_site::site(self.look.theme).text_box_in(self);
         let Some(link) = self.edit.as_mut() else {
             return false;
         };
         // Up, Down, Home and End move by the lines the look draws.
         let lines = match link.buffer() {
-            Some(b) if self.edit_view.is_some() => {
-                let text_box = edit_site::site(self.look.theme).text_box(&self.look);
-                Some(
-                    self.edit_layer
-                        .shaped(b.text(), &self.measure, text_box.style, text_box.width)
-                        as &dyn vo_core::edit::Lines,
-                )
-            }
+            Some(b) if self.edit_view.is_some() => Some(self.edit_layer.shaped(
+                b.text(),
+                &self.measure,
+                text_box.style,
+                text_box.width,
+            ) as &dyn vo_core::edit::Lines),
             _ => None,
         };
         let before: HashSet<vo_core::words::WordId> =

@@ -25,7 +25,7 @@ use vo_core::words::WordId;
 use voxtype::osd::config::OsdTheme;
 
 use super::edit::EditView;
-use super::{Look, Msg};
+use super::{Look, Msg, Popup};
 
 /// Motion features off in every look while a tap is pending, the text is
 /// settling or edited, or the edit is detached (plan section 4.3).
@@ -91,6 +91,19 @@ pub(crate) trait EditSite {
             style: look.text_style(),
             width: look.text_width(),
         }
+    }
+
+    /// The text box in popup `p`, for a look whose box depends on the
+    /// popup's state, such as Island's pill or card. Default:
+    /// [`EditSite::text_box`] of the popup's look.
+    fn text_box_in(&self, p: &Popup) -> TextBox {
+        self.text_box(&p.look)
+    }
+
+    /// Editable lines in popup `p`. Default: [`EditSite::edit_lines`] of
+    /// the popup's look.
+    fn edit_lines_in(&self, p: &Popup) -> u32 {
+        self.edit_lines(&p.look)
     }
 
     /// Editable lines in the window. Default: the look's `max_lines`.
