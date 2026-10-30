@@ -1175,6 +1175,9 @@ pub struct Daemon {
     // stop, and the stream's error if it failed: together they let a
     // failed stream be transcribed again instead of lost.
     streaming_samples: Option<Vec<f32>>,
+    // The streaming session's audio gate: holds or drops the mic audio for
+    // a keyboard edit, and says which audio the backend really got.
+    audio_gate: Option<audio::levels::SharedGate>,
     streaming_failure: Option<String>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
@@ -1313,6 +1316,7 @@ impl Daemon {
             transcriber_preloaded: None,
             rescued_audio: Arc::new(std::sync::Mutex::new(None)),
             streaming_samples: None,
+            audio_gate: None,
             streaming_failure: None,
             eager_chunk_tasks: Vec::new(),
             vad,
@@ -1926,6 +1930,11 @@ impl Daemon {
         if let Some(handle) = self.level_emitter_task.take() {
             handle.abort();
         }
+        // The aborted task no longer drops the backend's sender; the gate
+        // holds it.
+        if let Some(Ok(mut gate)) = self.audio_gate.as_ref().map(|g| g.lock()) {
+            gate.close();
+        }
     }
 
     /// Abort the OSD draining pump (if running) so the visualizer can
@@ -1952,6 +1961,12 @@ impl Daemon {
     /// Keep a live preview session's recording until the stream ends, in
     /// case it fails and the audio must be transcribed again.
     fn keep_streaming_samples(&mut self, samples: Option<Vec<f32>>) {
+        // After a keyboard edit pause, only the audio the backend got.
+        let gate = self.audio_gate.take();
+        let samples = samples.and_then(|s| match gate.as_ref().map(|g| g.lock()) {
+            Some(Ok(mut gate)) => gate.rescue_audio(s),
+            _ => Some(s),
+        });
         self.streaming_samples = samples.filter(|_| self.config.live_preview_active());
     }
 
@@ -2268,34 +2283,20 @@ impl Daemon {
                     self.is_external_trigger = track_silence;
                     let speech_tracker = self.new_speech_tracker(track_silence);
                     self.silence_tracker = speech_tracker.clone();
+                    // Nothing pauses the gate yet, so it keeps no copy.
+                    let gate = audio::levels::AudioGate::new(streaming_tx, false).shared();
+                    self.audio_gate = Some(gate.clone());
                     let handle = if let Some(hub) = &self.level_hub {
                         audio::levels::spawn_emitter_with_streaming_tap(
                             chunk_rx,
                             hub.frame_sink(),
-                            Some(streaming_tx),
+                            Some(gate),
                             speech_tracker,
                         )
                     } else {
-                        // No OSD: still need to drive chunk_rx → streaming_tx,
+                        // No OSD: still need to drive chunk_rx → the backend,
                         // and optionally bucket for silence tracking too.
-                        tokio::spawn(async move {
-                            let mut rx = chunk_rx;
-                            let mut bucketer = audio::levels::LevelBucketer::new();
-                            let mut out = Vec::with_capacity(8);
-                            while let Some(chunk) = rx.recv().await {
-                                if let Some(tracker) = &speech_tracker {
-                                    out.clear();
-                                    bucketer.push(&chunk, &mut out);
-                                    for frame in out.drain(..) {
-                                        tracker.observe(frame.peak_dbfs).await;
-                                    }
-                                }
-                                if let Err(e) = streaming_tx.try_send(chunk) {
-                                    // Backend slow or gone; drop and keep going.
-                                    tracing::trace!("streaming sample tap try_send failed: {}", e);
-                                }
-                            }
-                        })
+                        audio::levels::spawn_streaming_tap(chunk_rx, gate, speech_tracker)
                     };
                     self.level_emitter_task = Some(handle);
                     Ok((capture, streaming_rx))
