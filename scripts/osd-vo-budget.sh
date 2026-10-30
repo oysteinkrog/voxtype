@@ -19,16 +19,18 @@
 # nested `kwin_wayland --virtual` (never the real display). CPU is the
 # process's utime + stime from /proc/<pid>/stat over the window, in percent of
 # one core. Frames per second count the `vo: frame` lines (VO_DIAG_FRAMES=1)
-# whose scene time falls in the window. GPU is the worst surface's p95 and p99
-# per frame from `--offline --gpu-times --moment <moment>` at --fps 10 (no
+# whose scene time falls in the window. GPU is the worst surface's median, p95
+# and p99 per frame from `--offline --gpu-times --moment <moment>` at --fps 10 (no
 # display, needs a GPU with timestamp queries; "-" when it has none).
 #
-# The GPU is shared, and one run's p95 jumps between 0.3 and 4.2 ms on the
-# same binary (RD-13). Other work on the GPU only ever adds time, so the GPU
-# part runs VOXTYPE_BUDGET_GPU_RUNS times (default 3) and the table and the
-# gate use the LOWEST p95 of the runs. The p99 column is the lowest p99 of the
-# runs; it is reported and not gated. (A median of 3 flipped between 0.3 and
-# 1.0 ms on one look, because the runs are bimodal.) Use an optimised binary
+# The gate is the median GPU time per frame. One run's p95 jumps between 0.3
+# and 4.2 ms on the same binary (RD-13): at --fps 10 the GPU drops to its
+# lowest clock between frames (an RTX 3060 Ti idles at 225 of 2115 MHz), so
+# p95 mostly measures the clock, while the median holds still (Showcase:
+# median 0.41 to 0.49 ms, p95 0.59 to 2.51 ms over 3 runs of one binary).
+# Other work on the GPU only ever adds time, so the GPU part runs
+# VOXTYPE_BUDGET_GPU_RUNS times (default 3) and each column is the LOWEST of
+# the runs. p95 and p99 are reported and not gated. Use an optimised binary
 # (cargo build --profile measure) so debug-build cost is not in the numbers.
 #
 # Each state runs VOXTYPE_BUDGET_RUNS times (default 3) and keeps the run
@@ -38,14 +40,14 @@
 #
 # Writes $VOXTYPE_BUDGET_DIR/looks.tsv (default /var/tmp/claude/vo-budget),
 # with logs in its looks/ folder:
-#   look  state  cpu_pct  frames_per_s  gpu_ms_p95  gpu_ms_p99
+#   look  state  cpu_pct  frames_per_s  gpu_ms_p95  gpu_ms_p99  gpu_ms_median
 # and exits 1 naming each look and state over a limit. Limits (env vars):
 #
 #   VOXTYPE_BUDGET_IDLE_CPU_PCT  default 2    idle-open CPU, % of one core
 #   VOXTYPE_BUDGET_SHOWCASE_IDLE_CPU_PCT  default 3   the same for Showcase (see below)
 #   VOXTYPE_BUDGET_IDLE_FPS      default 30   idle-open frames per second
 #   VOXTYPE_BUDGET_REC_CPU_PCT   default 10   recording CPU, % of one core
-#   VOXTYPE_BUDGET_GPU_MS        default 1    GPU p95 per frame (lowest of 3 runs), both states
+#   VOXTYPE_BUDGET_GPU_MS        default 1    GPU median per frame (lowest of 3 runs), both states
 #   VOXTYPE_BUDGET_GPU_P99_MS    default 0    GPU p99 limit; 0 reports it without gating
 #
 # Other settings: LOOKS="swiss type" measures only those looks.
@@ -94,7 +96,7 @@ mkdir -p "$work/xdg-config"
 : >"$work/empty.toml"
 config=${VOXTYPE_BUDGET_CONFIG:-$work/empty.toml}
 tsv=$out/looks.tsv
-printf 'look\tstate\tcpu_pct\tframes_per_s\tgpu_ms_p95\tgpu_ms_p99\n' >"$tsv"
+printf 'look\tstate\tcpu_pct\tframes_per_s\tgpu_ms_p95\tgpu_ms_p99\tgpu_ms_median\n' >"$tsv"
 failed=()
 over() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a != "-" && a > b) }'; }
 
@@ -160,13 +162,13 @@ live() {
     echo "$cpu $fps"
 }
 
-# gpu LOOK MOMENT: prints "p95 p99": the lowest over $gpu_runs runs of the
-# worst surface's p95 and of its p99, or "- -".
+# gpu LOOK MOMENT: prints "p95 p99 median": the lowest over $gpu_runs runs of
+# the worst surface's p95, p99 and median, or "- - -".
 gpu() {
     local i
     for i in $(seq "$gpu_runs"); do gpu_once "$1" "$2"; done |
-        awk '$1 != "-" { if (!n || $1 < a) a = $1; if (!n || $2 < b) b = $2; n++ }
-            END { if (n) printf "%.3f %.3f\n", a, b; else print "- -" }'
+        awk '$1 != "-" { if (!n || $1 < a) a = $1; if (!n || $2 < b) b = $2; if (!n || $3 < c) c = $3; n++ }
+            END { if (n) printf "%.3f %.3f %.3f\n", a, b, c; else print "- - -" }'
 }
 
 gpu_once() {
@@ -181,10 +183,11 @@ gpu_once() {
             for (i = 1; i <= NF; i++) {
                 if ($i == "p95") p95 = ($(i + 1) > p95 ? $(i + 1) : p95)
                 if ($i == "p99") p99 = ($(i + 1) > p99 ? $(i + 1) : p99)
+                if ($i == "median") med = ($(i + 1) > med ? $(i + 1) : med)
             }
             seen = 1
         }
-        END { if (seen) printf "%.3f %.3f\n", p95, p99; else print "- -" }' <<<"$out"
+        END { if (seen) printf "%.3f %.3f %.3f\n", p95, p99, med; else print "- - -" }' <<<"$out"
 }
 
 for look in "${looks[@]}"; do
@@ -199,16 +202,16 @@ for look in "${looks[@]}"; do
         # of an even count), with its frame rate.
         read -r cpu fps < <(for _ in $(seq "$runs"); do live "$look" "$state" "$moment" "$from" "$to"; done |
             awk '$1 != "-"' | sort -n -k1,1 | awk '{ r[NR] = $0 } END { print (NR ? r[int((NR + 1) / 2)] : "- -") }')
-        read -r p95 p99 < <(gpu "$look" "$moment")
-        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$look" "$state" "$cpu" "$fps" "$p95" "$p99" >>"$tsv"
+        read -r p95 p99 med < <(gpu "$look" "$moment")
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$look" "$state" "$cpu" "$fps" "$p95" "$p99" "$med" >>"$tsv"
         why=()
         [[ $cpu == - ]] && why+=("live run failed (see $work/$look-$state.log)")
         over "$cpu" "$cpu_max" && why+=("cpu ${cpu}% > ${cpu_max}%")
         [[ -n $fps_max ]] && over "$fps" "$fps_max" && why+=("${fps} frames/s > $fps_max")
-        over "$p95" "$gpu_ms" && why+=("gpu p95 ${p95} ms > $gpu_ms ms")
+        over "$med" "$gpu_ms" && why+=("gpu median ${med} ms > $gpu_ms ms")
         [[ $gpu_p99 != 0 ]] && over "$p99" "$gpu_p99" && why+=("gpu p99 ${p99} ms > $gpu_p99 ms")
         if ((${#why[@]} == 0)); then
-            printf 'ok    %-10s %-10s cpu %6s%%  %5s frames/s  gpu p95 %s ms (p99 %s)\n' "$look" "$state" "$cpu" "$fps" "$p95" "$p99"
+            printf 'ok    %-10s %-10s cpu %6s%%  %5s frames/s  gpu median %s ms (p95 %s, p99 %s)\n' "$look" "$state" "$cpu" "$fps" "$med" "$p95" "$p99"
         else
             printf 'OVER  %-10s %-10s %s\n' "$look" "$state" "$(IFS=';'; echo "${why[*]}")"
             failed+=("$look $state")
