@@ -45,6 +45,8 @@ pub struct OsdState {
     /// Live preview font size in points; 0.0 means unset (theme size).
     pub preview_font_pt: f64,
     pub opacity: f64,
+    /// `doubt_below`: a word under this confidence is drawn unsure.
+    pub doubt_below: f64,
     pub word_fade: bool,
     pub look_badge: bool,
     /// `None` when config.toml holds a list of motion names, which the
@@ -90,6 +92,7 @@ pub enum Field {
     ReadingLine,
     PreviewFontPt,
     Opacity,
+    DoubtBelow,
     WordFade,
     LookBadge,
     Motion,
@@ -118,6 +121,7 @@ impl Field {
         Field::ReadingLine,
         Field::PreviewFontPt,
         Field::Opacity,
+        Field::DoubtBelow,
         Field::WordFade,
         Field::LookBadge,
         Field::Motion,
@@ -158,6 +162,7 @@ const READING_LINE_CHOICES: &[f64] = &[0.30, 0.40, 0.45, 0.50, 0.55, 0.60, 0.70]
 // 0.0 stands for unset: the theme's own font size.
 const PREVIEW_FONT_CHOICES: &[f64] = &[0.0, 10.0, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0];
 const OPACITY_CHOICES: &[f64] = &[0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0];
+const DOUBT_CHOICES: &[f64] = &[0.2, 0.3, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9];
 const WAVEFORM_SECS_CHOICES: &[f64] = &[1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0];
 const PEAK_DECAY_CHOICES: &[f64] = &[1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 20.0];
 const GAIN_CHOICES: &[f64] = &[1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 15.0, 20.0];
@@ -198,6 +203,9 @@ impl OsdState {
             reading_line: ed.get_float(TABLE, "reading_line").unwrap_or(0.5),
             preview_font_pt: ed.get_float(TABLE, "preview_font_pt").unwrap_or(0.0),
             opacity: ed.get_float(TABLE, "opacity").unwrap_or(0.95),
+            doubt_below: ed
+                .get_float(TABLE, "doubt_below")
+                .unwrap_or(crate::osd::config::DOUBT_BELOW as f64),
             word_fade: ed.get_bool(TABLE, "word_fade").unwrap_or(false),
             look_badge: ed.get_bool(TABLE, "look_badge").unwrap_or(false),
             motion: match ed.get_toml_value(TABLE, "motion") {
@@ -272,6 +280,12 @@ impl OsdState {
             ed.unset(TABLE, "preview_font_pt");
         }
         ed.set_float(TABLE, "opacity", self.opacity);
+        // The measured default: leave the key out so a new default applies.
+        if (self.doubt_below - crate::osd::config::DOUBT_BELOW as f64).abs() < 1e-6 {
+            ed.unset(TABLE, "doubt_below");
+        } else {
+            ed.set_float(TABLE, "doubt_below", self.doubt_below);
+        }
         if self.word_fade {
             ed.set_bool(TABLE, "word_fade", true);
         } else {
@@ -363,6 +377,9 @@ impl OsdState {
                     cycle_float(PREVIEW_FONT_CHOICES, self.preview_font_pt, delta)
             }
             Field::Opacity => self.opacity = cycle_float(OPACITY_CHOICES, self.opacity, delta),
+            Field::DoubtBelow => {
+                self.doubt_below = cycle_float(DOUBT_CHOICES, self.doubt_below, delta)
+            }
             Field::WordFade => self.word_fade = !self.word_fade,
             Field::LookBadge => self.look_badge = !self.look_badge,
             Field::Motion => {
@@ -601,6 +618,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             state.field == Field::Opacity,
             "Opacity",
             format!("{:.2}", state.opacity),
+        ),
+        FormRowSpec::new(
+            state.field == Field::DoubtBelow,
+            "Unsure below",
+            format!("{:.2}", state.doubt_below),
         ),
         FormRowSpec::new(
             state.field == Field::WordFade,
@@ -952,6 +974,17 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from(""),
             dim("Default: 0.95."),
         ],
+        Field::DoubtBelow => vec![
+            heading("Unsure below"),
+            Line::from(""),
+            Line::from(
+                "The vo popup marks a word as unsure (a wavy or thin line in \
+                 some looks) when the engine's confidence in it is below this, \
+                 0 to 1. Higher shows more marks.",
+            ),
+            Line::from(""),
+            dim("Default: 0.45, about 1 word in 100 of real dictation."),
+        ],
         Field::WaveformWindowSecs => vec![
             heading("Waveform window (seconds)"),
             Line::from(""),
@@ -1102,6 +1135,7 @@ mod tests {
                 Field::ReadingLine => "osd.reading_line",
                 Field::PreviewFontPt => "osd.preview_font_pt",
                 Field::Opacity => "osd.opacity",
+                Field::DoubtBelow => "osd.doubt_below",
                 Field::WordFade => "osd.word_fade",
                 Field::LookBadge => "osd.look_badge",
                 Field::Motion => "osd.motion",
@@ -1155,6 +1189,7 @@ mod tests {
             reading_line: 0.5,
             preview_font_pt: 0.0,
             opacity: 0.95,
+            doubt_below: 0.45,
             word_fade: false,
             look_badge: false,
             motion: Some("look".to_string()),
@@ -1214,6 +1249,7 @@ mod tests {
             reading_line: 0.5,
             preview_font_pt: 0.0,
             opacity: 0.95,
+            doubt_below: 0.45,
             word_fade: false,
             look_badge: false,
             motion: Some("look".to_string()),
