@@ -433,11 +433,60 @@ fn file_mode_lacks_path(config: &OutputConfig) -> bool {
 
 /// Run a shell command (for pre/post hooks)
 pub async fn run_hook(command: &str, hook_name: &str) -> Result<(), String> {
+    run_hook_with(command, hook_name, None).await
+}
+
+/// How a dictation ended, for the output hooks as `VOXTYPE_OUTCOME`, so a
+/// hook that presses Enter can leave it out when no text arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookOutcome {
+    /// The text was delivered (in the pre-output hook: is about to be).
+    Done,
+    /// The dictation was cancelled.
+    Cancelled,
+    /// Nothing was heard or transcribed.
+    Empty,
+    /// Recording, transcription or output failed.
+    Failed,
+    /// The text is on the clipboard only, not typed or pasted.
+    NotPasted,
+}
+
+impl HookOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HookOutcome::Done => "done",
+            HookOutcome::Cancelled => "cancelled",
+            HookOutcome::Empty => "empty",
+            HookOutcome::Failed => "failed",
+            HookOutcome::NotPasted => "not-pasted",
+        }
+    }
+}
+
+/// [`run_hook`] for `pre_output_command` and `post_output_command`, with
+/// `VOXTYPE_OUTCOME` set to `outcome`.
+pub async fn run_output_hook(
+    command: &str,
+    hook_name: &str,
+    outcome: HookOutcome,
+) -> Result<(), String> {
+    run_hook_with(command, hook_name, Some(outcome)).await
+}
+
+async fn run_hook_with(
+    command: &str,
+    hook_name: &str,
+    outcome: Option<HookOutcome>,
+) -> Result<(), String> {
     tracing::debug!("Running {} hook: {}", hook_name, command);
 
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(command)
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(command);
+    if let Some(outcome) = outcome {
+        cmd.env("VOXTYPE_OUTCOME", outcome.as_str());
+    }
+    let output = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
@@ -562,7 +611,7 @@ pub async fn output_via_confirmed(
 
     // Run pre-output hook if configured (e.g., switch to modifier-suppressing submap)
     if let Some(cmd) = options.pre_output_command {
-        if let Err(e) = run_hook(cmd, "pre_output").await {
+        if let Err(e) = run_output_hook(cmd, "pre_output", HookOutcome::Done).await {
             tracing::warn!("{}", e);
             // Continue anyway - best effort
         }
@@ -602,13 +651,26 @@ pub async fn output_via_confirmed(
         }
     }
 
+    // The text went to the clipboard although the chain could type it: the
+    // keystroke methods were skipped or failed.
+    let outcome = match result {
+        Ok(name)
+            if name.starts_with("clipboard")
+                && chain_synthesizes_keystrokes(chain.iter().map(|o| o.name())) =>
+        {
+            HookOutcome::NotPasted
+        }
+        Ok(_) => HookOutcome::Done,
+        Err(_) => HookOutcome::Failed,
+    };
+
     // Run post-output hook if configured (e.g., reset submap)
     // Always run this, even on failure, to ensure cleanup, unless `confirm`
     // says the target is gone.
     if let Some(cmd) = options.post_output_command {
         if !confirm().await {
             tracing::warn!("Target window changed before the post-output hook; skipping it");
-        } else if let Err(e) = run_hook(cmd, "post_output").await {
+        } else if let Err(e) = run_output_hook(cmd, "post_output", outcome).await {
             tracing::warn!("{}", e);
         }
     }
@@ -619,6 +681,72 @@ pub async fn output_via_confirmed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An output method that succeeds or fails, under a given name.
+    struct Named(&'static str, bool);
+
+    #[async_trait::async_trait]
+    impl TextOutput for Named {
+        async fn output(&self, _text: &str) -> Result<(), OutputError> {
+            if self.1 {
+                Ok(())
+            } else {
+                Err(OutputError::AllMethodsFailed)
+            }
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    /// The post-output hook's VOXTYPE_OUTCOME for `chain`.
+    async fn post_outcome(chain: Vec<Box<dyn TextOutput>>) -> String {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = dir.path().join("outcome");
+        let hook = format!("echo $VOXTYPE_OUTCOME > '{}'", log.display());
+        let _ = output_via(
+            &chain,
+            "text",
+            OutputOptions {
+                pre_output_command: None,
+                post_output_command: Some(&hook),
+                wait_for_modifier_release: false,
+                modifier_release_timeout: std::time::Duration::ZERO,
+                normalize: false,
+            },
+        )
+        .await;
+        std::fs::read_to_string(&log).unwrap().trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn the_post_output_hook_gets_the_outcome() {
+        assert_eq!(
+            post_outcome(vec![Box::new(Named("wtype", true))]).await,
+            "done"
+        );
+        // Clipboard mode: copying is the delivery.
+        assert_eq!(
+            post_outcome(vec![Box::new(Named("clipboard (wl-copy)", true))]).await,
+            "done"
+        );
+        // Typing failed and the clipboard took the text: no Enter.
+        assert_eq!(
+            post_outcome(vec![
+                Box::new(Named("wtype", false)),
+                Box::new(Named("clipboard (wl-copy)", true)),
+            ])
+            .await,
+            "not-pasted"
+        );
+        assert_eq!(
+            post_outcome(vec![Box::new(Named("wtype", false))]).await,
+            "failed"
+        );
+    }
 
     #[test]
     fn file_mode_warns_only_without_a_path() {

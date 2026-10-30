@@ -20,7 +20,7 @@ use crate::notification::{self, Lifetime};
 use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::output::streaming::StreamingSession;
-use crate::output::TextOutput;
+use crate::output::{HookOutcome, TextOutput};
 use crate::state::{ChunkResult, Phase, State};
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
@@ -1103,7 +1103,7 @@ async fn deliver_to_file(
     fallback: &[Box<dyn TextOutput>],
 ) -> FileDelivery {
     if let Some(cmd) = &cfg.pre_output_command {
-        if let Err(e) = output::run_hook(cmd, "pre_output").await {
+        if let Err(e) = output::run_output_hook(cmd, "pre_output", HookOutcome::Done).await {
             tracing::warn!("{}", e);
         }
     }
@@ -1141,7 +1141,12 @@ async fn deliver_to_file(
 
     // Always, even when nothing was delivered, matching output_with_fallback.
     if let Some(cmd) = &cfg.post_output_command {
-        if let Err(e) = output::run_hook(cmd, "post_output").await {
+        let outcome = match delivery {
+            FileDelivery::Written => HookOutcome::Done,
+            FileDelivery::FellBack(_) => HookOutcome::NotPasted,
+            FileDelivery::Lost(_) => HookOutcome::Failed,
+        };
+        if let Err(e) = output::run_output_hook(cmd, "post_output", outcome).await {
             tracing::warn!("{}", e);
         }
     }
@@ -1152,12 +1157,17 @@ async fn deliver_to_file(
 /// The post-output hook at the end of a streaming dictation, ended or
 /// cancelled, which resets a compositor submap entered for it. Skipped when
 /// an output call of the session already ran it, so it runs once (R31).
-async fn end_streaming_hook(cfg: &crate::config::OutputConfig, session: Option<&StreamingSession>) {
+/// When it runs here no text was output, so `outcome` is not `Done`.
+async fn end_streaming_hook(
+    cfg: &crate::config::OutputConfig,
+    session: Option<&StreamingSession>,
+    outcome: HookOutcome,
+) {
     if session.is_some_and(StreamingSession::post_hook_ran) {
         return;
     }
     if let Some(cmd) = &cfg.post_output_command {
-        if let Err(e) = output::run_hook(cmd, "post_output").await {
+        if let Err(e) = output::run_output_hook(cmd, "post_output", outcome).await {
             tracing::warn!("{}", e);
         }
     }
@@ -2040,7 +2050,7 @@ impl Daemon {
                 self.handle_transcription_result(state, Ok(Ok(text))).await;
             } else {
                 tracing::debug!("Eager recording produced empty result");
-                self.reset_to_idle(state).await;
+                self.reset_to_idle(state, HookOutcome::Empty).await;
             }
             *eager_transcriber = None;
         }
@@ -2671,6 +2681,9 @@ impl Daemon {
                 .flatten();
         clear_live_preview();
 
+        // For the post-output hook, when it runs at the end: no text went
+        // out.
+        let mut outcome = HookOutcome::Empty;
         // The stream failed: transcribe its audio again rather than lose it.
         if let Some(failure) = self.streaming_failure.take() {
             let delivered = self
@@ -2684,6 +2697,9 @@ impl Daemon {
                 *streaming_session = None;
                 *streaming_chain = None;
                 return;
+            }
+            if !delivered {
+                outcome = HookOutcome::Failed;
             }
             send_notification(
                 "Streaming Error",
@@ -2755,7 +2771,7 @@ impl Daemon {
 
         self.play_feedback(SoundEvent::TranscriptionComplete);
 
-        end_streaming_hook(&self.config.output, session.as_ref()).await;
+        end_streaming_hook(&self.config.output, session.as_ref(), outcome).await;
 
         *state = State::Idle;
         self.update_state("idle");
@@ -2833,7 +2849,9 @@ impl Daemon {
 
             // Run post_output_command to reset compositor submap
             if let Some(cmd) = &self.config.output.post_output_command {
-                if let Err(e) = output::run_hook(cmd, "post_output").await {
+                if let Err(e) =
+                    output::run_output_hook(cmd, "post_output", HookOutcome::Cancelled).await
+                {
                     tracing::warn!("{}", e);
                 }
             }
@@ -2866,7 +2884,9 @@ impl Daemon {
 
             // Run post_output_command to reset compositor submap
             if let Some(cmd) = &self.config.output.post_output_command {
-                if let Err(e) = output::run_hook(cmd, "post_output").await {
+                if let Err(e) =
+                    output::run_output_hook(cmd, "post_output", HookOutcome::Cancelled).await
+                {
                     tracing::warn!("{}", e);
                 }
             }
@@ -2922,7 +2942,12 @@ impl Daemon {
         self.update_state("idle");
         self.play_feedback(SoundEvent::Cancelled);
 
-        end_streaming_hook(&self.config.output, session.as_ref()).await;
+        end_streaming_hook(
+            &self.config.output,
+            session.as_ref(),
+            HookOutcome::Cancelled,
+        )
+        .await;
 
         if self.config.output.notification.on_recording_stop {
             send_notification(
@@ -3829,8 +3854,9 @@ impl Daemon {
     }
 
     /// Reset state to idle and run post_output_command to reset compositor submap
-    /// Call this when exiting from recording/transcribing without normal output flow
-    async fn reset_to_idle(&mut self, state: &mut State) {
+    /// Call this when exiting from recording/transcribing without normal output flow;
+    /// `outcome` says why, for the hook.
+    async fn reset_to_idle(&mut self, state: &mut State, outcome: HookOutcome) {
         discard_recording_overrides();
         self.restore_recording_media();
         *state = State::Idle;
@@ -3838,7 +3864,7 @@ impl Daemon {
 
         // Run post_output_command to reset compositor submap
         if let Some(cmd) = &self.config.output.post_output_command {
-            if let Err(e) = output::run_hook(cmd, "post_output").await {
+            if let Err(e) = output::run_output_hook(cmd, "post_output", outcome).await {
                 tracing::warn!("{}", e);
             }
         }
@@ -4167,7 +4193,7 @@ impl Daemon {
                     if audio_duration < 0.3 {
                         tracing::debug!("Recording too short ({:.2}s), ignoring", audio_duration);
                         self.publish_empty_outcome();
-                        self.reset_to_idle(state).await;
+                        self.reset_to_idle(state, HookOutcome::Empty).await;
                         return false;
                     }
 
@@ -4177,7 +4203,7 @@ impl Daemon {
                             Ok(result) if !result.has_speech => {
                                 self.report_no_speech(&result).await;
                                 self.publish_empty_outcome();
-                                self.reset_to_idle(state).await;
+                                self.reset_to_idle(state, HookOutcome::Empty).await;
                                 return false;
                             }
                             Ok(result) => {
@@ -4206,7 +4232,7 @@ impl Daemon {
                     {
                         Ok(transcriber) => transcriber,
                         Err(()) => {
-                            self.reset_to_idle(state).await;
+                            self.reset_to_idle(state, HookOutcome::Failed).await;
                             return false;
                         }
                     };
@@ -4223,13 +4249,13 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::warn!("Recording error: {}", e);
-                    self.reset_to_idle(state).await;
+                    self.reset_to_idle(state, HookOutcome::Failed).await;
                     false
                 }
             }
         } else {
             self.restore_recording_media();
-            self.reset_to_idle(state).await;
+            self.reset_to_idle(state, HookOutcome::Failed).await;
             false
         }
     }
@@ -4269,7 +4295,7 @@ impl Daemon {
                 if text.is_empty() {
                     tracing::debug!("Transcription was empty");
                     crate::osd::outcome::write(crate::osd::outcome::Outcome::Empty);
-                    self.reset_to_idle(state).await;
+                    self.reset_to_idle(state, HookOutcome::Empty).await;
                 } else {
                     tracing::info!("Transcribed: {:?}", text);
 
@@ -4612,7 +4638,7 @@ impl Daemon {
                     Lifetime::Millis(4000),
                 )
                 .await;
-                self.reset_to_idle(state).await;
+                self.reset_to_idle(state, HookOutcome::Failed).await;
             }
             Err(e) => {
                 // JoinError - task was cancelled or panicked
@@ -4651,7 +4677,7 @@ impl Daemon {
                         );
                     }
                 }
-                self.reset_to_idle(state).await;
+                self.reset_to_idle(state, HookOutcome::Failed).await;
             }
         }
     }
@@ -5200,7 +5226,7 @@ impl Daemon {
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
-                                    self.reset_to_idle(&mut state).await;
+                                    self.reset_to_idle(&mut state, HookOutcome::Empty).await;
                                 }
                                 eager_transcriber = None;
                             }
@@ -5337,7 +5363,7 @@ impl Daemon {
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
-                                    self.reset_to_idle(&mut state).await;
+                                    self.reset_to_idle(&mut state, HookOutcome::Empty).await;
                                 }
                                 eager_transcriber = None;
                             }
@@ -5393,7 +5419,7 @@ impl Daemon {
 
                                 // Run post_output_command to reset compositor submap
                                 if let Some(cmd) = &self.config.output.post_output_command {
-                                    if let Err(e) = output::run_hook(cmd, "post_output").await {
+                                    if let Err(e) = output::run_output_hook(cmd, "post_output", HookOutcome::Cancelled).await {
                                         tracing::warn!("{}", e);
                                     }
                                 }
@@ -5417,7 +5443,7 @@ impl Daemon {
 
                                 // Run post_output_command to reset compositor submap
                                 if let Some(cmd) = &self.config.output.post_output_command {
-                                    if let Err(e) = output::run_hook(cmd, "post_output").await {
+                                    if let Err(e) = output::run_output_hook(cmd, "post_output", HookOutcome::Cancelled).await {
                                         tracing::warn!("{}", e);
                                     }
                                 }
@@ -5657,7 +5683,7 @@ impl Daemon {
                             ).await {
                                 Ok(transcriber) => transcriber,
                                 Err(()) => {
-                                    self.reset_to_idle(&mut state).await;
+                                    self.reset_to_idle(&mut state, HookOutcome::Failed).await;
                                     continue;
                                 }
                             };
@@ -5669,7 +5695,7 @@ impl Daemon {
                                 self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                             } else {
                                 tracing::debug!("Eager recording timeout produced empty result");
-                                self.reset_to_idle(&mut state).await;
+                                self.reset_to_idle(&mut state, HookOutcome::Empty).await;
                             }
                             eager_transcriber = None;
                         } else {
@@ -6330,11 +6356,12 @@ mod tests {
     }
 
     /// Output config whose hooks log to `log`, noting whether `target`
-    /// existed when each ran, so tests can see order relative to the write.
+    /// existed when each ran, so tests can see order relative to the write,
+    /// and the hook's `VOXTYPE_OUTCOME`.
     fn hooked_output_config(log: &Path, target: &Path) -> crate::config::OutputConfig {
         let hook = |name: &str| {
             format!(
-                "if [ -e '{t}' ]; then echo {name}:file >> '{l}'; else echo {name}:nofile >> '{l}'; fi",
+                "if [ -e '{t}' ]; then echo {name}:file:$VOXTYPE_OUTCOME >> '{l}'; else echo {name}:nofile:$VOXTYPE_OUTCOME >> '{l}'; fi",
                 t = target.display(),
                 l = log.display()
             )
@@ -6358,7 +6385,10 @@ mod tests {
         assert_eq!(delivery, FileDelivery::Written);
         assert_eq!(fs::read_to_string(&target).unwrap(), "hello\n");
         // pre ran before the file existed, post after it was written.
-        assert_eq!(fs::read_to_string(&log).unwrap(), "pre:nofile\npost:file\n");
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            "pre:nofile:done\npost:file:done\n"
+        );
     }
 
     /// Lines the hooks of `hooked_output_config` wrote.
@@ -6393,7 +6423,7 @@ mod tests {
             )
             .await
             .unwrap();
-        end_streaming_hook(&cfg, Some(&session)).await;
+        end_streaming_hook(&cfg, Some(&session), HookOutcome::Empty).await;
         assert_eq!(hook_lines(&log), ["pre", "post"]);
     }
 
@@ -6419,8 +6449,28 @@ mod tests {
             )
             .await
             .is_err());
-        end_streaming_hook(&cfg, Some(&session)).await;
+        end_streaming_hook(&cfg, Some(&session), HookOutcome::Empty).await;
         assert_eq!(hook_lines(&log), ["pre", "post"]);
+    }
+
+    /// The post hook at the end of a stream that typed nothing says why, so
+    /// a hook that presses Enter leaves it out.
+    #[tokio::test]
+    async fn the_end_of_stream_hook_gets_the_outcome() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &dir.path().join("none"));
+        for outcome in [
+            HookOutcome::Cancelled,
+            HookOutcome::Empty,
+            HookOutcome::Failed,
+        ] {
+            end_streaming_hook(&cfg, Some(&StreamingSession::new()), outcome).await;
+        }
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            "post:nofile:cancelled\npost:nofile:empty\npost:nofile:failed\n"
+        );
     }
 
     /// R31: a stream that typed nothing (no speech, a cancel, an error)
@@ -6431,10 +6481,10 @@ mod tests {
         let log = dir.path().join("hooks.log");
         let cfg = hooked_output_config(&log, &dir.path().join("none"));
         let session = StreamingSession::new();
-        end_streaming_hook(&cfg, Some(&session)).await;
+        end_streaming_hook(&cfg, Some(&session), HookOutcome::Empty).await;
         assert_eq!(hook_lines(&log), ["post"]);
         fs::remove_file(&log).unwrap();
-        end_streaming_hook(&cfg, None).await;
+        end_streaming_hook(&cfg, None, HookOutcome::Empty).await;
         assert_eq!(hook_lines(&log), ["post"]);
     }
 
@@ -6463,7 +6513,7 @@ mod tests {
         assert_eq!(got.lock().unwrap().as_deref(), Some("rescue me"));
         assert_eq!(
             fs::read_to_string(&log).unwrap(),
-            "pre:nofile\npost:nofile\n"
+            "pre:nofile:done\npost:nofile:not-pasted\n"
         );
     }
 
@@ -6482,7 +6532,7 @@ mod tests {
         // The post hook runs even when nothing was delivered.
         assert_eq!(
             fs::read_to_string(&log).unwrap(),
-            "pre:nofile\npost:nofile\n"
+            "pre:nofile:done\npost:nofile:failed\n"
         );
     }
 
@@ -7388,7 +7438,7 @@ mod tests {
             .deliver_edited(&mut session, &chain, &clipboard, "edited text")
             .await;
         d.result.unwrap();
-        end_streaming_hook(&daemon.config.output, Some(&session)).await;
+        end_streaming_hook(&daemon.config.output, Some(&session), HookOutcome::Empty).await;
         let delivered = Delivered {
             verdict: d.paste,
             before_hook: d.before_hook,
@@ -7609,7 +7659,7 @@ mod tests {
             .deliver_edited(&mut session, &chain, &clipboard, "edited text")
             .await;
         d.result.unwrap();
-        end_streaming_hook(&daemon.config.output, Some(&session)).await;
+        end_streaming_hook(&daemon.config.output, Some(&session), HookOutcome::Empty).await;
         assert_eq!(d.paste, Verdict::Gone);
         assert_eq!(*pasted.lock().unwrap(), None, "no paste");
         assert_eq!(copied.lock().unwrap().as_deref(), Some("edited text"));

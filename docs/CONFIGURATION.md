@@ -3130,6 +3130,23 @@ post_output_command = "notify-send 'Done'"
 post_output_command = "echo $(date) >> ~/voxtype.log"
 ```
 
+**How the dictation ended:** both hooks get the environment variable `VOXTYPE_OUTCOME`. The post-output hook also runs when no text was typed (a cancel, no speech, an error), so a hook that presses Enter should check it first. After a keyboard edit whose window lost focus, the text goes to the clipboard and the post-output hook does not run.
+
+| `VOXTYPE_OUTCOME` | Meaning |
+|---|---|
+| `done` | The text was typed, pasted or written. In `pre_output_command` it is always `done`: that hook runs only when text is about to be output. |
+| `cancelled` | The dictation was cancelled. |
+| `empty` | Nothing was heard or transcribed. |
+| `failed` | Recording, transcription or output failed. |
+| `not-pasted` | The text is on the clipboard only: typing failed, a modifier key was held too long, or the output file could not be written. In clipboard mode a copied text is `done`. |
+
+```sh
+#!/bin/sh
+# post_output_command: press Enter only after text was typed.
+[ "$VOXTYPE_OUTCOME" = done ] || exit 0
+wtype -k Return
+```
+
 See [User Manual - Output Hooks](USER_MANUAL.md#output-hooks-compositor-integration) for detailed setup instructions.
 
 ---
