@@ -59,6 +59,14 @@ pub(crate) fn send_record_command(
         return Ok(());
     }
 
+    // Edit is a file trigger too; the daemon reads it on its next poll.
+    if matches!(action, RecordAction::Edit) {
+        let path = config::Config::runtime_dir().join(voxtype::daemon::EDIT_REQUEST_FILE);
+        std::fs::write(&path, trigger_stamp())
+            .map_err(|e| anyhow::anyhow!("Failed to write edit request: {}", e))?;
+        return Ok(());
+    }
+
     // Subcommand --model takes priority over top-level --model. Check it
     // before writing any override file, so a typo or an undownloaded model
     // fails here rather than after the user has spoken.
@@ -197,7 +205,7 @@ pub(crate) fn send_record_command(
                 libc::SIGUSR1 // Start
             }
         }
-        RecordAction::Cancel => unreachable!(), // Handled above
+        RecordAction::Cancel | RecordAction::Edit => unreachable!(), // Handled above
     };
 
     // With --wait, clear a previous run's completion sidecar before signalling,

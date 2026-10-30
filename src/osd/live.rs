@@ -628,6 +628,14 @@ pub fn read() -> Option<LiveDoc> {
 
 /// The current `preview-signals.json`, for a popup. None when there is none
 /// or it does not parse.
+/// How far the live model has decoded this dictation, in seconds of the
+/// audio it was given: the end of the newest committed frame. None before
+/// the first signals step, or without the OSD (no signals are sent).
+pub fn decoded_secs() -> Option<f32> {
+    let live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    live.signals.frames.last().map(|f| f.t + 0.08)
+}
+
 pub fn read_signals() -> Option<ModelSignals> {
     let json = std::fs::read_to_string(signals_path()).ok()?;
     serde_json::from_str(&json).ok()

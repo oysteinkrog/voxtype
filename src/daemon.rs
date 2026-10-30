@@ -21,7 +21,7 @@ use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::output::streaming::StreamingSession;
 use crate::output::TextOutput;
-use crate::state::{ChunkResult, State};
+use crate::state::{ChunkResult, Phase, State};
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
 use pidlock::Pidlock;
@@ -295,6 +295,30 @@ fn cleanup_pid_file(path: &PathBuf) {
 }
 
 /// Check if cancel has been requested (via file trigger)
+/// Trigger file `voxtype record edit` writes in the runtime dir.
+pub const EDIT_REQUEST_FILE: &str = "edit";
+
+/// Consume a `voxtype record edit` trigger.
+fn check_edit_requested() -> bool {
+    std::fs::remove_file(Config::runtime_dir().join(EDIT_REQUEST_FILE)).is_ok()
+}
+
+/// Settling ends by then even if the live model reports no progress.
+const EDIT_SETTLE_MAX: Duration = Duration::from_millis(1200);
+
+/// A recording paused for a keyboard edit.
+#[derive(Debug, Default)]
+struct EditPause {
+    /// The audio clock at the pause point, in seconds: once the live model
+    /// has decoded past it, every word spoken before the tap is in.
+    pause_at: f32,
+    /// While settling: when to stop waiting for that.
+    settle_by: Option<Instant>,
+    /// The pending tap's hold passed its cap, so the tap counts as
+    /// cancelled and its late confirmation is dropped.
+    dropped_tap: bool,
+}
+
 fn check_cancel_requested() -> bool {
     let cancel_file = Config::runtime_dir().join("cancel");
     if cancel_file.exists() {
@@ -1178,6 +1202,10 @@ pub struct Daemon {
     // The streaming session's audio gate: holds or drops the mic audio for
     // a keyboard edit, and says which audio the backend really got.
     audio_gate: Option<audio::levels::SharedGate>,
+    // Keyboard editing of a live preview recording; off until configured.
+    keyboard_edit: bool,
+    // The current recording's keyboard edit pause, while there is one.
+    edit: EditPause,
     streaming_failure: Option<String>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
@@ -1317,6 +1345,8 @@ impl Daemon {
             rescued_audio: Arc::new(std::sync::Mutex::new(None)),
             streaming_samples: None,
             audio_gate: None,
+            keyboard_edit: false,
+            edit: EditPause::default(),
             streaming_failure: None,
             eager_chunk_tasks: Vec::new(),
             vad,
@@ -1677,6 +1707,9 @@ impl Daemon {
         // an is_recording() state, so a leftover cancel file would kill the
         // session moments after it starts. See #606.
         discard_stale_cancel(self.start_request);
+        // An edit asked for before this recording is not for it.
+        let _ = check_edit_requested();
+        self.edit = EditPause::default();
         // An override model has its own transcriber, which records in batch
         // mode; streaming would run the default model instead.
         if let Some(name) = model_override.as_deref() {
@@ -1934,6 +1967,140 @@ impl Daemon {
         // holds it.
         if let Some(Ok(mut gate)) = self.audio_gate.as_ref().map(|g| g.lock()) {
             gate.close();
+        }
+    }
+
+    /// Silence sent to flush the live model's lookahead at a pause: one
+    /// chunk and the right context of its streaming window.
+    fn edit_pad_samples(&self) -> usize {
+        let window = self
+            .config
+            .parakeet
+            .clone()
+            .unwrap_or_default()
+            .streaming_window()
+            .unwrap_or_default();
+        (window.chunk_steps + window.right_steps) as usize * 1280
+    }
+
+    fn with_gate(&self, f: impl FnOnce(&mut audio::levels::AudioGate)) {
+        if let Some(Ok(mut gate)) = self.audio_gate.as_ref().map(|g| g.lock()) {
+            f(&mut gate);
+        }
+    }
+
+    /// A single edit tap ended while listening: hold the audio and stop the
+    /// clocks until it is confirmed or cancelled.
+    async fn edit_tap_pending(&mut self, state: &mut State) {
+        if !self.keyboard_edit
+            || !state.is_streaming()
+            || state.phase() != Some(Phase::Listening)
+        {
+            return;
+        }
+        self.with_gate(|g| g.hold());
+        if let Some(tracker) = &self.silence_tracker {
+            tracker.pause().await;
+        }
+        state.set_phase(Phase::Pending, Instant::now());
+    }
+
+    /// The pending tap became something else: the held audio goes on, in
+    /// order, and the recording listens again.
+    async fn edit_tap_cancelled(&mut self, state: &mut State) {
+        self.edit.dropped_tap = false;
+        if state.phase() != Some(Phase::Pending) {
+            return;
+        }
+        self.with_gate(|g| g.release());
+        if let Some(tracker) = &self.silence_tracker {
+            tracker.resume().await;
+        }
+        state.set_phase(Phase::Listening, Instant::now());
+    }
+
+    /// A confirmed single tap.
+    async fn edit_tap_confirmed(&mut self, state: &mut State) {
+        if std::mem::take(&mut self.edit.dropped_tap) {
+            return;
+        }
+        self.edit_toggle(state).await;
+    }
+
+    /// A confirmed single tap, or `voxtype record edit`: pause to edit when
+    /// listening, listen again when editing, edit again when detached.
+    async fn edit_toggle(&mut self, state: &mut State) {
+        if !self.keyboard_edit || !state.is_streaming() {
+            return;
+        }
+        match state.phase() {
+            Some(Phase::Listening | Phase::Pending) => self.edit_pause(state).await,
+            Some(Phase::Settling | Phase::Editing) => self.edit_resume(state).await,
+            Some(Phase::Detached) => {
+                state.set_phase(Phase::Editing, Instant::now());
+            }
+            _ => {}
+        }
+    }
+
+    /// Drop the held audio, send the silence pad so the live model decodes
+    /// every word before the pause, and stop passing mic audio.
+    async fn edit_pause(&mut self, state: &mut State) {
+        let pad = self.edit_pad_samples();
+        let mut pause_at = 0;
+        self.with_gate(|g| {
+            pause_at = g.clock();
+            g.pause(pad);
+        });
+        if let Some(tracker) = &self.silence_tracker {
+            tracker.pause().await;
+        }
+        let now = Instant::now();
+        self.edit = EditPause {
+            pause_at: pause_at as f32 / 16000.0,
+            settle_by: Some(now + EDIT_SETTLE_MAX),
+            dropped_tap: false,
+        };
+        state.set_phase(Phase::Settling, now);
+        tracing::info!("Paused for a keyboard edit");
+    }
+
+    /// Pass mic audio again; new speech goes after the edited text.
+    async fn edit_resume(&mut self, state: &mut State) {
+        self.with_gate(|g| g.resume());
+        if let Some(tracker) = &self.silence_tracker {
+            tracker.resume().await;
+        }
+        self.edit = EditPause::default();
+        state.set_phase(Phase::Listening, Instant::now());
+        tracing::info!("Listening again after a keyboard edit");
+    }
+
+    /// Every poll: a hold past its cap counts as a cancelled tap, and
+    /// settling ends once the live model has decoded to the pause point
+    /// (`decoded`, seconds of its audio) or the wait runs out.
+    async fn edit_tick(&mut self, state: &mut State, now: Instant, decoded: Option<f32>) {
+        match state.phase() {
+            Some(Phase::Pending) => {
+                let mut overflowed = false;
+                self.with_gate(|g| overflowed = g.take_overflow());
+                if overflowed {
+                    tracing::debug!("Edit tap held audio past its cap; listening on");
+                    self.edit.dropped_tap = true;
+                    if let Some(tracker) = &self.silence_tracker {
+                        tracker.resume().await;
+                    }
+                    state.set_phase(Phase::Listening, now);
+                }
+            }
+            Some(Phase::Settling) => {
+                let decoded = decoded.is_some_and(|d| d >= self.edit.pause_at);
+                if decoded || self.edit.settle_by.is_some_and(|by| now >= by) {
+                    self.edit.settle_by = None;
+                    state.set_phase(Phase::Editing, now);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4284,6 +4451,10 @@ impl Daemon {
             .and_then(|l| l.correction_armed());
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let correction_armed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let edit_armed = hotkey_listener.as_ref().and_then(|l| l.edit_armed());
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let edit_armed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
         let corrections_on = self.config.live_preview_active() && !self.config.live_typing;
         if correction_armed.is_some() && !corrections_on {
             tracing::warn!(
@@ -4336,9 +4507,19 @@ impl Daemon {
         transcribing_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
+            // A paused recording takes no spoken correction (R10).
+            let edit_paused = state
+                .phase()
+                .is_some_and(|p| p.is_paused() && p != Phase::Pending);
             if let Some(armed) = &correction_armed {
                 armed.store(
-                    corrections_on && state.is_streaming(),
+                    corrections_on && state.is_streaming() && !edit_paused,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            if let Some(armed) = &edit_armed {
+                armed.store(
+                    self.keyboard_edit && state.is_streaming(),
                     std::sync::atomic::Ordering::Relaxed,
                 );
             }
@@ -4756,16 +4937,25 @@ impl Daemon {
                         }
 
                         // === KEYBOARD EDIT TAP ===
-                        // Only sent while edit_armed is set, which nothing
-                        // sets until keyboard editing is wired in.
-                        (event @ (HotkeyEvent::EditTapPending | HotkeyEvent::EditTapConfirmed | HotkeyEvent::EditTapCancelled), _) => {
-                            tracing::debug!("Edit tap event {:?} ignored", event);
+                        (HotkeyEvent::EditTapPending, _) => {
+                            self.edit_tap_pending(&mut state).await;
+                        }
+                        (HotkeyEvent::EditTapConfirmed, _) => {
+                            self.edit_tap_confirmed(&mut state).await;
+                        }
+                        (HotkeyEvent::EditTapCancelled, _) => {
+                            self.edit_tap_cancelled(&mut state).await;
                         }
                     }
                 }
 
                 // Check for recording timeout and cancel requests
                 _ = recording_poll.tick(), if state.is_recording() => {
+                    if check_edit_requested() {
+                        self.edit_toggle(&mut state).await;
+                    }
+                    self.edit_tick(&mut state, Instant::now(), crate::osd::live::decoded_secs()).await;
+
                     // Check for cancel request first
                     if check_cancel_requested() {
                         self.cancel_requested_session(
@@ -5925,6 +6115,148 @@ mod tests {
         assert_eq!(ready.transcribe(&[]).unwrap(), "loaded");
         assert!(daemon.override_load_task.is_none());
         assert!(matches!(&daemon.override_cache, Some((name, _)) if name == "base.en"));
+    }
+
+    // Keyboard edit pause, with the gate's receiver as the fake worker.
+
+    fn edit_daemon() -> (Daemon, tokio::sync::mpsc::Receiver<Vec<f32>>, State) {
+        let mut daemon = parakeet_daemon(false);
+        daemon.keyboard_edit = true;
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        daemon.audio_gate = Some(audio::levels::AudioGate::new(tx, true).shared());
+        let state = State::Streaming {
+            started_at: Instant::now(),
+            model_override: None,
+            partial_buffer: String::new(),
+            finalized_text: String::new(),
+            typed_chars: 0,
+            file_output_path: None,
+            pause: Default::default(),
+        };
+        (daemon, rx, state)
+    }
+
+    /// What the capture tap does with one mic chunk.
+    fn mic(daemon: &Daemon, v: f32) {
+        daemon.with_gate(|g| g.push(vec![v; 160]));
+    }
+
+    fn worker_got(rx: &mut tokio::sync::mpsc::Receiver<Vec<f32>>) -> Vec<f32> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|block| block[0])
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn edit_pending_then_double_tap_loses_no_audio() {
+        let (mut daemon, mut rx, mut state) = edit_daemon();
+        mic(&daemon, 1.0);
+        daemon.edit_tap_pending(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Pending));
+        mic(&daemon, 2.0);
+        mic(&daemon, 3.0);
+        assert_eq!(worker_got(&mut rx), [1.0]);
+        // The second tap's press cancels; then the double tap stops.
+        daemon.edit_tap_cancelled(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        daemon.cut_streaming_audio();
+        assert_eq!(worker_got(&mut rx), [2.0, 3.0]);
+        assert_eq!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Disconnected));
+        // A Confirmed that comes after the stop changes nothing.
+        daemon.edit_tap_confirmed(&mut State::Idle).await;
+    }
+
+    #[tokio::test]
+    async fn edit_pending_confirm_settle_and_resume() {
+        let (mut daemon, mut rx, mut state) = edit_daemon();
+        for _ in 0..10 {
+            mic(&daemon, 1.0); // 0.1 s
+        }
+        daemon.edit_tap_pending(&mut state).await;
+        mic(&daemon, 2.0);
+        daemon.edit_tap_confirmed(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        // Held audio dropped; then the silence pad, 1.12 s at the default
+        // window; mic audio dropped while paused.
+        mic(&daemon, 3.0);
+        let got = worker_got(&mut rx);
+        assert_eq!(&got[..10], [1.0; 10]);
+        assert!(got[10..].iter().all(|&v| v == 0.0));
+        assert_eq!(daemon.edit.pause_at, 0.1);
+        daemon.with_gate(|g| assert_eq!(g.pads().first(), Some(&(1600..19520))));
+        // Settles when the live model has decoded to the pause point.
+        let now = Instant::now();
+        daemon.edit_tick(&mut state, now, Some(0.08)).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        daemon.edit_tick(&mut state, now, Some(0.16)).await;
+        assert_eq!(state.phase(), Some(Phase::Editing));
+        // A second tap resumes; new audio flows.
+        daemon.edit_tap_confirmed(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        mic(&daemon, 4.0);
+        assert_eq!(worker_got(&mut rx), [4.0]);
+    }
+
+    #[tokio::test]
+    async fn edit_settling_ends_after_its_wait_without_progress() {
+        let (mut daemon, _rx, mut state) = edit_daemon();
+        mic(&daemon, 1.0);
+        daemon.edit_toggle(&mut state).await; // record edit: no pending
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        let now = Instant::now();
+        daemon.edit_tick(&mut state, now, None).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        daemon
+            .edit_tick(&mut state, now + EDIT_SETTLE_MAX, None)
+            .await;
+        assert_eq!(state.phase(), Some(Phase::Editing));
+    }
+
+    #[tokio::test]
+    async fn edit_hold_past_its_cap_counts_as_cancelled() {
+        let (mut daemon, mut rx, mut state) = edit_daemon();
+        daemon.edit_tap_pending(&mut state).await;
+        for i in 0..41 {
+            mic(&daemon, i as f32); // 4.1 frames of 0.01 s past 400 ms
+        }
+        daemon.edit_tick(&mut state, Instant::now(), None).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        assert_eq!(worker_got(&mut rx).len(), 41);
+        // The listener's late Confirmed for that tap is dropped.
+        daemon.edit_tap_confirmed(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        mic(&daemon, 9.0);
+        assert_eq!(worker_got(&mut rx), [9.0]);
+        // The next tap works again.
+        daemon.edit_tap_pending(&mut state).await;
+        daemon.edit_tap_confirmed(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+    }
+
+    #[tokio::test]
+    async fn edit_taps_do_nothing_with_keyboard_editing_off() {
+        let (mut daemon, mut rx, mut state) = edit_daemon();
+        daemon.keyboard_edit = false;
+        daemon.edit_tap_pending(&mut state).await;
+        mic(&daemon, 1.0);
+        daemon.edit_tap_confirmed(&mut state).await;
+        mic(&daemon, 2.0);
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        assert_eq!(worker_got(&mut rx), [1.0, 2.0]);
+    }
+
+    #[tokio::test]
+    async fn edit_pause_time_is_not_recording_time() {
+        let (mut daemon, _rx, mut state) = edit_daemon();
+        if let State::Streaming { started_at, .. } = &mut state {
+            *started_at = Instant::now() - Duration::from_secs(10);
+        }
+        daemon.edit_tap_confirmed(&mut state).await;
+        let at_pause = state.recording_duration().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(state.recording_duration().unwrap() - at_pause < Duration::from_millis(20));
+        daemon.edit_tap_confirmed(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
     }
 
     /// #643: the panic-recovery arm in handle_transcription_result must fire
