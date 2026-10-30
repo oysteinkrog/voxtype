@@ -595,11 +595,15 @@ impl Popup {
                 since: self.shown_at,
                 period: 1.6,
             };
+            // It snaps into place: sliding in, it drew its line through the
+            // new state's hint.
             row = row.child(
                 Element::progress("progress", progress)
                     .height(1.0)
                     .grow(1.0)
-                    .margin_edges(0.0, 0.0, 0.0, 16.0),
+                    .margin_edges(0.0, 0.0, 0.0, 16.0)
+                    .motion(Prop::Position, Motion::Snap)
+                    .motion(Prop::Size, Motion::Snap),
             );
         } else {
             row = row.child(Element::row("spacer").grow(1.0));
