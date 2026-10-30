@@ -133,13 +133,6 @@ impl SubprocessTranscriber {
         }
     }
 
-    /// Get the path to the voxtype executable
-    fn get_executable_path() -> Result<std::path::PathBuf, TranscribeError> {
-        std::env::current_exe().map_err(|e| {
-            TranscribeError::InitFailed(format!("Cannot find voxtype executable: {}", e))
-        })
-    }
-
     /// Build the command to spawn a worker
     fn build_worker_command(&self) -> Result<Command, TranscribeError> {
         worker_command(
@@ -255,6 +248,33 @@ impl SubprocessTranscriber {
     }
 }
 
+/// A command that runs this same voxtype binary again, for a worker.
+///
+/// On Linux it executes `/proc/self/exe`, which names the running binary
+/// even after a package upgrade replaced or deleted its file; a path from
+/// `current_exe()` then points at nothing (or at a newer build), and every
+/// worker spawn failed with "No such file or directory". `argv[0]` stays the
+/// binary's path, as before, since ONNX Runtime looks for its provider
+/// libraries next to it.
+pub fn self_command() -> std::io::Result<Command> {
+    let exe = std::env::current_exe();
+    #[cfg(target_os = "linux")]
+    {
+        let proc_exe = std::path::Path::new("/proc/self/exe");
+        if proc_exe.exists() {
+            use std::os::unix::process::CommandExt;
+            let mut cmd = Command::new(proc_exe);
+            if let Ok(ref path) = exe {
+                // After a replace the link reads "<path> (deleted)".
+                let path = path.to_string_lossy();
+                cmd.arg0(path.strip_suffix(" (deleted)").unwrap_or(&path));
+            }
+            return Ok(cmd);
+        }
+    }
+    Ok(Command::new(exe?))
+}
+
 /// The command that starts a `transcribe-worker`.
 fn worker_command(
     config: &WhisperConfig,
@@ -262,9 +282,9 @@ fn worker_command(
     engine_args: Option<&(String, String)>,
     live_model: Option<&str>,
 ) -> Result<Command, TranscribeError> {
-    let exe_path = SubprocessTranscriber::get_executable_path()?;
-
-    let mut cmd = Command::new(&exe_path);
+    let mut cmd = self_command().map_err(|e| {
+        TranscribeError::InitFailed(format!("Cannot find voxtype executable: {}", e))
+    })?;
 
     // Pass config path BEFORE the subcommand — --config is a parent-level
     // arg in clap, so it must appear before "transcribe-worker"
@@ -1582,6 +1602,49 @@ mod tests {
         // Killed and reaped by the drop, so the pid is gone.
         let pid = nix::unistd::Pid::from_raw(pid as i32);
         assert!(nix::sys::signal::kill(pid, None).is_err());
+    }
+
+    /// Env var that makes [`self_command_survives_a_deleted_binary`] the
+    /// harness inside a linked copy of the test binary.
+    const SELF_EXEC_HARNESS: &str = "VOXTYPE_TEST_SELF_EXEC_HARNESS";
+
+    /// A package upgrade replaces the binary under a running daemon. Run a
+    /// hard-linked copy of this test binary, delete the copy's file from
+    /// inside it, then spawn "itself" again: the path from current_exe() is
+    /// gone, /proc/self/exe still works.
+    #[test]
+    fn self_command_survives_a_deleted_binary() {
+        if std::env::var_os(SELF_EXEC_HARNESS).is_some() {
+            let exe = std::env::current_exe().unwrap();
+            std::fs::remove_file(&exe).unwrap();
+            let by_path = Command::new(&exe).arg("--list").output();
+            assert!(by_path.is_err(), "the deleted path should not run");
+            let out = self_command()
+                .unwrap()
+                .arg("--list")
+                .stderr(Stdio::null())
+                .output()
+                .expect("spawn via /proc/self/exe");
+            assert!(out.status.success());
+            assert!(String::from_utf8_lossy(&out.stdout).contains("self_command_survives"));
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        // Same file system as the test binary, so a hard link works (no copy).
+        let dir = tempfile::tempdir_in(exe.parent().unwrap()).unwrap();
+        let copy = dir.path().join("voxtype-self-exec-test");
+        std::fs::hard_link(&exe, &copy).unwrap();
+        let status = Command::new(&copy)
+            .args([
+                "transcribe::subprocess::tests::self_command_survives_a_deleted_binary",
+                "--exact",
+                "--quiet",
+            ])
+            .env(SELF_EXEC_HARNESS, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "harness failed: {}", status);
+        assert!(!copy.exists(), "the harness deleted its own file");
     }
 
     #[test]
