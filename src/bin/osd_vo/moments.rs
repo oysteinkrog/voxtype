@@ -1062,6 +1062,10 @@ pub(crate) fn edit_scenario(look: &Look, ups: usize) -> vo::Scenario<Msg> {
             requested: true,
         },
     ));
+    // The daemon takes the edited text from the buffer, as the popup's
+    // keys leave it, and publishes and delivers that.
+    let edited = edited_text(look, &k.files.preview, ups, " quickly");
+    k.say(done, &edited);
     k.edit(done, Some("releasing"));
     k.edit(done + 0.2, None);
     deliver(&mut k, done + 0.2, Delivery::PastedEnter);
@@ -1078,6 +1082,30 @@ pub(crate) fn edit_scenario(look: &Look, ups: usize) -> vo::Scenario<Msg> {
     s.type_text(typed, " quickly");
     s.key(enter, LogicalKey::Named(NamedKey::Enter), None, Mods::NONE);
     s
+}
+
+/// `text` after the edit moment's keys in `look`: the caret from the end
+/// `ups` lines up by the look's own line breaks, then `typed`.
+fn edited_text(look: &Look, text: &str, ups: usize, typed: &str) -> String {
+    use vo::scene::text::TextLayout;
+    use vo_core::edit::{EditAction, EditBuffer};
+    let text_box = super::edit_site::site(look.theme).text_box(look);
+    let measure = vo::ShapedLayout::new(look.fonts.clone());
+    let lines = measure.layout(
+        text,
+        &super::edit::edit_style(text_box.style),
+        Some(text_box.width),
+    );
+    let mut buffer = EditBuffer::new(text);
+    for _ in 0..ups {
+        let up = EditAction::MoveLine {
+            down: false,
+            extend: false,
+        };
+        buffer.apply(up, &lines, 0.0);
+    }
+    buffer.apply_plain(EditAction::Insert(typed.into()), 0.0);
+    buffer.text().to_string()
 }
 
 /// `popup` set up for `moment`: in the edit moment it has a keyboard edit
@@ -1533,17 +1561,25 @@ mod tests {
             "typed on that line: {typed:?}"
         );
         assert_eq!(at(s.duration), None, "Enter ends the edit");
-        let report = vo::envelope::check_scenario(
-            popup(),
-            &s,
-            30.0,
-            options(),
-            &vo::envelope::Envelope {
-                transcript: 0..1 << 20,
-                ..vo::envelope::Envelope::default()
-            },
-        );
-        assert!(report.is_ok(), "{report}");
+        // At several frame rates, so the keys fall at every phase of a
+        // frame and a pass does not hang on one frame timing; with one to
+        // three lines up, so the typed word lands on different lines.
+        for ups in 1..=3 {
+            let s = edit_scenario(&look, ups);
+            for fps in [30.0, 47.0, 60.0] {
+                let report = vo::envelope::check_scenario(
+                    popup(),
+                    &s,
+                    fps,
+                    options(),
+                    &vo::envelope::Envelope {
+                        transcript: 0..1 << 20,
+                        ..vo::envelope::Envelope::default()
+                    },
+                );
+                assert!(report.is_ok(), "{ups} up at {fps} fps: {report}");
+            }
+        }
     }
 
     /// What [`EditSpy`] saw after each message, key and focus change.
@@ -1713,6 +1749,11 @@ mod tests {
             .unwrap();
         assert_eq!(released.badge, Some(("sending", false)), "{released:?}");
         assert_eq!(seen.last().unwrap().badge, None);
+        // The typed word stays from Enter through the release and the
+        // delivery, underlined (prio-lane's M7.L7 finding).
+        for e in seen.iter().filter(|e| e.t >= enter) {
+            assert_eq!(e.marked, ["quickly"], "at {:.2} s", e.t);
+        }
     }
 
     /// Plan 4.1: after the edit the marked words stay underlined, also when

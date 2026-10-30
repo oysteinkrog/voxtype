@@ -1891,13 +1891,22 @@ impl Popup {
             .and_then(|l| l.edit.as_ref())
             .filter(|b| !b.frozen.is_empty());
         let preview = &self.files.preview;
+        // Handed back and not yet answered: the daemon's block still has the
+        // text from before the edit, so the buffer stands in for it.
+        let handed_back = self
+            .edit
+            .as_ref()
+            .filter(|l| l.phase() == Some(edit_link::Phase::Releasing))
+            .and_then(|l| l.buffer())
+            .map(|b| b.text());
         match block {
             Some(b) => {
+                let frozen = handed_back.unwrap_or(&b.frozen);
                 let after = voxtype::osd::edit_doc::after_words(preview, b.raw_words).trim();
                 if after.is_empty() {
-                    b.frozen.clone()
+                    frozen.to_string()
                 } else {
-                    format!("{} {after}", b.frozen.trim_end())
+                    format!("{} {after}", frozen.trim_end())
                 }
             }
             None => preview.clone(),
