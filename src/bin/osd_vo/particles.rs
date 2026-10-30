@@ -1055,11 +1055,30 @@ impl Popup {
         let col = Element::column("bottom").size(l.width, 0.0);
         match phase {
             Phase::Done => {
+                // The column stays where it was while finishing and the chip
+                // goes down inside it. Moving the column down slid the
+                // leaving progress bar out below the card, and the chip in
+                // from the top of the card.
                 let y = words_bottom + CHIP_GAP - CHIP_H / 2.0;
+                // The bar stays, hidden at once: fading out where it was, it
+                // drew its line through the chip.
+                let bar = self
+                    .particles_bar()
+                    .opacity(0.0)
+                    .motion(Prop::Opacity, Motion::Snap);
                 at(
-                    col.child(at(self.particles_chip(), (l.width - CHIP_W * s) / 2.0, 0.0)),
+                    col.child(at(
+                        bar,
+                        (l.width - BAR_W * s) / 2.0,
+                        (words_bottom + BAR_GAP - BAR_H / 2.0) * s,
+                    ))
+                    .child(at(
+                        self.particles_chip(),
+                        (l.width - CHIP_W * s) / 2.0,
+                        y * s,
+                    )),
                     x0,
-                    y0 + y * s,
+                    y0,
                 )
             }
             _ => {
