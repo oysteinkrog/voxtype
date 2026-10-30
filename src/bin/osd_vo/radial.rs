@@ -706,17 +706,21 @@ impl Popup {
             .gap(12.0 * k)
             .child(icon)
             .child(
-                Element::label(format!("state-{state}"), state.as_str())
+                // Keyed once, not by state: a new key per state faded the old
+                // word out under the new one ("Loading" over "Listening").
+                Element::label("state", state.as_str())
                     .text_style(state_style)
                     .color(hex(TEXT, 1.0))
                     .width(wid(&state, &state_style))
                     .presence(Transition::fade().offset(0.0, 6.0 * k), Transition::fade()),
             )
             .child(
-                Element::label(format!("detail-{state}"), detail.as_str())
+                Element::label("detail", detail.as_str())
                     .text_style(detail_style)
                     .color(hex(DETAIL, 1.0))
                     .width(wid(&detail, &detail_style))
+                    // Its x follows the state word's width.
+                    .motion(Prop::Position, Motion::Snap)
                     .presence(Transition::fade().offset(0.0, 6.0 * k), Transition::fade()),
             );
         let y = (bottom - BOTTOM_GAP) * k - icon_h / 2.0;

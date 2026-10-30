@@ -644,15 +644,19 @@ impl Popup {
             .align_items(AlignItems::CENTER)
             .height(20.0)
             .child(
-                Element::label(format!("state-{state}"), state.as_str())
+                // Keyed once, not by state: a new key per state faded the old
+                // word out under the new one ("Loading" over "Listening").
+                Element::label("state", state.as_str())
                     .text_style(ui)
                     .color(colour)
                     .presence(Transition::fade().offset(0.0, 5.0), Transition::fade()),
             )
             .child(
-                Element::label(format!("detail-{}", status.state), detail)
+                Element::label("detail", detail)
                     .text_style(ui)
                     .color(hex(HINT))
+                    // Its x follows the state word's width.
+                    .motion(Prop::Position, Motion::Snap)
                     .presence(Transition::fade(), Transition::fade()),
             );
         panel.child(

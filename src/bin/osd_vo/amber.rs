@@ -752,17 +752,21 @@ impl Popup {
             .gap(16.0 * k)
             .child(icon)
             .child(
-                Element::label(format!("state-{state}"), state.as_str())
+                // Keyed once, not by state: a new key per state faded the old
+                // word out under the new one ("Loading" over "Listening").
+                Element::label("state", state.as_str())
                     .text_style(style)
                     .color(hex(SOFT, 1.0))
                     .width(wid(&state))
                     .presence(Transition::fade().wipe(1.0), Transition::fade()),
             )
             .child(
-                Element::label(format!("detail-{state}"), detail.as_str())
+                Element::label("detail", detail.as_str())
                     .text_style(style)
                     .color(hex(SOFT, 0.85))
                     .width(wid(&detail))
+                    // Its x follows the state word's width.
+                    .motion(Prop::Position, Motion::Snap)
                     .presence(Transition::fade().wipe(1.0), Transition::fade()),
             );
         let y = (Geo::rule2(self.lines) + STATUS_GAP) * k - side / 2.0;

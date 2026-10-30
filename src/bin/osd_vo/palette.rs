@@ -703,7 +703,9 @@ impl Popup {
                 Element::canvas("mark", until, move |t, r, p| mark.draw(t, r, p)).size(18.0, 18.0),
             )
             .child(
-                Element::label(format!("state-{state}"), state.as_str())
+                // Keyed once, not by state: a new key per state faded the old
+                // word out under the new one ("Loading" over "Listening").
+                Element::label("state", state.as_str())
                     .text_style(big)
                     .color(hex(INK))
                     .margin_edges(0.0, 0.0, 0.0, 12.0)
@@ -714,6 +716,8 @@ impl Popup {
                 .text_style(small)
                 .color(hex(SOFT))
                 .margin_edges(0.0, 0.0, 0.0, 9.0)
+                // Its x follows the state word's width.
+                .motion(Prop::Position, Motion::Snap)
                 .presence(Transition::fade().offset(0.0, 6.0), Transition::fade())
         };
         let badge = |key: String, s: &str| {
@@ -748,7 +752,7 @@ impl Popup {
         if detail.is_empty() {
             return row;
         }
-        row = row.child(grey(format!("dot-{state}"), "·"));
+        row = row.child(grey("dot".into(), "·"));
         // "tap Right Ctrl to stop": the key goes in a badge.
         let key = detail
             .strip_suffix(" to stop")
@@ -763,7 +767,7 @@ impl Popup {
                 (Mode::Done, Some(app)) => row
                     .child(grey("into".into(), "into"))
                     .child(badge(format!("app-{app}"), app)),
-                _ => row.child(grey(format!("detail-{state}"), &detail)),
+                _ => row.child(grey("detail".into(), &detail)),
             },
         }
     }

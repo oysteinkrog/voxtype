@@ -1010,7 +1010,9 @@ impl Popup {
         } else {
             status.state.clone()
         };
-        let label = Element::label(format!("state-{state}"), state.as_str())
+        // Keyed once, not by state: a new key per state faded the old word
+        // out under the new one ("Loading" over "Listening").
+        let label = Element::label("state", state.as_str())
             .text_style(style)
             .color(blue)
             .text_halo(Color::hex(BLUE, 0.35), 4.0 * s)
@@ -1062,7 +1064,9 @@ impl Popup {
                     Element::shape("sep", ShapeKind::Capsule)
                         .size(4.0 * s, 4.0 * s)
                         .fill(blue)
-                        .margin_edges(0.0, 4.0 * s, 0.0, 4.0 * s),
+                        .margin_edges(0.0, 4.0 * s, 0.0, 4.0 * s)
+                        // Its x follows the state word's width.
+                        .motion(Prop::Position, Motion::Snap),
                 )
                 .child(
                     Element::live_text(format!("detail-{state}"), &words)
@@ -1072,8 +1076,9 @@ impl Popup {
                         .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                         .motion(Prop::Offset, Spring::POP)
                         .word_enter(Transition::fade().offset(0.0, 7.0 * s))
-                        .word_change(Transition::fade().opacity(0.2).offset(0.0, -7.0 * s))
-                        .presence(Transition::fade(), Transition::fade()),
+                        // No presence, so a dropped line goes at once: an old line fading out
+                        // sat under the new state's words, which still fade in one by one.
+                        .word_change(Transition::fade().opacity(0.2).offset(0.0, -7.0 * s)),
                 );
         }
         let row_h = 30.0 * s;
