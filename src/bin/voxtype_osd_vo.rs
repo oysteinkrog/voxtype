@@ -2239,10 +2239,18 @@ impl App for Popup {
         }
     }
 
-    /// A look picked with the look chord has its own size and place.
+    /// A look picked with the look chord has its own size and place. A
+    /// scripted run renders at the look's own size, so its frames follow a
+    /// look switch as the live surface does.
     fn main_surface(&self) -> Option<(Size, Placement)> {
-        let spec = live_spec(self.osd.as_ref()?, &self.look);
-        Some((spec.size, spec.placement))
+        match &self.osd {
+            Some(osd) => {
+                let spec = live_spec(osd, &self.look);
+                Some((spec.size, spec.placement))
+            }
+            None if self.scripted => Some((self.look.surface(), Placement::Centered)),
+            None => None,
+        }
     }
 
     fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
@@ -3565,6 +3573,48 @@ mod tests {
         assert!(log.contains("the logger works"), "{log}");
         assert!(!log.contains("delivered"), "{log}");
         assert!(!log.contains("dictation ended"), "{log}");
+    }
+
+    /// t0xg: offline, the frames kept the first look's size for the whole
+    /// run, so after the look chord showcase was cut off at swiss's size.
+    /// A scripted run now asks for the look's own surface, and the frames
+    /// follow it as the live surface does.
+    #[test]
+    fn a_scripted_look_switch_renders_at_the_new_looks_size() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        for width_px in [400, 600] {
+            let look_of = |theme| {
+                let cfg = OsdConfig {
+                    theme,
+                    width_px,
+                    ..OsdConfig::default()
+                };
+                let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+                look.set_motion(&cfg.motion);
+                look
+            };
+            let (swiss, showcase) = (look_of(OsdTheme::Swiss), look_of(OsdTheme::Showcase));
+            assert_ne!(swiss.surface(), showcase.surface());
+            let s = moments::scenario(&swiss, moments::Moment::LookSwitch);
+            let options = Options {
+                fonts: fonts.clone(),
+                default_motion: default_motion(&swiss),
+                ..Options::default()
+            };
+            let mut sizes: Vec<Size> = Vec::new();
+            let popup = Popup::scripted(swiss.clone(), &fonts);
+            vo::envelope::sample_scenario(popup, &s, 10.0, options, &mut |_, _, dl| {
+                if sizes.last() != Some(&dl.size) {
+                    sizes.push(dl.size);
+                }
+            });
+            assert_eq!(
+                sizes,
+                [swiss.surface(), showcase.surface()],
+                "{width_px} px"
+            );
+        }
     }
 
     #[test]

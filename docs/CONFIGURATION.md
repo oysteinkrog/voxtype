@@ -1812,8 +1812,9 @@ and the final text do not change.
 
 - `0` turns the ticks off: one tail per step, as before.
 - Each tick costs about as much CPU as a step. On 7 test clips with the default
-  window, the live worker used 0.63 s of CPU per second of audio with no ticks,
-  1.23 s at `0.24` and 1.45 s at `0.16`.
+  window, the live worker used 0.46 s of CPU per second of audio with no ticks,
+  1.06 s at `0.24` and 1.13 s at `0.16` (CUDA build, live model on the CPU;
+  the numbers move with machine load).
 - When a tick takes more than 60 % of its interval twice in a row, the worker
   stops the ticks for that recording and logs
   `Tail ticks take ... ms of ... ms; one tail per step from now on`. On a slow
@@ -1827,6 +1828,33 @@ The worker logs the ticks of each recording, for example
 ```toml
 [parakeet]
 streaming_tail_secs = 0     # one tail per step
+```
+
+### streaming_pause_commit_secs
+
+**Type:** Float (seconds)
+**Default:** `0.3`
+**Required:** No
+
+How long a pause in speech lasts before the live preview shows the tail as
+text. Normally a word joins the preview text only when the next streaming step
+has its right context, about 0.8 s after the word ends. When you stop for a
+moment, the tail already holds the last words, so the preview shows them as
+soon as the audio has been quiet for this long and the model's last tail word
+ended at least this long ago. The next step replaces them with its own reading.
+The final text does not change.
+
+- `0` turns it off.
+- Values above 60 turn it off too.
+- It needs the tail ticks (`streaming_tail_secs`); with one tail per step it
+  can only act when a step lands inside the pause.
+- Short pauses gain nothing: on LibriSpeech most pauses between words are 0.3
+  to 0.5 s, and the next word starts before the pause is long enough.
+
+**Example:**
+```toml
+[parakeet]
+streaming_pause_commit_secs = 0   # words show only after the next step
 ```
 
 ### Complete Example

@@ -19,10 +19,16 @@ pub(crate) enum Mode {
 }
 
 impl Popup {
-    /// What the popup shows now.
+    /// What the popup shows now. A dictation that ended with nothing typed
+    /// shows as a cancel, even after it was finishing.
     pub(crate) fn kit_mode(&self) -> Mode {
         let status = self.status();
-        if self.extra.final_at.is_some() {
+        if matches!(
+            self.ending(),
+            Some(Ending::Cancelled | Ending::Empty | Ending::Failed)
+        ) {
+            Mode::Cancelled
+        } else if self.extra.final_at.is_some() {
             Mode::Done
         } else if self.ended() {
             if self.extra.finish_at.is_some() {
@@ -359,6 +365,42 @@ mod frosted_tests {
                 r.x >= inset && r.x + r.w <= w - inset,
                 "{r:?} leaves the octagon"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::swiss_look::edit_check::fonts as test_fonts;
+    use super::*;
+
+    /// A dictation that was finishing and then failed, found no speech or
+    /// was cancelled shows as a cancel, not as done; the looks that keep
+    /// their own mode take it from here.
+    #[test]
+    fn an_ending_with_nothing_typed_is_not_done_after_finishing() {
+        let reg = test_fonts();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Dotmatrix,
+            ..OsdConfig::default()
+        };
+        let look = Look::new(&cfg, &PlasmaTheme::default(), String::new(), &reg);
+        for (outcome, mode) in [
+            (Outcome::Failed, Mode::Cancelled),
+            (Outcome::Empty, Mode::Cancelled),
+            (Outcome::Cancelled, Mode::Cancelled),
+            (Outcome::Done, Mode::Done),
+        ] {
+            let mut popup = Popup::new(look.clone(), &reg);
+            popup.was_recording = true;
+            popup.extra.finish_at = Some(1.0);
+            popup.files.transcribing = true;
+            assert_eq!(popup.kit_mode(), Mode::Finishing);
+            popup.files.transcribing = false;
+            popup.files.outcome = Some(outcome);
+            assert_eq!(popup.kit_mode(), mode, "{outcome:?}");
+            popup.extra.final_at = Some(2.0);
+            assert_eq!(popup.kit_mode(), mode, "{outcome:?} with the final text");
         }
     }
 }

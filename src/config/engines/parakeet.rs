@@ -68,10 +68,22 @@ pub struct ParakeetConfig {
     /// that recording.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub streaming_tail_secs: Option<f32>,
+
+    /// Seconds of quiet after which the live preview shows the lookahead
+    /// tail's words as text, instead of waiting a step for their right
+    /// context. Speeds up the last words before a pause. The committed text
+    /// and the final text do not change; a later step that reads the words
+    /// differently shows as a revision. 0 turns it off. Absent:
+    /// [`DEFAULT_STREAMING_PAUSE_COMMIT_SECS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming_pause_commit_secs: Option<f32>,
 }
 
 /// `streaming_tail_secs` when the key is absent.
 pub const DEFAULT_STREAMING_TAIL_SECS: f32 = 0.24;
+
+/// `streaming_pause_commit_secs` when the key is absent.
+pub const DEFAULT_STREAMING_PAUSE_COMMIT_SECS: f32 = 0.3;
 
 /// Seconds per encoder output frame of the cache-aware Parakeet models:
 /// 8 mel frames of 10 ms. Every streaming window size must be a whole
@@ -187,6 +199,19 @@ impl ParakeetConfig {
         }
     }
 
+    /// `streaming_pause_commit_secs`, or its default; 0 for off. Out of range
+    /// (not 0 to 60 s) is off.
+    pub fn streaming_pause_commit_secs(&self) -> f32 {
+        let secs = self
+            .streaming_pause_commit_secs
+            .unwrap_or(DEFAULT_STREAMING_PAUSE_COMMIT_SECS);
+        if secs.is_finite() && (0.0..=MAX_STREAMING_SECS).contains(&secs) {
+            secs
+        } else {
+            0.0
+        }
+    }
+
     /// The `streaming_*` keys whose value is not a whole number of steps, with
     /// the value it was rounded to, for a warning in the log.
     pub fn streaming_rounding_notes(&self) -> Vec<String> {
@@ -224,6 +249,7 @@ impl Default for ParakeetConfig {
             streaming_left_context_secs: None,
             streaming_right_context_secs: None,
             streaming_tail_secs: None,
+            streaming_pause_commit_secs: None,
         }
     }
 }
@@ -359,6 +385,15 @@ mod tests {
             parakeet_section("streaming_tail_secs = -1").streaming_tail_secs(),
             0.0
         );
+    }
+
+    #[test]
+    fn streaming_pause_commit_secs_defaults_reads_and_turns_off() {
+        let secs = |toml: &str| parakeet_section(toml).streaming_pause_commit_secs();
+        assert_eq!(secs(""), DEFAULT_STREAMING_PAUSE_COMMIT_SECS);
+        assert_eq!(secs("streaming_pause_commit_secs = 0.5"), 0.5);
+        assert_eq!(secs("streaming_pause_commit_secs = 0"), 0.0);
+        assert_eq!(secs("streaming_pause_commit_secs = -1"), 0.0);
     }
 
     #[test]
