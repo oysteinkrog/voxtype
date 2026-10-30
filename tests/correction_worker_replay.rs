@@ -9,7 +9,10 @@
 //!
 //! tests/fixtures/correction/long_quiet_hold.worker.json is such a run:
 //! the public fixtures speech_long.wav, 0.6 s of silence and
-//! speech_quiet.wav, with the key held over "Quiet test." (5.05 to 6.41 s).
+//! speech_quiet.wav, with the key held over "Quiet test." (5.05 to 6.41 s),
+//! and Cohere writing the final text. long_quiet_hold.preview.json is the
+//! same with `live_preview_final = "preview"`: the final text is the live
+//! words, the respoken ones included.
 //! Another run replays with the ignored test:
 //!
 //! ```text
@@ -115,6 +118,20 @@ fn a_clip_that_fits_nowhere_pastes_the_live_words() {
     let note = note.expect("a note");
     assert_eq!(note.dropped, None);
     assert_eq!(note.from, "test");
+}
+
+/// With the live words as the final text, the respoken copy goes and the
+/// correction goes in.
+#[test]
+fn a_preview_final_text_gets_the_correction() {
+    let run = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/correction/long_quiet_hold.preview.json");
+    let (pasted, note) = replay(&run, 5.05, 6.41);
+    assert_eq!(
+        pasted,
+        "This is a longer quiet test of voice activity detection with multiple words and phrases"
+    );
+    assert_eq!(note.expect("a note").dropped, None);
 }
 
 #[test]
