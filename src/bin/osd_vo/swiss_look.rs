@@ -114,6 +114,16 @@ fn colon_loop() -> Loop {
 }
 
 impl Popup {
+    /// Whether there is text above the first line shown, for the margin
+    /// "…": earlier lines cut, or while editing, buffer lines above the
+    /// window (plan section 2.4).
+    pub(super) fn text_above(&self) -> bool {
+        match &self.edit_view {
+            Some(v) => v.start > 0,
+            None => self.cut > 0,
+        }
+    }
+
     pub(super) fn panel(&self) -> Element<Msg> {
         let l = &self.look;
         let status = self.status();
@@ -388,7 +398,7 @@ impl Popup {
         let style = l.text_style();
         let w = self.measure.layout("…", &style, None).size.w.ceil();
         let mut text = text;
-        if self.cut > 0 && !self.shown.is_empty() && self.delivered().is_none() {
+        if self.text_above() && !self.shown.is_empty() && self.delivered().is_none() {
             text = text.child(
                 Element::label("ellipsis", "…")
                     .text_style(style)
@@ -542,5 +552,488 @@ mod idle_tests {
             assert_eq!(l.value(0.0, k as f64), 0.0);
         }
         assert!(l.fps <= IDLE_FPS);
+    }
+}
+
+/// The edit checks every look's edit bead runs (plan section 6, M7.L): a
+/// dictation long enough to scroll, an edit of it with the caret in the
+/// newest, a middle and the top window line, at the default popup width and
+/// at a wide one (600 px, 17 pt). The caret must stand on the drawn glyphs,
+/// within 1 px, in every frame of a reflow, and the popup keeps its size.
+#[cfg(test)]
+pub(crate) mod edit_check {
+    use super::super::edit_link::{EditLink, Paths};
+    use super::super::*;
+    use vo::scene::display::{DisplayList, ItemKind};
+    use vo::scene::geom::{Point, Rect, Size};
+    use vo::scene::scene::Scene;
+    use vo::scene::text::ShapedLayout;
+    use vo_core::edit::EditAction;
+    use voxtype::osd::edit_ipc::EditBlock;
+
+    /// Which window line the caret goes to.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(crate) enum CaretAt {
+        Newest,
+        Middle,
+        Top,
+    }
+
+    pub(crate) struct Rig {
+        pub p: Popup,
+        pub scene: Scene<Msg>,
+        tokens: vo::Tokens,
+        _dir: tempfile::TempDir,
+        pub t: f64,
+    }
+
+    /// The dictation: `n` short words. 160 are more lines than any look
+    /// shows.
+    pub(crate) fn dictation(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// One font registry for every edit check. A look keeps the ids of the
+    /// fonts it adds in a process-wide `OnceLock`, taken from the first
+    /// registry it sees, so tests that each load their own registry and run
+    /// in parallel draw with each other's ids.
+    pub(crate) fn fonts() -> FontRegistry {
+        static FONTS: std::sync::OnceLock<FontRegistry> = std::sync::OnceLock::new();
+        FONTS
+            .get_or_init(|| load_fonts(&PlasmaTheme::default()).unwrap())
+            .clone()
+    }
+
+    fn block(phase: &str, text: &str) -> EditBlock {
+        EditBlock {
+            session: 1,
+            phase: phase.into(),
+            frozen: text.into(),
+            tail: String::new(),
+            pause: 1,
+            raw_words: text.split_whitespace().count(),
+        }
+    }
+
+    impl Rig {
+        /// `theme` at the default width, or `wide`: 600 px and 17 pt text.
+        pub(crate) fn new(theme: OsdTheme, wide: bool) -> Rig {
+            let mut cfg = OsdConfig {
+                theme,
+                ..OsdConfig::default()
+            };
+            if wide {
+                cfg.width_px = 600;
+                cfg.preview_font_pt = Some(17.0);
+            }
+            let plasma = PlasmaTheme::default();
+            let fonts = fonts();
+            let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+            look.set_motion(&cfg.motion);
+            let dir = tempfile::TempDir::new().unwrap();
+            let mut p = Popup::new(look, &fonts);
+            p.edit = Some(EditLink::new(Paths {
+                buffer: dir.path().join("edit-buffer.json"),
+                cmds: dir.path().join("edit-cmd"),
+            }));
+            let mut scene: Scene<Msg> =
+                Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+            scene.set_viewport(0.0, p.look.live_surface(), 1.0);
+            Rig {
+                p,
+                scene,
+                tokens: vo::Tokens::default(),
+                _dir: dir,
+                t: 0.0,
+            }
+        }
+
+        /// Shows the view at `t`.
+        pub(crate) fn show(&mut self, t: f64) {
+            self.t = t;
+            let view = self.p.view(&self.tokens);
+            self.scene.apply(view, t);
+        }
+
+        /// The popup's size: its surface and the laid-out root.
+        pub(crate) fn size(&self) -> (Size, Rect) {
+            let root = self.scene.root().expect("a view");
+            (self.p.look.live_surface(), self.scene.layout_target(root))
+        }
+
+        /// The dictation of `n` words shown at 0.
+        pub(crate) fn dictate(&mut self, n: usize) {
+            let text = dictation(n);
+            self.p.files.preview = text.clone();
+            self.p.text(&text);
+            self.show(0.0);
+        }
+
+        /// A tap at `t`: the popup owns the text, the caret at its end.
+        pub(crate) fn enter(&mut self, t: f64) {
+            let text = self.p.files.preview.clone();
+            let link = self.p.edit.as_mut().unwrap();
+            link.sync(Some(&block("editing", &text)));
+            self.p.sync_quiet();
+            assert!(self.p.edit_text(t));
+            self.show(t);
+        }
+
+        /// Resume: the daemon listens again and the popup shows the text.
+        pub(crate) fn resume(&mut self, t: f64) {
+            let text = self.buffer_text();
+            let link = self.p.edit.as_mut().unwrap();
+            link.resume();
+            link.sync(Some(&block("listening", &text)));
+            self.p.sync_quiet();
+            assert!(!self.p.edit_text(t));
+            self.p.files.preview = text.clone();
+            let source = self.p.source_text();
+            self.p.text(&source);
+            self.show(t);
+        }
+
+        pub(crate) fn buffer_text(&self) -> String {
+            let link = self.p.edit.as_ref().unwrap();
+            link.buffer().unwrap().text().to_string()
+        }
+
+        /// One edit action at `t`, then the view.
+        pub(crate) fn act(&mut self, action: EditAction, t: f64) {
+            let site = edit_site::site(self.p.look.theme);
+            let tb = site.text_box(&self.p.look);
+            let text = self.buffer_text();
+            let lines = self
+                .p
+                .edit_layer
+                .shaped(&text, &self.p.measure, tb.style, tb.width)
+                .clone();
+            self.p.edit.as_mut().unwrap().apply(action, &lines, t);
+            assert!(self.p.edit_text(t));
+            self.show(t);
+        }
+
+        /// Moves the caret up from the newest window line to `at`, one line
+        /// a key, starting at `t`. Returns the time after the last key.
+        pub(crate) fn caret_to(&mut self, at: CaretAt, t: f64) -> f64 {
+            let n = self.p.edit_view.as_ref().unwrap().lines;
+            let up = match at {
+                CaretAt::Newest => 0,
+                CaretAt::Middle => n / 2,
+                CaretAt::Top => n - 1,
+            };
+            let mut t = t;
+            for _ in 0..up {
+                let up = EditAction::MoveLine {
+                    down: false,
+                    extend: false,
+                };
+                self.act(up, t);
+                t += 0.1;
+            }
+            let v = self.p.edit_view.as_ref().unwrap();
+            assert_eq!(v.caret_line, n - 1 - up, "{at:?} of {n} lines");
+            t
+        }
+
+        /// Every glyph drawn, `(word id, pen position)`, in surface space.
+        pub(crate) fn glyphs(dl: &DisplayList) -> Vec<(u32, Point)> {
+            let mut out = Vec::new();
+            for (i, l) in dl.layers.iter().enumerate() {
+                for it in dl
+                    .layer_items(i as _)
+                    .iter()
+                    .filter(|it| it.kind == ItemKind::Glyphs)
+                {
+                    for g in &dl.glyphs[it.start as usize..(it.start + it.len) as usize] {
+                        let q = l.transform.apply(g.pos);
+                        out.push((g.word, l.warp.as_ref().map_or(q, |w| w.apply(q))));
+                    }
+                }
+            }
+            out
+        }
+
+        /// The glyph the caret follows in frame `dl`, its word's id, and the
+        /// pens the caret must lie between: in a word, the glyph before the
+        /// caret, and the next pen on the line; just before a word, that
+        /// word's first glyph, and the pen of the glyph before it on the
+        /// line. Just before a word that starts a wrapped line, the caret may
+        /// stay at the end of the line above: then it follows the last glyph
+        /// of the word before.
+        pub(crate) fn caret_glyph(&self, dl: &DisplayList) -> Option<(u32, Point, f32, f32)> {
+            let v = self.p.edit_view.as_ref()?;
+            let caret = v.decor.caret?;
+            let foot = dl.edit_caret?;
+            let id = |w: usize| self.p.shown.get(w).map(|w| w.id);
+            let ranges = edit::word_ranges(&v.text);
+            let all = Self::glyphs(dl);
+            let pens = |w: usize| {
+                let mut own: Vec<Point> = all
+                    .iter()
+                    .filter(|g| Some(g.0) == id(w))
+                    .map(|g| g.1)
+                    .collect();
+                own.sort_by(|a, b| a.x.total_cmp(&b.x));
+                // A revised word's old glyphs fade where its new ones are.
+                own.dedup_by(|a, b| (a.x - b.x).abs() < 0.5 && (a.y - b.y).abs() < 0.5);
+                own
+            };
+            let on_line =
+                |w: usize, y: f32| pens(w).into_iter().filter(move |p| (p.y - y).abs() < 1.0);
+            if let Some(w) = ranges
+                .iter()
+                .position(|r| r.start < caret && caret <= r.end)
+            {
+                let own = pens(w);
+                let k = caret - ranges[w].start - 1;
+                let pen = *own.get(k)?;
+                let hi = own
+                    .get(k + 1)
+                    .map(|p| p.x)
+                    .or_else(|| on_line(w + 1, pen.y).map(|p| p.x).reduce(f32::min));
+                return Some((id(w)?, pen, pen.x, hi.unwrap_or(f32::INFINITY)));
+            }
+            let w = ranges.iter().position(|r| r.start == caret)?;
+            let pen = *pens(w).first()?;
+            if (foot.y - pen.y).abs() > 1.0 && w > 0 {
+                let last = *pens(w - 1).last()?;
+                return Some((id(w - 1)?, last, last.x, f32::INFINITY));
+            }
+            let lo = w
+                .checked_sub(1)
+                .and_then(|b| on_line(b, pen.y).map(|p| p.x).reduce(f32::max));
+            Some((id(w)?, pen, lo.unwrap_or(f32::NEG_INFINITY), pen.x))
+        }
+
+        /// Checks every frame from `from` to `to` at 120 fps: the caret is
+        /// drawn, after its glyph and no further than the next on the line, on the
+        /// glyph's baseline within 1 px, and in every frame within 1 px of
+        /// the place against that glyph where it settles.
+        pub(crate) fn caret_follows(&self, from: f64, to: f64, what: &str) {
+            let settled = self.scene.sample(to);
+            let (word, pen, lo, hi) = self.caret_glyph(&settled).expect("the caret's glyph");
+            let foot = settled.edit_caret.expect("the caret");
+            // Between two letters of a word the caret stands at the next
+            // letter's pen.
+            assert!(
+                foot.x > lo && foot.x <= hi + 0.01,
+                "{what}: caret {foot:?} between pens {lo} and {hi}"
+            );
+            assert!(
+                (foot.y - pen.y).abs() <= 1.0,
+                "{what}: caret {foot:?} on {pen:?}"
+            );
+            let rest = (foot.x - pen.x, foot.y - pen.y);
+            let mut t = from;
+            while t < to {
+                let dl = self.scene.sample(t);
+                let foot = dl.edit_caret.expect("the caret in every frame");
+                // Some glyph of the caret's word is where the caret's glyph
+                // must be. Its old copies fade out elsewhere, so the glyph is
+                // not told apart by its place in the word.
+                let off = Self::glyphs(&dl)
+                    .into_iter()
+                    .filter(|g| g.0 == word)
+                    .map(|g| ((foot.x - g.1.x - rest.0).abs()).max((foot.y - g.1.y - rest.1).abs()))
+                    .reduce(f32::min);
+                // Typed letters are not drawn in the first frames of their
+                // fade in (the still profile's 80 ms), and the caret may
+                // follow one of them.
+                let fading = t < from + 0.08;
+                assert!(
+                    fading || off.is_some_and(|d| d <= 1.0),
+                    "{what}: at {t:.3} the caret is {off:?} px off its glyph"
+                );
+                t += 1.0 / 120.0;
+            }
+        }
+
+        /// The golden's words for the view now: the window and where the
+        /// caret settles.
+        pub(crate) fn golden_part(&self) -> String {
+            let v = self.p.edit_view.as_ref().unwrap();
+            let foot = self.scene.sample(self.t + 2.0).edit_caret.unwrap();
+            let words: Vec<&str> = v.text.split_whitespace().collect();
+            format!(
+                "{} lines, caret on line {} at {:.1},{:.1}, words {} to {}{}",
+                v.lines,
+                v.caret_line,
+                foot.x,
+                foot.y,
+                words.first().copied().unwrap_or(""),
+                words.last().copied().unwrap_or(""),
+                if self.ellipsis_drawn() {
+                    ", \u{2026}"
+                } else {
+                    ""
+                },
+            )
+        }
+
+        /// Whether a margin "…" is drawn: a glyph of no word left of every
+        /// word's glyphs, level with the top line (a smaller "…" sits a
+        /// little higher).
+        pub(crate) fn ellipsis_drawn(&self) -> bool {
+            let dl = self.scene.sample(self.t + 2.0);
+            let glyphs = Self::glyphs(&dl);
+            let words = glyphs.iter().filter(|g| g.0 != vo::scene::display::NO_WORD);
+            let left = words.clone().map(|g| g.1.x).fold(f32::MAX, f32::min);
+            let top = words.map(|g| g.1.y).fold(f32::MAX, f32::min);
+            glyphs.iter().any(|g| {
+                g.0 == vo::scene::display::NO_WORD && g.1.x < left && (g.1.y - top).abs() < 6.0
+            })
+        }
+
+        /// The whole check for `theme`, compared with its golden,
+        /// `tests/fixtures/osd-vo/edit-<name>.txt` (`VOXTYPE_BLESS=1` writes
+        /// it).
+        pub(crate) fn run(theme: OsdTheme, name: &str) {
+            let mut golden = String::new();
+            for wide in [false, true] {
+                for at in [CaretAt::Newest, CaretAt::Middle, CaretAt::Top] {
+                    let what = format!("{name} {} {at:?}", if wide { "wide" } else { "default" });
+                    let mut r = Rig::new(theme, wide);
+                    r.dictate(160);
+                    let before = r.size();
+                    r.enter(1.0);
+                    assert_eq!(r.size(), before, "{what}: size at entry (R53)");
+                    let t = r.caret_to(at, 2.0);
+                    r.caret_follows(t, t + 0.5, &format!("{what}, moved"));
+                    // The margin "…" shows while text is above the window.
+                    if r.p.look.margin_ellipsis() {
+                        assert!(r.ellipsis_drawn(), "{what}: the margin ellipsis");
+                    }
+                    let moved = r.golden_part();
+                    // Typing reflows the caret's line: the words after the
+                    // caret slide along and wrap, the caret with its glyph.
+                    let t = t + 0.5;
+                    r.act(EditAction::Insert("abcdefghij".into()), t);
+                    r.caret_follows(t, t + 0.6, &format!("{what}, typed"));
+                    assert_eq!(r.size(), before, "{what}: size while editing (R53)");
+                    golden.push_str(&format!(
+                        "{} {at:?}: {moved}; typed: {}\n",
+                        if wide { "wide" } else { "default" },
+                        r.golden_part()
+                    ));
+                    r.resume(t + 1.0);
+                    assert_eq!(r.size(), before, "{what}: size after resume (R53)");
+                }
+            }
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("tests/fixtures/osd-vo/edit-{name}.txt"));
+            if std::env::var_os("VOXTYPE_BLESS").is_some() {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &golden).unwrap();
+            }
+            let want = std::fs::read_to_string(&path).unwrap_or_default();
+            assert_eq!(
+                golden,
+                want,
+                "{} differs; VOXTYPE_BLESS=1 rewrites it",
+                path.display()
+            );
+            // A text that fits: no "…" while editing it.
+            for wide in [false, true] {
+                let mut r = Rig::new(theme, wide);
+                r.dictate(6);
+                r.enter(1.0);
+                assert!(!r.ellipsis_drawn(), "{name}: a short text has no ellipsis");
+                assert_eq!(r.p.edit_view.as_ref().unwrap().start, 0);
+            }
+        }
+    }
+
+    /// R35: the edit moment (`moments::edit_scenario`) keeps the reading-line
+    /// envelope, read on the caret line, with the caret on the newest line,
+    /// one line up and on the top line (four Ups), at both widths. Checked
+    /// from the moment the popup takes the keyboard until the edit ends: the
+    /// dictation before it is the look's own `--envelope` run, and the
+    /// delivery after it is the look's ending.
+    pub(crate) fn envelope(theme: OsdTheme, name: &str) {
+        let plasma = PlasmaTheme::default();
+        let fonts = fonts();
+        for wide in [false, true] {
+            let mut cfg = OsdConfig {
+                theme,
+                ..OsdConfig::default()
+            };
+            if wide {
+                cfg.width_px = 600;
+                cfg.preview_font_pt = Some(17.0);
+            }
+            let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+            look.set_motion(&cfg.motion);
+            for ups in [0, 1, 4] {
+                let s = moments::edit_scenario(&look, ups);
+                let popup = moments::popup_for(
+                    moments::Moment::Edit,
+                    Popup::scripted(look.clone(), &fonts),
+                );
+                let options = vo::Options {
+                    fonts: fonts.clone(),
+                    default_motion: default_motion(&look),
+                    ..vo::Options::default()
+                };
+                let focus = s
+                    .inputs
+                    .iter()
+                    .find(|(_, i)| matches!(i, vo::Input::KeyboardFocus { .. }))
+                    .expect("the popup takes the keyboard")
+                    .0;
+                // The daemon releases the text 0.25 s after the last key.
+                let last_key = s
+                    .inputs
+                    .iter()
+                    .filter(|(_, i)| matches!(i, vo::Input::Key(_)))
+                    .map(|(t, _)| *t)
+                    .fold(focus, f64::max);
+                let env = vo::envelope::Envelope {
+                    transcript: 0..1 << 20,
+                    from: focus,
+                    until: last_key + 0.2,
+                    ..vo::envelope::Envelope::default()
+                };
+                let report = vo::envelope::check_scenario(popup, &s, 30.0, options, &env);
+                assert!(
+                    report.is_ok() && report.glyphs_checked > 0,
+                    "{name} {} with {ups} ups: {report}",
+                    if wide { "wide" } else { "default" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn swiss_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Swiss, "swiss");
+    }
+
+    #[test]
+    fn swiss_edits_within_the_envelope() {
+        envelope(OsdTheme::Swiss, "swiss");
+    }
+
+    #[test]
+    fn dotmatrix_edits_within_the_envelope() {
+        envelope(OsdTheme::Dotmatrix, "dotmatrix");
+    }
+
+    #[test]
+    fn swissfi_edits_within_the_envelope() {
+        envelope(OsdTheme::Swissfi, "swissfi");
+    }
+
+    #[test]
+    fn dotmatrix_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Dotmatrix, "dotmatrix");
+    }
+
+    #[test]
+    fn swissfi_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Swissfi, "swissfi");
     }
 }

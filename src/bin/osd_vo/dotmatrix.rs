@@ -628,7 +628,7 @@ impl Popup {
                     r: MARK_R,
                 },
             ));
-        if self.cut > 0 && !self.shown.is_empty() && self.delivered().is_none() {
+        if self.text_above() && !self.shown.is_empty() && self.delivered().is_none() {
             text = text.child(self.dotmatrix_ellipsis(dim));
         }
         // The open seam under a tentative word, in dots (MO-24).
