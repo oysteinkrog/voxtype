@@ -2130,6 +2130,7 @@ impl Daemon {
                         String::new()
                     },
                     pause: self.edit_pauses,
+                    raw_words: doc.frozen_words(),
                 })
             }
             (None, Some(Phase::Pending)) => Some(crate::osd::edit_ipc::EditBlock {

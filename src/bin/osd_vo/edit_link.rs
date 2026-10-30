@@ -347,6 +347,7 @@ mod tests {
             frozen: frozen.into(),
             tail: String::new(),
             pause,
+            raw_words: 0,
         }
     }
 

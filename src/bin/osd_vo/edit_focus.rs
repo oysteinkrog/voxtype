@@ -10,7 +10,7 @@
 //! focus again. The popup never takes it back by itself.
 
 use vo::scene::input::KeyEvent;
-use vo_core::edit::PlainLines;
+use vo_core::edit::{Lines, PlainLines};
 use vo_core::edit_keymap::{EditCmd, TextBoxKeys};
 use voxtype::osd::edit_ipc::FinishMode;
 
@@ -94,7 +94,14 @@ impl Focus {
     }
 
     /// A key while focused. Returns true when the text box used it.
-    pub(crate) fn key(&mut self, ev: &KeyEvent, link: &mut EditLink) -> bool {
+    /// `lines` is the buffer as the look wraps it, for Up, Down, Home and
+    /// End; without it each hard line is one line.
+    pub(crate) fn key(
+        &mut self,
+        ev: &KeyEvent,
+        link: &mut EditLink,
+        lines: Option<&dyn Lines>,
+    ) -> bool {
         if !self.has || !link.editable() {
             return false;
         }
@@ -105,8 +112,8 @@ impl Focus {
         match self.keys.map(ev, selection) {
             None => return false,
             Some(EditCmd::Edit(action)) => {
-                let lines = PlainLines::new(buffer.text());
-                link.apply(action, &lines, ev.t);
+                let plain = PlainLines::new(buffer.text());
+                link.apply(action, lines.unwrap_or(&plain), ev.t);
             }
             Some(EditCmd::Collapse) => link.collapse(),
             Some(EditCmd::Resume) => link.resume(),
@@ -169,6 +176,7 @@ mod tests {
                 frozen: "helo".into(),
                 tail: String::new(),
                 pause: 1,
+                raw_words: 0,
             };
             self.link.sync(Some(&block));
             self.focus.follow(&mut self.link, &mut self.ctl, 0.0);
@@ -189,7 +197,7 @@ mod tests {
                 text: text.map(Into::into),
                 mods: Mods::default(),
             };
-            let used = self.focus.key(&ev, &mut self.link);
+            let used = self.focus.key(&ev, &mut self.link, None);
             self.focus.follow(&mut self.link, &mut self.ctl, 0.0);
             used
         }

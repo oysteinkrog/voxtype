@@ -35,6 +35,11 @@ pub struct EditBlock {
     /// pause is the popup's own, so a popup started again reloads it.
     #[serde(default)]
     pub pause: u32,
+    /// Words of the live preview text through the freeze boundary: after a
+    /// resume the popup shows `frozen`, then the preview's words after
+    /// these.
+    #[serde(default)]
+    pub raw_words: usize,
 }
 
 /// `edit-buffer.json`: the popup's text while it owns it.
@@ -232,10 +237,11 @@ mod tests {
             frozen: "Hello.".into(),
             tail: String::new(),
             pause: 2,
+            raw_words: 0,
         };
         assert_eq!(
             serde_json::to_string(&block).unwrap(),
-            r#"{"session":3,"phase":"pending","frozen":"Hello.","pause":2}"#
+            r#"{"session":3,"phase":"pending","frozen":"Hello.","pause":2,"raw_words":0}"#
         );
         let line = EditCmdLine {
             session: 3,
