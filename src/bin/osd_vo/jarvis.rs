@@ -699,7 +699,12 @@ impl Popup {
         // when it did not.
         let first = |l: &(Vec<Word>, f32)| l.0.first().map(|w| w.id);
         let n = self.jarvis.lines.len();
-        let newest = self.jarvis.lines.last().and_then(first).map(|id| (id, self.lines));
+        let newest = self
+            .jarvis
+            .lines
+            .last()
+            .and_then(first)
+            .map(|id| (id, self.lines));
         if let (Some((was, rows)), Some((id, now_rows))) = (self.jarvis.newest, newest) {
             let behind = n.checked_sub(2).and_then(|i| first(&self.jarvis.lines[i]));
             if id != was && behind == Some(was) {
@@ -1229,7 +1234,11 @@ impl Popup {
                 hex(CYAN, 1.0),
                 &|words| self.typo_words(words),
                 &|line, words, room| {
-                    let tail = model_signals::TailText { style, width: room, rows: 1 };
+                    let tail = model_signals::TailText {
+                        style,
+                        width: room,
+                        rows: 1,
+                    };
                     self.signal_marks_in(line, words, &tail, (0.0, 0.0), hex(TEXT, 1.0))
                 },
                 self.jarvis.hold.as_ref(),
@@ -1267,7 +1276,9 @@ impl Popup {
                         .size(w, style.line_height)
                         .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                         .motion(Prop::Offset, Spring::POP)
-                        .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k))),
+                        .word_enter(
+                            self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k)),
+                        ),
                 );
             // The ghost tail after the newest line, as far as the text's
             // right edge: the line is centred, so that is half the free room.
@@ -1277,6 +1288,11 @@ impl Popup {
                     width: (text_width(&self.look) + w) / 2.0,
                     rows: 1,
                 };
+                // The first line takes over from the loading line, centred
+                // as it is: the forming cue stands after both.
+                if let Some(lw) = self.hearing.voice.hint_w.get().filter(|_| i == 0) {
+                    self.hearing.voice.hint.set(Some((w + lw) / 2.0));
+                }
                 self.signal_marks_in(line, words, &tail, (0.0, 0.0), hex(TEXT, 1.0))
             } else {
                 line
@@ -1293,23 +1309,43 @@ impl Popup {
                 rows: 1,
             };
             let slot = Element::layer("forming-slot").size(tw, style.line_height);
-            column = column.child(self.signal_marks_in(slot, &[], &tail, (tw / 2.0, 0.0), hex(TEXT, 1.0)));
+            column = column.child(self.signal_marks_in(
+                slot,
+                &[],
+                &tail,
+                (tw / 2.0, 0.0),
+                hex(TEXT, 1.0),
+            ));
         }
         if self.jarvis.lines.is_empty() && status.loading {
             // Nothing heard yet while the model loads: say so in the frame.
             let what = status.detail.trim_start_matches(['·', ' ']);
             let what = what.split(',').next().unwrap_or("");
+            let waiting = format!("{} {what}", status.state).trim().to_string();
+            // The forming cue after the loading line, which stays centred.
+            let tw = text_width(&self.look);
+            let lw = self.measure.layout(&waiting, &style, None).size.w;
+            self.hearing.voice.hint_w.set(Some(lw));
+            let from = (tw + lw) / 2.0 + style.size * 0.3;
+            let tail = model_signals::TailText {
+                style,
+                width: (tw - from).max(0.0),
+                rows: 1,
+            };
+            let slot = Element::layer("forming-slot").size(tw, style.line_height);
+            column = column.child(at(
+                self.signal_marks_in(slot, &[], &tail, (from, 0.0), hex(TEXT, 1.0)),
+                (g.w - tw) / 2.0,
+                0.0,
+            ));
             column = column.child(
-                Element::label(
-                    "waiting",
-                    format!("{} {what}", status.state).trim().to_string(),
-                )
-                .text_style(style)
-                .color(hex(MID, 1.0))
-                .presence(
-                    Transition::fade(),
-                    Transition::fade().offset(0.0, -16.0 * k),
-                ),
+                Element::label("waiting", waiting)
+                    .text_style(style)
+                    .color(hex(MID, 1.0))
+                    .presence(
+                        Transition::fade(),
+                        Transition::fade().offset(0.0, -16.0 * k),
+                    ),
             );
         }
         at(Element::column("frame-box"), MARGIN, g.frame_top)

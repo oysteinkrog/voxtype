@@ -645,6 +645,12 @@ impl Popup {
             .presence(Transition::fade(), Transition::fade());
             text = text.child(at(caret, 0.0, 0.0));
         }
+        // The forming cue stands after the loading word (it turns into
+        // "Listening", the wider of the two).
+        if self.look.on("loading-word") && self.endings.loading_since.is_some() {
+            let w = self.measure.layout("Listening", &style, None).size.w;
+            self.hearing.voice.hint.set(Some(w));
+        }
         self.signal_marks(text, &self.shown, l.text_width(), (0.0, 0.0), hex(INK))
     }
 

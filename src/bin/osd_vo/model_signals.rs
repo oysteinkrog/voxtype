@@ -365,6 +365,10 @@ impl Popup {
     ) -> Element<Msg> {
         let width = tail.width;
         let forming = self.forming_on() && self.hearing.voice.active();
+        if !forming {
+            // A loading line's end is for this call's cue only.
+            self.hearing.voice.hint.set(None);
+        }
         if !self.signals_on() && !forming {
             return text;
         }
@@ -575,7 +579,9 @@ impl Popup {
         for (i, w) in words.iter().enumerate() {
             let range = start..start + w.text.len();
             start = range.end + 1;
-            let Some(d) = self.word_detail(i) else { continue };
+            let Some(d) = self.word_detail(i) else {
+                continue;
+            };
             let k = ((d.entropy - DOUBT_FROM) / (DOUBT_FULL - DOUBT_FROM)).clamp(0.0, 1.0);
             if d.entropy < DOUBT_FROM {
                 continue;
@@ -638,7 +644,9 @@ impl Popup {
             let range = start..start + w.text.len();
             start = range.end + 1;
             let Some(age) = born(w.id) else { continue };
-            let Some(d) = self.word_detail(i) else { continue };
+            let Some(d) = self.word_detail(i) else {
+                continue;
+            };
             let Some(twin) = d.runner_up.as_deref().map(str::trim) else {
                 continue;
             };
@@ -723,7 +731,11 @@ impl Popup {
                     continue;
                 }
                 let age = ((now - at) / CHANGE_SECS) as f32;
-                let (fade, rise) = if reduced { (0.7, 0.0) } else { (1.0 - age, 4.0 * age) };
+                let (fade, rise) = if reduced {
+                    (0.7, 0.0)
+                } else {
+                    (1.0 - age, 4.0 * age)
+                };
                 let e = Element::label(format!("change-{p}-{old}"), old.clone())
                     .text_style(style)
                     .color(ink)
@@ -731,7 +743,11 @@ impl Popup {
                 out.push(kit::at(e, origin.0 + g.pos.x, origin.1 + top - rise));
             }
         }
-        let n = st.flickers.iter().filter(|&&f| now - f < FLICKER_SECS).count();
+        let n = st
+            .flickers
+            .iter()
+            .filter(|&&f| now - f < FLICKER_SECS)
+            .count();
         if n > 0 && !words.is_empty() {
             let tint = (FLICKER_INK * n as f32).min(FLICKER_MAX);
             let h = self.lines as f32 * style.line_height;
@@ -817,7 +833,10 @@ impl Popup {
             let top = first.pos.y - style.size * 0.8;
             let h = style.size * 1.0;
             let ring = Element::shape(format!("burst-{}", w.id), ShapeKind::RRect)
-                .size(last.pos.x + last.advance - first.pos.x + 2.0 * grow, h + 2.0 * grow)
+                .size(
+                    last.pos.x + last.advance - first.pos.x + 2.0 * grow,
+                    h + 2.0 * grow,
+                )
                 .radius(h * 0.5 + grow)
                 .stroke(l.accent.fade(ink), 1.5);
             out.push(kit::at(
@@ -909,7 +928,11 @@ impl Popup {
                 .motion(Prop::Position, spring)
                 .motion(Prop::Size, spring)
                 .presence(Transition::fade(), Transition::fade());
-            out.push(kit::at(e, origin.0 + x0 + CURSOR_GAP, origin.1 + t0 + inset + h));
+            out.push(kit::at(
+                e,
+                origin.0 + x0 + CURSOR_GAP,
+                origin.1 + t0 + inset + h,
+            ));
         }
         out
     }
@@ -1064,7 +1087,10 @@ mod tests {
         let w = |t: &str| place_words(t);
         let old = w("This is a longer test on");
         // "on" was a guess (place 5, after 5 committed words).
-        assert_eq!(changed_places(&old, 5, &w("This is a longer test of voice")), vec![5]);
+        assert_eq!(
+            changed_places(&old, 5, &w("This is a longer test of voice")),
+            vec![5]
+        );
         assert!(changed_places(&old, 5, &w("This is a longer test on voice")).is_empty());
         assert!(changed_places(&old, 5, &w("This is a longer test")).is_empty());
         // A full stop that comes and goes changes no word.

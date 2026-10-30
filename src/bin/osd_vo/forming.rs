@@ -71,6 +71,12 @@ pub(crate) struct Voice {
     /// how far right of its place the cue stood then, and the place it
     /// last had (x, line top).
     land: std::cell::Cell<Option<(f64, f32, f32, f32)>>,
+    /// The right edge of a loading line on the text's first line, in the
+    /// space of the next cue drawn: a look that writes one where the words
+    /// go sets it just before, and the cue stands after it.
+    pub(crate) hint: std::cell::Cell<Option<f32>>,
+    /// How wide a look's loading line was, for the hand-over to the words.
+    pub(crate) hint_w: std::cell::Cell<Option<f32>>,
 }
 
 impl Voice {
@@ -181,15 +187,8 @@ impl Popup {
         if !self.forming_on() {
             return None;
         }
+        let hint = self.hearing.voice.hint.take();
         let spoken = self.forming_spoken(tail_end)?;
-        // Looks that write a loading line where the words go: the cue waits
-        // for the first word there.
-        if words.is_empty()
-            && self.kit_mode() == kit::Mode::Loading
-            && matches!(self.look.theme, OsdTheme::Palette | OsdTheme::Jarvis)
-        {
-            return None;
-        }
         let now = self.extra.now;
         let sig = {
             use std::hash::{Hash, Hasher};
@@ -198,8 +197,10 @@ impl Popup {
             (words.len(), h.finish())
         };
         let v = &self.hearing.voice;
-        // Looks with a loading line where the words go hand the place over
-        // while that line fades out.
+        // Looks with a loading line where the words go: the cue stands after
+        // that line while it shows and while it fades out under the first
+        // words. While the line shows, a look that does not say where it
+        // ends gets no cue.
         let hinted = matches!(self.look.theme, OsdTheme::Palette | OsdTheme::Jarvis);
         let onset = v.from.is_some_and(|f| v.clock - f < ONSET_SECS);
         let mut changed = false;
@@ -222,7 +223,8 @@ impl Popup {
                 since > f64::NEG_INFINITY
             }
         };
-        if hand {
+        let hint = if hand || words.is_empty() { hint } else { None };
+        if hinted && hint.is_none() && words.is_empty() && self.kit_mode() == kit::Mode::Loading {
             return None;
         }
         // Looks whose words land with a move (letters flying in, a word
@@ -289,8 +291,11 @@ impl Popup {
             // so a new place is already settled, unless a word lands now.
             Some((lx, lt, _)) if top + 0.5 < lt || ((lt - top).abs() <= 0.5 && x + 0.5 < lx) => {
                 let settled = onset && !changed;
-                v.line
-                    .set(Some((x, top, if settled { f64::NEG_INFINITY } else { now })));
+                v.line.set(Some((
+                    x,
+                    top,
+                    if settled { f64::NEG_INFINITY } else { now },
+                )));
                 if !settled {
                     return None;
                 }
@@ -304,9 +309,12 @@ impl Popup {
         }
         if let Some(push) = landing {
             x += push;
-            if x + letter * 0.4 > text.width + 0.5 {
-                return None;
-            }
+        }
+        if let Some(h) = hint.filter(|_| top < line_h * 0.5) {
+            x = x.max(h + gap);
+        }
+        if x + letter * 0.4 > text.width + 0.5 {
+            return None;
         }
         let w = (letters * letter).min(text.width - x).max(letter * 0.4);
         let near = self
@@ -320,7 +328,11 @@ impl Popup {
             v.level.clamp(0.0, 1.0).sqrt()
         };
         // Reduced motion: the cue appears and goes, with no fade.
-        let fade = if still { 1.0 } else { 1.0 - (v.quiet() / FADE_SECS).clamp(0.0, 1.0) as f32 };
+        let fade = if still {
+            1.0
+        } else {
+            1.0 - (v.quiet() / FADE_SECS).clamp(0.0, 1.0) as f32
+        };
         let alpha =
             (INK_LOW + (INK_HIGH - INK_LOW) * level + if near { INK_NEAR } else { 0.0 }) * fade;
         let (color, pen, alpha) = if probe() {
