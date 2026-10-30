@@ -30,8 +30,9 @@
 # (focus_probe target) stands in for the app the text goes to.
 #
 # Script: dictate, tap, Up twice, type, Esc (resume), dictate more, tap,
-# Enter (finish). Then a second dictation: dictate, tap, type, cancel. Then
-# a third: dictate, tap, close the window, Enter.
+# Enter (finish). Then a second dictation: dictate, tap, type, cancel. A
+# third: dictate, tap, Enter at once, before the text settles. A fourth:
+# dictate, tap, close the window, Enter.
 # Checks, one PASS or FAIL line each:
 #   - the pasted text (the clipboard at the paste) equals what the popup
 #     showed (its edit buffer when Enter was pressed)
@@ -41,8 +42,15 @@
 #   - with the window closed, the text is only copied: no keys reach the
 #     other window and the hook sends no Enter
 #   - focus comes back to the window within 500 ms of Esc, Enter and cancel
+#   - an Enter before the text settles still delivers once, and the popup
+#     does not take focus again
 #   - the popup keeps its size from the tap to the hand-back
-#   - no key tool that could reach the real desktop ran
+#   - no key tool that could reach the real desktop ran, and the real
+#     desktop's dotool pipe and clipboard are the same after the run
+#
+# dotool, ydotool, eitype and xdotool are stubs that fail; wl-copy and
+# wl-paste work only on the nested socket; notify-send only logs. The run
+# stops before it starts anything when one of them is not the stub.
 #
 # Exits 0 when every check passes.
 set -uo pipefail
@@ -57,7 +65,7 @@ bin=$(dirname "$voxtype")
 for b in "$voxtype" "$bin/voxtype-osd" "$bin/voxtype-osd-vo" "$probe" "$keys"; do
     [ -x "$b" ] || { echo "osd-vo-edit-e2e: $b is not an executable" >&2; exit 2; }
 done
-for c in kwin_wayland kdotool wtype wl-paste ffmpeg python3; do
+for c in kwin_wayland kdotool wl-copy wl-paste ffmpeg python3; do
     command -v "$c" >/dev/null || { echo "osd-vo-edit-e2e: $c is not installed" >&2; exit 2; }
 done
 utt=$libri/test-clean/1089/134686
@@ -124,6 +132,26 @@ exit 1
 EOF
     chmod +x "$work/path/$t"
 done
+# The clipboard tools work only on the nested session's socket.
+for t in wl-copy wl-paste; do
+    real=$(command -v "$t")
+    {
+        echo '#!/bin/sh'
+        echo 'case "$WAYLAND_DISPLAY" in'
+        echo "    */voxtype-e2e-*|voxtype-e2e-*) exec '$real' \"\$@\" ;;"
+        echo 'esac'
+        echo 'echo "$(date +%s%3N) blocked $(basename "$0") on $WAYLAND_DISPLAY" >> "$VOXTYPE_E2E_KEYS_LOG"'
+        echo 'exit 1'
+    } > "$work/path/$t"
+    chmod +x "$work/path/$t"
+done
+# No notification reaches the real desktop; the stub logs it.
+cat > "$work/path/notify-send" <<'EOF'
+#!/bin/sh
+echo "$(date +%s%3N) notify-send $*" >> "$VOXTYPE_E2E_NOTIFY_LOG"
+echo 1
+EOF
+chmod +x "$work/path/notify-send"
 cat > "$work/path/wtype" <<'EOF'
 #!/usr/bin/env bash
 echo "$(date +%s%3N) wtype $*" >> "$VOXTYPE_E2E_KEYS_LOG"
@@ -145,6 +173,34 @@ done
 exec "$VOXTYPE_E2E_FAKE_KEYS" "${steps[@]}"
 EOF
 chmod +x "$work/path/wtype"
+
+# Fail before anything runs when a tool that could reach the real desktop
+# is not the stub.
+for t in dotool dotoolc ydotool eitype xdotool wtype wl-copy wl-paste notify-send; do
+    found=$(PATH="$work/path:$PATH" command -v "$t")
+    [ "$found" = "$work/path/$t" ] || { echo "osd-vo-edit-e2e: $t resolves to '$found', not the stub" >&2; exit 2; }
+done
+
+# The real desktop, checked before and after the run: the dotoold pipe's
+# time and a hash of the real clipboard. wl-paste reads it through
+# ext-data-control and opens no window. A copy made on the real desktop
+# during the run also changes the hash.
+real_wl=${VOXTYPE_E2E_REAL_WAYLAND:-}
+if [ -z "$real_wl" ]; then
+    for sock in /run/user/$(id -u)/wayland-[0-9]; do
+        [ -S "$sock" ] && { real_wl=$(basename "$sock"); break; }
+    done
+fi
+real_state() {
+    stat -c 'dotool-pipe %y' /tmp/dotool-pipe 2>/dev/null || echo "dotool-pipe none"
+    if [ -n "$real_wl" ]; then
+        XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=$real_wl timeout 3 \
+            sh -c 'wl-paste --list-types; wl-paste --no-newline' 2>/dev/null | sha256sum | sed 's/^/clipboard /'
+    else
+        echo "clipboard unknown"
+    fi
+}
+real_before=$(real_state)
 
 # As the user's auto-Enter hook: no Enter after a paste-only finish or a
 # dictation that did not deliver text.
@@ -204,7 +260,7 @@ realtime = false
 EOF
 
 cat > "$work/inner.py" <<'EOF'
-import json, os, subprocess, sys, threading, time
+import json, os, shutil, subprocess, sys, threading, time
 
 work, voxtype, probe, keys = sys.argv[1:5]
 home = os.path.join(work, "home")
@@ -277,6 +333,7 @@ env = dict(os.environ, XDG_RUNTIME_DIR=rt, WAYLAND_DISPLAY=wl,
            ALSA_CONFIG_PATH=os.path.join(work, "asound.conf"),
            VOXTYPE_E2E_HOOK_LOG=os.path.join(work, "hook.log"),
            VOXTYPE_E2E_KEYS_LOG=os.path.join(work, "keys.log"), VOXTYPE_E2E_FAKE_KEYS=keys,
+           VOXTYPE_E2E_NOTIFY_LOG=os.path.join(work, "notify.log"),
            PATH=os.path.join(work, "path") + os.pathsep + os.environ["PATH"],
            DOTOOL_PIPE=os.path.join(work, "no-dotool-pipe"),
            YDOTOOL_SOCKET=os.path.join(work, "no-ydotool.sock"),
@@ -285,6 +342,12 @@ env = dict(os.environ, XDG_RUNTIME_DIR=rt, WAYLAND_DISPLAY=wl,
 env.update(KDE_SESSION_VERSION="6", KDE_FULL_SESSION="true", XDG_CURRENT_DESKTOP="KDE")
 for k in ("PULSE_SERVER", "PIPEWIRE_REMOTE", "PIPEWIRE_RUNTIME_DIR", "DISPLAY"):
     env.pop(k, None)
+
+stubs = os.path.join(work, "path")
+for t in ("dotool", "dotoolc", "ydotool", "eitype", "xdotool", "wtype", "wl-copy", "wl-paste", "notify-send"):
+    if shutil.which(t, path=env["PATH"]) != os.path.join(stubs, t):
+        check(f"{t} is the stub", False, f"found {shutil.which(t, path=env['PATH'])}")
+        sys.exit(1)
 
 def vt(*args):
     return subprocess.run([voxtype, *args], env=env, capture_output=True, text=True, timeout=20)
@@ -470,7 +533,39 @@ check("a cancel runs no Enter from the hook", not hook_enters(new_hooks), f"hook
 kept = vt("record", "restore", "--print")
 check("the cancelled edit's text can be restored", kept.returncode == 0 and "xyz" in kept.stdout, f"rc={kept.returncode}")
 
-# --- Third dictation: the target window closes during the edit. ---
+# --- Third dictation: Enter right after the tap, before the text settles. ---
+wait(lambda: (read("state") or "").strip() == "idle", 10)
+time.sleep(1.5)
+t3 = ms()
+hooks_before = len(lines(os.path.join(work, "hook.log")))
+vt("record", "start")
+wait(lambda: len(shown().split()) >= 10, 25)
+time.sleep(max(0.0, 12.0 - (ms() - t3) / 1e3))
+vt("record", "edit")
+wait(lambda: target("leave", t3), 2)
+at_press = phase()
+t_early = ms()
+press("enter")
+note(f"phase at Enter: {at_press}")
+check("Enter lands before the text has settled", at_press in ("pending", "settling"), f"phase={at_press}")
+back = wait(lambda: target("enter", t_early), 2)
+lat = back[0][0] - t_early if back else None
+check("an early Enter gives focus back within 500 ms", lat is not None and lat <= 500, f"latency_ms={lat}")
+done = wait(lambda: (read("outcome") or "").strip() == "done", 15)
+check("an early Enter delivers", done, f"outcome={read('outcome')!r}")
+time.sleep(1.5)
+codes = [c for _, c in keys_after(t_early)]
+note(f"window keys after the early Enter: {codes}")
+check("after an early Enter the paste and one Enter go to the window",
+      codes[:2] == [42, 110] and codes.count(28) == 1 and codes.index(28) > 1, f"keys={codes}")
+early = clipboard() or ""
+note(f"pasted: {early!r}")
+check("an early Enter pastes the dictated words", early.startswith("He hoped") and len(early.split()) >= 10)
+check("the popup does not take focus again after an early Enter",
+      not target("leave", t_early), f"leaves={target('leave', t_early)}")
+check("the daemon is idle after an early Enter", (read("state") or "").strip() == "idle", f"state={read('state')!r}")
+
+# --- Fourth dictation: the target window closes during the edit. ---
 wait(lambda: (read("state") or "").strip() == "idle", 10)
 time.sleep(1.5)
 t2 = ms()
@@ -498,6 +593,8 @@ check("with the window closed, the popup says it was not pasted", (read("not-pas
       f"not-pasted={read('not-pasted')!r}")
 new_hooks = lines(os.path.join(work, "hook.log"))[hooks_before:]
 check("with the window closed, the hook sends no Enter", not hook_enters(new_hooks), f"hook={new_hooks}")
+notes = [l for l in lines(os.path.join(work, "notify.log")) if "not pasted" in l.lower()]
+check("with the window closed, a notification says so", notes, f"{lines(os.path.join(work, 'notify.log'))}")
 
 blocked = [l for l in lines(os.path.join(work, "keys.log")) if " blocked " in l]
 check("no key tool outside the nested session ran", not blocked, f"{blocked}")
@@ -518,8 +615,16 @@ EOF
 chmod +x "$work/inner.sh"
 
 XDG_CONFIG_HOME=$work/home/kwin-config KWIN_WAYLAND_NO_PERMISSION_CHECKS=1 WAYLAND_DISPLAY=no-such-wl DISPLAY= \
-    timeout 330 dbus-run-session -- kwin_wayland --virtual --no-lockscreen --no-global-shortcuts \
+    timeout 400 dbus-run-session -- kwin_wayland --virtual --no-lockscreen --no-global-shortcuts \
     --socket "voxtype-e2e-$$" --width 1280 --height 800 \
     --exit-with-session "$work/inner.sh" > "$work/kwin.log" 2>&1
+real_after=$(real_state)
 cat "$work/inner.log"
+if [ "$real_before" = "$real_after" ]; then
+    echo "PASS the real desktop's dotool pipe and clipboard are unchanged"
+else
+    echo "FAIL the real desktop's dotool pipe or clipboard changed during the run"
+    printf '     before: %s\n     after:  %s\n' "$(echo $real_before)" "$(echo $real_after)"
+    exit 1
+fi
 grep -q '^RESULT PASS' "$work/inner.log"
