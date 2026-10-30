@@ -27,7 +27,7 @@
 //! - `graded-doubt`: an underline under each word the model was unsure of,
 //!   from entropy 0.3 nats (hairline, faint) to 1.0 (2.4 px, strong), until
 //!   the final pass. It replaces the type look's on/off doubt line, which
-//!   fires only under 60 % confidence, where it is on.
+//!   fires only under `[osd] doubt_below` confidence, where it is on.
 //!
 //! - `breathing-stop`: when the tail expects a full stop, it sits after the
 //!   text at its probability's ink (60 % at certainty, so it never reads

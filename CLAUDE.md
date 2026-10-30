@@ -372,7 +372,7 @@ Milestone-aligned with GitHub so the two don't drift. Based on the 29 Aug 2026 b
 
 **Blocked/Waiting:**
 - **Nixpkgs onnxruntime MIGraphX support** - Verify the nixpkgs `onnxruntime` build (with `rocmSupport = true`) actually exposes the MIGraphX EP. The Nix flake's `parakeet-migraphx` output uses `onnxruntimeRocm` and sets `ORT_MIGRAPHX_MODEL_CACHE_PATH`; if MIGraphX isn't exposed in nixpkgs, ORT will fail to register the EP at runtime.
-- **Cohere decoder on CUDA** - Encoder runs on GPU; decoder pinned to CPU pending ORT's CUDA `GroupQueryAttention` kernel adding `attention_bias` support. Flip the second arg of `build_session(&decoder_file, threads, "decoder", false)` in `src/transcribe/cohere.rs` once ORT lands the kernel.
+- **Cohere decoder on CUDA** - Encoder runs on GPU; decoder pinned to CPU pending ORT's CUDA `GroupQueryAttention` kernel adding `attention_bias` support. Flip the `use_gpu` arg (the first `false`) of `build_session(&decoder_file, threads, "decoder", false, false)` in `src/transcribe/cohere.rs` once ORT lands the kernel.
 
 ### Non-Goals
 

@@ -637,6 +637,10 @@ pub struct OsdConfig {
     /// vo popup: a single tap of `[hotkey] edit_key`, or `voxtype record
     /// edit`. Off by default.
     pub keyboard_edit: bool,
+    /// The vo popup marks a word as unsure (Type's wavy line, Palette's
+    /// wave, Captions' thin line) when the engine's confidence in it is
+    /// below this, 0 to 1. Default [`DOUBT_BELOW`].
+    pub doubt_below: f32,
     /// Motion features of the vo popup: `"look"` (each look's own set),
     /// `"none"`, or a list of names (see [`OsdMotion`]).
     pub motion: OsdMotion,
@@ -687,6 +691,7 @@ impl Default for OsdConfig {
             look_badge: false,
             realtime: true,
             keyboard_edit: false,
+            doubt_below: DOUBT_BELOW,
             motion: OsdMotion::Look,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,
@@ -702,9 +707,26 @@ impl Default for OsdConfig {
     }
 }
 
+/// The default `doubt_below`. Measured on 90 minutes of real dictation
+/// with the live model (parakeet-unified-en-0.6b-int8, 11881 words, ASR-01,
+/// Oct 2026), a word's confidence (its lowest token probability) has these
+/// quantiles: 0.1 % 0.29, 1 % 0.45, 5 % 0.55, 10 % 0.63, 25 % 0.87, median
+/// 0.99. The old 0.6 marked 8.3 % of words and some word in 77 % of
+/// dictations; 0.45 marks about 1 % of words, the ones most likely wrong.
+pub const DOUBT_BELOW: f32 = 0.45;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doubt_below_defaults_to_the_measured_one_percent() {
+        assert_eq!(OsdConfig::default().doubt_below, DOUBT_BELOW);
+        let old: OsdConfig = toml::from_str("look_badge = true").unwrap();
+        assert_eq!(old.doubt_below, 0.45);
+        let set: OsdConfig = toml::from_str("doubt_below = 0.3").unwrap();
+        assert_eq!(set.doubt_below, 0.3);
+    }
 
     #[test]
     fn keyboard_edit_is_off_unless_set() {

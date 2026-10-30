@@ -23,10 +23,7 @@ impl Popup {
     /// shows as a cancel, even after it was finishing.
     pub(crate) fn kit_mode(&self) -> Mode {
         let status = self.status();
-        if matches!(
-            self.ending(),
-            Some(Ending::Cancelled | Ending::Empty | Ending::Failed)
-        ) {
+        if self.kit_nothing_typed() {
             Mode::Cancelled
         } else if self.extra.final_at.is_some() {
             Mode::Done
@@ -43,6 +40,15 @@ impl Popup {
         } else {
             Mode::Listening
         }
+    }
+
+    /// The dictation ended with nothing typed: a cancel, no speech or a
+    /// failure, even after it was finishing.
+    pub(crate) fn kit_nothing_typed(&self) -> bool {
+        matches!(
+            self.ending(),
+            Some(Ending::Cancelled | Ending::Empty | Ending::Failed)
+        )
     }
 
     /// When the current mode began, as far as the shared times tell.

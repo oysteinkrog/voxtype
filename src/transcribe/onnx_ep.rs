@@ -26,6 +26,18 @@ use ort::execution_providers::ExecutionProviderDispatch;
 #[cfg(feature = "onnx-common")]
 use ort::session::builder::{BuilderResult, SessionBuilder};
 
+/// Lets the session's threads sleep while they wait for work. ORT's
+/// default lets them spin, which keeps whole cores busy for the same text
+/// and speed.
+// BuilderResult is ort's own type: its error hands the builder back.
+#[cfg(feature = "onnx-common")]
+#[allow(clippy::result_large_err)]
+pub fn sleeping_threads(builder: SessionBuilder) -> BuilderResult {
+    builder
+        .with_intra_op_spinning(false)?
+        .with_inter_op_spinning(false)
+}
+
 /// Register GPU EPs onto a session builder.
 ///
 /// `engine_label` and `session_label` are used only for logging
@@ -33,6 +45,7 @@ use ort::session::builder::{BuilderResult, SessionBuilder};
 /// the modified builder; if no EPs are compiled in or registration
 /// fails, falls through unchanged and ort uses the CPU EP.
 #[cfg(feature = "onnx-common")]
+#[allow(clippy::result_large_err)]
 pub fn register_gpu_eps(
     builder: SessionBuilder,
     engine_label: &str,
@@ -55,17 +68,17 @@ fn compiled_providers() -> Vec<(&'static str, ExecutionProviderDispatch)> {
 
     #[cfg(feature = "onnx-tensorrt-enabled")]
     {
-        use ort::execution_providers::{ExecutionProvider, TensorRTExecutionProvider};
+        use ort::execution_providers::TensorRTExecutionProvider;
         providers.push(("TensorRT", TensorRTExecutionProvider::default().build()));
     }
     #[cfg(feature = "onnx-cuda-enabled")]
     {
-        use ort::execution_providers::{CUDAExecutionProvider, ExecutionProvider};
+        use ort::execution_providers::CUDAExecutionProvider;
         providers.push(("CUDA", CUDAExecutionProvider::default().build()));
     }
     #[cfg(feature = "onnx-migraphx-enabled")]
     {
-        use ort::execution_providers::{ExecutionProvider, MIGraphXExecutionProvider};
+        use ort::execution_providers::MIGraphXExecutionProvider;
         providers.push(("MIGraphX", MIGraphXExecutionProvider::default().build()));
     }
 

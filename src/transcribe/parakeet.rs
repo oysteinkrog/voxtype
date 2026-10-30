@@ -284,8 +284,26 @@ impl Transcriber for ParakeetTranscriber {
     }
 }
 
-/// Build execution config based on compile-time feature flags
+/// Build execution config based on compile-time feature flags, with
+/// threads that sleep while they wait for work.
 pub(super) fn build_execution_config() -> Option<ExecutionConfig> {
+    Some(sleeping_threads(gpu_execution_config().unwrap_or_default()))
+}
+
+/// `config` with its threads sleeping while they wait for work. ORT's
+/// default lets them spin, which keeps whole cores busy for the same text
+/// and speed.
+pub(super) fn sleeping_threads(config: ExecutionConfig) -> ExecutionConfig {
+    config.with_custom_configure(|b| {
+        Ok(b.with_intra_op_spinning(false)?
+            .with_inter_op_spinning(false)?)
+    })
+}
+
+/// The GPU execution provider compiled in and usable, if any.
+// Each cfg block returns; which one ends the body depends on the features.
+#[allow(clippy::needless_return)]
+fn gpu_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-cuda")]
     {
         if probe_cuda_runtime() {
@@ -357,12 +375,7 @@ fn probe_cuda_runtime() -> bool {
         return false;
     }
 
-    let sym = unsafe {
-        libc::dlsym(
-            handle,
-            b"cudaRuntimeGetVersion\0".as_ptr() as *const libc::c_char,
-        )
-    };
+    let sym = unsafe { libc::dlsym(handle, c"cudaRuntimeGetVersion".as_ptr()) };
 
     if sym.is_null() {
         tracing::warn!("Could not find cudaRuntimeGetVersion in CUDA runtime library");

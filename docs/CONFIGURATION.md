@@ -4122,6 +4122,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_EDIT_KEY` | string | `hotkey.edit_key` |
 | `VOXTYPE_EDIT_QUIET_MS` | integer | `hotkey.edit_quiet_ms` |
 | `VOXTYPE_OSD_KEYBOARD_EDIT` | bool | `osd.keyboard_edit` |
+| `VOXTYPE_OSD_DOUBT_BELOW` | float | `osd.doubt_below` |
 
 **Whisper / Engine:**
 
@@ -4518,6 +4519,22 @@ frontend = "vo"
 keyboard_edit = true
 ```
 
+### Unsure-word threshold
+
+**Type:** Float, 0 to 1 (`[osd] doubt_below`)
+**Default:** `0.45`
+**Required:** No
+**CLI:** `voxtype-osd-vo --doubt-below` · **Env:** `VOXTYPE_OSD_DOUBT_BELOW`
+
+The vo popup marks a word as unsure when the engine's confidence in it is below this: a wavy line in `type`, a wave in `palette`, a thin line in `captions`. The confidence is the lowest probability among the word's tokens.
+
+The default comes from 90 minutes of real dictation with `parakeet-unified-en-0.6b-int8`. There, 1 % of words scored under 0.45, 5 % under 0.55 and 10 % under 0.63; the median word scored 0.99. At the old fixed 0.6, about 8 % of words, and some word in three dictations out of four, were marked. At 0.45 about 1 word in 100 is marked. Raise it to see more marks, lower it to see fewer.
+
+```toml
+[osd]
+doubt_below = 0.45
+```
+
 ### vo OSD (experimental)
 
 `frontend = "vo"` runs `voxtype-osd-vo`, which draws the `swiss` look on
@@ -4542,8 +4559,11 @@ fonts, and draws the `swiss` look. Differences from the GTK4 popup:
   once, as in the GTK4 popup.
 - `look_badge = true` in `[osd]` (or `--look-badge`, or
   `VOXTYPE_OSD_LOOK_BADGE=1`) shows the active look's place in the look
-  chord's list and its name, such as "3/20 Type", above the popup's
-  top-left corner. Off by default.
+  chord's list and its name, such as "3/20 Type", in white on a dark
+  pill above the popup's top-left corner. With a centred position it stays
+  on the same screen spot for every look: with `anchor = "center"` just
+  above the tallest look's panel, lined up with the left edge of a
+  `width_px` wide panel. Off by default.
 - While it shows, the popup's own threads run at real-time priority
   (`SCHED_RR` 1, the same as KWin), so CPU load from builds or other apps
   does not make it wait. They go back to normal priority when it hides. A

@@ -187,14 +187,16 @@ impl CohereTranscriber {
             ))
         })?;
 
-        let encoder = build_session(&encoder_file, threads, "encoder", true)?;
+        let encoder = build_session(&encoder_file, threads, "encoder", true, true)?;
         // Decoder pinned to CPU: ORT's CUDA GroupQueryAttention kernel rejects
         // the `attention_bias` input that the HF Optimum decoder export uses
         // (validated on GTX 1660 Ti, ORT 1.20 via pyke ort 2.0.0-rc.12). The
         // encoder still runs on GPU, where the 1.4GB-weight matmuls dominate
         // wall time; the smaller decoder runs CPU-side until ORT lands the
         // attention_bias kernel.
-        let decoder = build_session(&decoder_file, threads, "decoder", false)?;
+        // The decoder's threads spin: it runs once per token, and sleeping
+        // between those small runs made the final pass 4 to 6 % slower.
+        let decoder = build_session(&decoder_file, threads, "decoder", false, false)?;
 
         // The HF Optimum exports use mixed precision: `encoder_hidden_states`
         // stays Float32 across every variant (q4/int8/FP32 keep encoder
@@ -383,15 +385,16 @@ impl CohereTranscriber {
             let num_logits = Tensor::<i64>::from_array(([] as [usize; 0], vec![1_i64]))
                 .map_err(|e| TranscribeError::InferenceFailed(format!("num_logits tensor: {e}")))?;
 
-            let mut inputs: Vec<(Cow<str>, ort::session::SessionInputValue)> = Vec::new();
-            inputs.push((Cow::Borrowed("input_ids"), input_ids.into()));
-            inputs.push((Cow::Borrowed("attention_mask"), attention_mask.into()));
-            inputs.push((Cow::Borrowed("position_ids"), position_ids.into()));
-            inputs.push((Cow::Borrowed("num_logits_to_keep"), num_logits.into()));
-            inputs.push((
-                Cow::Borrowed("encoder_hidden_states"),
-                ort::session::SessionInputValue::from(&encoder_hidden),
-            ));
+            let mut inputs: Vec<(Cow<str>, ort::session::SessionInputValue)> = vec![
+                (Cow::Borrowed("input_ids"), input_ids.into()),
+                (Cow::Borrowed("attention_mask"), attention_mask.into()),
+                (Cow::Borrowed("position_ids"), position_ids.into()),
+                (Cow::Borrowed("num_logits_to_keep"), num_logits.into()),
+                (
+                    Cow::Borrowed("encoder_hidden_states"),
+                    ort::session::SessionInputValue::from(&encoder_hidden),
+                ),
+            ];
 
             for layer in 0..N_LAYERS {
                 let dk_name = format!("past_key_values.{layer}.decoder.key");
@@ -438,28 +441,28 @@ impl CohereTranscriber {
                 let mut present_enc: Vec<DynValue> = Vec::with_capacity(N_LAYERS * 2);
                 for layer in 0..N_LAYERS {
                     let dk = outputs
-                        .remove(&format!("present.{layer}.decoder.key"))
+                        .remove(format!("present.{layer}.decoder.key"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.decoder.key"
                             ))
                         })?;
                     let dv = outputs
-                        .remove(&format!("present.{layer}.decoder.value"))
+                        .remove(format!("present.{layer}.decoder.value"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.decoder.value"
                             ))
                         })?;
                     let ek = outputs
-                        .remove(&format!("present.{layer}.encoder.key"))
+                        .remove(format!("present.{layer}.encoder.key"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.encoder.key"
                             ))
                         })?;
                     let ev = outputs
-                        .remove(&format!("present.{layer}.encoder.value"))
+                        .remove(format!("present.{layer}.encoder.value"))
                         .ok_or_else(|| {
                             TranscribeError::InferenceFailed(format!(
                                 "missing present.{layer}.encoder.value"
@@ -627,11 +630,18 @@ fn build_session(
     threads: usize,
     label: &str,
     use_gpu: bool,
+    sleep: bool,
 ) -> Result<Session, TranscribeError> {
     let builder = Session::builder()
         .map_err(|e| TranscribeError::InitFailed(format!("{label} builder: {e}")))?
         .with_intra_threads(threads)
         .map_err(|e| TranscribeError::InitFailed(format!("{label} threads: {e}")))?;
+    let builder = if sleep {
+        super::onnx_ep::sleeping_threads(builder)
+            .map_err(|e| TranscribeError::InitFailed(format!("{label} threads: {e}")))?
+    } else {
+        builder
+    };
 
     let mut builder = if use_gpu {
         super::onnx_ep::register_gpu_eps(builder, "Cohere", label)

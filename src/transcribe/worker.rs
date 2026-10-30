@@ -1356,10 +1356,7 @@ impl PauseCommit {
 /// text and tick times.
 #[cfg(feature = "parakeet")]
 fn live_execution_config() -> parakeet_rs::ExecutionConfig {
-    parakeet_rs::ExecutionConfig::new().with_custom_configure(|b| {
-        Ok(b.with_intra_op_spinning(false)?
-            .with_inter_op_spinning(false)?)
-    })
+    super::parakeet::sleeping_threads(parakeet_rs::ExecutionConfig::new())
 }
 
 /// The sound strip's probe, when the OSD is on and `sound-strip` is among

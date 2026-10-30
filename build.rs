@@ -26,6 +26,8 @@ fn main() -> Result<(), Error> {
     // Before the man-page early return: the version must be stamped for
     // every build, not just release builds.
     expose_build_version();
+    // Also before the early return: the CUDA probe needs it in debug builds.
+    expose_cuda_build_major();
     register_station_exhibits()?;
 
     // Only generate man pages for release builds or when explicitly requested
@@ -80,8 +82,6 @@ fn main() -> Result<(), Error> {
         "cargo:warning=Man pages generated in: {}",
         man_dir.display()
     );
-
-    expose_cuda_build_major();
 
     Ok(())
 }

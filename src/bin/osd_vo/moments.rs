@@ -1213,8 +1213,11 @@ pub(crate) fn live(
     }
     let played = Played {
         name: m.name(),
+        // `osd` set as the live popup has it, so the surface keeps the
+        // live size and place through the moment.
         popup: Popup {
             live_surface: true,
+            osd: Some(cfg.clone()),
             ..Popup::scripted(look, &fonts)
         },
         inputs,
@@ -1622,7 +1625,7 @@ mod tests {
             self.1.borrow_mut().push(EditSeen {
                 t,
                 badge: p.edit_badge(),
-                drawn: p.look_badge().is_some(),
+                drawn: p.look_badge(0.0, 0.0).is_some(),
                 hint: p.edit_hint(),
                 quiet: !p.look.quiet.is_empty(),
                 marked,

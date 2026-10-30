@@ -80,6 +80,7 @@ impl OmnilingualTranscriber {
                 TranscribeError::InitFailed(format!("ONNX session builder failed: {}", e))
             })?
             .with_intra_threads(threads)
+            .and_then(super::onnx_ep::sleeping_threads)
             .map_err(|e| TranscribeError::InitFailed(format!("Failed to set threads: {}", e)))?
             .commit_from_file(&model_file)
             .map_err(|e| {
@@ -256,7 +257,7 @@ fn resolve_model_path(model: &str) -> Result<PathBuf, TranscribeError> {
     }
 
     // Also check int8 variant naming
-    let sherpa_int8_name = format!("{}-int8", &sherpa_name);
+    let sherpa_int8_name = format!("{}-int8", sherpa_name);
     let sherpa_int8_path = models_dir.join(&sherpa_int8_name);
     if sherpa_int8_path.exists() {
         return Ok(sherpa_int8_path);

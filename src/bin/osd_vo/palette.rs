@@ -65,8 +65,6 @@ const STATUS_TOP: f32 = 16.0;
 const STATUS_H: f32 = 24.0;
 const PAD_BOTTOM: f32 = 21.0;
 const MAX_LINES: u32 = 5;
-/// Below this confidence a word gets a wavy underline.
-const UNSURE: f32 = 0.6;
 /// The caret blinks once no word has come for this long.
 const CARET_IDLE: f64 = 0.6;
 
@@ -358,7 +356,7 @@ impl Popup {
         if self.closing {
             return root;
         }
-        root.child(self.palette_panel().margin_edges(12.0, 0.0, 0.0, 0.0))
+        root.child(self.palette_panel().margin_edges(12.0, 0.0, 0.0, 12.0))
     }
 
     pub(crate) fn palette_panel(&self) -> Element<Msg> {
@@ -530,7 +528,7 @@ impl Popup {
                 self.model
                     .info(w.id)
                     .and_then(|i| i.conf)
-                    .is_some_and(|c| c < UNSURE)
+                    .is_some_and(|c| c < self.look.doubt_below)
             })
             .map(|w| w.id)
             .collect()

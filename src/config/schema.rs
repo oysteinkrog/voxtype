@@ -1389,6 +1389,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Pause a live preview dictation and fix its text by keyboard in the vo popup.",
     ),
     spec(
+        "osd.doubt_below",
+        "osd",
+        "doubt_below",
+        KeyType::Float { min: 0.0, max: 1.0 },
+        "OSD",
+        "Unsure-word threshold",
+        "The vo popup marks a word as unsure when the engine's confidence is below this.",
+    ),
+    spec(
         "osd.frontend",
         "osd",
         "frontend",
@@ -2978,6 +2987,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
         "osd.enabled" => json!(cfg.osd.enabled),
         "osd.keyboard_edit" => json!(cfg.osd.keyboard_edit),
+        "osd.doubt_below" => f32_json(cfg.osd.doubt_below),
         "osd.frontend" => serde_json::to_value(cfg.osd.frontend).ok()?,
         "osd.style" => json!(cfg.osd.style),
         "osd.plugin_path" => match &cfg.osd.plugin_path {

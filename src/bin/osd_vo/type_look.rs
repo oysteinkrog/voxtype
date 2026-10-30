@@ -37,8 +37,6 @@ const ICON_BOX: f32 = 18.0;
 /// check is drawn before the popup closes, about half a second after the
 /// final text.
 const DONE_SECS: f32 = 0.45;
-/// Below this confidence a word gets a wavy underline.
-const DOUBT: f32 = 0.6;
 /// The wavy underline: wave height and length, stroke width, in logical
 /// pixels, and how far below the baseline it sits.
 const WAVE_AMP: f32 = 1.6;
@@ -413,7 +411,7 @@ impl Popup {
         for w in self.model.words() {
             let conf = self.model.info(w.id).and_then(|i| i.conf);
             match conf {
-                Some(c) if c < DOUBT => {
+                Some(c) if c < self.look.doubt_below => {
                     self.extra.doubtful.insert(w.id, None);
                 }
                 Some(_) => {
