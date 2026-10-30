@@ -20,7 +20,7 @@ use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
-use vo::scene::flow::Revise;
+use vo::scene::flow::{Revise, ROLL_WORD_EMS};
 use vo::scene::taffy;
 use vo::scene::Insets;
 use vo::scene::taffy::prelude::{auto, length};
@@ -99,6 +99,8 @@ const GROW_SECS: f64 = 0.15;
 /// A glitch burst, and the least time between two from revisions.
 const BURST_SECS: f64 = 0.14;
 const BURST_GAP: f64 = 0.4;
+/// Seconds a revised word's old text takes to roll up and out.
+const ROLL_SECS: f64 = 0.22;
 /// The open's glitch.
 const OPEN_GLITCH_SECS: f64 = 0.24;
 /// Ticks while something is being typed or grown.
@@ -237,6 +239,9 @@ pub struct State {
     revised: Option<WordId>,
     /// The words on screen at the last sync.
     words: Vec<Word>,
+    /// Revised words' old text rolling up and out: the word, its old
+    /// text and when it was revised.
+    rolls: Vec<(WordId, String, f64)>,
 }
 
 impl Default for State {
@@ -252,6 +257,7 @@ impl Default for State {
             revised_at: f64::NEG_INFINITY,
             revised: None,
             words: Vec::new(),
+            rolls: Vec::new(),
         }
     }
 }
@@ -1173,6 +1179,13 @@ impl Popup {
                 c.revised = Some(w.id);
             }
         }
+        // Every changed word rolls its old text up and out.
+        c.rolls.retain(|r| t < r.2 + ROLL_SECS);
+        for w in &self.shown {
+            if let Some(o) = c.words.iter().find(|o| o.id == w.id && o.text != w.text) {
+                c.rolls.push((w.id, o.text.clone(), t));
+            }
+        }
         c.words.clone_from(&self.shown);
     }
 
@@ -1187,6 +1200,7 @@ impl Popup {
                 || t < typing
                 || t < c.lines_at + GROW_SECS
                 || t < c.revised_at + BURST_SECS
+                || c.rolls.iter().any(|r| t < r.2 + ROLL_SECS)
                 || t < c.mode_at + 0.25)
     }
 
@@ -1451,8 +1465,9 @@ impl Popup {
         } else {
             hex(PAPER)
         };
-        // New words rise into place; a revised word rolls up and out while
-        // its replacement rolls in from below.
+        // New words rise into place. A revised word's replacement is there
+        // at once, at full ink on the reading line, while its old text rolls
+        // up and out above it (`cyber_rolls`).
         let words = Element::live_text("words", &self.shown)
             .line_motion(&self.look)
             .text_style(l.text_style())
@@ -1461,7 +1476,7 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.10))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 6.0)))
-            .word_revise(Revise::Roll)
+            .word_revise(Revise::Swap)
             .text_halo(Color::WHITE.fade(if cancelled { 0.0 } else { 0.12 }), 3.0);
         let words = self.handoff_or(
             words,
@@ -1494,6 +1509,9 @@ impl Popup {
             true,
         ))
         .children(self.cyber_rewind());
+        if !rewinding {
+            text = text.children(self.cyber_rolls(colour));
+        }
         if cancelled && !rewinding {
             // A red strike through each line, drawn on.
             for (i, (y, w)) in self.cyber_line_extents().into_iter().enumerate() {
@@ -1516,6 +1534,45 @@ impl Popup {
             }
         }
         self.signal_marks(text, &self.shown, l.text_width(), (0.0, 0.0), colour)
+    }
+
+    /// Each revised word's old text, rolling up out of its slot and fading,
+    /// its letters spreading to the new word's width. In the text column's
+    /// space.
+    fn cyber_rolls(&self, colour: Color) -> Vec<Element<Msg>> {
+        let t = self.extra.now;
+        let style = self.look.text_style();
+        let travel = if reduced() {
+            0.0
+        } else {
+            ROLL_WORD_EMS * style.size
+        };
+        let mut out = Vec::new();
+        for (i, (id, old, at_t)) in self.cyber.rolls.iter().enumerate() {
+            let k = ease_out((t - at_t) / ROLL_SECS);
+            if k >= 1.0 {
+                continue;
+            }
+            let Some(b) = self.cyber_word_box(*id) else {
+                continue;
+            };
+            let new = self
+                .shown
+                .iter()
+                .find(|w| w.id == *id)
+                .map_or("", |w| w.text.as_str());
+            let width = |s: &str| self.measure.layout(s, &style, None).size.w;
+            let gaps = old.chars().count().saturating_sub(1).max(1) as f32;
+            let spread = (width(new) - width(old)) / gaps * k;
+            let roll = Element::label(format!("roll{i}"), old.clone())
+                .text_style(style.tracking(style.tracking + spread))
+                .color(colour)
+                .opacity(1.0 - k)
+                .motion(Prop::Position, Motion::Snap)
+                .motion(Prop::Opacity, Motion::Snap);
+            out.push(at(roll, b.x - TEXT_X, b.y - TEXT_TOP - travel * k));
+        }
+        out
     }
 
     /// MO-50: a cancel takes the words back into the caret.
