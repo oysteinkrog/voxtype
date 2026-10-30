@@ -487,6 +487,10 @@ lat = back[0][0] - t_enter if back else None
 check("Enter gives focus back within 500 ms", lat is not None and lat <= 500, f"latency_ms={lat}")
 done = wait(lambda: (read("outcome") or "").strip() == "done", 15)
 check("the dictation ends as done", done, f"outcome={read('outcome')!r}")
+receipt = json.loads(read("result.json") or "null") or {}
+check("the popup is told what was pasted", receipt.get("text") == at_enter and receipt.get("method")
+      and receipt.get("latency_ms") is not None,
+      f"result={receipt}")
 time.sleep(1.0)
 pasted = clipboard()
 check("the pasted text equals what the popup showed", pasted is not None and pasted.strip() == at_enter.strip(),
@@ -553,6 +557,7 @@ lat = back[0][0] - t_early if back else None
 check("an early Enter gives focus back within 500 ms", lat is not None and lat <= 500, f"latency_ms={lat}")
 done = wait(lambda: (read("outcome") or "").strip() == "done", 15)
 check("an early Enter delivers", done, f"outcome={read('outcome')!r}")
+receipt = json.loads(read("result.json") or "null") or {}
 time.sleep(1.5)
 codes = [c for _, c in keys_after(t_early)]
 note(f"window keys after the early Enter: {codes}")
@@ -561,6 +566,7 @@ check("after an early Enter the paste and one Enter go to the window",
 early = clipboard() or ""
 note(f"pasted: {early!r}")
 check("an early Enter pastes the dictated words", early.startswith("He hoped") and len(early.split()) >= 10)
+check("the popup is told what an early Enter pasted", receipt.get("text") == early, f"result={receipt}")
 check("the popup does not take focus again after an early Enter",
       not target("leave", t_early), f"leaves={target('leave', t_early)}")
 check("the daemon is idle after an early Enter", (read("state") or "").strip() == "idle", f"state={read('state')!r}")

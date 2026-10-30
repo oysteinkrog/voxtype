@@ -360,6 +360,24 @@ impl Default for EditLink {
 }
 
 /// How a keyboard-edited dictation was delivered.
+/// The delivery record of a live preview dictation.
+fn stream_delivery(
+    method: &str,
+    text: &str,
+    enter: bool,
+    output: Duration,
+) -> crate::osd::outcome::Delivery {
+    crate::osd::outcome::Delivery {
+        text: text.to_string(),
+        chars: text.chars().count(),
+        method: method.to_string(),
+        enter,
+        output_ms: output.as_millis() as u64,
+        latency_ms: crate::osd::outcome::since_stop_ms(),
+        audio_s: None,
+    }
+}
+
 struct EditDelivery {
     /// The check before the paste: anything but confirmed gave the
     /// clipboard only.
@@ -2498,6 +2516,8 @@ impl Daemon {
             .await;
         if !d.paste.confirmed() && d.result.is_ok() {
             self.report_not_pasted(edited, d.paste, started).await;
+        } else if d.result.is_ok() {
+            self.report_stream_delivery(session, started);
         }
         if let Some(v) = d.before_hook.filter(|v| !v.confirmed()) {
             send_notification(
@@ -2530,6 +2550,19 @@ impl Daemon {
             tracing::error!("Edited text delivery failed: {}", e);
         }
         true
+    }
+
+    /// Tell the popup what a live preview dictation delivered, as the batch
+    /// path does, so it shows the hand-off and the receipt.
+    fn report_stream_delivery(&self, session: &StreamingSession, started: Instant) {
+        if let Some((method, text)) = session.delivered() {
+            crate::osd::outcome::write_delivery(&stream_delivery(
+                method,
+                text,
+                self.config.output.auto_submit,
+                started.elapsed(),
+            ));
+        }
     }
 
     /// Tell the popup and the desktop that an edited dictation is on the
@@ -2627,6 +2660,9 @@ impl Daemon {
     /// drain, and stop the mic. Leaves `streaming_session`/`_chain` for
     /// the caller to disown (or keep, to receive trailing finals).
     async fn stop_streaming_capture(&mut self, audio_capture: &mut Option<Box<dyn AudioCapture>>) {
+        // A stream never passes through "transcribing", where a batch
+        // recording starts the receipt's latency clock.
+        crate::osd::outcome::stopped();
         self.cut_streaming_audio();
         self.start_streaming_drain_pump();
         if let Some(mut c) = audio_capture.take() {
@@ -6000,7 +6036,13 @@ impl Daemon {
                                             }
                                             let pre = self.config.output.pre_output_command.as_deref();
                                             let post = self.config.output.post_output_command.as_deref();
-                                            s.commit_segment(chain, text, Some(&self.text_processor), pre, post).await
+                                            let started = Instant::now();
+                                            let r = s.commit_segment(chain, text, Some(&self.text_processor), pre, post).await;
+                                            // Live preview sends the whole text as one Final.
+                                            if r.is_ok() && self.config.live_preview_active() {
+                                                self.report_stream_delivery(s, started);
+                                            }
+                                            r
                                         }
                                     };
                                     if let Err(e) = committed {
@@ -6330,6 +6372,17 @@ mod tests {
     use crate::config::{TranscriptionEngine, WhisperMode};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_live_preview_delivery_tells_the_popup_what_went_out() {
+        let d = stream_delivery("wtype", "naïve café", true, Duration::from_millis(42));
+        assert_eq!(d.text, "naïve café");
+        assert_eq!(d.chars, 10);
+        assert_eq!(d.method, "wtype");
+        assert!(d.enter);
+        assert_eq!(d.output_ms, 42);
+        assert_eq!(d.audio_s, None);
+    }
 
     /// Fallback output that records what it was handed.
     struct RecordingOutput {
