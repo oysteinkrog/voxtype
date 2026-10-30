@@ -88,13 +88,12 @@ const TEXT_LINE: f32 = 40.0;
 const STATUS_GAP: f32 = 32.0;
 const STATUS_BOTTOM: f32 = 23.0;
 const STATUS_PX: f32 = 13.5;
-/// While finishing, the words move up and a progress bar sits between them and the status.
-const FINISH_LIFT: f32 = 14.0;
+/// While finishing, a progress bar sits between the words and the status, and the card
+/// grows down to hold it: the words stay where they were read.
 const BAR_W: f32 = 340.0;
 const BAR_H: f32 = 4.0;
 const BAR_GAP: f32 = 27.0;
-/// Once done, the words move up more and the chip replaces the status row.
-const DONE_LIFT: f32 = 30.0;
+/// Once done, the chip replaces the status row.
 const CHIP_W: f32 = 332.0;
 const CHIP_H: f32 = 45.0;
 const CHIP_GAP: f32 = 28.0;
@@ -205,8 +204,8 @@ fn card_h(lines: u32, phase: Phase) -> f32 {
     let words = TEXT_TOP + lines as f32 * TEXT_LINE;
     match phase {
         Phase::Listening => words + STATUS_GAP + STATUS_BOTTOM,
-        Phase::Finishing => words - FINISH_LIFT + BAR_GAP + 22.0 + STATUS_BOTTOM,
-        Phase::Done => words - DONE_LIFT + CHIP_GAP + CHIP_H / 2.0 + CHIP_BOTTOM,
+        Phase::Finishing => words + BAR_GAP + 22.0 + STATUS_BOTTOM,
+        Phase::Done => words + CHIP_GAP + CHIP_H / 2.0 + CHIP_BOTTOM,
     }
 }
 
@@ -671,7 +670,7 @@ impl Popup {
             ))
             .child(self.particles_trail(phase, x0, y0, surface))
             .child(self.particles_words(phase, x0, y0))
-            .children(self.particles_rewind(phase, x0, y0))
+            .children(self.particles_rewind(x0, y0))
             .child(self.particles_bottom(phase, x0, y0))
     }
 
@@ -890,7 +889,7 @@ impl Popup {
             .size(w, self.lines as f32 * TEXT_LINE * s)
             .child(words);
         let text = self.signal_marks(text, &self.shown, w, (0.0, 0.0), hex(INK));
-        let (x, y) = self.particles_text_at(phase, x0, y0);
+        let (x, y) = self.particles_text_at(x0, y0);
         // Under reduced motion no pre-echo blobs: they are motion that comes before the
         // words. (The look's set has no other hearing feature.)
         let text = if self.still() {
@@ -901,21 +900,17 @@ impl Popup {
         at(text, x, y)
     }
 
-    /// The text box's top left in the surface.
-    fn particles_text_at(&self, phase: Phase, x0: f32, y0: f32) -> (f32, f32) {
+    /// The text box's top left in the surface. It stays put in every phase, so the
+    /// newest line never moves under the reader.
+    fn particles_text_at(&self, x0: f32, y0: f32) -> (f32, f32) {
         let l = &self.look;
         let s = scale(l);
-        let lift = match phase {
-            Phase::Listening => 0.0,
-            Phase::Finishing => FINISH_LIFT,
-            Phase::Done => DONE_LIFT,
-        };
-        (x0 + (l.width - TEXT_W * s) / 2.0, y0 + (TEXT_TOP - lift) * s)
+        (x0 + (l.width - TEXT_W * s) / 2.0, y0 + TEXT_TOP * s)
     }
 
     /// MO-50: a cancel takes the words back into the caret, drawn where the live text
     /// is, which turns clear meanwhile.
-    fn particles_rewind(&self, phase: Phase, x0: f32, y0: f32) -> Option<Element<Msg>> {
+    fn particles_rewind(&self, x0: f32, y0: f32) -> Option<Element<Msg>> {
         let l = &self.look;
         let (style, w) = (text_style(l), text_width(l));
         let h = self.lines as f32 * TEXT_LINE * scale(l);
@@ -924,7 +919,7 @@ impl Popup {
             mark: hex(CYAN),
             faint: Color::hex(HINT, 0.4),
         };
-        let (x, y) = self.particles_text_at(phase, x0, y0);
+        let (x, y) = self.particles_text_at(x0, y0);
         self.rewind_mark("rewind", self.lay_words(style, w), ink, Size::new(w, h))
             .map(|e| at(e, x, y))
     }
@@ -978,7 +973,7 @@ impl Popup {
         let col = Element::column("bottom").size(l.width, 0.0);
         match phase {
             Phase::Done => {
-                let y = words_bottom - DONE_LIFT + CHIP_GAP - CHIP_H / 2.0;
+                let y = words_bottom + CHIP_GAP - CHIP_H / 2.0;
                 at(
                     col.child(at(self.particles_chip(), (l.width - CHIP_W * s) / 2.0, 0.0)),
                     x0,
@@ -986,16 +981,11 @@ impl Popup {
                 )
             }
             _ => {
-                let lift = if phase == Phase::Finishing {
-                    FINISH_LIFT
-                } else {
-                    0.0
-                };
                 let mut col = col;
                 let status = self.status();
-                let mut status_y = words_bottom - lift + STATUS_GAP;
+                let mut status_y = words_bottom + STATUS_GAP;
                 if self.shows_progress(&status) {
-                    let bar_y = words_bottom - lift + BAR_GAP;
+                    let bar_y = words_bottom + BAR_GAP;
                     status_y = bar_y + 22.0;
                     col = col.child(at(
                         self.particles_bar(),
