@@ -635,7 +635,6 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             UnifiedStreamingConfig::default()
         }
     };
-    // None = CPU: the GPU is left to the engine model.
     let model_path = super::parakeet::resolve_model_path(live_model).map_err(|e| e.to_string());
     // The sound strip runs an encoder with one more output and a probe on
     // it; without it the worker loads the plain encoder as before.
@@ -651,9 +650,9 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
                     &path.join(super::sound_probe::ENCODER_FILE),
                     p.output.as_str(),
                 )),
-                None,
+                Some(live_execution_config()),
             ),
-            None => ParakeetUnifiedHandle::load(&path, None),
+            None => ParakeetUnifiedHandle::load(&path, Some(live_execution_config())),
         }
         .map_err(|e| e.to_string())
     });
@@ -1349,6 +1348,18 @@ impl PauseCommit {
         self.shown = Some(with_tail.to_string());
         self.shown.clone()
     }
+}
+
+/// The live model's ONNX Runtime settings: the CPU, since the GPU is left
+/// to the engine model, with threads that sleep between runs. ORT's default
+/// lets them spin, which kept 5 to 6 cores busy while dictating for the same
+/// text and tick times.
+#[cfg(feature = "parakeet")]
+fn live_execution_config() -> parakeet_rs::ExecutionConfig {
+    parakeet_rs::ExecutionConfig::new().with_custom_configure(|b| {
+        Ok(b.with_intra_op_spinning(false)?
+            .with_inter_op_spinning(false)?)
+    })
 }
 
 /// The sound strip's probe, when the OSD is on and `sound-strip` is among

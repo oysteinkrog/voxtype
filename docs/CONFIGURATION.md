@@ -1812,8 +1812,9 @@ and the final text do not change.
 
 - `0` turns the ticks off: one tail per step, as before.
 - Each tick costs about as much CPU as a step. On 7 test clips with the default
-  window, the live worker used 0.63 s of CPU per second of audio with no ticks,
-  1.23 s at `0.24` and 1.45 s at `0.16`.
+  window, the live worker used 0.46 s of CPU per second of audio with no ticks,
+  1.06 s at `0.24` and 1.13 s at `0.16` (CUDA build, live model on the CPU;
+  the numbers move with machine load).
 - When a tick takes more than 60 % of its interval twice in a row, the worker
   stops the ticks for that recording and logs
   `Tail ticks take ... ms of ... ms; one tail per step from now on`. On a slow
