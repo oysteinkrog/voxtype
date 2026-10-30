@@ -230,10 +230,18 @@ impl EditLink {
             self.rev = self.rev.max(snap.rev);
             self.written = Some((buffer.rev(), buffer.selection()));
             self.buffer = Some(buffer);
+            // The tail the daemon froze while no popup ran is not in the
+            // file: seeded from what the file took in, it is added below.
+            if let Some(base) = snap.base {
+                self.seeded = base;
+            }
         } else {
             self.buffer = Some(EditBuffer::new(block.frozen.clone()));
         }
         self.write();
+        if block.frozen != self.seeded {
+            self.add_tail(&block.frozen);
+        }
     }
 
     /// The tail settled: the frozen text grew at its end. The buffer gets
@@ -485,6 +493,26 @@ mod tests {
             Change::Entered
         );
         assert!(link.editable());
+    }
+
+    /// The popup stopped while the tail settled, and the daemon froze the
+    /// tail before it started again: the reloaded text gets the tail.
+    #[test]
+    fn a_restarted_popup_gets_the_tail_it_missed() {
+        let dir = TempDir::new().unwrap();
+        let mut link = EditLink::new(paths(&dir));
+        link.sync(Some(&block("settling", "one", 1)));
+        act(&mut link, EditAction::Insert("!".into()));
+        drop(link);
+        let mut again = EditLink::new(paths(&dir));
+        assert_eq!(
+            again.sync(Some(&block("editing", "one two", 1))),
+            Change::Entered
+        );
+        assert_eq!(again.buffer().unwrap().text(), "one! two");
+        let file = read_buffer_from(&dir.path().join("edit-buffer.json")).unwrap();
+        assert_eq!(file.text, "one! two");
+        assert_eq!(file.base.as_deref(), Some("one two"));
     }
 
     #[test]
