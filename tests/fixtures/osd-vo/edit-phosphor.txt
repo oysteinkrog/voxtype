@@ -1,0 +1,6 @@
+default Newest: 5 lines, caret on line 4 at 81.2,236.2, words w135 to w159; typed: 5 lines, caret on line 4 at 193.3,236.2, words w135 to w159abcdefghij
+default Middle: 5 lines, caret on line 2 at 81.2,182.3, words w135 to w159; typed: 5 lines, caret on line 2 at 193.3,182.3, words w135 to w159
+default Top: 5 lines, caret on line 0 at 81.2,128.5, words w135 to w159; typed: 5 lines, caret on line 0 at 193.3,128.5, words w135abcdefghij to w159
+wide Newest: 5 lines, caret on line 4 at 113.7,346.3, words w135 to w159; typed: 5 lines, caret on line 4 at 281.9,346.3, words w135 to w159abcdefghij
+wide Middle: 5 lines, caret on line 2 at 113.7,265.5, words w135 to w159; typed: 5 lines, caret on line 2 at 281.9,265.5, words w135 to w159
+wide Top: 5 lines, caret on line 0 at 113.7,184.7, words w135 to w159; typed: 5 lines, caret on line 0 at 281.9,184.7, words w135abcdefghij to w159

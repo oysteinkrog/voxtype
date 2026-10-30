@@ -656,12 +656,14 @@ pub(crate) mod edit_check {
             self.t = t;
             self.p.extra.now = t;
             // The state that `update` keeps for these looks, such as
-            // Island's form. Each returns at once for another look.
+            // Island's form or Phosphor's caret. Each returns at once for
+            // another look.
             self.p.sync_amber(t);
             self.p.sync_radial(t);
             self.p.sync_tron(t);
             self.p.sync_island(t);
             self.p.sync_cyber(t);
+            self.p.sync_phosphor(t);
             let view = self.p.view(&self.tokens);
             self.scene.apply(view, t);
         }
