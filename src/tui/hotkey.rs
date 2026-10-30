@@ -1,4 +1,5 @@
-//! Hotkey settings: PTT key, mode, cancel/modifier keys, evdev enable.
+//! Hotkey settings: PTT key, mode, cancel/modifier keys, double tap,
+//! correction and edit keys, look chord, evdev enable.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -25,6 +26,15 @@ pub struct HotkeyState {
     pub enabled: bool,
     pub cancel_key: Option<String>,
     pub modifier: Option<String>,
+    pub double_tap: bool,
+    pub double_tap_ms: i64,
+    pub double_tap_alt_key: Option<String>,
+    pub double_tap_cancel_key: Option<String>,
+    pub look_chord: bool,
+    pub correction_key: Option<String>,
+    pub correction_hold_ms: i64,
+    pub edit_key: Option<String>,
+    pub edit_quiet_ms: i64,
     /// Status banner shown after Save / Reset, cleared on the next edit.
     pub feedback: Option<Feedback>,
     pub dirty_since_load: bool,
@@ -63,6 +73,15 @@ pub enum Field {
     Mode,
     CancelKey,
     Modifier,
+    DoubleTap,
+    DoubleTapMs,
+    DoubleTapAltKey,
+    DoubleTapCancelKey,
+    LookChord,
+    CorrectionKey,
+    CorrectionHoldMs,
+    EditKey,
+    EditQuietMs,
 }
 
 impl Field {
@@ -72,6 +91,15 @@ impl Field {
         Field::Mode,
         Field::CancelKey,
         Field::Modifier,
+        Field::DoubleTap,
+        Field::DoubleTapMs,
+        Field::DoubleTapAltKey,
+        Field::DoubleTapCancelKey,
+        Field::LookChord,
+        Field::CorrectionKey,
+        Field::CorrectionHoldMs,
+        Field::EditKey,
+        Field::EditQuietMs,
     ];
 }
 
@@ -111,6 +139,28 @@ const MODIFIER_CHOICES: &[Option<&str>] = &[
     Some("LEFTMETA"),
 ];
 
+/// Keys for the second double-tap, correction and edit keys. Modifiers suit
+/// them because a tap or a hold of one alone types nothing.
+const SIDE_KEY_CHOICES: &[Option<&str>] = &[
+    None,
+    Some("RIGHTSHIFT"),
+    Some("RIGHTALT"),
+    Some("RIGHTCTRL"),
+    Some("RIGHTMETA"),
+    Some("LEFTSHIFT"),
+    Some("LEFTCTRL"),
+    Some("LEFTALT"),
+    Some("LEFTMETA"),
+];
+
+// Defaults match `HotkeyConfig`; a key at its default stays out of the file.
+const DEFAULT_DOUBLE_TAP_MS: i64 = 300;
+const DEFAULT_CORRECTION_HOLD_MS: i64 = 450;
+const DEFAULT_EDIT_QUIET_MS: i64 = 150;
+const DOUBLE_TAP_MS_CHOICES: &[i64] = &[200, 250, 300, 350, 400, 500, 600];
+const CORRECTION_HOLD_CHOICES: &[i64] = &[300, 400, 450, 500, 600, 800, 1000];
+const EDIT_QUIET_CHOICES: &[i64] = &[0, 100, 150, 200, 300, 500];
+
 impl HotkeyState {
     pub fn load() -> Result<Self, EditorError> {
         let ed = ConfigEditor::load()?;
@@ -125,6 +175,21 @@ impl HotkeyState {
             enabled: ed.get_bool("hotkey", "enabled").unwrap_or(true),
             cancel_key: ed.get_string("hotkey", "cancel_key"),
             modifier: ed.get_string("hotkey", "model_modifier"),
+            double_tap: ed.get_bool("hotkey", "double_tap").unwrap_or(false),
+            double_tap_ms: ed
+                .get_int("hotkey", "double_tap_ms")
+                .unwrap_or(DEFAULT_DOUBLE_TAP_MS),
+            double_tap_alt_key: ed.get_string("hotkey", "double_tap_alt_key"),
+            double_tap_cancel_key: ed.get_string("hotkey", "double_tap_cancel_key"),
+            look_chord: ed.get_bool("hotkey", "look_chord").unwrap_or(true),
+            correction_key: ed.get_string("hotkey", "correction_key"),
+            correction_hold_ms: ed
+                .get_int("hotkey", "correction_hold_ms")
+                .unwrap_or(DEFAULT_CORRECTION_HOLD_MS),
+            edit_key: ed.get_string("hotkey", "edit_key"),
+            edit_quiet_ms: ed
+                .get_int("hotkey", "edit_quiet_ms")
+                .unwrap_or(DEFAULT_EDIT_QUIET_MS),
             feedback: None,
             dirty_since_load: false,
             field: Field::Enabled,
@@ -161,6 +226,34 @@ impl HotkeyState {
             Some(k) => ed.set_string("hotkey", "model_modifier", k),
             None => ed.unset("hotkey", "model_modifier"),
         }
+        set_or_unset_bool(&mut ed, "double_tap", self.double_tap, false);
+        set_or_unset_int(
+            &mut ed,
+            "double_tap_ms",
+            self.double_tap_ms,
+            DEFAULT_DOUBLE_TAP_MS,
+        );
+        set_or_unset_key(&mut ed, "double_tap_alt_key", &self.double_tap_alt_key);
+        set_or_unset_key(
+            &mut ed,
+            "double_tap_cancel_key",
+            &self.double_tap_cancel_key,
+        );
+        set_or_unset_bool(&mut ed, "look_chord", self.look_chord, true);
+        set_or_unset_key(&mut ed, "correction_key", &self.correction_key);
+        set_or_unset_int(
+            &mut ed,
+            "correction_hold_ms",
+            self.correction_hold_ms,
+            DEFAULT_CORRECTION_HOLD_MS,
+        );
+        set_or_unset_key(&mut ed, "edit_key", &self.edit_key);
+        set_or_unset_int(
+            &mut ed,
+            "edit_quiet_ms",
+            self.edit_quiet_ms,
+            DEFAULT_EDIT_QUIET_MS,
+        );
 
         match ed.save() {
             Ok(()) => {
@@ -214,7 +307,29 @@ impl HotkeyState {
     fn is_text_field(field: Field) -> bool {
         // Free-text on Key / CancelKey / Modifier so users can type custom
         // KEY_* names that aren't in the curated cycle list.
-        matches!(field, Field::Key | Field::CancelKey | Field::Modifier)
+        matches!(
+            field,
+            Field::Key
+                | Field::CancelKey
+                | Field::Modifier
+                | Field::DoubleTapAltKey
+                | Field::DoubleTapCancelKey
+                | Field::CorrectionKey
+                | Field::EditKey
+        )
+    }
+
+    /// The optional key a text field edits, or `None` for the other fields.
+    fn optional_key_mut(&mut self, field: Field) -> Option<&mut Option<String>> {
+        match field {
+            Field::CancelKey => Some(&mut self.cancel_key),
+            Field::Modifier => Some(&mut self.modifier),
+            Field::DoubleTapAltKey => Some(&mut self.double_tap_alt_key),
+            Field::DoubleTapCancelKey => Some(&mut self.double_tap_cancel_key),
+            Field::CorrectionKey => Some(&mut self.correction_key),
+            Field::EditKey => Some(&mut self.edit_key),
+            _ => None,
+        }
     }
 
     fn start_edit_if_text_field(&mut self) -> bool {
@@ -223,11 +338,13 @@ impl HotkeyState {
         if !self.enabled || !Self::is_text_field(self.field) {
             return false;
         }
-        let initial = match self.field {
+        let field = self.field;
+        let initial = match field {
             Field::Key => self.key.clone(),
-            Field::CancelKey => self.cancel_key.clone().unwrap_or_default(),
-            Field::Modifier => self.modifier.clone().unwrap_or_default(),
-            _ => String::new(),
+            _ => self
+                .optional_key_mut(field)
+                .and_then(|k| k.clone())
+                .unwrap_or_default(),
         };
         self.editing = Some(TextEdit {
             field: self.field,
@@ -242,21 +359,15 @@ impl HotkeyState {
             Field::Key if !trimmed.is_empty() => {
                 self.key = trimmed.to_uppercase();
             }
-            Field::CancelKey => {
-                self.cancel_key = if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_uppercase())
-                };
+            _ => {
+                if let Some(k) = self.optional_key_mut(field) {
+                    *k = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_uppercase())
+                    };
+                }
             }
-            Field::Modifier => {
-                self.modifier = if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_uppercase())
-                };
-            }
-            _ => {}
         }
         self.dirty_since_load = true;
         self.feedback = None;
@@ -287,6 +398,33 @@ impl HotkeyState {
             Field::Enabled => {
                 self.enabled = !self.enabled;
             }
+            Field::DoubleTap => self.double_tap = !self.double_tap,
+            Field::DoubleTapMs => {
+                self.double_tap_ms = cycle_int(DOUBLE_TAP_MS_CHOICES, self.double_tap_ms, delta)
+            }
+            Field::DoubleTapAltKey => {
+                self.double_tap_alt_key =
+                    cycle_opt(SIDE_KEY_CHOICES, self.double_tap_alt_key.as_deref(), delta)
+            }
+            Field::DoubleTapCancelKey => {
+                self.double_tap_cancel_key =
+                    cycle_opt(CANCEL_CHOICES, self.double_tap_cancel_key.as_deref(), delta)
+            }
+            Field::LookChord => self.look_chord = !self.look_chord,
+            Field::CorrectionKey => {
+                self.correction_key =
+                    cycle_opt(SIDE_KEY_CHOICES, self.correction_key.as_deref(), delta)
+            }
+            Field::CorrectionHoldMs => {
+                self.correction_hold_ms =
+                    cycle_int(CORRECTION_HOLD_CHOICES, self.correction_hold_ms, delta)
+            }
+            Field::EditKey => {
+                self.edit_key = cycle_opt(SIDE_KEY_CHOICES, self.edit_key.as_deref(), delta)
+            }
+            Field::EditQuietMs => {
+                self.edit_quiet_ms = cycle_int(EDIT_QUIET_CHOICES, self.edit_quiet_ms, delta)
+            }
         }
         self.dirty_since_load = true;
         self.feedback = None;
@@ -304,6 +442,39 @@ fn cycle_str(choices: &[&'static str], current: &str, delta: i32) -> String {
         .unwrap_or(-1);
     let new = (idx + delta).rem_euclid(choices.len() as i32);
     choices[new as usize].to_string()
+}
+
+fn cycle_int(choices: &[i64], current: i64, delta: i32) -> i64 {
+    let idx = choices
+        .iter()
+        .position(|c| *c == current)
+        .map(|i| i as i32)
+        .unwrap_or(-1);
+    let new = (idx + delta).rem_euclid(choices.len() as i32);
+    choices[new as usize]
+}
+
+fn set_or_unset_bool(ed: &mut ConfigEditor, key: &str, value: bool, default: bool) {
+    if value == default {
+        ed.unset("hotkey", key);
+    } else {
+        ed.set_bool("hotkey", key, value);
+    }
+}
+
+fn set_or_unset_int(ed: &mut ConfigEditor, key: &str, value: i64, default: i64) {
+    if value == default {
+        ed.unset("hotkey", key);
+    } else {
+        ed.set_int("hotkey", key, value);
+    }
+}
+
+fn set_or_unset_key(ed: &mut ConfigEditor, key: &str, value: &Option<String>) {
+    match value {
+        Some(k) => ed.set_string("hotkey", key, k),
+        None => ed.unset("hotkey", key),
+    }
 }
 
 fn cycle_opt(
@@ -385,6 +556,40 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             },
         )
         .dimmed(greyout),
+        FormRowSpec::new(
+            state.field == Field::DoubleTap,
+            "Double tap",
+            yesno(state.double_tap),
+        )
+        .dimmed(greyout),
+        FormRowSpec::new(
+            state.field == Field::DoubleTapMs,
+            "Double tap time (ms)",
+            state.double_tap_ms.to_string(),
+        )
+        .dimmed(greyout),
+        key_row(state, Field::DoubleTapAltKey, "Second double-tap key").dimmed(greyout),
+        key_row(state, Field::DoubleTapCancelKey, "Double-tap cancel key").dimmed(greyout),
+        FormRowSpec::new(
+            state.field == Field::LookChord,
+            "Look chord (Ctrl+Ctrl+Up/Down)",
+            yesno(state.look_chord),
+        )
+        .dimmed(greyout),
+        key_row(state, Field::CorrectionKey, "Correction key").dimmed(greyout),
+        FormRowSpec::new(
+            state.field == Field::CorrectionHoldMs,
+            "Correction hold (ms)",
+            state.correction_hold_ms.to_string(),
+        )
+        .dimmed(greyout),
+        key_row(state, Field::EditKey, "Edit key").dimmed(greyout),
+        FormRowSpec::new(
+            state.field == Field::EditQuietMs,
+            "Edit tap quiet time (ms)",
+            state.edit_quiet_ms.to_string(),
+        )
+        .dimmed(greyout),
     ];
 
     let feedback_pair = state
@@ -405,6 +610,32 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+fn yesno(b: bool) -> &'static str {
+    if b {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+/// Row for an optional key: the inline editor while editing, else the key.
+fn key_row(state: &HotkeyState, field: Field, label: &'static str) -> FormRowSpec {
+    let value = match state.editing.as_ref() {
+        Some(e) if e.field == field => e.input.caret_string(),
+        _ => {
+            let key = match field {
+                Field::DoubleTapAltKey => &state.double_tap_alt_key,
+                Field::DoubleTapCancelKey => &state.double_tap_cancel_key,
+                Field::CorrectionKey => &state.correction_key,
+                Field::EditKey => &state.edit_key,
+                _ => &None,
+            };
+            key.as_deref().unwrap_or("(none)").to_string()
+        }
+    };
+    FormRowSpec::new(state.field == field, label, value)
+}
+
 fn to_common_level(level: FeedbackLevel) -> CommonFeedback {
     match level {
         FeedbackLevel::Ok => CommonFeedback::Ok,
@@ -420,6 +651,79 @@ fn guidance_for_field(state: &HotkeyState) -> Vec<Line<'_>> {
         Field::Mode => guidance_mode(state),
         Field::CancelKey => guidance_cancel(state),
         Field::Modifier => guidance_modifier(state),
+        Field::DoubleTap => simple_guidance(
+            state,
+            "Double tap",
+            "Start and stop recording with a quick double tap of the push-to-talk \
+             key instead of one press. A tap is a press and release with no \
+             other key pressed meanwhile, so shortcuts that use the key (Ctrl+C \
+             on Right Ctrl) never count. Use it with Toggle mode.",
+            "Off by default.",
+        ),
+        Field::DoubleTapMs => simple_guidance(
+            state,
+            "Double tap time",
+            "The longest tap, and the longest gap between the two taps, in \
+             milliseconds.",
+            "Default: 300.",
+        ),
+        Field::DoubleTapAltKey => simple_guidance(
+            state,
+            "Second double-tap key",
+            "A second key whose double tap also starts and stops recording (with \
+             Double tap on). Each double tap writes which key fired, main or alt, \
+             to hotkey-last in the runtime directory, so an output hook can act \
+             on how the recording was stopped.",
+            "(none) by default. Enter or i types any KEY_* name.",
+        ),
+        Field::DoubleTapCancelKey => simple_guidance(
+            state,
+            "Double-tap cancel key",
+            "A key whose double tap discards the recording (with Double tap on). \
+             Unlike the single-press cancel key, a stray press never throws a \
+             dictation away.",
+            "(none) by default. Enter or i types any KEY_* name.",
+        ),
+        Field::LookChord => simple_guidance(
+            state,
+            "Look chord",
+            "Hold Left Ctrl and Right Ctrl, then press Down or Up, to switch the \
+             vo popup to its next or previous look while it shows. The look is \
+             kept for later dictations.",
+            "On by default.",
+        ),
+        Field::CorrectionKey => simple_guidance(
+            state,
+            "Correction key",
+            "Hold this key while recording and say the right words; they replace \
+             the words they sound most like. Taps keep their meaning, so it can \
+             be the second double-tap key. Needs a live preview model.",
+            "(none) by default, which turns corrections off.",
+        ),
+        Field::CorrectionHoldMs => simple_guidance(
+            state,
+            "Correction hold",
+            "How long the correction key must be held before a correction \
+             starts, in milliseconds. With Double tap on it is raised to at \
+             least the double tap time plus 150.",
+            "Default: 450.",
+        ),
+        Field::EditKey => simple_guidance(
+            state,
+            "Edit key",
+            "A single tap while recording pauses the dictation so you can fix \
+             its text by keyboard in the popup; tap again to keep talking. \
+             Needs [osd] keyboard_edit.",
+            "(none) by default, which uses the second double-tap key.",
+        ),
+        Field::EditQuietMs => simple_guidance(
+            state,
+            "Edit tap quiet time",
+            "The edit tap counts only when no other key was pressed this many \
+             milliseconds before it, so a Shift pressed while typing does not \
+             pause the dictation.",
+            "Default: 150.",
+        ),
     }
 }
 
@@ -666,6 +970,29 @@ fn guidance_modifier<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
     lines
 }
 
+fn simple_guidance<'a>(
+    state: &'a HotkeyState,
+    title: &'a str,
+    body: &'a str,
+    default: &'a str,
+) -> Vec<Line<'a>> {
+    let mut lines = vec![
+        heading(title),
+        Line::from(""),
+        Line::from(body),
+        Line::from(""),
+        Line::from(Span::styled(default, Style::default().fg(Color::Gray))),
+    ];
+    if !state.enabled {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "(Ignored: evdev listener is disabled.)",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    lines
+}
+
 fn display_key(key: &str) -> String {
     if KEY_CHOICES.contains(&key) {
         key.to_string()
@@ -731,5 +1058,115 @@ fn handle_edit_key(state: &mut HotkeyState, key: KeyEvent) -> Action {
             state.editing = None;
             Action::None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::schema::{scalar_keys, CONFIG_KEYS};
+
+    /// The hotkey form is a hand-written transcription of the schema's
+    /// `Hotkey` section, so a key added in one place and not the other
+    /// drifts silently. If a key genuinely does not belong in the TUI, add
+    /// it to `NOT_IN_TUI` with a reason rather than deleting the test.
+    #[test]
+    fn every_hotkey_schema_key_has_a_form_field() {
+        const NOT_IN_TUI: &[&str] = &[];
+
+        let expected: Vec<&str> = scalar_keys()
+            .filter(|s| s.section == "Hotkey")
+            .map(|s| s.key)
+            .filter(|k| !NOT_IN_TUI.contains(k))
+            .collect();
+
+        // Field -> the schema key it edits. Adding a Field without extending
+        // this map fails to compile, which is the point.
+        let covered: Vec<&str> = Field::ALL
+            .iter()
+            .map(|f| match f {
+                Field::Enabled => "hotkey.enabled",
+                Field::Key => "hotkey.key",
+                Field::Mode => "hotkey.mode",
+                Field::CancelKey => "hotkey.cancel_key",
+                Field::Modifier => "hotkey.model_modifier",
+                Field::DoubleTap => "hotkey.double_tap",
+                Field::DoubleTapMs => "hotkey.double_tap_ms",
+                Field::DoubleTapAltKey => "hotkey.double_tap_alt_key",
+                Field::DoubleTapCancelKey => "hotkey.double_tap_cancel_key",
+                Field::LookChord => "hotkey.look_chord",
+                Field::CorrectionKey => "hotkey.correction_key",
+                Field::CorrectionHoldMs => "hotkey.correction_hold_ms",
+                Field::EditKey => "hotkey.edit_key",
+                Field::EditQuietMs => "hotkey.edit_quiet_ms",
+            })
+            .collect();
+
+        let missing: Vec<&&str> = expected.iter().filter(|k| !covered.contains(k)).collect();
+        assert!(
+            missing.is_empty(),
+            "schema keys in section Hotkey with no TUI field: {missing:?}"
+        );
+
+        let unknown: Vec<&&str> = covered
+            .iter()
+            .filter(|k| !CONFIG_KEYS.iter().any(|s| s.key == **k))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "TUI fields editing keys absent from the schema: {unknown:?}"
+        );
+    }
+
+    fn state() -> HotkeyState {
+        HotkeyState {
+            key: "RIGHTCTRL".to_string(),
+            mode: Mode::Toggle,
+            enabled: true,
+            cancel_key: None,
+            modifier: None,
+            double_tap: false,
+            double_tap_ms: DEFAULT_DOUBLE_TAP_MS,
+            double_tap_alt_key: None,
+            double_tap_cancel_key: None,
+            look_chord: true,
+            correction_key: None,
+            correction_hold_ms: DEFAULT_CORRECTION_HOLD_MS,
+            edit_key: None,
+            edit_quiet_ms: DEFAULT_EDIT_QUIET_MS,
+            feedback: None,
+            dirty_since_load: false,
+            field: Field::Enabled,
+            editing: None,
+        }
+    }
+
+    #[test]
+    fn optional_key_fields_cycle_and_take_typed_names() {
+        let mut s = state();
+        s.field = Field::CorrectionKey;
+        s.cycle(1);
+        assert_eq!(s.correction_key.as_deref(), Some("RIGHTSHIFT"));
+        s.cycle(-1);
+        assert_eq!(s.correction_key, None);
+
+        s.commit_text_edit(Field::EditKey, " rightalt ".to_string());
+        assert_eq!(s.edit_key.as_deref(), Some("RIGHTALT"));
+        s.commit_text_edit(Field::EditKey, "  ".to_string());
+        assert_eq!(s.edit_key, None);
+    }
+
+    #[test]
+    fn timing_fields_cycle_from_their_defaults() {
+        let mut s = state();
+        s.field = Field::DoubleTapMs;
+        s.cycle(1);
+        assert_eq!(s.double_tap_ms, 350);
+        s.field = Field::CorrectionHoldMs;
+        s.cycle(-1);
+        assert_eq!(s.correction_hold_ms, 400);
+        s.field = Field::EditQuietMs;
+        s.cycle(1);
+        assert_eq!(s.edit_quiet_ms, 200);
     }
 }
