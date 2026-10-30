@@ -96,6 +96,9 @@ pub enum Verdict {
     Timeout,
     /// No window was saved, or the tool failed.
     Failed,
+    /// A key that finished the edit (Enter, Right Ctrl, Right Shift) or a
+    /// modifier was still held, so a paste could repeat it.
+    KeyHeld,
 }
 
 impl Verdict {
@@ -111,6 +114,7 @@ impl Verdict {
             Verdict::Gone => "the window was closed",
             Verdict::Timeout => "the window did not get focus back",
             Verdict::Failed => "the window could not be checked",
+            Verdict::KeyHeld => "a key was still held",
         }
     }
 }

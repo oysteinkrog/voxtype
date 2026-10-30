@@ -34,6 +34,19 @@ const MODIFIER_KEYS: &[Key] = &[
     Key::KEY_RIGHTMETA,
 ];
 
+/// Enter keys. A held Enter that finished a keyboard edit would repeat
+/// into the target window, or turn the paste keystroke into another
+/// shortcut, so the paste waits for it too (plan R30).
+const ENTER_KEYS: &[Key] = &[Key::KEY_ENTER, Key::KEY_KPENTER];
+
+/// Keys that must be up before keystrokes are synthesized.
+fn blocks_output(state: &AttributeSet<Key>) -> bool {
+    MODIFIER_KEYS
+        .iter()
+        .chain(ENTER_KEYS)
+        .any(|k| state.contains(*k))
+}
+
 /// Snapshot-based modifier-state checker.
 pub enum ModifierGuard {
     /// At least one keyboard event device is readable; modifier checks are live.
@@ -110,8 +123,8 @@ impl ModifierGuard {
         }
     }
 
-    /// Returns `true` if any modifier key is currently held on any tracked
-    /// keyboard. Always returns `false` when `Disabled`.
+    /// Returns `true` if any modifier key, or Enter, is currently held on
+    /// any tracked keyboard. Always returns `false` when `Disabled`.
     pub fn any_modifier_held(&mut self) -> bool {
         let Self::Active { devices } = self else {
             return false;
@@ -123,7 +136,7 @@ impl ModifierGuard {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            if MODIFIER_KEYS.iter().any(|k| state.contains(*k)) {
+            if blocks_output(&state) {
                 return true;
             }
         }
@@ -174,6 +187,35 @@ mod tests {
     async fn disabled_guard_reports_no_modifier_held() {
         let mut guard = ModifierGuard::Disabled;
         assert!(!guard.any_modifier_held());
+    }
+
+    fn held(keys: &[Key]) -> bool {
+        let mut state = AttributeSet::<Key>::new();
+        for k in keys {
+            state.insert(*k);
+        }
+        blocks_output(&state)
+    }
+
+    #[test]
+    fn enter_and_the_finishing_keys_hold_the_output() {
+        // The keys that finish a keyboard edit: Enter, and the Right Ctrl
+        // and Right Shift double taps.
+        for k in [
+            Key::KEY_ENTER,
+            Key::KEY_KPENTER,
+            Key::KEY_RIGHTCTRL,
+            Key::KEY_RIGHTSHIFT,
+        ] {
+            assert!(held(&[k]), "{k:?} held must wait");
+        }
+        assert!(held(&[Key::KEY_A, Key::KEY_LEFTMETA]));
+    }
+
+    #[test]
+    fn other_keys_do_not_hold_the_output() {
+        assert!(!held(&[]));
+        assert!(!held(&[Key::KEY_A, Key::KEY_SPACE, Key::KEY_ESC]));
     }
 
     #[test]

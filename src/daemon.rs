@@ -330,7 +330,12 @@ struct EditLink {
     reader: crate::osd::edit_ipc::CmdReader,
     /// Asks the compositor which window is active, for the paste gate.
     windows: Arc<std::sync::Mutex<Box<dyn crate::osd::target::Windows>>>,
+    /// Waits up to the given time for the modifiers and Enter to be up;
+    /// false when one is still held.
+    keys_up: KeysUp,
 }
+
+type KeysUp = Box<dyn Fn(Duration) -> futures_util::future::BoxFuture<'static, bool> + Send + Sync>;
 
 impl Default for EditLink {
     fn default() -> Self {
@@ -349,6 +354,7 @@ impl Default for EditLink {
             discarded: crate::osd::edit_journal::discarded_path(),
             reader: Default::default(),
             windows: Arc::new(std::sync::Mutex::new(Box::new(crate::osd::target::Kdotool))),
+            keys_up: Box::new(|t| Box::pin(modifiers_released(t))),
         }
     }
 }
@@ -2348,8 +2354,9 @@ impl Daemon {
     /// Deliver a keyboard-edited dictation, only into the window it was
     /// dictated for. After the popup gave focus back, that window must be
     /// active again within 500 ms (R27), and still be active right before
-    /// the paste, after the modifiers are up (R28). Otherwise, or when it
-    /// was closed (R29), the text goes to `clipboard` only and neither
+    /// the paste, after the modifiers and Enter are up (R28, R30). Otherwise,
+    /// when it was closed (R29), or when a key that finished the edit is
+    /// still held, the text goes to `clipboard` only and neither
     /// output hook runs, so an Enter hook cannot press Enter in the wrong
     /// window. Returns the verdict with the delivery's result.
     async fn deliver_edited(
@@ -2371,11 +2378,11 @@ impl Daemon {
             None => Verdict::Failed,
         };
         if verdict.confirmed() {
-            if !modifiers_released(LIVE_TYPING_FINAL_WAIT).await {
-                tracing::warn!("Modifier still held; sending the final text anyway");
-            }
+            // A held Enter, Right Ctrl or Right Shift would repeat into the
+            // window, or make the paste key another shortcut.
             let id = self.edit_window.as_ref().map(|w| w.id.clone());
             verdict = match id {
+                _ if !(self.edit_link.keys_up)(LIVE_TYPING_FINAL_WAIT).await => Verdict::KeyHeld,
                 Some(id) => self.edit_windows(move |w| target::check(w, &id)).await,
                 None => Verdict::Failed,
             };
@@ -4823,9 +4830,7 @@ impl Daemon {
         // Spoken corrections work on the live words, so the listener
         // watches for a correction hold only while a live preview records.
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let correction_armed = hotkey_listener
-            .as_ref()
-            .and_then(|l| l.correction_armed());
+        let correction_armed = hotkey_listener.as_ref().and_then(|l| l.correction_armed());
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let correction_armed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -6566,6 +6571,7 @@ mod tests {
             discarded: dir.path().join("discarded.json"),
             reader: Default::default(),
             windows: Arc::new(std::sync::Mutex::new(Box::new(FakeWindows::default()))),
+            keys_up: Box::new(|_| Box::pin(async { true })),
         };
         TestLink {
             dir,
@@ -7095,13 +7101,16 @@ mod tests {
 
     /// Deliver "edited text" for a recording that started in window "a",
     /// with `windows` open and `actives` seen in turn, then end the stream
-    /// as the daemon does. `saved: false` is a start where kdotool failed.
+    /// as the daemon does. `saved: false` is a start where kdotool failed;
+    /// `keys_up: false`, a key held past the wait.
     async fn deliver_edited_with(
         windows: &[(&'static str, &'static str)],
         actives: &[Option<&'static str>],
         saved: bool,
+        keys_up: bool,
     ) -> Delivered {
         let (mut daemon, _rx, _state, link) = edit_daemon_linked();
+        daemon.edit_link.keys_up = Box::new(move |_| Box::pin(async move { keys_up }));
         let hooks = link.dir.path().join("hooks");
         let hook = |name: &str| format!("echo {name} >> '{}'", hooks.display());
         daemon.config.output.pre_output_command = Some(hook("pre"));
@@ -7145,7 +7154,7 @@ mod tests {
     #[tokio::test]
     async fn edited_text_is_pasted_into_the_window_it_was_dictated_for() {
         use crate::osd::target::Verdict;
-        let d = deliver_edited_with(&[("a", "term")], &[Some("a")], true).await;
+        let d = deliver_edited_with(&[("a", "term")], &[Some("a")], true, true).await;
         assert_eq!(d.verdict, Verdict::Confirmed);
         assert_eq!(d.pasted.as_deref(), Some("edited text"));
         assert_eq!(d.copied, None);
@@ -7161,6 +7170,7 @@ mod tests {
             &[("a", "term"), ("b", "term")],
             &[None, Some("b"), Some("a")],
             true,
+            true,
         )
         .await;
         assert_eq!(d.verdict, Verdict::Confirmed);
@@ -7172,7 +7182,8 @@ mod tests {
     async fn a_window_of_the_same_class_gets_no_paste_and_no_enter() {
         use crate::osd::target::Verdict;
         // "b" is the same app and keeps focus: activating "a" fails.
-        let d = deliver_edited_with(&[("a", "term"), ("b", "term")], &[Some("b")], true).await;
+        let d =
+            deliver_edited_with(&[("a", "term"), ("b", "term")], &[Some("b")], true, true).await;
         assert_eq!(d.verdict, Verdict::Timeout);
         assert_eq!(d.activated, ["a"], "one activation, no more");
         assert_eq!(d.pasted, None);
@@ -7188,6 +7199,7 @@ mod tests {
             &[("a", "term"), ("b", "term")],
             &[Some("a"), Some("b")],
             true,
+            true,
         )
         .await;
         assert_eq!(d.verdict, Verdict::Mismatch);
@@ -7199,7 +7211,7 @@ mod tests {
     #[tokio::test]
     async fn a_closed_window_gets_the_clipboard() {
         use crate::osd::target::Verdict;
-        let d = deliver_edited_with(&[("b", "term")], &[Some("b")], true).await;
+        let d = deliver_edited_with(&[("b", "term")], &[Some("b")], true, true).await;
         assert_eq!(d.verdict, Verdict::Gone);
         assert!(d.activated.is_empty(), "a closed window is never activated");
         assert_eq!(d.pasted, None);
@@ -7208,9 +7220,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_key_still_held_gives_the_clipboard() {
+        use crate::osd::target::Verdict;
+        // Enter (or a Right Ctrl or Right Shift double tap) that finished
+        // the edit is held past the wait: pasting would repeat it.
+        let d = deliver_edited_with(&[("a", "term")], &[Some("a")], true, false).await;
+        assert_eq!(d.verdict, Verdict::KeyHeld);
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.hooks, "");
+    }
+
+    #[tokio::test]
     async fn no_saved_window_gets_the_clipboard() {
         use crate::osd::target::Verdict;
-        let d = deliver_edited_with(&[("a", "term")], &[Some("a")], false).await;
+        let d = deliver_edited_with(&[("a", "term")], &[Some("a")], false, true).await;
         assert_eq!(d.verdict, Verdict::Failed);
         assert_eq!(d.pasted, None);
         assert_eq!(d.copied.as_deref(), Some("edited text"));
