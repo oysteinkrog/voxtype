@@ -166,23 +166,22 @@ async fn send_linux(title: &str, body: &str, lifetime: Lifetime, urgency: Option
         args.push(title.to_string());
         args.push(body.to_string());
 
-        match Command::new("notify-send")
-            .args(&args)
-            .stderr(Stdio::null())
-            .output()
-            .await
-        {
-            Ok(out) if out.status.success() => {
+        match run_bounded("notify-send", &args, SEND_TIMEOUT).await {
+            Some(Ok(out)) if out.status.success() => {
                 remember_notification_id(&out.stdout, lifetime);
                 return;
             }
-            Ok(_) => {
+            Some(Ok(_)) => {
                 // Almost certainly a libnotify too old for --print-id. Fall
                 // through once, then stop trying.
                 REPLACE_UNSUPPORTED.store(true, Ordering::Relaxed);
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 tracing::debug!("Failed to send notification: {}", e);
+                return;
+            }
+            None => {
+                tracing::debug!("No notification server answered in {:?}", SEND_TIMEOUT);
                 return;
             }
         }
@@ -191,15 +190,33 @@ async fn send_linux(title: &str, body: &str, lifetime: Lifetime, urgency: Option
     let mut args = linux_common_args(lifetime.bounded(2000), urgency);
     args.push(title.to_string());
     args.push(body.to_string());
-    if let Err(e) = Command::new("notify-send")
-        .args(&args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-    {
-        tracing::debug!("Failed to send notification: {}", e);
+    match run_bounded("notify-send", &args, SEND_TIMEOUT).await {
+        Some(Ok(_)) => {}
+        Some(Err(e)) => tracing::debug!("Failed to send notification: {}", e),
+        None => tracing::debug!("No notification server answered in {:?}", SEND_TIMEOUT),
     }
+}
+
+/// How long a notification may take to post. With no notification server
+/// running, D-Bus waits 25 s to start one, and the daemon must not stall
+/// that long: the paste and the next recording wait behind it.
+#[cfg(target_os = "linux")]
+const SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Run `program` and collect its output, or None when it takes longer than
+/// `limit` (it is killed then).
+#[cfg(target_os = "linux")]
+async fn run_bounded(
+    program: &str,
+    args: &[String],
+    limit: std::time::Duration,
+) -> Option<std::io::Result<std::process::Output>> {
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    tokio::time::timeout(limit, cmd.output()).await.ok()
 }
 
 /// Send a status notification: the same single-slot behaviour as `send`, plus
@@ -260,17 +277,18 @@ pub async fn close_persistent() {
             return;
         }
     };
-    if let Err(e) = conn
-        .call_method(
-            Some("org.freedesktop.Notifications"),
-            "/org/freedesktop/Notifications",
-            Some("org.freedesktop.Notifications"),
-            "CloseNotification",
-            &(id,),
-        )
-        .await
-    {
-        tracing::debug!("Failed to close notification {}: {}", id, e);
+    let body = (id,);
+    let call = conn.call_method(
+        Some("org.freedesktop.Notifications"),
+        "/org/freedesktop/Notifications",
+        Some("org.freedesktop.Notifications"),
+        "CloseNotification",
+        &body,
+    );
+    match tokio::time::timeout(SEND_TIMEOUT, call).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::debug!("Failed to close notification {}: {}", id, e),
+        Err(_) => tracing::debug!("No notification server answered in {:?}", SEND_TIMEOUT),
     }
 }
 
@@ -426,6 +444,21 @@ fn send_linux_sync(title: &str, body: &str, urgency: Option<&str>) {
 mod linux_tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn a_slow_notifier_is_cut_off() {
+        let started = std::time::Instant::now();
+        let out = run_bounded(
+            "sleep",
+            &["30".to_string()],
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+        assert!(out.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let out = run_bounded("true", &[], std::time::Duration::from_secs(5)).await;
+        assert!(matches!(out, Some(Ok(o)) if o.status.success()));
+    }
 
     /// One test for the whole round trip: LAST_NOTIFICATION_ID is a process
     /// global, so splitting these would let them race each other.
