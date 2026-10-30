@@ -371,6 +371,8 @@ voxtype record start --file         # Write to file_path from config
 voxtype record stop                 # Stop recording and transcribe (sends SIGUSR2 to daemon)
 voxtype record toggle               # Toggle recording state
 voxtype record cancel               # Cancel recording or transcription in progress
+voxtype record edit                 # Pause for a keyboard edit, or resume (needs [osd] keyboard_edit)
+voxtype record restore              # Copy the text of a discarded edited dictation (kept 60 s)
 ```
 
 **Model override:** Use `--model` to specify which model to use for this recording:
@@ -1236,6 +1238,39 @@ voxtype glossary forget glim bot    # remove one
 When the model keeps hearing the word wrong, spell it: hold the key and say "spell", then the letters in the NATO alphabet ("golf lima india mike") or as plain letters, with "capital" before a letter to make it upper case. The popup shows the letters as they come. A spelled word is always learned.
 
 The log and the learned words live under `~/.local/share/voxtype/` unless `corrections_log` and `learned_words_file` in `[text]` point elsewhere. Set `learn_corrections = false` to turn it off.
+
+### Fixing Text by Keyboard
+
+When the model gets a word wrong and saying it again does not help, you can pause the dictation, fix the text by keyboard in the popup, and go on talking. This is off by default. Turn it on with `[osd] keyboard_edit = true`; it needs a live preview (`live_preview_model`), `live_typing` off and the vo popup (`[osd] frontend = "vo"`). See [Keyboard editing](CONFIGURATION.md#keyboard-editing) in the Configuration Guide.
+
+**Pause.** While recording, tap the edit key once. It is your `double_tap_alt_key` (Right Shift in the examples) unless `[hotkey] edit_key` names another. Because two taps of that key mean "stop and paste", voxtype waits 300 ms (`double_tap_ms`) after you let go to be sure no second tap follows. The caret appears about 350 ms after the tap. Wait for it before you type: keys pressed before it go to the app you were dictating into.
+
+When the pause starts, the microphone is muted and the last words still being decoded appear after your text as a short "settling" tail. They become editable when they land, at most 1.2 s later. The popup keeps its look; the badge says "EDIT".
+
+**Edit.** The text you see is the text that will be pasted, already processed (spoken punctuation, replacements, quotes). The usual editing keys work: arrows, Ctrl+arrows, Home and End, Shift to select, Backspace and Delete, Ctrl+Z to undo. Shift+Enter adds a new line. Shift for capitals or with arrows never counts as an edit tap.
+
+**Go on or finish.**
+
+| Key | What it does |
+|---|---|
+| Edit key, one tap (or Esc) | Resume listening. New speech is added at the end. |
+| Edit key, two taps | Stop and paste, without Enter |
+| Right Ctrl, two taps (the main key) | Stop, paste and press Enter |
+| Enter | Stop, paste and press Enter (on release) |
+| Cancel key, two taps (Right Alt) | Discard. The text is kept for 60 s. |
+
+A spoken correction (holding the correction key) works again once you resume, but it never changes text you already paused on or typed. If the words it hears only fit there, the popup says "Not changed: frozen text". Holding the key while editing does nothing.
+
+**Focus.** While you edit, the popup has the keyboard. If you click another window, Alt+Tab, lock the screen or the popup's screen goes away, the popup lets go and shows "paused · Shift to edit". Your text and caret are kept, and the recording stays paused. One tap of the edit key takes you back. With focus-follows-mouse, moving the pointer over another window for about 300 ms has the same effect.
+
+**Pasting.** Before it pastes, voxtype checks that the window you were dictating into is active again, and checks once more before pressing Enter. If it is not (you closed it, or another window took focus), the text goes to the clipboard only and the popup says "Copied, not pasted". Paste it yourself with Ctrl+V.
+
+**Undo a discard.** A dictation you discarded after pausing it is kept for 60 seconds:
+
+```bash
+voxtype record restore           # copy it to the clipboard
+voxtype record restore --print   # or print it
+```
 
 ## Whisper Models
 

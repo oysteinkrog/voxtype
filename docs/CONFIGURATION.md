@@ -504,6 +504,39 @@ correction_key = "RIGHTSHIFT"   # tap twice: paste only; hold: correct
 
 How long `correction_key` must be held before a correction starts. The correction itself starts at key-down, so words you say during the wait count. With `double_tap = true` the value is raised to at least `double_tap_ms` + 150, so a slow tap never starts a correction.
 
+### edit_key
+
+**Type:** String (evdev key name)
+**Default:** unset (uses `double_tap_alt_key`)
+**Required:** No
+**CLI:** `--edit-key KEY` · **Env:** `VOXTYPE_EDIT_KEY`
+
+The key whose single tap pauses a recording for keyboard editing, and resumes it again. Only used with `[osd] keyboard_edit = true` (see [Keyboard editing](#keyboard-editing)). Unset, it is your `double_tap_alt_key`, so with the example below one Right Shift tap edits, two taps stop and paste, and a hold is a spoken correction.
+
+A tap only counts when it is clean: no other key held when the key goes down, no other key pressed in the `edit_quiet_ms` before it, no other key pressed while it is down, and released within `double_tap_ms`. When the key also has a double-tap meaning, the tap is confirmed only after `double_tap_ms` passes with no second tap, so the pause starts about 300 ms after you let go. A key that starts, stops or cancels recording on a single press (the hotkey without `double_tap`, or `cancel_key`) cannot be the edit key: voxtype logs a warning and edit taps stay off. With neither `edit_key` nor `double_tap_alt_key` set there is no edit tap; `voxtype record edit` still works.
+
+```toml
+[hotkey]
+double_tap = true
+key = "RIGHTCTRL"
+double_tap_alt_key = "RIGHTSHIFT"
+correction_key = "RIGHTSHIFT"   # tap twice: paste only; hold: correct
+# edit_key unset: one tap of RIGHTSHIFT pauses to edit
+
+[osd]
+frontend = "vo"
+keyboard_edit = true
+```
+
+### edit_quiet_ms
+
+**Type:** Integer (milliseconds)
+**Default:** `150`
+**Required:** No
+**CLI:** `--edit-quiet-ms MS` · **Env:** `VOXTYPE_EDIT_QUIET_MS`
+
+How long no other key may be pressed before an edit tap. A Shift pressed in the middle of typing and then let go does not count as a tap. Raise it if stray taps pause your recordings; set it to 0 to turn the guard off.
+
 ---
 
 ## [audio]
@@ -3884,6 +3917,9 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_HOTKEY` | string | `hotkey.key` |
 | `VOXTYPE_HOTKEY_ENABLED` | bool | `hotkey.enabled` |
 | `VOXTYPE_CANCEL_KEY` | string | `hotkey.cancel_key` |
+| `VOXTYPE_EDIT_KEY` | string | `hotkey.edit_key` |
+| `VOXTYPE_EDIT_QUIET_MS` | integer | `hotkey.edit_quiet_ms` |
+| `VOXTYPE_OSD_KEYBOARD_EDIT` | bool | `osd.keyboard_edit` |
 
 **Whisper / Engine:**
 
@@ -4260,6 +4296,25 @@ positions ignore `anchor`. Both the `gtk4` and the `vo` popups take
 `--anchor top|reading-line` and `--reading-line 0.5`, or
 `VOXTYPE_OSD_ANCHOR` and `VOXTYPE_OSD_READING_LINE`. In the `vo` popup, the
 looks other than `swiss` center the whole popup on the line for now.
+
+### Keyboard editing
+
+**Type:** Boolean (`[osd] keyboard_edit`)
+**Default:** `false`
+**Required:** No
+**CLI:** `--osd-keyboard-edit` · **Env:** `VOXTYPE_OSD_KEYBOARD_EDIT`
+
+Lets you pause a live preview dictation and fix its text by keyboard in the popup, then go on talking. One tap of `[hotkey] edit_key` pauses; another tap (or Esc) resumes. `voxtype record edit` does the same from a script or a compositor binding. The [user manual](USER_MANUAL.md#fixing-text-by-keyboard) describes the keys.
+
+It needs `live_preview_model` set and `live_typing` off, because the text is pasted at the end, not typed as you speak. The vo popup (`frontend = "vo"`) draws the editing. When the other settings do not allow it, the daemon logs a warning at start and leaves it off.
+
+With it off, nothing changes: the edit key's taps do nothing new, and dictation output is the same.
+
+```toml
+[osd]
+frontend = "vo"
+keyboard_edit = true
+```
 
 ### vo OSD (experimental)
 
