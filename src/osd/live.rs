@@ -847,4 +847,119 @@ mod tests {
         assert_eq!(doc.status.unwrap().audio_left_s, None);
         assert_eq!(doc.meta, None);
     }
+
+    // M0.4 probe: is the preview text processed when it is shown, and what
+    // does delivery change? Findings, for the edit freeze (M6.1, M9.1):
+    //
+    // - Shown: the live worker's raw text, trimmed, with spoken corrections
+    //   overlaid (`correction::overlay`). No text processing and no
+    //   normalisation: fillers, spoken punctuation words, replacements and
+    //   curly quotes all show as the model wrote them.
+    // - Delivered (live preview, `live_preview_final = "preview"`, the
+    //   Streaming Final arm in daemon.rs): the worker's final, trimmed, then
+    //   in order
+    //   1. `correction::apply_final`: spoken corrections (already shown);
+    //   2. `TextProcessor::process` (from `StreamingSession::commit_segment`):
+    //      filler filter, replacements and learned words, spoken punctuation,
+    //      replacements again;
+    //   3. `output::output_via`: `normalize_quotes` maps the curly quotes
+    //      and primes U+2018 U+2019 U+201B U+2032 to ' and U+201C U+201D
+    //      U+201F U+2033 to ";
+    //   4. the driver: `append_text` is added, `shift_enter_newlines` types
+    //      newlines as Shift+Enter, and `auto_submit` presses Enter after.
+    //   The batch path (handle_transcription_result) also runs
+    //   `detect_submit` (strips a trailing "submit") and the
+    //   `post_process_command`; the streaming path runs neither.
+    // - Processing is not idempotent for typed text: a typed word such as
+    //   "comma" or "um" changes if delivery processes it again, so edit text
+    //   must skip steps 2 and 3 after the freeze.
+
+    struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[async_trait::async_trait]
+    impl crate::output::TextOutput for Recorder {
+        async fn output(&self, text: &str) -> Result<(), crate::error::OutputError> {
+            self.0.lock().unwrap().push(text.to_string());
+            Ok(())
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &'static str {
+            "recorder"
+        }
+    }
+
+    /// Text as `output_via` hands it to the driver.
+    async fn deliver(text: &str) -> String {
+        let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let chain: Vec<Box<dyn crate::output::TextOutput>> = vec![Box::new(Recorder(got.clone()))];
+        let opts = crate::output::OutputOptions {
+            pre_output_command: None,
+            post_output_command: None,
+            wait_for_modifier_release: false,
+            modifier_release_timeout: std::time::Duration::ZERO,
+        };
+        crate::output::output_via(&chain, text, opts).await.unwrap();
+        let out = got.lock().unwrap().pop().unwrap();
+        out
+    }
+
+    fn processor() -> crate::text::TextProcessor {
+        let mut config = crate::config::TextConfig {
+            spoken_punctuation: true,
+            filter_filler_words: true,
+            ..Default::default()
+        };
+        config
+            .replacements
+            .insert("franken term".into(), "FrankenTerm".into());
+        let mut tp = crate::text::TextProcessor::new(&config);
+        tp.learn("voxtipe", "voxtype");
+        tp
+    }
+
+    const RAW: &str =
+        " um open franken term comma then run voxtipe \u{201C}now\u{201D} it\u{2019}s done period ";
+
+    #[test]
+    fn preview_is_shown_unprocessed() {
+        let mut doc = LiveDoc::default();
+        doc.apply_preview(RAW, None);
+        assert_eq!(doc.text, RAW.trim());
+        let words: Vec<_> = doc.words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(words, RAW.split_whitespace().collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn delivery_processes_and_normalises_the_shown_text() {
+        let mut doc = LiveDoc::default();
+        doc.apply_preview(RAW, None);
+        let delivered = deliver(&processor().process(&doc.text)).await;
+        assert_eq!(
+            delivered,
+            "open FrankenTerm, then run voxtype \"now\" it's done."
+        );
+        assert_ne!(delivered, doc.text);
+    }
+
+    #[tokio::test]
+    async fn every_quote_and_prime_is_normalised_at_delivery() {
+        let shown = "\u{2018}a\u{2019} \u{201B}b\u{2032} \u{201C}c\u{201D} \u{201F}d\u{2033}";
+        assert_eq!(deliver(shown).await, "'a' 'b' \"c\" \"d\"");
+    }
+
+    #[tokio::test]
+    async fn processed_text_survives_normalisation_once_normalised() {
+        // Freezing runs process and normalise once; delivering that frozen
+        // text with no further processing changes nothing.
+        let frozen = deliver(&processor().process(RAW.trim())).await;
+        assert_eq!(deliver(&frozen).await, frozen);
+    }
+
+    #[test]
+    fn processing_typed_text_again_would_change_it() {
+        let typed = "um I said comma literally";
+        assert_ne!(processor().process(typed), typed);
+    }
 }
