@@ -260,7 +260,7 @@ realtime = false
 EOF
 
 cat > "$work/inner.py" <<'EOF'
-import json, os, shutil, subprocess, sys, threading, time
+import json, os, re, shutil, subprocess, sys, threading, time
 
 work, voxtype, probe, keys = sys.argv[1:5]
 home = os.path.join(work, "home")
@@ -601,6 +601,13 @@ new_hooks = lines(os.path.join(work, "hook.log"))[hooks_before:]
 check("with the window closed, the hook sends no Enter", not hook_enters(new_hooks), f"hook={new_hooks}")
 notes = [l for l in lines(os.path.join(work, "notify.log")) if "not pasted" in l.lower()]
 check("with the window closed, a notification says so", notes, f"{lines(os.path.join(work, 'notify.log'))}")
+
+# The popup logs each delivery it shows; the warm-up frames at its start
+# log none.
+plain = [re.sub(r"\x1b\[[0-9;]*m", "", l) for l in lines(dlog)]
+shown_receipts = [l for l in plain if "lifecycle: delivered" in l]
+vias = [l.split("via=")[1].split()[0] for l in shown_receipts if "via=" in l]
+check("the popup shows each receipt as it went", vias == ["Pasted", "Pasted", "Copied"], f"vias={vias}")
 
 blocked = [l for l in lines(os.path.join(work, "keys.log")) if " blocked " in l]
 check("no key tool outside the nested session ran", not blocked, f"{blocked}")

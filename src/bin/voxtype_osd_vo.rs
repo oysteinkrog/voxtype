@@ -3016,6 +3016,14 @@ fn prewarm(
 }
 
 fn warm_frames(look: Look, fonts: FontRegistry) -> vo::WarmFrames {
+    // The scripted dictation ends and delivers like a real one; its log
+    // lines would read as a real delivery.
+    tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+        warm_frames_quietly(look, fonts)
+    })
+}
+
+fn warm_frames_quietly(look: Look, fonts: FontRegistry) -> vo::WarmFrames {
     let size = look.surface();
     let options = || Options {
         fonts: fonts.clone(),
@@ -3518,6 +3526,43 @@ fn cut_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The warm-up's scripted dictation logs nothing, so the log shows only
+    /// real dictations ending and delivering.
+    #[test]
+    fn the_warm_up_logs_nothing() {
+        use std::io::Write;
+        #[derive(Clone, Default)]
+        struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let cfg = OsdConfig::default();
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        let buf = Buf::default();
+        let sink = buf.clone();
+        let logger = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || sink.clone())
+            .finish();
+        let frames = tracing::subscriber::with_default(logger, || {
+            tracing::info!("the logger works");
+            warm_frames(look, fonts)
+        });
+        assert!(!frames.lists.is_empty());
+        let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("the logger works"), "{log}");
+        assert!(!log.contains("delivered"), "{log}");
+        assert!(!log.contains("dictation ended"), "{log}");
+    }
 
     #[test]
     fn only_presses_while_the_popup_shows_step_the_look() {
