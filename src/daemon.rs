@@ -325,6 +325,8 @@ struct EditLink {
     cmds: PathBuf,
     /// Where a finish says how the recording was stopped (`hotkey-last`).
     hotkey_last: PathBuf,
+    /// Where a discarded edited dictation is kept for a minute.
+    discarded: PathBuf,
     reader: crate::osd::edit_ipc::CmdReader,
 }
 
@@ -342,6 +344,7 @@ impl Default for EditLink {
             buffer: crate::osd::edit_ipc::buffer_path(),
             cmds: crate::osd::edit_ipc::cmd_path(),
             hotkey_last: Config::runtime_dir().join("hotkey-last"),
+            discarded: crate::osd::edit_journal::discarded_path(),
             reader: Default::default(),
         }
     }
@@ -2259,6 +2262,29 @@ impl Daemon {
         Some(doc.final_text(|t| output::normalize_quotes(&tp.process(t)).into_owned()))
     }
 
+    /// A dictation with a keyboard edit is discarded: keep the text it
+    /// would have pasted for a minute, for `voxtype record restore`.
+    fn edit_keep_discarded(&mut self, state: &State) {
+        use crate::osd::edit_journal;
+        let Some(text) = self.edit_final_text(state.phase()) else {
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        let path = self.edit_link.discarded.clone();
+        let at = edit_journal::now_ms();
+        if let Err(e) = edit_journal::keep_in(&path, &text, at) {
+            tracing::warn!("Could not keep the discarded text in {:?}: {}", path, e);
+            return;
+        }
+        tracing::info!("Discarded text kept for 60 s: `voxtype record restore` copies it");
+        tokio::spawn(async move {
+            tokio::time::sleep(edit_journal::KEEP).await;
+            edit_journal::expire_in(&path, at, edit_journal::now_ms());
+        });
+    }
+
     /// The popup's commands ready to act on: the buffer file holds the
     /// revision they name.
     fn edit_commands(&mut self) -> Vec<crate::osd::edit_ipc::Accepted> {
@@ -2585,6 +2611,7 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         notification_body: &str,
     ) {
+        self.edit_keep_discarded(state);
         clear_live_preview();
         let backend_task = streaming_handle.take().map(|h| {
             let _ = h.cancel.send(());
@@ -6379,6 +6406,7 @@ mod tests {
             buffer: dir.path().join("edit-buffer.json"),
             cmds: dir.path().join("edit-cmd"),
             hotkey_last: dir.path().join("hotkey-last"),
+            discarded: dir.path().join("discarded.json"),
             reader: Default::default(),
         };
         TestLink {
@@ -6768,6 +6796,38 @@ mod tests {
             daemon.edit_final_text(state.phase()).as_deref(),
             Some("draft text")
         );
+    }
+
+    #[tokio::test]
+    async fn discarding_an_edited_dictation_keeps_its_text() {
+        use crate::osd::edit_ipc::{write_buffer_to, EditBuffer};
+        use crate::osd::edit_journal::{now_ms, restore_from};
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("draft text");
+        daemon.edit_toggle(&mut state).await;
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        write_buffer_to(
+            &daemon.edit_link.buffer,
+            &EditBuffer {
+                session,
+                rev: 3,
+                text: "typed fix".into(),
+                sel: (0, 0),
+            },
+        )
+        .unwrap();
+        daemon.edit_keep_discarded(&state);
+        let kept = link.dir.path().join("discarded.json");
+        assert_eq!(restore_from(&kept, now_ms()).as_deref(), Some("typed fix"));
+
+        // A dictation that was never paused keeps nothing.
+        let (mut daemon, _rx, state, link) = edit_daemon_linked();
+        link.show("plain dictation");
+        daemon.edit_keep_discarded(&state);
+        assert!(!link.dir.path().join("discarded.json").exists());
     }
 
     #[tokio::test]

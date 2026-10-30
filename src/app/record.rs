@@ -11,6 +11,36 @@ use std::time::{Duration, Instant};
 use voxtype::daemon::{result_sidecar_path, trigger_stamp, START_REQUEST_FILE};
 use voxtype::{config, daemon_status, RecordAction};
 
+/// `voxtype record restore`: copy or print the text of a discarded
+/// keyboard-edit dictation.
+fn restore_discarded(print: bool) -> anyhow::Result<()> {
+    use std::io::Write;
+    use voxtype::osd::edit_journal::{discarded_path, now_ms, restore_from};
+    let Some(text) = restore_from(&discarded_path(), now_ms()) else {
+        anyhow::bail!(
+            "No discarded text to restore. Only a dictation paused for a keyboard \
+             edit is kept, and only for 60 seconds."
+        );
+    };
+    if print {
+        println!("{text}");
+        return Ok(());
+    }
+    let mut child = std::process::Command::new("wl-copy")
+        .args(["--type", "text/plain;charset=utf-8"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Could not run wl-copy: {e}. Use --print instead."))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    if !child.wait()?.success() {
+        anyhow::bail!("wl-copy failed. Use --print instead.");
+    }
+    eprintln!("Copied the discarded text to the clipboard.");
+    Ok(())
+}
+
 /// Send a record command to the running daemon via Unix signals or file triggers
 pub(crate) fn send_record_command(
     config: &config::Config,
@@ -18,6 +48,11 @@ pub(crate) fn send_record_command(
     top_level_model: Option<&str>,
 ) -> anyhow::Result<()> {
     use voxtype::OutputModeOverride;
+
+    // Restore needs no daemon: the kept text is a file.
+    if let RecordAction::Restore { print } = action {
+        return restore_discarded(print);
+    }
 
     // Verify the daemon is alive before writing any override files; the
     // process-existence check (and stale-lockfile cleanup) lives in
@@ -205,7 +240,7 @@ pub(crate) fn send_record_command(
                 libc::SIGUSR1 // Start
             }
         }
-        RecordAction::Cancel | RecordAction::Edit => unreachable!(), // Handled above
+        RecordAction::Cancel | RecordAction::Edit | RecordAction::Restore { .. } => unreachable!(), // Handled above
     };
 
     // With --wait, clear a previous run's completion sidecar before signalling,
