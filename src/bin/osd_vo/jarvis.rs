@@ -161,15 +161,14 @@ struct Fonts {
 /// Barlow, a grotesk close to the concept's type, or the look's own sans
 /// when it is not installed.
 fn fonts(look: &Look) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |family: &str| look.fonts.add_system(family).unwrap_or(SANS);
-        Fonts {
-            text: add("Barlow:regular"),
-            caption: add("Barlow Semi Condensed:medium"),
-            status: add("Barlow:medium"),
-        }
-    })
+    // Added to the registry once (`FontRegistry::system`), so every
+    // registry, such as a test's, has its own ids.
+    let add = |family: &str| look.fonts.system(family).unwrap_or(SANS);
+    Fonts {
+        text: add("Barlow:regular"),
+        caption: add("Barlow Semi Condensed:medium"),
+        status: add("Barlow:medium"),
+    }
 }
 
 /// Sizes in logical pixels, from the concept's.
@@ -1219,13 +1218,27 @@ impl Popup {
             .width(g.w)
             .height(rows as f32 * style.line_height)
             .margin_edges(FRAME_PAD_TOP * k, 0.0, 0.0, 0.0);
+        // While editing: the window's lines as the edit layer breaks them,
+        // each with its sticky centring width.
+        let editing = self.edit_view.is_some();
+        let edit_lines;
+        let lines: &[(Vec<Word>, f32)] = if editing {
+            edit_lines = self.text_lines(&style, text_width(&self.look));
+            &edit_lines
+        } else {
+            &self.jarvis.lines
+        };
+        // From a tap until the edit is handed back, a line whose first word
+        // changes (an edit reflowed it) swaps to its new node at once, so no
+        // word shows twice.
+        let tapped = self.edit_tapped();
         // Each line is keyed by its first word, so when the top line leaves
         // the others keep their nodes and move up.
         // The popup counts the lines it has room for; show that many.
-        let skip = self.jarvis.lines.len().saturating_sub(rows as usize);
+        let skip = lines.len().saturating_sub(rows as usize);
         if self.look.on(wild_space::DEPTH_STACK) {
             column = column.child(self.depth_stack_lines(
-                &self.jarvis.lines[skip..],
+                &lines[skip..],
                 g.w,
                 rows,
                 style,
@@ -1245,17 +1258,28 @@ impl Popup {
             ));
         }
         let stacked = if self.look.on(wild_space::DEPTH_STACK) {
-            self.jarvis.lines.len()
+            lines.len()
         } else {
             skip
         };
-        let newest = self.jarvis.lines.len().saturating_sub(1);
-        for (i, (words, width)) in self.jarvis.lines.iter().enumerate().skip(stacked) {
-            let key = words.first().map_or(0, |w| w.id);
+        let newest = lines.len().saturating_sub(1);
+        for (i, (words, width)) in lines.iter().enumerate().skip(stacked) {
+            let key = words
+                .first()
+                .map_or_else(|| format!("-slot-{i}"), |w| w.id.to_string());
+            // While editing the node is as wide as the text box, and the
+            // text sits in it by the line's sticky width, so the line keeps
+            // its left edge while you type and may run past that width.
             let w = width.ceil() + 2.0;
+            let (text_w, text_x) = if editing {
+                let tw = text_width(&self.look).max(w);
+                (tw, (tw - w) / 2.0)
+            } else {
+                (w, 0.0)
+            };
             let live = Element::live_text("words", words);
             // MO-13 (`onset-ink`) on the newest line.
-            let live = if i == newest {
+            let live = if i == newest && !tapped {
                 self.typo_words(live)
             } else {
                 live
@@ -1263,22 +1287,28 @@ impl Popup {
             // A new line comes in through its words' own entry: a fade of
             // the whole line from 0 put its first word under the reading
             // line's 70 % ink floor (RD-09).
+            let (enter, exit) = if tapped {
+                (Transition::NONE, Transition::NONE)
+            } else {
+                (
+                    self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k)),
+                    Transition::fade(),
+                )
+            };
             let line = Element::layer(format!("line{key}"))
-                .size(w, style.line_height)
-                .presence(Transition::NONE, Transition::fade())
+                .size(text_w, style.line_height)
+                .presence(Transition::NONE, exit)
                 .child(
-                    at(live, 0.0, 0.0)
+                    at(live, text_x, 0.0)
                         .text_style(style)
                         .revision_motion(revision::motion(&self.look))
                         .word_revise(revision::revise(&self.look))
                         .color(hex(TEXT, 1.0))
                         .text_halo(hex(CYAN, 0.45), 7.0 * k)
-                        .size(w, style.line_height)
+                        .size(text_w, style.line_height)
                         .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                         .motion(Prop::Offset, Spring::POP)
-                        .word_enter(
-                            self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k)),
-                        ),
+                        .word_enter(enter),
                 );
             // The ghost tail after the newest line, as far as the text's
             // right edge: the line is centred, so that is half the free room.
@@ -1576,5 +1606,52 @@ mod tests {
         for side in [reach.left, reach.top, reach.right, reach.bottom] {
             assert!(side >= bloom, "{reach:?}");
         }
+    }
+}
+
+/// Jarvis' edit adapter (plan section 4.5): the lines lie flat in the
+/// chamfered frame, one node per line, and the ring does not follow the
+/// words.
+pub(crate) struct JarvisSite;
+
+impl edit_site::EditSite for JarvisSite {
+    fn quiet(&self) -> &'static [&'static str] {
+        &[RING_READS]
+    }
+
+    fn place(&self, look: &Look, el: Element<Msg>, view: &edit::EditView) -> Element<Msg> {
+        edit_site::place_lines(self, look, el, view)
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::scope::edit_tests::check_edit_envelope;
+    use super::super::swiss_look::edit_check::Rig;
+    use super::*;
+
+    /// M7.L10: Jarvis edits in its own frame. With the caret on the newest,
+    /// a middle and the top line, at both widths: the caret on its glyph
+    /// within 1 px in every frame, the popup's size unchanged, and the
+    /// golden `tests/fixtures/osd-vo/edit-jarvis.txt`.
+    #[test]
+    fn jarvis_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Jarvis, "jarvis");
+    }
+
+    /// While editing, the ring does not read the words.
+    #[test]
+    fn jarvis_ring_reads_are_quiet_while_editing() {
+        let mut r = Rig::new(OsdTheme::Jarvis, false);
+        r.dictate(40);
+        r.enter(1.0);
+        assert!(!r.p.look.on(RING_READS));
+    }
+
+    /// R35: the edit moment with the caret on each line stays inside the
+    /// reading-line envelope, at both widths.
+    #[test]
+    fn jarvis_edit_moment_keeps_the_envelope() {
+        check_edit_envelope(OsdTheme::Jarvis, &[0, 1, 2]);
     }
 }
