@@ -1085,15 +1085,21 @@ impl Popup {
                 let mut col = col;
                 let status = self.status();
                 let mut status_y = words_bottom + STATUS_GAP;
-                if self.shows_progress(&status) {
-                    let bar_y = words_bottom + BAR_GAP;
+                let bar_y = words_bottom + BAR_GAP;
+                let bar = self.particles_bar();
+                let bar = if self.shows_progress(&status) {
                     status_y = bar_y + 22.0;
-                    col = col.child(at(
-                        self.particles_bar(),
-                        (l.width - BAR_W * s) / 2.0,
-                        (bar_y - BAR_H / 2.0) * s,
-                    ));
-                }
+                    bar
+                } else {
+                    // Hidden at once when loading ends: fading out where it
+                    // was, it drew its line through the status row.
+                    bar.opacity(0.0).motion(Prop::Opacity, Motion::Snap)
+                };
+                col = col.child(at(
+                    bar,
+                    (l.width - BAR_W * s) / 2.0,
+                    (bar_y - BAR_H / 2.0) * s,
+                ));
                 // A new row replaces the old one at once and settles up into place, so the
                 // two never sit over each other, even when the progress bar moves the row.
                 let step = if self.still() { 0.0 } else { 8.0 * s };
