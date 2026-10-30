@@ -770,7 +770,9 @@ impl Popup {
                     .presence(Transition::fade().wipe(1.0), Transition::fade()),
             );
         let y = (Geo::rule2(self.lines) + STATUS_GAP) * k - side / 2.0;
-        at(row, 72.0 * k, y)
+        // The row snaps to a new line count, as the canvas's rules do: on a
+        // spring it slid down across the rule above it.
+        at(row, 72.0 * k, y).motion(Prop::Position, Motion::Snap)
     }
 }
 
