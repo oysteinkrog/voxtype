@@ -513,12 +513,17 @@ const DOTS_SPEED: f64 = 6.0;
 /// rest by itself when the view stops declaring it, and holds still under
 /// reduced motion.
 fn spin(deg_per_s: f64) -> Loop {
-    let turn = Loop::spin(360.0 / deg_per_s.abs());
+    let turn = Loop::spin(360.0 / deg_per_s.abs()).fps(IDLE_FPS);
     Loop {
         amp: turn.amp.copysign(deg_per_s),
         ..turn
     }
 }
+
+/// Steps a second of the HUD's slow loops. A few degrees a second needs no
+/// more, and an open popup on room tone then draws 10 frames a second, not
+/// 15, which keeps its idle CPU inside the budget.
+const IDLE_FPS: f64 = 10.0;
 
 /// The chamfered frame round the transcript in `r`, traced on by `o`.
 fn draw_frame(r: Rect, k: f32, o: f32, p: &mut Painter) {
@@ -792,6 +797,8 @@ impl Popup {
         // the view leaves the loops out and they come to rest; under reduced
         // motion they hold still.
         let live = rest_at.is_none();
+        // Under reduced motion the ring holds still at its rest pose.
+        let spinning = live && !self.still();
         let half = 222.0 * g.k;
         let local = Hud {
             centre: Point::new(half, half),
@@ -807,7 +814,7 @@ impl Popup {
             });
         let square = |e: Element<Msg>| at(e, g.cx - half, g.cy - half).size(2.0 * half, 2.0 * half);
         let turn = |e: Element<Msg>, speed: f64| {
-            if live {
+            if spinning {
                 e.ambient(LoopProp::Rotation, spin(speed))
             } else {
                 e
@@ -841,7 +848,16 @@ impl Popup {
             let mut e = square(Element::canvas(
                 format!("spin{speed}"),
                 self.shown_at + 1.0,
-                move |t, _, p| local.draw_segments(speed, t, p),
+                // Round the middle of the box the canvas is given: the
+                // turning element hands it its own box, a still one its
+                // place in the surface.
+                move |t, r, p| {
+                    let hud = Hud {
+                        centre: Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0),
+                        ..local.clone()
+                    };
+                    hud.draw_segments(speed, t, p)
+                },
             ));
             e = turn(e, speed as f64);
             if !live {
