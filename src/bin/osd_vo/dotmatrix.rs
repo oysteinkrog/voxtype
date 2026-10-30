@@ -10,8 +10,6 @@
 use super::kit::{at, ease_out, hex, mix, reduced, Levels, Mode};
 use super::*;
 
-use std::sync::OnceLock;
-
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::Point;
@@ -111,15 +109,14 @@ struct Fonts {
     dots: u32,
 }
 
+/// The look's fonts, added to `reg` once (`FontRegistry::system`), so
+/// every registry, such as a test's, has its own ids.
 fn fonts(reg: &FontRegistry) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |pattern: &str, or: u32| reg.add_system(pattern).unwrap_or(or);
-        Fonts {
-            text: add("Inter", SANS),
-            dots: add("Doto:extralight", MONO),
-        }
-    })
+    let add = |pattern: &str, or: u32| reg.system(pattern).unwrap_or(or);
+    Fonts {
+        text: add("Inter", SANS),
+        dots: add("Doto:extralight", MONO),
+    }
 }
 
 pub(crate) fn text_style(look: &Look) -> TextStyle {
@@ -628,7 +625,7 @@ impl Popup {
                     r: MARK_R,
                 },
             ));
-        if self.cut > 0 && !self.shown.is_empty() && self.delivered().is_none() {
+        if self.text_above() && !self.shown.is_empty() && self.delivered().is_none() {
             text = text.child(self.dotmatrix_ellipsis(dim));
         }
         // The open seam under a tentative word, in dots (MO-24).
@@ -686,21 +683,55 @@ impl Popup {
             })
     }
 
-    fn dotmatrix_status(&self, mode: Mode, mode_at: f64) -> Element<Msg> {
-        let l = &self.look;
-        let style = TextStyle::new(fonts(&l.fonts).dots, STATUS_PX, STATUS_H + 4.0);
+    /// The status row's words in `mode`.
+    fn dotmatrix_status_text(&self, mode: Mode) -> String {
         let status = self.status();
-        let text = match mode {
+        match mode {
             Mode::Done => match self.kit_target() {
                 Some(app) => format!("{} · {app}", self.delivery_word()),
                 None => self.delivery_word().to_string(),
             },
-            Mode::Cancelled => "Cancelled · nothing was typed".to_string(),
+            // No speech and a failure say so; a cancel is the default.
+            Mode::Cancelled => match self.ending() {
+                Some(Ending::Empty) => Ending::Empty.label().to_string(),
+                Some(Ending::Failed) => "Failed · nothing was typed".to_string(),
+                _ => "Cancelled · nothing was typed".to_string(),
+            },
             _ => format!("{}{}", status.state, status.detail.replace("  ·  ", " · ")),
-        };
-        // The label scrambles in when the state changes; the detail of the
-        // same state (a number counting down) changes in place.
-        let since = self.extra.now - mode_at.max(self.shown_at + 0.1);
+        }
+    }
+
+    /// When the status label began to resolve: the label scrambles in when
+    /// the state changes; the detail of the same state (a number counting
+    /// down) changes in place.
+    fn dotmatrix_status_from(&self, mode_at: f64) -> f64 {
+        mode_at.max(self.shown_at + 0.1)
+    }
+
+    /// Keeps the tick armed while the status label resolves. It changes
+    /// with the time alone, so after the last event (the end of a
+    /// dictation with no speech) nothing else would draw it.
+    pub(crate) fn arm_dotmatrix_tick(&mut self, cx: &mut Cx<Msg>) {
+        if self.look.theme != OsdTheme::Dotmatrix
+            || self.extra.tick.is_some()
+            || self.closing
+            || reduced()
+        {
+            return;
+        }
+        let mode = self.kit_mode();
+        let from = self.dotmatrix_status_from(self.kit_mode_at(mode));
+        let len = self.dotmatrix_status_text(mode).chars().count();
+        if cx.t() < from + len as f64 * RESOLVE_SECS {
+            self.extra.tick = Some(cx.after(SCRAMBLE_SECS / 2.0, Msg::Tick));
+        }
+    }
+
+    fn dotmatrix_status(&self, mode: Mode, mode_at: f64) -> Element<Msg> {
+        let l = &self.look;
+        let style = TextStyle::new(fonts(&l.fonts).dots, STATUS_PX, STATUS_H + 4.0);
+        let text = self.dotmatrix_status_text(mode);
+        let since = self.extra.now - self.dotmatrix_status_from(mode_at);
         let shown = scrambled(&text, since);
         let mark = Mark { mode, mode_at };
         let until = mark.until();
@@ -740,6 +771,128 @@ impl Popup {
             row.child(count)
         } else {
             row
+        }
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::super::*;
+
+    /// A look's font ids belong to the registry it draws with: tests that
+    /// each load their own registry must not draw with another's ids.
+    #[test]
+    fn each_registry_has_its_own_font_ids() {
+        let plasma = PlasmaTheme::default();
+        for theme in [OsdTheme::Dotmatrix, OsdTheme::Swissfi, OsdTheme::Amber] {
+            let cfg = OsdConfig {
+                theme,
+                ..OsdConfig::default()
+            };
+            let a = load_fonts(&plasma).unwrap();
+            let b = load_fonts(&plasma).unwrap();
+            // One more face in b moves the ids the look adds there.
+            b.add_system("monospace").unwrap();
+            let font = |fonts: &FontRegistry| {
+                Look::new(&cfg, &plasma, String::new(), fonts)
+                    .text_style()
+                    .font
+            };
+            let (fa, fb) = (font(&a), font(&b));
+            if fa == SANS {
+                continue; // the look's font is not installed here
+            }
+            assert_eq!(fb, fa + 1, "{theme:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::moments::{scenario, Moment};
+    use super::super::swiss_look::edit_check::fonts as test_fonts;
+    use super::*;
+    use vo::scene::display::{DisplayList, ItemKind};
+    use vo::scene::scene::Scene;
+    use vo::scene::text::ShapedLayout;
+
+    /// The dot-face glyphs in `dl`, left to right.
+    fn dots(dl: &DisplayList, font: u32) -> Vec<u32> {
+        let mut gs: Vec<(f32, u32)> = Vec::new();
+        for (i, l) in dl.layers.iter().enumerate() {
+            for it in dl
+                .layer_items(i as _)
+                .iter()
+                .filter(|it| it.kind == ItemKind::Glyphs)
+            {
+                for g in &dl.glyphs[it.start as usize..(it.start + it.len) as usize] {
+                    if g.font == font && g.color.a > 0.05 {
+                        gs.push((l.transform.apply(g.pos).x, g.glyph));
+                    }
+                }
+            }
+        }
+        gs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        gs.into_iter().map(|g| g.1).collect()
+    }
+
+    /// wucu: the status label scrambles in by the clock alone, so after a
+    /// cancel, the last event, it froze half resolved ("Cancelled ·
+    /// +7E=<H<"). It now asks for frames until it reads in full, at both
+    /// widths. No speech says so rather than "Cancelled".
+    #[test]
+    fn dotmatrix_status_resolves_after_the_ending() {
+        let reg = test_fonts();
+        let plasma = PlasmaTheme::default();
+        // A cut label ends in "…", so only its start is checked.
+        for (moment, label) in [
+            (Moment::Cancel, "Cancelled · noth"),
+            (Moment::NoSpeech, "No speech"),
+        ] {
+            for width_px in [400, 600] {
+                let cfg = OsdConfig {
+                    theme: OsdTheme::Dotmatrix,
+                    width_px,
+                    ..OsdConfig::default()
+                };
+                let mut look = Look::new(&cfg, &plasma, String::new(), &reg);
+                look.set_motion(&cfg.motion);
+                let dot = fonts(&reg).dots;
+                let style = TextStyle::new(dot, STATUS_PX, STATUS_H + 4.0);
+                let mut scene: Scene<Msg> =
+                    Scene::new().with_text(Box::new(ShapedLayout::new(reg.clone())));
+                scene.set_viewport(0.0, Size::new(600.0, 100.0), 1.0);
+                scene.apply(Element::label("state", label).text_style(style), 0.0);
+                let mut want = DisplayList::default();
+                scene.sample_into(0.0, &mut want);
+                let want = dots(&want, dot);
+                assert!(want.len() >= label.replace([' ', '·'], "").chars().count());
+
+                let options = Options {
+                    fonts: reg.clone(),
+                    default_motion: default_motion(&look),
+                    ..Options::default()
+                };
+                let mut last = Vec::new();
+                vo::envelope::sample_scenario(
+                    Popup::new(look.clone(), &reg),
+                    &scenario(&look, moment),
+                    10.0,
+                    options,
+                    // The last frame with the label in it: as the popup
+                    // fades out, only the count's digit roll is left.
+                    &mut |_, _, dl| {
+                        let got = dots(dl, dot);
+                        if got.len() >= want.len() {
+                            last = got;
+                        }
+                    },
+                );
+                assert!(
+                    last.windows(want.len()).any(|w| w == want.as_slice()),
+                    "{moment:?} at {width_px} px: the last status reads {last:?}, not {label:?} {want:?}"
+                );
+            }
         }
     }
 }

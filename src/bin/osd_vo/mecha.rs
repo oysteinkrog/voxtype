@@ -83,31 +83,32 @@ pub(crate) struct Fonts {
     cjk: u32,
 }
 
-/// The look's fonts, added to the shared registry once. Labels use the
-/// framework's built-in Barlow Condensed and Japanese label subset; the
-/// transcript uses Saira ExtraCondensed ExtraBold, built in when the
+/// The look's fonts, added to `reg` once (`FontRegistry::asset` and
+/// `system`), so every registry, such as a test's, has its own ids. Labels
+/// use the framework's built-in Barlow Condensed and Japanese label subset;
+/// the transcript uses Saira ExtraCondensed ExtraBold, built in when the
 /// framework has it, else from fontconfig, else the built-in condensed bold.
 fn fonts(reg: &FontRegistry) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let asset = |name: &str, fallback: u32| reg.asset(name).unwrap_or(fallback);
-        let label = asset("condensed-bold", SANS);
-        let small = asset("condensed", MONO);
-        let cjk = asset("jp-labels-bold", SANS);
-        let text = reg
-            .asset("extra-condensed-bold")
-            .or_else(|_| reg.add_system("Saira ExtraCondensed:extrabold"))
-            .unwrap_or(label);
-        for f in [text, label, small] {
+    let asset = |name: &str, fallback: u32| reg.asset(name).unwrap_or(fallback);
+    let label = asset("condensed-bold", SANS);
+    let small = asset("condensed", MONO);
+    let cjk = asset("jp-labels-bold", SANS);
+    let text = reg
+        .asset("extra-condensed-bold")
+        .ok()
+        .or_else(|| reg.system("Saira ExtraCondensed:extrabold"))
+        .unwrap_or(label);
+    for f in [text, label, small] {
+        if *reg.fallbacks(f) != [cjk] {
             reg.set_fallbacks(f, &[cjk]);
         }
-        Fonts {
-            text,
-            label,
-            small,
-            cjk,
-        }
-    })
+    }
+    Fonts {
+        text,
+        label,
+        small,
+        cjk,
+    }
 }
 
 /// The popup's width.
@@ -1043,11 +1044,25 @@ fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
 /// Shaped labels by text, font and size in 1/64 units.
 type ShapedCache = HashMap<(String, u32, u32), Arc<ShapedText>>;
 
-/// Shaped labels, kept: the view is built for every audio batch.
+/// Shaped labels, kept: the view is built for every audio batch. Font ids
+/// belong to a font table, so each table has its own cache (tests each load
+/// their own table).
 fn shaped(measure: &vo::ShapedLayout, text: &str, font: u32, px: f32) -> Arc<ShapedText> {
-    static CACHE: OnceLock<Mutex<ShapedCache>> = OnceLock::new();
+    static CACHES: Mutex<Vec<(FontRegistry, ShapedCache)>> = Mutex::new(Vec::new());
     let key = (text.to_string(), font, (px * 64.0) as u32);
-    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    let mut caches = CACHES.lock().unwrap();
+    let same = |(f, _): &(FontRegistry, ShapedCache)| f.same_table(measure.fonts());
+    let i = match caches.iter().position(same) {
+        Some(i) => i,
+        None => {
+            if caches.len() >= 4 {
+                caches.remove(0);
+            }
+            caches.push((measure.fonts().clone(), ShapedCache::new()));
+            caches.len() - 1
+        }
+    };
+    let cache = &mut caches[i].1;
     if let Some(s) = cache.get(&key) {
         return s.clone();
     }
@@ -1618,10 +1633,12 @@ impl Popup {
         let y0 = box_size.h - lines.max(1).min(MAX_LINES as usize) as f32 * style.line_height;
         let gap = 0.12 * style.size;
         let (hydraulic, joint) = (l.on(HYDRAULIC_CHAIN), l.on(ONSET_JOINT));
+        let editing = self.edit_view.is_some();
         let mut chain = Chain {
             size: style.size,
             home: Point::new(0.0, y0 + style.line_height * 0.78),
-            caret: phase == Phase::Listening && (hydraulic || joint),
+            // While editing the edit caret is the one caret.
+            caret: phase == Phase::Listening && (hydraulic || joint) && !editing,
             reduced: kit::reduced() || l.on("reduced-motion"),
             box_size,
             joints: if joint {
@@ -1631,7 +1648,8 @@ impl Popup {
             },
             ..Chain::default()
         };
-        if !hydraulic && !joint {
+        // An edit is no new word or revision: no push, plate or tick.
+        if editing || (!hydraulic && !joint) {
             return chain;
         }
         if let Some(first) = boxes.first() {
@@ -1660,5 +1678,57 @@ impl Popup {
         chain.targets = targets;
         chain.push = hydraulic && !chain.reduced;
         chain
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::swiss_look::edit_check::{envelope, Rig};
+    use super::Phase;
+    use voxtype::osd::config::OsdTheme;
+
+    /// M7.L5: Mecha edits in its own layout, its slide-in entry off (the
+    /// still profile). With the caret on the newest, a middle and the top
+    /// line, at both widths: the caret on its glyph within 1 px in every
+    /// frame, the popup's size unchanged, and the golden
+    /// `tests/fixtures/osd-vo/edit-mecha.txt`.
+    #[test]
+    fn mecha_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Mecha, "mecha");
+    }
+
+    /// M7.L5: the edit moment keeps the reading-line envelope (R35).
+    #[test]
+    fn mecha_edits_within_the_envelope() {
+        envelope(OsdTheme::Mecha, "mecha");
+    }
+
+    /// Labels shaped with one font table are not reused for another, where
+    /// the same font id is another face.
+    #[test]
+    fn shaped_labels_are_kept_per_font_table() {
+        use super::super::*;
+        let plasma = PlasmaTheme::default();
+        let (a, b) = (load_fonts(&plasma).unwrap(), load_fonts(&plasma).unwrap());
+        let id = a.add_system("monospace").unwrap();
+        assert_eq!(b.add_system("serif").unwrap(), id);
+        let (ma, mb) = (vo::ShapedLayout::new(a), vo::ShapedLayout::new(b));
+        let text = "MMMM iiii";
+        let wa = super::shaped(&ma, text, id, 20.0).size.w;
+        let wb = super::shaped(&mb, text, id, 20.0).size.w;
+        assert_ne!(wa, wb, "a monospace and a serif face");
+    }
+
+    /// The hydraulic chain's caret block shows while listening; while
+    /// editing the edit caret is the one caret, and an edit pushes no
+    /// plate.
+    #[test]
+    fn mecha_hides_its_chain_caret_while_editing() {
+        let mut r = Rig::new(OsdTheme::Mecha, false);
+        r.dictate(40);
+        assert!(r.p.mecha_chain(Phase::Listening).caret, "listening");
+        r.enter(1.0);
+        let chain = r.p.mecha_chain(Phase::Listening);
+        assert!(!chain.caret && chain.plates.is_empty() && chain.targets.is_empty());
     }
 }

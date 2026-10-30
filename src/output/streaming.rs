@@ -45,7 +45,7 @@
 //! cleanup.
 
 use crate::error::OutputError;
-use crate::output::{output_with_fallback, OutputOptions, TextOutput};
+use crate::output::{output_via, output_with_fallback, OutputOptions, TextOutput};
 use crate::text::TextProcessor;
 use std::process::Stdio;
 use tokio::process::Command;
@@ -70,6 +70,8 @@ pub struct StreamingSession {
     /// An output call ran the post-output hook, which it does whether or
     /// not the text got through, so the end of the stream need not.
     post_hook_ran: bool,
+    /// The output method and the text of the last commit that went out.
+    delivered: Option<(&'static str, String)>,
 }
 
 impl StreamingSession {
@@ -80,6 +82,7 @@ impl StreamingSession {
             typed_chars: 0,
             partial: String::new(),
             post_hook_ran: false,
+            delivered: None,
         }
     }
 
@@ -171,6 +174,12 @@ impl StreamingSession {
         self.post_hook_ran
     }
 
+    /// The output method and the text of the last commit that went out,
+    /// for the popup's receipt.
+    pub fn delivered(&self) -> Option<(&'static str, &str)> {
+        self.delivered.as_ref().map(|(m, t)| (*m, t.as_str()))
+    }
+
     /// Number of Unicode scalar values typed to the output. Used by the
     /// daemon to populate `State::Streaming.typed_chars`.
     pub fn typed_chars(&self) -> usize {
@@ -233,7 +242,8 @@ impl StreamingSession {
             normalize: true,
         };
         self.post_hook_ran |= post_output_command.is_some();
-        output_with_fallback(chain, text, opts).await?;
+        let method = output_via(chain, text, opts).await?;
+        self.delivered = Some((method, text.to_string()));
 
         self.typed_chars += text.chars().count();
         // Treat the partial-stream-so-far plus this final tail as the
@@ -260,16 +270,17 @@ impl StreamingSession {
         .await
     }
 
-    /// [`Self::commit_exact`], asking `confirm` right before the post-output
-    /// hook and skipping the hook when it says no. A skipped hook does not
-    /// run at the end of the stream either.
+    /// [`Self::commit_exact`], asking `confirm` right before the text is
+    /// typed and right before the post-output hook (see
+    /// [`crate::output::output_via_confirmed`]). A skipped hook does not run
+    /// at the end of the stream either.
     pub async fn commit_exact_confirmed(
         &mut self,
         chain: &[Box<dyn TextOutput>],
         text: &str,
         pre_output_command: Option<&str>,
         post_output_command: Option<&str>,
-        confirm: impl FnOnce() -> futures_util::future::BoxFuture<'static, bool>,
+        confirm: impl Fn() -> futures_util::future::BoxFuture<'static, bool>,
     ) -> Result<(), OutputError> {
         if text.is_empty() {
             self.clear_partial();
@@ -283,7 +294,8 @@ impl StreamingSession {
             normalize: false,
         };
         self.post_hook_ran |= post_output_command.is_some();
-        crate::output::output_via_confirmed(chain, text, opts, confirm).await?;
+        let method = crate::output::output_via_confirmed(chain, text, opts, confirm).await?;
+        self.delivered = Some((method, text.to_string()));
         self.typed_chars += text.chars().count();
         self.finalized_text.push_str(text);
         self.clear_partial();
@@ -585,6 +597,24 @@ mod tests {
             }
         }
         vec![Box::new(Wrap(out))]
+    }
+
+    #[tokio::test]
+    async fn a_commit_records_what_it_delivered() {
+        let rec = std::sync::Arc::new(RecordingOutput::new());
+        let chain = chain_with(rec.clone());
+        let mut session = StreamingSession::new();
+        assert_eq!(session.delivered(), None);
+        session
+            .commit_segment(&chain, "hello", None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(session.delivered(), Some(("recording-test", "hello")));
+        session
+            .commit_exact(&chain, "edited text", None, None)
+            .await
+            .unwrap();
+        assert_eq!(session.delivered(), Some(("recording-test", "edited text")));
     }
 
     #[tokio::test]

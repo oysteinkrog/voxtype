@@ -818,7 +818,7 @@ impl Popup {
         let f = fonts(&l.fonts);
         let h = transcript_h(self.lines.min(MAX_LINES)) + lattice_room(l);
         let dim = if mode == Mode::Cancelled { 0.45 } else { 1.0 };
-        let words = Element::live_text("words", &self.shown[..self.room()])
+        let words = Element::live_text("words", &self.shown[..self.edit_room()])
             .line_motion(&self.look)
             .revision_motion(revision::motion(&self.look))
             .word_revise(revision::revise(&self.look))
@@ -952,7 +952,7 @@ impl Popup {
             };
             let style = l.text_style();
             tile = tile.children(
-                self.lattice_lines("mission", &self.shown[..self.room()], &style, text_width(l), &set)
+                self.lattice_lines("mission", &self.shown[..self.edit_room()], &style, text_width(l), &set)
                     .map(|e| at(e, TEXT_X, TEXT_TOP)),
             );
         }
@@ -999,7 +999,7 @@ impl Popup {
                     Element::column("text")
                         .width(text_width(l))
                         .child(words),
-                    &self.shown[..self.room()],
+                    &self.shown[..self.edit_room()],
                     text_width(l),
                     (0.0, 0.0),
                     hex(INK),
@@ -1215,5 +1215,34 @@ mod tests {
         let long = popup.fitted("cohere-transcribe-q4f1-long", &style, room);
         assert!(long.ends_with('\u{2026}') && w(&long) <= room, "{long}");
         assert_eq!(popup.fitted("Cohere", &style, room), "Cohere");
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::swiss_look::edit_check::{envelope, Rig};
+    use voxtype::osd::config::OsdTheme;
+
+    /// M7.L3: Mission edits in its own layout, with its hinge and revision
+    /// address off (quiet list). With the caret on the newest, a middle and
+    /// the top line, at both widths: the caret on its glyph within 1 px in
+    /// every frame, the popup's size unchanged, and the golden
+    /// `tests/fixtures/osd-vo/edit-mission.txt`.
+    #[test]
+    fn mission_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Mission, "mission");
+    }
+
+    /// M7.L3: the edit moment keeps the reading-line envelope (R35).
+    #[test]
+    fn mission_edits_within_the_envelope() {
+        envelope(OsdTheme::Mission, "mission");
+    }
+
+    /// Every window word draws while editing, also just after the panel
+    /// grew a line (no `room()` hold-back).
+    #[test]
+    fn mission_draws_every_word_while_editing() {
+        super::super::type_look::edit_tests::every_word_draws(OsdTheme::Mission);
     }
 }

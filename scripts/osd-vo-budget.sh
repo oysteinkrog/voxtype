@@ -31,9 +31,10 @@
 # 1.0 ms on one look, because the runs are bimodal.) Use an optimised binary
 # (cargo build --profile measure) so debug-build cost is not in the numbers.
 #
-# Each state runs VOXTYPE_BUDGET_RUNS times (default 2) and keeps the run
-# with the least CPU: the first start of a look builds its GPU pipelines and
-# can cost three times as much.
+# Each state runs VOXTYPE_BUDGET_RUNS times (default 3) and keeps the run
+# with the median CPU: the first start of a look builds its GPU pipelines and
+# can cost three times as much, and one quiet run alone would hide noise the
+# other way.
 #
 # Writes $VOXTYPE_BUDGET_DIR/looks.tsv (default /var/tmp/claude/vo-budget),
 # with logs in its looks/ folder:
@@ -41,12 +42,15 @@
 # and exits 1 naming each look and state over a limit. Limits (env vars):
 #
 #   VOXTYPE_BUDGET_IDLE_CPU_PCT  default 2    idle-open CPU, % of one core
+#   VOXTYPE_BUDGET_SHOWCASE_IDLE_CPU_PCT  default 3   the same for Showcase (see below)
 #   VOXTYPE_BUDGET_IDLE_FPS      default 30   idle-open frames per second
 #   VOXTYPE_BUDGET_REC_CPU_PCT   default 10   recording CPU, % of one core
 #   VOXTYPE_BUDGET_GPU_MS        default 1    GPU p95 per frame (lowest of 3 runs), both states
 #   VOXTYPE_BUDGET_GPU_P99_MS    default 0    GPU p99 limit; 0 reports it without gating
 #
 # Other settings: LOOKS="swiss type" measures only those looks.
+# VOXTYPE_BUDGET_CONFIG=FILE runs with that config file instead of an empty
+# one, for example one with only `[osd] width_px = 600` for the wide popup.
 # The policy behind the limits is rule 8 of docs/MOTION-PLAN.md in the vo
 # framework repo (voxtype-osd-gpu).
 set -uo pipefail
@@ -56,10 +60,17 @@ bin=${1:-$root/target/measure/voxtype-osd-vo}
 out=${VOXTYPE_BUDGET_DIR:-/var/tmp/claude/vo-budget}
 # Its own folder: the framework's budget.sh uses the same parent.
 work=$out/looks
-runs=${VOXTYPE_BUDGET_RUNS:-2}
+runs=${VOXTYPE_BUDGET_RUNS:-3}
 gpu_runs=${VOXTYPE_BUDGET_GPU_RUNS:-3}
 idle_cpu=${VOXTYPE_BUDGET_IDLE_CPU_PCT:-2}
 idle_fps=${VOXTYPE_BUDGET_IDLE_FPS:-30}
+# Showcase animates at idle (particle trail, breathing dots and shapes), and its idle cost
+# is accepted at 3 % (giyy, 2026-10-30): the looks stay alive, no frame-rate cut at idle.
+# Measured at 48cb3e4 (vo bc9e935), 7 interleaved runs: idle-open median 2.44 %. With every
+# offscreen layer pass and its bloom skipped (the most a layer cache could save) the median
+# is 2.20 %, so no layer cache brings it under 2 %. The rest is per-frame scene sampling,
+# view, encoding and submit.
+showcase_idle_cpu=${VOXTYPE_BUDGET_SHOWCASE_IDLE_CPU_PCT:-3}
 rec_cpu=${VOXTYPE_BUDGET_REC_CPU_PCT:-10}
 gpu_ms=${VOXTYPE_BUDGET_GPU_MS:-1}
 gpu_p99=${VOXTYPE_BUDGET_GPU_P99_MS:-0}
@@ -81,6 +92,7 @@ fi
 
 mkdir -p "$work/xdg-config"
 : >"$work/empty.toml"
+config=${VOXTYPE_BUDGET_CONFIG:-$work/empty.toml}
 tsv=$out/looks.tsv
 printf 'look\tstate\tcpu_pct\tframes_per_s\tgpu_ms_p95\tgpu_ms_p99\n' >"$tsv"
 failed=()
@@ -132,7 +144,7 @@ live() {
         timeout 60 systemd-run --user --scope --quiet --collect --slice=builds.slice --unit="$unit" \
         -p CPUQuota=400% -- dbus-run-session -- kwin_wayland --virtual --no-lockscreen --no-global-shortcuts \
         --socket "vo-look-budget-$$" --width 1920 --height 1080 \
-        --exit-with-session "$work/inner.sh $log $ticks $from $to $bin --config $work/empty.toml --theme $look --live-moment $moment" \
+        --exit-with-session "$work/inner.sh $log $ticks $from $to $bin --config $config --theme $look --live-moment $moment" \
         >"$work/kwin-$look-$state.log" 2>&1
     systemctl --user stop "$unit.scope" 2>/dev/null
     if [[ ! -s $ticks ]] || ! grep -q 'popup exit 0' "$log" 2>/dev/null; then
@@ -162,7 +174,7 @@ gpu_once() {
     rm -rf "$dir"
     local out
     out=$(RUST_LOG=warn systemd-run --user --slice=builds.slice --scope -q -p CPUQuota=400% nice -n 10 \
-        "$bin" --config "$work/empty.toml" --theme "$look" --offline "$dir" --fps 10 --gpu-times \
+        "$bin" --config "$config" --theme "$look" --offline "$dir" --fps 10 --gpu-times \
         --moment "$moment" 2>&1)
     rm -rf "$dir"
     awk '/GPU .* frames,/ {
@@ -181,14 +193,12 @@ for look in "${looks[@]}"; do
             moment=dictation from=1.5 to=6.5 cpu_max=$rec_cpu fps_max=
         else
             moment=long-silence from=1.8 to=5.9 cpu_max=$idle_cpu fps_max=$idle_fps
+            [[ ${look,,} == showcase ]] && cpu_max=$showcase_idle_cpu
         fi
-        cpu=- fps=-
-        for _ in $(seq "$runs"); do
-            read -r c f < <(live "$look" "$state" "$moment" "$from" "$to")
-            if [[ $c != - ]] && { [[ $cpu == - ]] || over "$cpu" "$c"; }; then
-                cpu=$c fps=$f
-            fi
-        done
+        # The run with the median CPU of those that finished (the lower middle one
+        # of an even count), with its frame rate.
+        read -r cpu fps < <(for _ in $(seq "$runs"); do live "$look" "$state" "$moment" "$from" "$to"; done |
+            awk '$1 != "-"' | sort -n -k1,1 | awk '{ r[NR] = $0 } END { print (NR ? r[int((NR + 1) / 2)] : "- -") }')
         read -r p95 p99 < <(gpu "$look" "$moment")
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$look" "$state" "$cpu" "$fps" "$p95" "$p99" >>"$tsv"
         why=()

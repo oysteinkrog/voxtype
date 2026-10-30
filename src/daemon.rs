@@ -20,7 +20,7 @@ use crate::notification::{self, Lifetime};
 use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::output::streaming::StreamingSession;
-use crate::output::TextOutput;
+use crate::output::{HookOutcome, TextOutput};
 use crate::state::{ChunkResult, Phase, State};
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
@@ -360,6 +360,39 @@ impl Default for EditLink {
 }
 
 /// How a keyboard-edited dictation was delivered.
+/// The sound and the outcome file for a stream that ended with `outcome`.
+/// A stream that sent nothing must not read as done: a hook that presses
+/// Enter checks the file.
+fn stream_end_signals(outcome: HookOutcome) -> (SoundEvent, crate::osd::outcome::Outcome) {
+    use crate::osd::outcome::Outcome;
+    match outcome {
+        HookOutcome::Failed => (SoundEvent::Error, Outcome::Failed),
+        HookOutcome::Empty => (SoundEvent::TranscriptionComplete, Outcome::Empty),
+        HookOutcome::Cancelled => (SoundEvent::Cancelled, Outcome::Cancelled),
+        HookOutcome::Done | HookOutcome::NotPasted => {
+            (SoundEvent::TranscriptionComplete, Outcome::Done)
+        }
+    }
+}
+
+/// The delivery record of a live preview dictation.
+fn stream_delivery(
+    method: &str,
+    text: &str,
+    enter: bool,
+    output: Duration,
+) -> crate::osd::outcome::Delivery {
+    crate::osd::outcome::Delivery {
+        text: text.to_string(),
+        chars: text.chars().count(),
+        method: method.to_string(),
+        enter,
+        output_ms: output.as_millis() as u64,
+        latency_ms: crate::osd::outcome::since_stop_ms(),
+        audio_s: None,
+    }
+}
+
 struct EditDelivery {
     /// The check before the paste: anything but confirmed gave the
     /// clipboard only.
@@ -1103,7 +1136,7 @@ async fn deliver_to_file(
     fallback: &[Box<dyn TextOutput>],
 ) -> FileDelivery {
     if let Some(cmd) = &cfg.pre_output_command {
-        if let Err(e) = output::run_hook(cmd, "pre_output").await {
+        if let Err(e) = output::run_output_hook(cmd, "pre_output", HookOutcome::Done).await {
             tracing::warn!("{}", e);
         }
     }
@@ -1141,7 +1174,12 @@ async fn deliver_to_file(
 
     // Always, even when nothing was delivered, matching output_with_fallback.
     if let Some(cmd) = &cfg.post_output_command {
-        if let Err(e) = output::run_hook(cmd, "post_output").await {
+        let outcome = match delivery {
+            FileDelivery::Written => HookOutcome::Done,
+            FileDelivery::FellBack(_) => HookOutcome::NotPasted,
+            FileDelivery::Lost(_) => HookOutcome::Failed,
+        };
+        if let Err(e) = output::run_output_hook(cmd, "post_output", outcome).await {
             tracing::warn!("{}", e);
         }
     }
@@ -1152,12 +1190,17 @@ async fn deliver_to_file(
 /// The post-output hook at the end of a streaming dictation, ended or
 /// cancelled, which resets a compositor submap entered for it. Skipped when
 /// an output call of the session already ran it, so it runs once (R31).
-async fn end_streaming_hook(cfg: &crate::config::OutputConfig, session: Option<&StreamingSession>) {
+/// When it runs here no text was output, so `outcome` is not `Done`.
+async fn end_streaming_hook(
+    cfg: &crate::config::OutputConfig,
+    session: Option<&StreamingSession>,
+    outcome: HookOutcome,
+) {
     if session.is_some_and(StreamingSession::post_hook_ran) {
         return;
     }
     if let Some(cmd) = &cfg.post_output_command {
-        if let Err(e) = output::run_hook(cmd, "post_output").await {
+        if let Err(e) = output::run_output_hook(cmd, "post_output", outcome).await {
             tracing::warn!("{}", e);
         }
     }
@@ -1297,6 +1340,8 @@ pub struct Daemon {
     edit_target: Option<tokio::task::JoinHandle<Option<crate::osd::target::Window>>>,
     edit_window: Option<crate::osd::target::Window>,
     streaming_failure: Option<String>,
+    // A stream that ended in an error with no rescue: why no text went out.
+    streaming_error: Option<HookOutcome>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -1444,6 +1489,7 @@ impl Daemon {
             edit_target: None,
             edit_window: None,
             streaming_failure: None,
+            streaming_error: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -1805,6 +1851,7 @@ impl Daemon {
         discard_stale_cancel(self.start_request);
         // An edit asked for before this recording is not for it.
         let _ = check_edit_requested();
+        self.streaming_error = None;
         self.edit = EditPause::default();
         self.edit_doc = None;
         self.edit_pauses = 0;
@@ -2040,7 +2087,7 @@ impl Daemon {
                 self.handle_transcription_result(state, Ok(Ok(text))).await;
             } else {
                 tracing::debug!("Eager recording produced empty result");
-                self.reset_to_idle(state).await;
+                self.reset_to_idle(state, HookOutcome::Empty).await;
             }
             *eager_transcriber = None;
         }
@@ -2205,7 +2252,18 @@ impl Daemon {
         }
         match state.phase() {
             Some(Phase::Listening | Phase::Pending) => self.edit_pause(state).await,
-            Some(Phase::Settling | Phase::Editing) => self.edit_resume(state).await,
+            Some(Phase::Settling | Phase::Editing) => {
+                // A resume by tap or `record edit` takes the popup's text
+                // from its buffer file.
+                let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
+                let session = self.edit_doc.as_ref().map(|d| d.session());
+                if let Some(snap) =
+                    snapshot.filter(|b| Some(b.session) == session && b.pause == self.edit_pauses)
+                {
+                    self.edit_take_buffer(&snap.text, snap.base.as_deref());
+                }
+                self.edit_resume(state).await
+            }
             Some(Phase::Detached) => {
                 state.set_phase(Phase::Editing, Instant::now());
                 self.edit_publish(state);
@@ -2239,16 +2297,18 @@ impl Daemon {
         tracing::info!("Paused for a keyboard edit");
     }
 
-    /// Pass mic audio again; new speech goes after the edited text.
-    async fn edit_resume(&mut self, state: &mut State) {
-        // A resume by tap or `record edit` takes the popup's text from its
-        // buffer file; a Resume command has already put the same text in.
-        let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
-        if let (Some(doc), Some(snap)) = (self.edit_doc.as_mut(), snapshot) {
-            if snap.session == doc.session() && snap.pause == self.edit_pauses {
-                doc.replace_frozen(&snap.text);
-            }
+    /// The popup's text replaces the frozen region, with the words frozen
+    /// after the popup last saw it (its `base`) added at the end.
+    fn edit_take_buffer(&mut self, text: &str, base: Option<&str>) {
+        if let Some(doc) = self.edit_doc.as_mut() {
+            let text = crate::osd::edit_ipc::with_unseen(text, base, &doc.frozen());
+            doc.replace_frozen(&text);
         }
+    }
+
+    /// Pass mic audio again; new speech goes after the edited text. The
+    /// caller has taken the popup's text.
+    async fn edit_resume(&mut self, state: &mut State) {
         self.with_gate(|g| g.resume());
         if let Some(tracker) = &self.silence_tracker {
             tracker.resume().await;
@@ -2303,13 +2363,23 @@ impl Daemon {
         let shown = (self.edit_link.shown)();
         let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
         let tp = &self.text_processor;
+        let pause = self.edit_pauses;
         let doc = self.edit_doc.as_mut()?;
         let popup_owned = matches!(
             phase,
             Some(Phase::Settling | Phase::Editing | Phase::Detached)
         );
-        if let Some(snapshot) = snapshot.filter(|b| popup_owned && b.session == doc.session()) {
-            doc.replace_frozen(&snapshot.text);
+        // A buffer of an earlier pause lacks the words frozen since: the
+        // popup has not written this pause's yet, or it is not running.
+        if let Some(snapshot) =
+            snapshot.filter(|b| popup_owned && b.session == doc.session() && b.pause == pause)
+        {
+            let text = crate::osd::edit_ipc::with_unseen(
+                &snapshot.text,
+                snapshot.base.as_deref(),
+                &doc.frozen(),
+            );
+            doc.replace_frozen(&text);
         }
         doc.live(&shown);
         Some(doc.final_text(|t| output::normalize_quotes(&tp.process(t)).into_owned()))
@@ -2365,7 +2435,8 @@ impl Daemon {
     /// Deliver a keyboard-edited dictation, only into the window it was
     /// dictated for. After the popup gave focus back, that window must be
     /// active again within 500 ms (R27), and still be active right before
-    /// the paste, after the modifiers and Enter are up (R28, R30). Otherwise,
+    /// the paste, after the modifiers and Enter are up and after the
+    /// pre-output hook (R28, R30). Otherwise,
     /// when it was closed (R29), or when a key that finished the edit is
     /// still held, the text goes to `clipboard` only and neither
     /// output hook runs, so an Enter hook cannot press Enter in the wrong
@@ -2399,10 +2470,13 @@ impl Daemon {
         if verdict.confirmed() {
             let pre = self.config.output.pre_output_command.as_deref();
             let post = self.config.output.post_output_command.as_deref();
-            let before_hook = Arc::new(std::sync::Mutex::new(None));
-            let (windows, seen) = (self.edit_link.windows.clone(), before_hook.clone());
+            // The checks after the pre-output hook and before the
+            // post-output hook, in order.
+            let checks = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (windows, seen) = (self.edit_link.windows.clone(), checks.clone());
             let id = self.edit_window.as_ref().map(|w| w.id.clone());
             let confirm = move || -> futures_util::future::BoxFuture<'static, bool> {
+                let (id, windows, seen) = (id.clone(), windows.clone(), seen.clone());
                 Box::pin(async move {
                     let v = match id {
                         Some(id) => tokio::task::spawn_blocking(move || {
@@ -2413,19 +2487,27 @@ impl Daemon {
                         .unwrap_or(Verdict::Failed),
                         None => Verdict::Failed,
                     };
-                    *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+                    seen.lock().unwrap_or_else(|e| e.into_inner()).push(v);
                     v.confirmed()
                 })
             };
             let result = session
                 .commit_exact_confirmed(chain, text, pre, post, confirm)
                 .await;
-            let before_hook = *before_hook.lock().unwrap_or_else(|e| e.into_inner());
-            return EditDelivery {
-                paste: verdict,
-                before_hook,
-                result,
-            };
+            let checks = checks.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            match result {
+                // Focus moved during the pre-output hook: nothing was typed.
+                Err(crate::error::OutputError::TargetChanged) => {
+                    verdict = checks.first().copied().unwrap_or(Verdict::Failed);
+                }
+                result => {
+                    return EditDelivery {
+                        paste: verdict,
+                        before_hook: checks.get(1).copied(),
+                        result,
+                    };
+                }
+            }
         }
         tracing::warn!("Copied, not pasted: {}", verdict.reason());
         session.skip_post_hook();
@@ -2433,6 +2515,72 @@ impl Daemon {
             paste: verdict,
             before_hook: None,
             result: session.commit_exact(clipboard, text, None, None).await,
+        }
+    }
+
+    /// Deliver an edited dictation with [`Self::deliver_edited`], and tell
+    /// the user when it was only copied or the output hook was skipped.
+    async fn deliver_edit(
+        &mut self,
+        session: &mut StreamingSession,
+        chain: &[Box<dyn TextOutput>],
+        edited: &str,
+    ) -> std::result::Result<(), crate::error::OutputError> {
+        let clipboard: Vec<Box<dyn TextOutput>> = vec![Box::new(
+            output::clipboard::ClipboardOutput::new(self.config.output.append_text.clone()),
+        )];
+        let started = Instant::now();
+        let d = self
+            .deliver_edited(session, chain, &clipboard, edited)
+            .await;
+        if !d.paste.confirmed() && d.result.is_ok() {
+            self.report_not_pasted(edited, d.paste, started).await;
+        } else if d.result.is_ok() {
+            self.report_stream_delivery(session, started);
+        }
+        if let Some(v) = d.before_hook.filter(|v| !v.confirmed()) {
+            send_notification(
+                "Pasted, Enter not sent",
+                &format!("The output hook did not run: {}.", v.reason()),
+                self.config.output.notification.show_engine_icon,
+                self.config.engine,
+                "normal",
+            )
+            .await;
+        }
+        d.result
+    }
+
+    /// A live stream failed after a keyboard edit. Transcribing its audio
+    /// again would drop the edits, and that paste would skip the window
+    /// check, so the edited text goes out as an edited dictation does.
+    /// False when there was no edit, or nothing to deliver it with.
+    async fn deliver_after_failure(
+        &mut self,
+        edited: Option<&str>,
+        session: Option<&mut StreamingSession>,
+        chain: Option<&Vec<Box<dyn TextOutput>>>,
+    ) -> bool {
+        let (Some(edited), Some(session), Some(chain)) = (edited, session, chain) else {
+            return false;
+        };
+        tracing::warn!("Live stream failed after a keyboard edit; delivering the edited text");
+        if let Err(e) = self.deliver_edit(session, chain, edited).await {
+            tracing::error!("Edited text delivery failed: {}", e);
+        }
+        true
+    }
+
+    /// Tell the popup what a live preview dictation delivered, as the batch
+    /// path does, so it shows the hand-off and the receipt.
+    fn report_stream_delivery(&self, session: &StreamingSession, started: Instant) {
+        if let Some((method, text)) = session.delivered() {
+            crate::osd::outcome::write_delivery(&stream_delivery(
+                method,
+                text,
+                self.config.output.auto_submit,
+                started.elapsed(),
+            ));
         }
     }
 
@@ -2466,14 +2614,15 @@ impl Daemon {
     }
 
     /// The popup's commands ready to act on: the buffer file holds the
-    /// revision they name.
-    fn edit_commands(&mut self) -> Vec<crate::osd::edit_ipc::Accepted> {
+    /// revision they name. Also the buffer's `base`, which their texts share.
+    fn edit_commands(&mut self) -> (Vec<crate::osd::edit_ipc::Accepted>, Option<String>) {
         let Some(doc) = &self.edit_doc else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let buffer = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
         let link = &mut self.edit_link;
-        link.reader.poll(&link.cmds, doc.session(), buffer.as_ref())
+        let ready = link.reader.poll(&link.cmds, doc.session(), buffer.as_ref());
+        (ready, buffer.and_then(|b| b.base))
     }
 
     /// Act on the popup's commands. Returns true when one asks to stop the
@@ -2481,20 +2630,17 @@ impl Daemon {
     async fn edit_handle_commands(&mut self, state: &mut State) -> bool {
         use crate::osd::edit_ipc::{Accepted, FinishMode};
         let mut finish = false;
-        for cmd in self.edit_commands() {
+        let (ready, base) = self.edit_commands();
+        for cmd in ready {
             match cmd {
                 Accepted::Resume { text } => {
-                    if let Some(doc) = self.edit_doc.as_mut() {
-                        doc.replace_frozen(&text);
-                    }
+                    self.edit_take_buffer(&text, base.as_deref());
                     if matches!(state.phase(), Some(p) if p.is_paused() && p != Phase::Pending) {
                         self.edit_resume(state).await;
                     }
                 }
                 Accepted::Finish { mode, text } => {
-                    if let Some(doc) = self.edit_doc.as_mut() {
-                        doc.replace_frozen(&text);
-                    }
+                    self.edit_take_buffer(&text, base.as_deref());
                     // How the output hook tells "paste" from "paste and
                     // Enter", as for the double taps.
                     let last = match mode {
@@ -2533,6 +2679,9 @@ impl Daemon {
     /// drain, and stop the mic. Leaves `streaming_session`/`_chain` for
     /// the caller to disown (or keep, to receive trailing finals).
     async fn stop_streaming_capture(&mut self, audio_capture: &mut Option<Box<dyn AudioCapture>>) {
+        // A stream never passes through "transcribing", where a batch
+        // recording starts the receipt's latency clock.
+        crate::osd::outcome::stopped();
         self.cut_streaming_audio();
         self.start_streaming_drain_pump();
         if let Some(mut c) = audio_capture.take() {
@@ -2572,9 +2721,6 @@ impl Daemon {
             let _ = h.task.await;
         }
         self.stop_streaming_drain_pump();
-        clear_live_preview();
-
-        // The stream failed: transcribe its audio again rather than lose it.
         let file_output = matches!(
             &state,
             State::Streaming {
@@ -2582,11 +2728,32 @@ impl Daemon {
                 ..
             }
         );
+        // A failed dictation with a keyboard edit keeps the edited text,
+        // taken before the preview it reads is cleared.
+        let edited =
+            (self.streaming_failure.is_some() && !file_output && self.config.live_preview_active())
+                .then(|| self.edit_final_text(state.phase()))
+                .flatten();
+        clear_live_preview();
+
+        // Why no text went out, for when none did.
+        let mut outcome = self.streaming_error.take().unwrap_or(HookOutcome::Empty);
+        // The stream failed: transcribe its audio again rather than lose it.
         if let Some(failure) = self.streaming_failure.take() {
-            if !file_output && self.rescue_stream(state, failure.clone()).await {
+            let delivered = self
+                .deliver_after_failure(
+                    edited.as_deref(),
+                    streaming_session.as_mut(),
+                    streaming_chain.as_ref(),
+                )
+                .await;
+            if !delivered && !file_output && self.rescue_stream(state, failure.clone()).await {
                 *streaming_session = None;
                 *streaming_chain = None;
                 return;
+            }
+            if !delivered {
+                outcome = HookOutcome::Failed;
             }
             send_notification(
                 "Streaming Error",
@@ -2656,9 +2823,17 @@ impl Daemon {
         let session = streaming_session.take();
         *streaming_chain = None;
 
-        self.play_feedback(SoundEvent::TranscriptionComplete);
+        let sent = session
+            .as_ref()
+            .is_some_and(|s| s.typed_chars() > 0 || s.delivered().is_some());
+        let outcome = if sent { HookOutcome::Done } else { outcome };
+        // The outcome file before the hook: a hook that presses Enter
+        // reads it.
+        let (sound, ended) = stream_end_signals(outcome);
+        self.play_feedback(sound);
+        crate::osd::outcome::write(ended);
 
-        end_streaming_hook(&self.config.output, session.as_ref()).await;
+        end_streaming_hook(&self.config.output, session.as_ref(), outcome).await;
 
         *state = State::Idle;
         self.update_state("idle");
@@ -2736,7 +2911,9 @@ impl Daemon {
 
             // Run post_output_command to reset compositor submap
             if let Some(cmd) = &self.config.output.post_output_command {
-                if let Err(e) = output::run_hook(cmd, "post_output").await {
+                if let Err(e) =
+                    output::run_output_hook(cmd, "post_output", HookOutcome::Cancelled).await
+                {
                     tracing::warn!("{}", e);
                 }
             }
@@ -2769,7 +2946,9 @@ impl Daemon {
 
             // Run post_output_command to reset compositor submap
             if let Some(cmd) = &self.config.output.post_output_command {
-                if let Err(e) = output::run_hook(cmd, "post_output").await {
+                if let Err(e) =
+                    output::run_output_hook(cmd, "post_output", HookOutcome::Cancelled).await
+                {
                     tracing::warn!("{}", e);
                 }
             }
@@ -2825,7 +3004,12 @@ impl Daemon {
         self.update_state("idle");
         self.play_feedback(SoundEvent::Cancelled);
 
-        end_streaming_hook(&self.config.output, session.as_ref()).await;
+        end_streaming_hook(
+            &self.config.output,
+            session.as_ref(),
+            HookOutcome::Cancelled,
+        )
+        .await;
 
         if self.config.output.notification.on_recording_stop {
             send_notification(
@@ -3732,8 +3916,9 @@ impl Daemon {
     }
 
     /// Reset state to idle and run post_output_command to reset compositor submap
-    /// Call this when exiting from recording/transcribing without normal output flow
-    async fn reset_to_idle(&mut self, state: &mut State) {
+    /// Call this when exiting from recording/transcribing without normal output flow;
+    /// `outcome` says why, for the hook.
+    async fn reset_to_idle(&mut self, state: &mut State, outcome: HookOutcome) {
         discard_recording_overrides();
         self.restore_recording_media();
         *state = State::Idle;
@@ -3741,7 +3926,7 @@ impl Daemon {
 
         // Run post_output_command to reset compositor submap
         if let Some(cmd) = &self.config.output.post_output_command {
-            if let Err(e) = output::run_hook(cmd, "post_output").await {
+            if let Err(e) = output::run_output_hook(cmd, "post_output", outcome).await {
                 tracing::warn!("{}", e);
             }
         }
@@ -4070,7 +4255,7 @@ impl Daemon {
                     if audio_duration < 0.3 {
                         tracing::debug!("Recording too short ({:.2}s), ignoring", audio_duration);
                         self.publish_empty_outcome();
-                        self.reset_to_idle(state).await;
+                        self.reset_to_idle(state, HookOutcome::Empty).await;
                         return false;
                     }
 
@@ -4080,7 +4265,7 @@ impl Daemon {
                             Ok(result) if !result.has_speech => {
                                 self.report_no_speech(&result).await;
                                 self.publish_empty_outcome();
-                                self.reset_to_idle(state).await;
+                                self.reset_to_idle(state, HookOutcome::Empty).await;
                                 return false;
                             }
                             Ok(result) => {
@@ -4109,7 +4294,7 @@ impl Daemon {
                     {
                         Ok(transcriber) => transcriber,
                         Err(()) => {
-                            self.reset_to_idle(state).await;
+                            self.reset_to_idle(state, HookOutcome::Failed).await;
                             return false;
                         }
                     };
@@ -4126,13 +4311,13 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::warn!("Recording error: {}", e);
-                    self.reset_to_idle(state).await;
+                    self.reset_to_idle(state, HookOutcome::Failed).await;
                     false
                 }
             }
         } else {
             self.restore_recording_media();
-            self.reset_to_idle(state).await;
+            self.reset_to_idle(state, HookOutcome::Failed).await;
             false
         }
     }
@@ -4172,7 +4357,7 @@ impl Daemon {
                 if text.is_empty() {
                     tracing::debug!("Transcription was empty");
                     crate::osd::outcome::write(crate::osd::outcome::Outcome::Empty);
-                    self.reset_to_idle(state).await;
+                    self.reset_to_idle(state, HookOutcome::Empty).await;
                 } else {
                     tracing::info!("Transcribed: {:?}", text);
 
@@ -4515,7 +4700,7 @@ impl Daemon {
                     Lifetime::Millis(4000),
                 )
                 .await;
-                self.reset_to_idle(state).await;
+                self.reset_to_idle(state, HookOutcome::Failed).await;
             }
             Err(e) => {
                 // JoinError - task was cancelled or panicked
@@ -4554,7 +4739,7 @@ impl Daemon {
                         );
                     }
                 }
-                self.reset_to_idle(state).await;
+                self.reset_to_idle(state, HookOutcome::Failed).await;
             }
         }
     }
@@ -5103,7 +5288,7 @@ impl Daemon {
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
-                                    self.reset_to_idle(&mut state).await;
+                                    self.reset_to_idle(&mut state, HookOutcome::Empty).await;
                                 }
                                 eager_transcriber = None;
                             }
@@ -5240,7 +5425,7 @@ impl Daemon {
                                     self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                                 } else {
                                     tracing::debug!("Eager recording produced empty result");
-                                    self.reset_to_idle(&mut state).await;
+                                    self.reset_to_idle(&mut state, HookOutcome::Empty).await;
                                 }
                                 eager_transcriber = None;
                             }
@@ -5296,7 +5481,7 @@ impl Daemon {
 
                                 // Run post_output_command to reset compositor submap
                                 if let Some(cmd) = &self.config.output.post_output_command {
-                                    if let Err(e) = output::run_hook(cmd, "post_output").await {
+                                    if let Err(e) = output::run_output_hook(cmd, "post_output", HookOutcome::Cancelled).await {
                                         tracing::warn!("{}", e);
                                     }
                                 }
@@ -5320,7 +5505,7 @@ impl Daemon {
 
                                 // Run post_output_command to reset compositor submap
                                 if let Some(cmd) = &self.config.output.post_output_command {
-                                    if let Err(e) = output::run_hook(cmd, "post_output").await {
+                                    if let Err(e) = output::run_output_hook(cmd, "post_output", HookOutcome::Cancelled).await {
                                         tracing::warn!("{}", e);
                                     }
                                 }
@@ -5560,7 +5745,7 @@ impl Daemon {
                             ).await {
                                 Ok(transcriber) => transcriber,
                                 Err(()) => {
-                                    self.reset_to_idle(&mut state).await;
+                                    self.reset_to_idle(&mut state, HookOutcome::Failed).await;
                                     continue;
                                 }
                             };
@@ -5572,7 +5757,7 @@ impl Daemon {
                                 self.handle_transcription_result(&mut state, Ok(Ok(text))).await;
                             } else {
                                 tracing::debug!("Eager recording timeout produced empty result");
-                                self.reset_to_idle(&mut state).await;
+                                self.reset_to_idle(&mut state, HookOutcome::Empty).await;
                             }
                             eager_transcriber = None;
                         } else {
@@ -5868,27 +6053,7 @@ impl Daemon {
                                         &text
                                     };
                                     let committed = match &edited {
-                                        Some(edited) => {
-                                            let clipboard: Vec<Box<dyn TextOutput>> =
-                                                vec![Box::new(output::clipboard::ClipboardOutput::new(
-                                                    self.config.output.append_text.clone(),
-                                                ))];
-                                            let started = Instant::now();
-                                            let d = self.deliver_edited(s, chain, &clipboard, edited).await;
-                                            if !d.paste.confirmed() && d.result.is_ok() {
-                                                self.report_not_pasted(edited, d.paste, started).await;
-                                            }
-                                            if let Some(v) = d.before_hook.filter(|v| !v.confirmed()) {
-                                                send_notification(
-                                                    "Pasted, Enter not sent",
-                                                    &format!("The output hook did not run: {}.", v.reason()),
-                                                    self.config.output.notification.show_engine_icon,
-                                                    self.config.engine,
-                                                    "normal",
-                                                ).await;
-                                            }
-                                            d.result
-                                        }
+                                        Some(edited) => self.deliver_edit(s, chain, edited).await,
                                         None => {
                                             if self.config.live_preview_active()
                                                 && !modifiers_released(LIVE_TYPING_FINAL_WAIT).await
@@ -5897,7 +6062,13 @@ impl Daemon {
                                             }
                                             let pre = self.config.output.pre_output_command.as_deref();
                                             let post = self.config.output.post_output_command.as_deref();
-                                            s.commit_segment(chain, text, Some(&self.text_processor), pre, post).await
+                                            let started = Instant::now();
+                                            let r = s.commit_segment(chain, text, Some(&self.text_processor), pre, post).await;
+                                            // Live preview sends the whole text as one Final.
+                                            if r.is_ok() && self.config.live_preview_active() {
+                                                self.report_stream_delivery(s, started);
+                                            }
+                                            r
                                         }
                                     };
                                     if let Err(e) = committed {
@@ -5946,7 +6117,7 @@ impl Daemon {
                                 // A dictation started and stopped again without
                                 // speaking: the popup says so, nothing else.
                                 tracing::info!("Streaming session ended with no speech");
-                                crate::osd::outcome::write(crate::osd::outcome::Outcome::Empty);
+                                self.streaming_error = Some(HookOutcome::Empty);
                             } else if self.config.live_preview_active() {
                                 // end_streaming transcribes the audio again
                                 // and reports the outcome.
@@ -5954,6 +6125,7 @@ impl Daemon {
                                 self.streaming_failure = Some(err.to_string());
                             } else {
                                 tracing::error!("Streaming backend error: {}", err);
+                                self.streaming_error = Some(HookOutcome::Failed);
                                 // Not "critical": KDE and GNOME keep critical
                                 // notifications up until they are closed.
                                 send_notification(
@@ -6228,6 +6400,30 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[test]
+    fn a_stream_that_sent_nothing_does_not_read_as_done() {
+        use crate::osd::outcome::Outcome;
+        let (sound, file) = stream_end_signals(HookOutcome::Empty);
+        assert!(matches!(sound, SoundEvent::TranscriptionComplete));
+        assert_eq!(file, Outcome::Empty);
+        let (sound, file) = stream_end_signals(HookOutcome::Failed);
+        assert!(matches!(sound, SoundEvent::Error));
+        assert_eq!(file, Outcome::Failed);
+        let (_, file) = stream_end_signals(HookOutcome::Done);
+        assert_eq!(file, Outcome::Done);
+    }
+
+    #[test]
+    fn a_live_preview_delivery_tells_the_popup_what_went_out() {
+        let d = stream_delivery("wtype", "naïve café", true, Duration::from_millis(42));
+        assert_eq!(d.text, "naïve café");
+        assert_eq!(d.chars, 10);
+        assert_eq!(d.method, "wtype");
+        assert!(d.enter);
+        assert_eq!(d.output_ms, 42);
+        assert_eq!(d.audio_s, None);
+    }
+
     /// Fallback output that records what it was handed.
     struct RecordingOutput {
         got: Arc<std::sync::Mutex<Option<String>>>,
@@ -6253,11 +6449,12 @@ mod tests {
     }
 
     /// Output config whose hooks log to `log`, noting whether `target`
-    /// existed when each ran, so tests can see order relative to the write.
+    /// existed when each ran, so tests can see order relative to the write,
+    /// and the hook's `VOXTYPE_OUTCOME`.
     fn hooked_output_config(log: &Path, target: &Path) -> crate::config::OutputConfig {
         let hook = |name: &str| {
             format!(
-                "if [ -e '{t}' ]; then echo {name}:file >> '{l}'; else echo {name}:nofile >> '{l}'; fi",
+                "if [ -e '{t}' ]; then echo {name}:file:$VOXTYPE_OUTCOME >> '{l}'; else echo {name}:nofile:$VOXTYPE_OUTCOME >> '{l}'; fi",
                 t = target.display(),
                 l = log.display()
             )
@@ -6281,7 +6478,10 @@ mod tests {
         assert_eq!(delivery, FileDelivery::Written);
         assert_eq!(fs::read_to_string(&target).unwrap(), "hello\n");
         // pre ran before the file existed, post after it was written.
-        assert_eq!(fs::read_to_string(&log).unwrap(), "pre:nofile\npost:file\n");
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            "pre:nofile:done\npost:file:done\n"
+        );
     }
 
     /// Lines the hooks of `hooked_output_config` wrote.
@@ -6316,7 +6516,7 @@ mod tests {
             )
             .await
             .unwrap();
-        end_streaming_hook(&cfg, Some(&session)).await;
+        end_streaming_hook(&cfg, Some(&session), HookOutcome::Empty).await;
         assert_eq!(hook_lines(&log), ["pre", "post"]);
     }
 
@@ -6342,8 +6542,28 @@ mod tests {
             )
             .await
             .is_err());
-        end_streaming_hook(&cfg, Some(&session)).await;
+        end_streaming_hook(&cfg, Some(&session), HookOutcome::Empty).await;
         assert_eq!(hook_lines(&log), ["pre", "post"]);
+    }
+
+    /// The post hook at the end of a stream that typed nothing says why, so
+    /// a hook that presses Enter leaves it out.
+    #[tokio::test]
+    async fn the_end_of_stream_hook_gets_the_outcome() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &dir.path().join("none"));
+        for outcome in [
+            HookOutcome::Cancelled,
+            HookOutcome::Empty,
+            HookOutcome::Failed,
+        ] {
+            end_streaming_hook(&cfg, Some(&StreamingSession::new()), outcome).await;
+        }
+        assert_eq!(
+            fs::read_to_string(&log).unwrap(),
+            "post:nofile:cancelled\npost:nofile:empty\npost:nofile:failed\n"
+        );
     }
 
     /// R31: a stream that typed nothing (no speech, a cancel, an error)
@@ -6354,10 +6574,10 @@ mod tests {
         let log = dir.path().join("hooks.log");
         let cfg = hooked_output_config(&log, &dir.path().join("none"));
         let session = StreamingSession::new();
-        end_streaming_hook(&cfg, Some(&session)).await;
+        end_streaming_hook(&cfg, Some(&session), HookOutcome::Empty).await;
         assert_eq!(hook_lines(&log), ["post"]);
         fs::remove_file(&log).unwrap();
-        end_streaming_hook(&cfg, None).await;
+        end_streaming_hook(&cfg, None, HookOutcome::Empty).await;
         assert_eq!(hook_lines(&log), ["post"]);
     }
 
@@ -6386,7 +6606,7 @@ mod tests {
         assert_eq!(got.lock().unwrap().as_deref(), Some("rescue me"));
         assert_eq!(
             fs::read_to_string(&log).unwrap(),
-            "pre:nofile\npost:nofile\n"
+            "pre:nofile:done\npost:nofile:not-pasted\n"
         );
     }
 
@@ -6405,7 +6625,7 @@ mod tests {
         // The post hook runs even when nothing was delivered.
         assert_eq!(
             fs::read_to_string(&log).unwrap(),
-            "pre:nofile\npost:nofile\n"
+            "pre:nofile:done\npost:nofile:failed\n"
         );
     }
 
@@ -6834,6 +7054,7 @@ mod tests {
             text: text.into(),
             sel: (0, 0),
             pause: 1,
+            base: None,
         };
         write_buffer_to(&daemon.edit_link.buffer, &buffer(1, "hello world")).unwrap();
         append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev: 2 }).unwrap();
@@ -6866,6 +7087,7 @@ mod tests {
                 text: "Send this.".into(),
                 sel: (0, 0),
                 pause: 1,
+                base: None,
             },
         )
         .unwrap();
@@ -6919,6 +7141,7 @@ mod tests {
                     text: typed.into(),
                     sel: (0, 0),
                     pause: 1,
+                    base: None,
                 },
             )
             .unwrap();
@@ -6983,6 +7206,7 @@ mod tests {
                 text: "final text\n".into(),
                 sel: (0, 0),
                 pause: 1,
+                base: None,
             },
         )
         .unwrap();
@@ -7003,6 +7227,7 @@ mod tests {
                 text: "stale".into(),
                 sel: (0, 0),
                 pause: 1,
+                base: None,
             },
         )
         .unwrap();
@@ -7028,6 +7253,7 @@ mod tests {
             text: text.into(),
             sel: (0, 0),
             pause,
+            base: None,
         };
         // A snapshot of an earlier pause is not this edit.
         write_buffer_to(&daemon.edit_link.buffer, &snap(0, "stale")).unwrap();
@@ -7068,6 +7294,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_buffer_of_an_earlier_pause_does_not_replace_the_text() {
+        use crate::osd::edit_ipc::{write_buffer_to, EditBuffer};
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("first part");
+        daemon.edit_toggle(&mut state).await;
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        write_buffer_to(
+            &daemon.edit_link.buffer,
+            &EditBuffer {
+                session,
+                rev: 1,
+                text: "first fixed".into(),
+                sel: (0, 0),
+                pause: 1,
+                base: None,
+            },
+        )
+        .unwrap();
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        // More speech, then a second pause the popup has not written yet.
+        link.show("first part and more words");
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        let frozen = link.last().unwrap().frozen;
+        assert!(frozen.ends_with("and more words"), "{frozen}");
+        assert_eq!(daemon.edit_final_text(state.phase()), Some(frozen));
+    }
+
+    /// A stream that fails after a keyboard edit delivers the edited text,
+    /// through the window check, and does not transcribe the audio again.
+    #[tokio::test]
+    async fn a_failed_stream_after_an_edit_delivers_the_edited_text() {
+        let (mut daemon, _rx, _state, _link) = edit_daemon_linked();
+        daemon.edit_link.windows = Arc::new(std::sync::Mutex::new(Box::new(FakeWindows {
+            windows: vec![("a", "term")],
+            actives: [Some("a")].into_iter().collect(),
+            ..Default::default()
+        })));
+        daemon.edit_window = Some(crate::osd::target::Window {
+            id: "a".into(),
+            class: "term".into(),
+        });
+        daemon.transcriber_preloaded = Some(Arc::new(FixedTranscriber("raw words")));
+        daemon.streaming_samples = Some(vec![0.0; 16000]);
+        let pasted = Arc::new(std::sync::Mutex::new(None));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: pasted.clone(),
+            succeed: true,
+        })];
+        let mut session = StreamingSession::new();
+        assert!(
+            daemon
+                .deliver_after_failure(Some("edited text"), Some(&mut session), Some(&chain))
+                .await
+        );
+        assert_eq!(pasted.lock().unwrap().as_deref(), Some("edited text"));
+        assert!(daemon.transcription_task.is_none());
+        // Without an edit the audio is transcribed again, as before.
+        assert!(
+            !daemon
+                .deliver_after_failure(None, Some(&mut session), Some(&chain))
+                .await
+        );
+    }
+
+    /// Enter while the tail settles: the daemon froze "two" after the popup
+    /// last looked, so the popup's text lacks it. The paste still has it.
+    #[tokio::test]
+    async fn words_frozen_after_the_popup_looked_are_kept() {
+        use crate::osd::edit_ipc::{
+            append_cmd_to, write_buffer_to, EditBuffer, EditCmd, FinishMode,
+        };
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("one");
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        let seen = link.last().unwrap().frozen;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        write_buffer_to(
+            &daemon.edit_link.buffer,
+            &EditBuffer {
+                session,
+                rev: 1,
+                text: format!("{seen}!"),
+                sel: (0, 0),
+                pause: 1,
+                base: Some(seen.clone()),
+            },
+        )
+        .unwrap();
+        // The tail settles and is frozen before the Finish is read.
+        link.show("one two");
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let frozen = link.last().unwrap().frozen;
+        let added = frozen.strip_prefix(seen.as_str()).unwrap().to_string();
+        assert!(!added.is_empty(), "{frozen}");
+        append_cmd_to(
+            &daemon.edit_link.cmds,
+            session,
+            EditCmd::Finish {
+                mode: FinishMode::PasteEnter,
+                rev: 1,
+            },
+        )
+        .unwrap();
+        assert!(daemon.edit_handle_commands(&mut state).await);
+        assert_eq!(
+            daemon.edit_final_text(state.phase()),
+            Some(format!("{seen}!{added}"))
+        );
+    }
+
+    #[tokio::test]
     async fn discarding_an_edited_dictation_keeps_its_text() {
         use crate::osd::edit_ipc::{write_buffer_to, EditBuffer};
         use crate::osd::edit_journal::{now_ms, restore_from};
@@ -7086,6 +7431,7 @@ mod tests {
                 text: "typed fix".into(),
                 sel: (0, 0),
                 pause: 1,
+                base: None,
             },
         )
         .unwrap();
@@ -7185,7 +7531,7 @@ mod tests {
             .deliver_edited(&mut session, &chain, &clipboard, "edited text")
             .await;
         d.result.unwrap();
-        end_streaming_hook(&daemon.config.output, Some(&session)).await;
+        end_streaming_hook(&daemon.config.output, Some(&session), HookOutcome::Empty).await;
         let delivered = Delivered {
             verdict: d.paste,
             before_hook: d.before_hook,
@@ -7212,11 +7558,12 @@ mod tests {
     #[tokio::test]
     async fn focus_lost_after_the_paste_skips_the_post_output_hook() {
         use crate::osd::target::Verdict;
-        // Confirmed for the hand-back and the paste; "b" (the same app)
-        // has focus by the time the hook would press Enter.
+        // Confirmed for the hand-back, the paste and after the pre-output
+        // hook; "b" (the same app) has focus by the time the hook would
+        // press Enter.
         let d = deliver_edited_with(
             &[("a", "term"), ("b", "term")],
-            &[Some("a"), Some("a"), Some("b")],
+            &[Some("a"), Some("a"), Some("a"), Some("b")],
             true,
             true,
         )
@@ -7224,6 +7571,25 @@ mod tests {
         assert_eq!(d.verdict, Verdict::Confirmed);
         assert_eq!(d.pasted.as_deref(), Some("edited text"));
         assert_eq!(d.before_hook, Some(Verdict::Mismatch));
+        assert_eq!(d.hooks, "pre\n", "no post-output hook, also not at the end");
+    }
+
+    #[tokio::test]
+    async fn focus_lost_during_the_pre_output_hook_types_nothing() {
+        use crate::osd::target::Verdict;
+        // Confirmed for the hand-back and the paste; the pre-output hook
+        // runs, and then "b" has focus.
+        let d = deliver_edited_with(
+            &[("a", "term"), ("b", "term")],
+            &[Some("a"), Some("a"), Some("b")],
+            true,
+            true,
+        )
+        .await;
+        assert_eq!(d.verdict, Verdict::Mismatch);
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.before_hook, None);
         assert_eq!(d.hooks, "pre\n", "no post-output hook, also not at the end");
     }
 
@@ -7386,7 +7752,7 @@ mod tests {
             .deliver_edited(&mut session, &chain, &clipboard, "edited text")
             .await;
         d.result.unwrap();
-        end_streaming_hook(&daemon.config.output, Some(&session)).await;
+        end_streaming_hook(&daemon.config.output, Some(&session), HookOutcome::Empty).await;
         assert_eq!(d.paste, Verdict::Gone);
         assert_eq!(*pasted.lock().unwrap(), None, "no paste");
         assert_eq!(copied.lock().unwrap().as_deref(), Some("edited text"));

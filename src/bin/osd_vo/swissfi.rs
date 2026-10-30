@@ -14,8 +14,6 @@
 use super::kit::{at, ease_in_out, ease_out, hex, mix, reduced, Levels, Mode};
 use super::*;
 
-use std::sync::OnceLock;
-
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
@@ -83,17 +81,15 @@ struct Fonts {
     mono: u32,
 }
 
-/// The look's fonts, added to the shared registry once. A family that is
+/// The look's fonts, added to `reg` once (`FontRegistry::system`), so
+/// every registry, such as a test's, has its own ids. A family that is
 /// missing falls back to the popup's own fonts.
 fn fonts(reg: &FontRegistry) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |pattern: &str, or: u32| reg.add_system(pattern).unwrap_or(or);
-        Fonts {
-            text: add("Inter", SANS),
-            mono: add("JetBrains Mono:extralight", MONO),
-        }
-    })
+    let add = |pattern: &str, or: u32| reg.system(pattern).unwrap_or(or);
+    Fonts {
+        text: add("Inter", SANS),
+        mono: add("JetBrains Mono:extralight", MONO),
+    }
 }
 
 /// The transcript: a huge tight grotesk.
@@ -101,8 +97,11 @@ pub(crate) fn text_style(look: &Look) -> TextStyle {
     TextStyle::new(fonts(&look.fonts).text, TEXT_PX, TEXT_LINE).tracking(-1.9)
 }
 
+/// The width the transcript is measured at: the width its column wraps at,
+/// so the popup cuts the top line only when the text really runs onto one
+/// more line than it has room for.
 pub(crate) fn text_width(look: &Look) -> f32 {
-    look.width - 2.0 * (PAD_X + TEXT_INSET)
+    wrap_width(look)
 }
 
 /// The width the transcript's column wraps at: the panel less its padding
@@ -686,5 +685,59 @@ impl Popup {
                 .text_style(style)
                 .color(hex(MUTED)),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::moments::edit_scenario;
+    use super::*;
+
+    /// tnhp: at 400 px the popup measured the transcript 5.3 px narrower
+    /// than its column wraps, so it cut the top line one word early. The
+    /// newest line then scrolled up a whole row while it was still the
+    /// reading line (19.4 px off its baseline), and the next word joined it
+    /// there. A dictation of 26 words keeps the reading line on its row.
+    #[test]
+    fn swissfi_cuts_the_top_line_only_when_the_text_needs_the_room() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Swissfi,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        look.set_motion(&cfg.motion);
+        let options = Options {
+            fonts: fonts.clone(),
+            default_motion: default_motion(&look),
+            ..Options::default()
+        };
+        let report = vo::envelope::check_scenario(
+            Popup::new(look.clone(), &fonts),
+            &edit_scenario(&look, 0),
+            30.0,
+            options,
+            &vo::envelope::Envelope {
+                transcript: 0..1 << 20,
+                ..vo::envelope::Envelope::default()
+            },
+        );
+        // Only where the words sit: the first word's entry ink is vo's.
+        let moved: Vec<String> = report
+            .violations
+            .iter()
+            .filter(|v| v.breach.kind() != "ink")
+            .map(|v| {
+                format!(
+                    "t {:.3} word {} {} {:.2}",
+                    v.t,
+                    v.word,
+                    v.breach.kind(),
+                    v.breach.value()
+                )
+            })
+            .collect();
+        assert!(moved.is_empty(), "{moved:?}");
     }
 }

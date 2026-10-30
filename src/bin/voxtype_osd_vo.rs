@@ -17,7 +17,7 @@
 //! screenshots and checks without a daemon or a display.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -168,6 +168,9 @@ mod edit_focus;
 #[path = "osd_vo/edit.rs"]
 mod edit;
 
+#[path = "osd_vo/edit_site.rs"]
+mod edit_site;
+
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;
 
@@ -312,7 +315,8 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     offline: Option<PathBuf>,
 
-    /// Frames per second for `--offline`.
+    /// Frames per second for `--offline`, `--envelope` and `--exit-check`.
+    /// `--envelope` needs at least 15.
     #[arg(long, default_value = "30")]
     fps: f64,
 
@@ -708,6 +712,9 @@ struct Look {
     word_fade: bool,
     /// The live popup names its look in a strip above the panel.
     badge: bool,
+    /// `[osd] keyboard_edit`: the badge strip is there for the edit badge,
+    /// so the popup keeps its size when an edit starts (R53).
+    edit_badge: bool,
     /// `Swiss`, `Showcase` or `Type`; anything else draws swiss.
     theme: OsdTheme,
     /// The icon theme's microphone as a registered path and its viewBox, or `None` to draw
@@ -723,6 +730,9 @@ struct Look {
     /// `no-` entries. Off in `Look::new`, so a station tile keeps exactly
     /// its exhibit's features; `set_motion` turns it on.
     look_set: bool,
+    /// Features switched off while a keyboard edit is pending or under way
+    /// (`edit_site::quiet_list`); empty otherwise.
+    quiet: Arc<[&'static str]>,
 }
 
 /// Letter spacing of a full newest line under type's margin bell (MO-31).
@@ -778,12 +788,14 @@ impl Look {
             stop_hint,
             word_fade: cfg.word_fade,
             badge: cfg.look_badge,
+            edit_badge: cfg.keyboard_edit,
             theme: cfg.theme,
             mic: load_mic_icon(fonts),
             reading_line: (cfg.anchor == OsdAnchor::ReadingLine)
                 .then(|| cfg.reading_line.clamp(0.0, 1.0)),
             features: Arc::from([]),
             look_set: false,
+            quiet: Arc::from([]),
         }
     }
 
@@ -808,6 +820,9 @@ impl Look {
     /// Asked for, or in the current look's set and not taken out. Reads
     /// `self.theme` now, so a look switch mid-show answers the new look.
     fn asked_or_set(&self, name: &str) -> bool {
+        if self.quiet.contains(&name) {
+            return false;
+        }
         self.asked(name)
             || (self.look_set
                 && defaults::in_set(self.theme, name)
@@ -818,6 +833,9 @@ impl Look {
     /// that have motion features.
     #[allow(dead_code)]
     fn on(&self, name: &str) -> bool {
+        if self.quiet.contains(&name) {
+            return false;
+        }
         // MO-75: `look-choice` also turns on the motions this look picks.
         self.asked_or_set(name)
             || (self.asked_or_set(choice::LOOK_CHOICE)
@@ -1121,7 +1139,7 @@ impl Look {
 
     /// Height of the look badge's strip above the panel, or 0 without it.
     fn badge_h(&self) -> f32 {
-        if self.badge {
+        if self.badge || self.edit_badge {
             BADGE_H
         } else {
             0.0
@@ -1219,6 +1237,9 @@ struct Files {
     outcome: Option<Outcome>,
     /// `result.json`: what a typed or pasted dictation delivered.
     delivery: Option<voxtype::osd::outcome::Delivery>,
+    /// `not-pasted`: why the text went to the clipboard only, when the
+    /// target window was not confirmed.
+    not_pasted: Option<String>,
     /// `osd-look`: the last press of the look chord.
     look_step: Option<look_step::Step>,
 }
@@ -1456,6 +1477,14 @@ struct Popup {
     /// text (`osd_vo/edit.rs`).
     edit_layer: edit::EditLayer,
     edit_view: Option<edit::EditView>,
+    /// Words typed or changed by keyboard edits in this dictation, kept
+    /// until the next recording: the looks underline them (plan 4.1).
+    edit_marks: HashSet<vo_core::words::WordId>,
+    /// Edits this popup has shown, for the hint.
+    edit_entries: u32,
+    /// An edit was handed over to be delivered (Enter): the text is final,
+    /// so the quiet list stays on until the next recording.
+    edit_sent: bool,
     /// The text the words were last built from: the preview, or after an
     /// edit the edited text and the speech since.
     source: String,
@@ -1481,6 +1510,9 @@ impl Popup {
             focus: edit_focus::Focus::default(),
             edit_layer: edit::EditLayer::default(),
             edit_view: None,
+            edit_marks: HashSet::new(),
+            edit_entries: 0,
+            edit_sent: false,
             source: String::new(),
             recorder: None,
             measure: vo::ShapedLayout::new(fonts.clone()),
@@ -1576,7 +1608,7 @@ impl Popup {
             // status would read as "Listening", as if a new recording began.
             // After a reported delivery the status says what happened: "Typed".
             let state = match self.delivered() {
-                Some(d) => d.via.label().into(),
+                Some(d) => d.label().into(),
                 None => ending.label().into(),
             };
             return StatusLine {
@@ -1798,13 +1830,19 @@ impl Popup {
             return false;
         };
         let text = buffer.text().to_string();
+        if self.edit_view.is_none() {
+            self.edit_entries += 1;
+        }
         self.model.update(&text);
+        let site = edit_site::site(self.look.theme);
+        let text_box = site.text_box_in(self);
+        let edit_lines = site.edit_lines_in(self);
         let view = self.edit_layer.view(
             buffer,
             &self.measure,
-            self.look.text_style(),
-            self.look.text_width(),
-            self.look.max_lines(),
+            text_box.style,
+            text_box.width,
+            edit_lines,
             t,
         );
         let window = view.start..view.start + view.text.len();
@@ -1813,7 +1851,47 @@ impl Popup {
         // Grows upward by whole lines, never shrinks (R53).
         self.lines = self.lines.max(view.lines);
         self.edit_view = Some(view);
+        self.mark_edits();
         true
+    }
+
+    /// The edit view's marks: the marked words in its window.
+    fn mark_edits(&mut self) {
+        let (Some(view), Some(buffer)) = (
+            self.edit_view.as_mut(),
+            self.edit.as_ref().and_then(|l| l.buffer()),
+        ) else {
+            return;
+        };
+        let window = view.start..view.start + view.text.len();
+        view.decor.marks =
+            edit::mark_ranges(self.model.words(), buffer.text(), window, &self.edit_marks);
+    }
+
+    /// R34: from a pending tap until resume or a cancelled tap, the look's
+    /// quiet list is off. Enter is neither: after it hands the text over
+    /// to be delivered, the list stays off until the next recording, so the
+    /// final text does not take the look's live motion back.
+    fn sync_quiet(&mut self) {
+        use edit_link::Phase;
+        let link = self.edit.as_ref();
+        let phase = link.and_then(|l| l.phase());
+        if phase == Some(Phase::Releasing) && link.is_some_and(|l| l.sending()) {
+            self.edit_sent = true;
+        }
+        let quiet = self.edit_sent
+            || phase.is_some_and(|p| {
+                matches!(
+                    p,
+                    Phase::Pending | Phase::Settling | Phase::Editing | Phase::Detached
+                )
+            });
+        // Made again each time: a look switched mid-edit has its own list.
+        self.look.quiet = if quiet {
+            edit_site::quiet_list(self.look.theme).into()
+        } else {
+            Arc::from([])
+        };
     }
 
     /// The text the look shows when the popup does not own the edit text:
@@ -1827,13 +1905,22 @@ impl Popup {
             .and_then(|l| l.edit.as_ref())
             .filter(|b| !b.frozen.is_empty());
         let preview = &self.files.preview;
+        // Handed back and not yet answered: the daemon's block still has the
+        // text from before the edit, so the buffer stands in for it.
+        let handed_back = self
+            .edit
+            .as_ref()
+            .filter(|l| l.phase() == Some(edit_link::Phase::Releasing))
+            .and_then(|l| l.buffer())
+            .map(|b| b.text());
         match block {
             Some(b) => {
+                let frozen = handed_back.unwrap_or(&b.frozen);
                 let after = voxtype::osd::edit_doc::after_words(preview, b.raw_words).trim();
                 if after.is_empty() {
-                    b.frozen.clone()
+                    frozen.to_string()
                 } else {
-                    format!("{} {after}", b.frozen.trim_end())
+                    format!("{} {after}", frozen.trim_end())
                 }
             }
             None => preview.clone(),
@@ -1912,6 +1999,7 @@ impl App for Popup {
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
         self.arm_cyber_tick(cx);
+        self.arm_dotmatrix_tick(cx);
     }
 
     fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
@@ -1963,6 +2051,12 @@ impl App for Popup {
                     self.event_at = t;
                 }
                 self.extra.files(&self.files, &files, t);
+                if files.recording && !self.files.recording {
+                    // A new recording: the last dictation's edit marks go,
+                    // and its look's motion comes back.
+                    self.edit_marks.clear();
+                    self.edit_sent = false;
+                }
                 self.was_recording |= files.recording;
                 self.was_finishing |= files.transcribing || (files.finishing && !files.recording);
                 self.files = files;
@@ -1980,6 +2074,7 @@ impl App for Popup {
                     link.sync(self.files.live.as_ref().and_then(|l| l.edit.as_ref()));
                     self.focus.follow(link, cx, t);
                 }
+                self.sync_quiet();
                 let editing = self.edit_text(t);
                 let source = self.source_text();
                 if !editing && source != self.source {
@@ -2065,6 +2160,7 @@ impl App for Popup {
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
         self.arm_cyber_tick(cx);
+        self.arm_dotmatrix_tick(cx);
         self.pace = self.room_tone_pace(t);
         if !tick && self.idle(t) {
             tracing::info!(
@@ -2098,6 +2194,7 @@ impl App for Popup {
     }
 
     fn key(&mut self, ev: &vo::scene::input::KeyEvent, cx: &mut Cx<Msg>) -> bool {
+        let text_box = edit_site::site(self.look.theme).text_box_in(self);
         let Some(link) = self.edit.as_mut() else {
             return false;
         };
@@ -2106,15 +2203,28 @@ impl App for Popup {
             Some(b) if self.edit_view.is_some() => Some(self.edit_layer.shaped(
                 b.text(),
                 &self.measure,
-                self.look.text_style(),
-                self.look.text_width(),
+                text_box.style,
+                text_box.width,
             ) as &dyn vo_core::edit::Lines),
             _ => None,
         };
+        let before: HashSet<vo_core::words::WordId> =
+            self.model.words().iter().map(|w| w.id).collect();
         let used = self.focus.key(ev, link, lines);
         self.focus.follow(link, cx, ev.t);
         if used {
-            self.edit_text(ev.t);
+            self.sync_quiet();
+            if self.edit_text(ev.t) {
+                // A word the key made or changed has a new id.
+                let new = self
+                    .model
+                    .words()
+                    .iter()
+                    .map(|w| w.id)
+                    .filter(|id| !before.contains(id));
+                self.edit_marks.extend(new);
+                self.mark_edits();
+            }
         }
         used
     }
@@ -2124,6 +2234,8 @@ impl App for Popup {
             let t = cx.t();
             self.focus.changed(gained, requested, link, t);
             self.focus.follow(link, cx, t);
+            self.sync_quiet();
+            self.edit_text(t);
         }
     }
 
@@ -2141,12 +2253,22 @@ impl App for Popup {
         // the old look whole at once: no exit of it, its status row
         // included, draws over the new look.
         let look = match &self.edit_view {
-            Some(v) => look.map_live_texts(&mut |e| {
-                e.live_source(v.text.clone())
-                    .edit(v.decor.clone())
-                    .still_motion(true)
-            }),
+            Some(v) => edit_site::site(self.look.theme).place(&self.look, look, v),
+            // A pending tap or a detached edit: still, before and after.
+            None if !self.look.quiet.is_empty() => {
+                look.map_live_texts(&mut |e| e.still_motion(true))
+            }
             None => look,
+        };
+        // Edited words stay underlined until delivery.
+        let look = match &self.edit_view {
+            None if !self.edit_marks.is_empty() => edit_site::place_marks(
+                edit_site::site(self.look.theme),
+                &self.look,
+                look,
+                &self.edit_marks,
+            ),
+            _ => look,
         };
         let look = correction_note::dim(look, self.correction_view());
         let look = Element::column(format!("look-{:?}", self.look.theme)).child(look);
@@ -2158,11 +2280,13 @@ impl App for Popup {
                 .child(look),
             None => look,
         };
-        let root = if self.live_surface && self.look.badge {
-            Element::column("badged")
-                .pad_edges(BADGE_H, 0.0, 0.0, 0.0)
-                .child(self.look_badge())
-                .child(root)
+        let root = if self.live_surface && (self.look.badge || self.look.edit_badge) {
+            let strip = Element::column("badged").pad_edges(BADGE_H, 0.0, 0.0, 0.0);
+            match self.look_badge() {
+                Some(badge) => strip.child(badge),
+                None => strip,
+            }
+            .child(root)
         } else {
             root
         };
@@ -2176,15 +2300,27 @@ const BADGE_H: f32 = 22.0;
 impl Popup {
     /// "3/20 Type": the look's place in the look chord's list and its
     /// name, small and dim at the strip's left, so a chord press shows
-    /// where it landed.
-    fn look_badge(&self) -> Element<Msg> {
+    /// where it landed. With a keyboard edit, the edit's state after it,
+    /// and while editing the keys' hint. None when it has nothing to say.
+    fn look_badge(&self) -> Option<Element<Msg>> {
         let theme = self.look.theme;
         let name = format!("{theme:?}");
-        let text = match OsdTheme::VO_LOOKS.iter().position(|t| *t == theme) {
-            Some(i) => format!("{}/{}  {name}", i + 1, OsdTheme::VO_LOOKS.len()),
-            None => name,
+        let look =
+            self.look.badge.then(
+                || match OsdTheme::VO_LOOKS.iter().position(|t| *t == theme) {
+                    Some(i) => format!("{}/{}  {name}", i + 1, OsdTheme::VO_LOOKS.len()),
+                    None => name,
+                },
+            );
+        let (edit, dim) = self.edit_badge().unzip();
+        let text = match (look, edit) {
+            (Some(l), Some(e)) => format!("{l} \u{b7} {e}"),
+            (Some(l), None) => l,
+            (None, Some(e)) => e.to_string(),
+            (None, None) => return None,
         };
-        Element::row(format!("look-badge-{theme:?}"))
+        let ink = |a: f32| Color::rgba(1.0, 1.0, 1.0, a);
+        let mut row = Element::row(format!("look-badge-{theme:?}"))
             .align_items(AlignItems::CENTER)
             .pad_edges(2.0, 7.0, 2.0, 7.0)
             .radius(4.0)
@@ -2197,10 +2333,50 @@ impl Popup {
             .child(
                 Element::label("look-badge-text", text)
                     .text_style(TextStyle::new(SANS, 11.0, 15.0).tracking(0.3))
-                    .color(Color::rgba(1.0, 1.0, 1.0, 0.82)),
-            )
+                    .color(ink(if dim == Some(true) { 0.45 } else { 0.82 })),
+            );
+        if let Some(a) = self.edit_hint() {
+            row = row.child(
+                Element::label("edit-hint", EDIT_HINT)
+                    .text_style(TextStyle::new(SANS, 11.0, 15.0).tracking(0.3))
+                    .color(ink(a))
+                    .pad_edges(0.0, 0.0, 0.0, 10.0),
+            );
+        }
+        Some(row)
+    }
+
+    /// The edit's state for the badge, and whether it is dimmed (plan
+    /// section 2.1): a dimmed "EDIT" while a tap is pending, so keys typed
+    /// then are known to go to the app (K7).
+    fn edit_badge(&self) -> Option<(&'static str, bool)> {
+        use edit_link::Phase;
+        let link = self.edit.as_ref()?;
+        Some(match link.phase()? {
+            Phase::Listening => return None,
+            Phase::Pending => ("EDIT", true),
+            Phase::Settling => ("EDIT \u{b7} settling", false),
+            Phase::Editing => ("EDIT \u{b7} paused", false),
+            Phase::Detached => ("paused \u{b7} Shift to edit", false),
+            Phase::Releasing if link.sending() => ("sending", false),
+            Phase::Releasing => ("listening", false),
+        })
+    }
+
+    /// The hint's ink while editing, for the first [`EDIT_HINT_USES`]
+    /// edits this popup has shown, fading with each; None after them.
+    fn edit_hint(&self) -> Option<f32> {
+        let n = self.edit_entries;
+        let editing = self.edit.as_ref().and_then(|l| l.phase()) == Some(edit_link::Phase::Editing);
+        (editing && (1..=EDIT_HINT_USES).contains(&n))
+            .then(|| 0.7 * (EDIT_HINT_USES + 1 - n) as f32 / EDIT_HINT_USES as f32)
     }
 }
+
+/// The keys' hint beside the edit badge.
+const EDIT_HINT: &str = "Shift: listen \u{b7} Enter: send";
+/// Edits that show the hint, each fainter than the last.
+const EDIT_HINT_USES: u32 = 3;
 
 impl Popup {
     /// The look chord was pressed: show the next (or previous) look at
@@ -2557,6 +2733,7 @@ fn read_files() -> Files {
         transcribing: state.trim() == "transcribing" && state_fresh,
         outcome: voxtype::osd::outcome::read(),
         delivery: voxtype::osd::outcome::read_delivery(),
+        not_pasted: voxtype::osd::outcome::read_not_pasted(),
         finishing,
         suppressed: dir.join("osd_suppressed").exists(),
         preview: std::fs::read_to_string(VoxtypeConfig::live_preview_path())
@@ -2842,6 +3019,14 @@ fn prewarm(
 }
 
 fn warm_frames(look: Look, fonts: FontRegistry) -> vo::WarmFrames {
+    // The scripted dictation ends and delivers like a real one; its log
+    // lines would read as a real delivery.
+    tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+        warm_frames_quietly(look, fonts)
+    })
+}
+
+fn warm_frames_quietly(look: Look, fonts: FontRegistry) -> vo::WarmFrames {
     let size = look.surface();
     let options = || Options {
         fonts: fonts.clone(),
@@ -3344,6 +3529,43 @@ fn cut_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The warm-up's scripted dictation logs nothing, so the log shows only
+    /// real dictations ending and delivering.
+    #[test]
+    fn the_warm_up_logs_nothing() {
+        use std::io::Write;
+        #[derive(Clone, Default)]
+        struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let cfg = OsdConfig::default();
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        let buf = Buf::default();
+        let sink = buf.clone();
+        let logger = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || sink.clone())
+            .finish();
+        let frames = tracing::subscriber::with_default(logger, || {
+            tracing::info!("the logger works");
+            warm_frames(look, fonts)
+        });
+        assert!(!frames.lists.is_empty());
+        let log = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("the logger works"), "{log}");
+        assert!(!log.contains("delivered"), "{log}");
+        assert!(!log.contains("dictation ended"), "{log}");
+    }
 
     #[test]
     fn only_presses_while_the_popup_shows_step_the_look() {

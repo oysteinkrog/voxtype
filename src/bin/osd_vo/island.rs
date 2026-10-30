@@ -153,15 +153,14 @@ struct Fonts {
     medium: u32,
 }
 
+/// The look's fonts, added to `reg` once (`FontRegistry::system`), so
+/// every registry, such as a test's, has its own ids.
 fn fonts(reg: &FontRegistry) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |pattern: &str, or: u32| reg.add_system(pattern).unwrap_or(or);
-        Fonts {
-            text: add("Nunito:semibold", SANS),
-            medium: add("Nunito:medium", SANS),
-        }
-    })
+    let add = |pattern: &str, or: u32| reg.system(pattern).unwrap_or(or);
+    Fonts {
+        text: add("Nunito:semibold", SANS),
+        medium: add("Nunito:medium", SANS),
+    }
 }
 
 fn reduced() -> bool {
@@ -742,6 +741,12 @@ impl Popup {
         }
     }
 
+    /// The text is edited, or was and is sent: the card shows it as one
+    /// text with the edit caret, until the next recording.
+    fn island_editing(&self) -> bool {
+        self.edit_view.is_some() || self.edit_sent
+    }
+
     /// Lines the words take in the pill.
     fn pill_lines(&self) -> u32 {
         let text = self
@@ -992,8 +997,9 @@ impl Popup {
             Vec::new()
         };
 
-        // The caret after the newest word, in the card.
-        let caret = if card && mode == Mode::Listening {
+        // The caret after the newest word, in the card. While editing the
+        // edit caret, in the same blue, takes its place (`IslandSite`).
+        let caret = if card && mode == Mode::Listening && !self.island_editing() {
             let style = card_style(l);
             let room = self.island_room(text_w, &style);
             self.island_last_line(&self.shown[..room], text_w, &style)
@@ -1259,7 +1265,12 @@ impl Popup {
     fn island_room(&self, w: f32, style: &TextStyle) -> usize {
         let s = &self.island;
         let all = self.shown.len();
-        if reduced() || s.shape.at(self.extra.now).h >= s.shape.to.h - ROOM_GAP {
+        // While editing every window word draws, or the caret could sit past
+        // the last drawn word.
+        if reduced()
+            || self.edit_view.is_some()
+            || s.shape.at(self.extra.now).h >= s.shape.to.h - ROOM_GAP
+        {
             return all;
         }
         let fits = |n: usize| {
@@ -1340,6 +1351,17 @@ impl Popup {
         if self.delivered().is_some() {
             // The hand-off lays out all the words itself, in one block.
             text = text.child(self.island_handoff(Element::column("handed"), &style, w));
+        } else if self.island_editing() {
+            // While editing and after it the text is one text in white, in
+            // the node the older lines had, so no line fades in from
+            // nothing, nor when the edit ends.
+            text = text.child(at(
+                live("old".into(), words, style, hex(WHITE))
+                    .word_enter(Transition::NONE)
+                    .width(w),
+                0.0,
+                0.0,
+            ));
         } else {
             text = text
                 .child(at(
@@ -1447,4 +1469,104 @@ fn card_h(lines: u32, bar: bool) -> f32 {
         + 13.0
         + CARD_STATUS
         + if bar { 14.0 } else { 0.0 }
+}
+
+/// Island's edit adapter (plan section 4.5): the capsule keeps its form,
+/// so in the pill the window is the pill's lines in the pill's text box,
+/// and in the card the card's. The card's blue caret is the edit caret.
+/// Its word bulge and lean pace are in the quiet list.
+pub(crate) struct IslandSite;
+
+impl edit_site::EditSite for IslandSite {
+    fn text_box_in(&self, p: &Popup) -> edit_site::TextBox {
+        if p.island.card {
+            edit_site::TextBox {
+                style: card_style(&p.look),
+                width: text_width(&p.look),
+            }
+        } else {
+            edit_site::TextBox {
+                style: pill_style(&p.look),
+                width: pill_text_w(WIDTH),
+            }
+        }
+    }
+
+    fn edit_lines_in(&self, p: &Popup) -> u32 {
+        if p.island.card {
+            CARD_LINES
+        } else {
+            PILL_LINES
+        }
+    }
+
+    fn caret(&self, _look: &Look) -> edit_site::CaretStyle {
+        edit_site::CaretStyle {
+            caret: vo::scene::flow::Caret {
+                color: Some(hex(BLUE)),
+                ..vo::scene::flow::Caret::default()
+            },
+            selection: Color::hex(BLUE, 0.35),
+            mark: hex(BLUE),
+        }
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::swiss_look::edit_check::{envelope, Rig};
+    use super::{hex, BLUE, PILL_LINES};
+    use vo_core::edit::EditAction;
+    use voxtype::osd::config::OsdTheme;
+
+    /// M7.L5: Island edits in its own layout, in the card. With the caret
+    /// on the newest, a middle and the top line, at both widths: the caret
+    /// on its glyph within 1 px in every frame, the popup's size unchanged,
+    /// and the golden `tests/fixtures/osd-vo/edit-island.txt`.
+    #[test]
+    fn island_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Island, "island");
+    }
+
+    /// M7.L5: the edit moment keeps the reading-line envelope (R35).
+    #[test]
+    fn island_edits_within_the_envelope() {
+        envelope(OsdTheme::Island, "island");
+    }
+
+    /// The card's blue caret gives way to the edit caret in the same blue.
+    #[test]
+    fn island_edits_with_one_blue_caret() {
+        let mut r = Rig::new(OsdTheme::Island, false);
+        // The card's caret shows while listening.
+        r.p.files.recording = true;
+        r.dictate(160);
+        // A word just came: the caret is solid, not in its slow blink.
+        r.p.island.word_at = 0.9;
+        r.show(0.9);
+        assert_eq!(r.carets(hex(BLUE)), 1, "the card's caret");
+        r.enter(1.0);
+        assert_eq!(r.carets(hex(BLUE)), 1, "the edit caret only");
+    }
+
+    /// In the pill the capsule keeps its form: the window is the pill's
+    /// lines, at most `PILL_LINES`, in the pill's text box, and the caret
+    /// stands on its glyph.
+    #[test]
+    fn island_edits_in_the_pill() {
+        let mut r = Rig::new(OsdTheme::Island, false);
+        r.dictate(8);
+        assert!(!r.p.island.card, "a short text is in the pill");
+        let before = r.size();
+        r.enter(1.0);
+        assert!(!r.p.island.card, "the pill stays");
+        assert_eq!(r.size(), before);
+        r.caret_follows(1.0, 1.5, "pill, entered");
+        let more = " more words to fill the pill";
+        r.act(EditAction::Insert(more.into()), 1.5);
+        r.caret_follows(1.5, 2.1, "pill, typed");
+        let v = r.p.edit_view.as_ref().unwrap();
+        assert!(v.lines <= PILL_LINES, "{} lines", v.lines);
+        assert!(!r.p.island.card);
+    }
 }

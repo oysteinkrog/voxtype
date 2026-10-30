@@ -54,6 +54,21 @@ pub struct EditBuffer {
     /// The [`EditBlock::pause`] the popup was editing.
     #[serde(default)]
     pub pause: u32,
+    /// The daemon's frozen text the buffer has taken in. Words the daemon
+    /// froze after it are not in `text` yet ([`with_unseen`]). None from a
+    /// popup that does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+}
+
+/// The popup's `text` with the words the daemon froze after the popup last
+/// saw its frozen text (`base`), added at the end as the popup adds a
+/// settled tail. `frozen` is the daemon's frozen text now.
+pub fn with_unseen(text: &str, base: Option<&str>, frozen: &str) -> String {
+    match base.and_then(|base| frozen.strip_prefix(base)) {
+        Some(added) => format!("{text}{added}"),
+        None => text.to_string(),
+    }
 }
 
 /// How a finish delivers the text.
@@ -179,13 +194,33 @@ impl CmdReader {
         );
         // In order: nothing passes a command still waiting.
         let mut ready = Vec::new();
-        while let Some(accepted) = self
-            .queue
-            .front()
-            .and_then(|&cmd| accept(cmd, session, buffer))
-        {
+        while let Some(&cmd) = self.queue.front() {
+            if let Some(accepted) = accept(cmd, session, buffer) {
+                self.queue.pop_front();
+                ready.push(accepted);
+                continue;
+            }
+            // The buffer moved past the command's revision, so it can never
+            // hold it again: waiting would block every later command. The
+            // popup wrote again after a Finish (deliver what it has now),
+            // or after a Resume a tap already acted on (drop it).
+            let Some(b) = buffer.filter(|b| b.session == session) else {
+                break;
+            };
+            match cmd {
+                EditCmd::Finish { mode, rev } if rev < b.rev => {
+                    tracing::warn!(rev, now = b.rev, "Edit finish for an old revision");
+                    ready.push(Accepted::Finish {
+                        mode,
+                        text: b.text.clone(),
+                    });
+                }
+                EditCmd::Resume { rev } if rev < b.rev => {
+                    tracing::warn!(rev, now = b.rev, "Edit resume for an old revision dropped");
+                }
+                _ => break,
+            }
             self.queue.pop_front();
-            ready.push(accepted);
         }
         ready
     }
@@ -226,6 +261,7 @@ mod tests {
             text: text.into(),
             sel: (text.len(), text.len()),
             pause: 1,
+            base: None,
         }
     }
 
@@ -353,6 +389,47 @@ mod tests {
             None
         );
         assert_eq!(accept(EditCmd::Resume { rev: 7 }, 1, None), None);
+    }
+
+    /// A command whose revision the buffer has moved past does not block
+    /// the queue: a Finish delivers the newer text, a Resume is dropped.
+    #[test]
+    fn a_command_for_a_revision_moved_past_does_not_block() {
+        let dir = TempDir::new().unwrap();
+        let cmds = dir.path().join("edit-cmd");
+        let mut reader = CmdReader::default();
+        append_cmd_to(&cmds, 1, EditCmd::Resume { rev: 2 }).unwrap();
+        append_cmd_to(&cmds, 1, EditCmd::ProxyClosed).unwrap();
+        let b = buffer(1, 3, "newer");
+        assert_eq!(reader.poll(&cmds, 1, Some(&b)), [Accepted::ProxyClosed]);
+        append_cmd_to(
+            &cmds,
+            1,
+            EditCmd::Finish {
+                mode: FinishMode::Paste,
+                rev: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            reader.poll(&cmds, 1, Some(&b)),
+            [Accepted::Finish {
+                mode: FinishMode::Paste,
+                text: "newer".into()
+            }]
+        );
+        // A buffer of another dictation answers nothing.
+        append_cmd_to(&cmds, 1, EditCmd::Resume { rev: 1 }).unwrap();
+        assert_eq!(reader.poll(&cmds, 1, Some(&buffer(2, 9, "other"))), []);
+    }
+
+    #[test]
+    fn words_frozen_after_the_popup_looked_are_added() {
+        assert_eq!(with_unseen("one!", Some("one"), "one two"), "one! two");
+        assert_eq!(with_unseen("one!", Some("one"), "one"), "one!");
+        // No base, or a frozen text that is not an extension of it.
+        assert_eq!(with_unseen("one!", None, "one two"), "one!");
+        assert_eq!(with_unseen("one!", Some("uno"), "one two"), "one!");
     }
 
     #[test]

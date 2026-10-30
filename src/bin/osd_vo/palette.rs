@@ -518,9 +518,10 @@ impl Popup {
             .child(gear)
     }
 
-    /// The words the engine is unsure of, as long as no final pass began.
+    /// The words the engine is unsure of, as long as no final pass began
+    /// and the text is not being edited.
     fn palette_unsure(&self) -> Vec<u32> {
-        if self.extra.finish_at.is_some() {
+        if self.extra.finish_at.is_some() || self.edit_view.is_some() {
             return Vec::new();
         }
         self.shown
@@ -565,7 +566,7 @@ impl Popup {
             ));
         // Once earlier lines are cut, the "…" hangs in the left margin, so the
         // cut moves the text by exactly one line and no row reflows.
-        if self.cut > 0 && !self.shown.is_empty() && self.delivered().is_none() {
+        if self.text_above() && !self.shown.is_empty() && self.delivered().is_none() {
             let w = self.measure.layout("…", &style, None).size.w.ceil();
             text = text.child(at(
                 Element::label("ellipsis", "…")
@@ -620,8 +621,9 @@ impl Popup {
             text = text.child(at(tint, first.pos.x, top));
         }
         // The caret after the last word: it jumps as a text field's does and
-        // blinks once the words stop coming.
-        if !matches!(mode, Mode::Done | Mode::Cancelled) {
+        // blinks once the words stop coming. While editing, the edit caret
+        // in the same violet takes its place (`PaletteSite`).
+        if !matches!(mode, Mode::Done | Mode::Cancelled) && self.edit_view.is_none() {
             let (x, y) = match laid.glyphs.last() {
                 Some(g) => {
                     let tail = joined.get(g.cluster as usize..).unwrap_or("");
@@ -766,5 +768,58 @@ impl Popup {
                 _ => row.child(grey(format!("detail-{state}"), &detail)),
             },
         }
+    }
+}
+
+/// Palette's edit adapter (plan section 4.5): its violet caret is the edit
+/// caret.
+pub(crate) struct PaletteSite;
+
+impl edit_site::EditSite for PaletteSite {
+    fn caret(&self, _look: &Look) -> edit_site::CaretStyle {
+        edit_site::CaretStyle {
+            caret: vo::scene::flow::Caret {
+                width: 2.4,
+                color: Some(hex(VIOLET)),
+                ..vo::scene::flow::Caret::default()
+            },
+            selection: Color::hex(VIOLET, 0.35),
+            mark: hex(VIOLET),
+        }
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::swiss_look::edit_check::{envelope, Rig};
+    use super::{hex, VIOLET};
+    use voxtype::osd::config::OsdTheme;
+
+    /// M7.L4: Palette edits in its own layout, its violet caret as the edit caret, its unsure-word wave and tint off, the margin "…" while text is above. With the caret on the
+    /// newest, a middle and the top line, at both widths: the caret on its
+    /// glyph within 1 px in every frame, the popup's size unchanged, and the
+    /// golden `tests/fixtures/osd-vo/edit-palette.txt`.
+    #[test]
+    fn palette_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Palette, "palette");
+    }
+
+    /// The look's violet caret after the last word gives way to the edit
+    /// caret in the same violet: one caret shows.
+    #[test]
+    fn palette_edits_with_one_violet_caret() {
+        for wide in [false, true] {
+            let mut r = Rig::new(OsdTheme::Palette, wide);
+            r.dictate(160);
+            assert_eq!(r.carets(hex(VIOLET)), 1, "the look's caret");
+            r.enter(1.0);
+            assert_eq!(r.carets(hex(VIOLET)), 1, "the edit caret only");
+        }
+    }
+
+    /// M7.L4: the edit moment keeps the reading-line envelope (R35).
+    #[test]
+    fn palette_edits_within_the_envelope() {
+        envelope(OsdTheme::Palette, "palette");
     }
 }

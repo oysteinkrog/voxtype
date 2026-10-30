@@ -528,7 +528,11 @@ fn render(live: &mut Live, fresh: bool) {
             .zip(details.unwrap_or_else(|| vec![None; n]))
             .collect();
         let shown = if fresh {
-            correction::overlay(raw)
+            // The audio clock: how far the live model has decoded, from its
+            // newest frame, or its newest word without signals.
+            let newest = words.last().map_or(0.0, |w| w.end);
+            let decoded = live.signals.frames.last().map_or(0.0, |f| f.t + 0.08);
+            correction::overlay(raw, decoded.max(newest))
         } else {
             correction::current()
         };

@@ -118,17 +118,16 @@ struct Fonts {
 /// Oswald Light, the closest free match to the concept's condensed face,
 /// Barlow for the small labels and IBM Plex Sans JP for the side labels
 /// (2.4 MB, where Noto Sans CJK is 19 MB; any Japanese face when missing),
-/// or the look's own sans when one is not installed.
+/// or the look's own sans when one is not installed. Added to the look's
+/// registry once (`FontRegistry::system`), so every registry, such as a
+/// test's, has its own ids.
 fn fonts(look: &Look) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |family: &str| look.fonts.add_system(family).unwrap_or(SANS);
-        Fonts {
-            text: add("Oswald:light"),
-            small: add("Barlow:regular"),
-            jp: add("IBM Plex Sans JP:regular:lang=ja"),
-        }
-    })
+    let add = |family: &str| look.fonts.system(family).unwrap_or(SANS);
+    Fonts {
+        text: add("Oswald:light"),
+        small: add("Barlow:regular"),
+        jp: add("IBM Plex Sans JP:regular:lang=ja"),
+    }
 }
 
 /// Sizes in logical pixels, from the concept's.
@@ -903,5 +902,26 @@ mod tests {
             assert!(p.x >= FRAME - 1e-3 && p.x <= CONCEPT_W - FRAME + 1e-3);
             assert!(p.y >= FRAME - 1e-3 && p.y <= 430.0 + 1e-3);
         }
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::swiss_look::edit_check::{envelope, Rig};
+    use voxtype::osd::config::OsdTheme;
+
+    /// M7.L2: Amber edits in its own layout, its wipe-in and margin bell off, its text box at the scaled `TEXT_X` and `TEXT_TOP`. With the caret on the
+    /// newest, a middle and the top line, at both widths: the caret on its
+    /// glyph within 1 px in every frame, the popup's size unchanged, and the
+    /// golden `tests/fixtures/osd-vo/edit-amber.txt`.
+    #[test]
+    fn amber_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Amber, "amber");
+    }
+
+    /// M7.L2: the edit moment keeps the reading-line envelope (R35).
+    #[test]
+    fn amber_edits_within_the_envelope() {
+        envelope(OsdTheme::Amber, "amber");
     }
 }

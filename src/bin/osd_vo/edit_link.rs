@@ -77,7 +77,8 @@ pub(crate) enum Change {
 /// The popup's edit state for one dictation.
 #[derive(Debug, Default)]
 pub(crate) struct EditLink {
-    paths: Paths,
+    /// None for a link that reads and writes no files (`EditLink::offline`).
+    paths: Option<Paths>,
     session: u64,
     pause: u32,
     phase: Option<Phase>,
@@ -96,14 +97,28 @@ pub(crate) struct EditLink {
     /// finish, focus lost). The popup's phase stands until the daemon
     /// publishes another.
     ahead_of: Option<Phase>,
+    /// The popup last handed the text back to be delivered, not to listen
+    /// again: the badge says "sending" while releasing.
+    sending: bool,
+    /// The pause whose text the popup handed back (resume or finish). A
+    /// block that still gives it the text of that pause was written before
+    /// the daemon read the hand-back: taking it would make the text
+    /// editable again and write a revision the hand-back does not name.
+    handed_back: Option<u32>,
 }
 
 impl EditLink {
     pub(crate) fn new(paths: Paths) -> EditLink {
         EditLink {
-            paths,
+            paths: Some(paths),
             ..EditLink::default()
         }
+    }
+
+    /// A link that reads and writes no files, for scripted moments
+    /// (`--moment edit`): the daemon's side comes from the script.
+    pub(crate) fn offline() -> EditLink {
+        EditLink::default()
     }
 
     pub(crate) fn phase(&self) -> Option<Phase> {
@@ -112,6 +127,11 @@ impl EditLink {
 
     pub(crate) fn buffer(&self) -> Option<&EditBuffer> {
         self.buffer.as_ref()
+    }
+
+    /// The text was handed back to be delivered (Enter), not to listen.
+    pub(crate) fn sending(&self) -> bool {
+        self.sending
     }
 
     pub(crate) fn tail(&self) -> &str {
@@ -134,6 +154,13 @@ impl EditLink {
             self.rev = 0;
         }
         let phase = Phase::parse(&block.phase);
+        let owns = phase.is_some_and(Phase::owns_text);
+        if owns && self.handed_back == Some(block.pause) {
+            return Change::Nothing;
+        }
+        if !owns || self.handed_back != Some(block.pause) {
+            self.handed_back = None;
+        }
         if phase.is_some() && phase == self.ahead_of {
             return Change::Nothing;
         }
@@ -169,6 +196,7 @@ impl EditLink {
     fn leave(&mut self) -> Change {
         self.phase = None;
         self.ahead_of = None;
+        self.handed_back = None;
         self.tail.clear();
         self.written = None;
         if self.buffer.take().is_some() {
@@ -187,7 +215,10 @@ impl EditLink {
             // A new pause of a running popup: the frozen text holds the
             // last edit and the speech since; an undo floor starts here.
             buffer.seed(block.frozen.clone());
-        } else if let Some(snap) = edit_ipc::read_buffer_from(&self.paths.buffer)
+        } else if let Some(snap) = self
+            .paths
+            .as_ref()
+            .and_then(|p| edit_ipc::read_buffer_from(&p.buffer))
             .filter(|b| b.session == block.session && b.pause == block.pause)
         {
             let mut buffer = EditBuffer::new(snap.text);
@@ -199,10 +230,18 @@ impl EditLink {
             self.rev = self.rev.max(snap.rev);
             self.written = Some((buffer.rev(), buffer.selection()));
             self.buffer = Some(buffer);
+            // The tail the daemon froze while no popup ran is not in the
+            // file: seeded from what the file took in, it is added below.
+            if let Some(base) = snap.base {
+                self.seeded = base;
+            }
         } else {
             self.buffer = Some(EditBuffer::new(block.frozen.clone()));
         }
         self.write();
+        if block.frozen != self.seeded {
+            self.add_tail(&block.frozen);
+        }
     }
 
     /// The tail settled: the frozen text grew at its end. The buffer gets
@@ -262,15 +301,23 @@ impl EditLink {
             text: buffer.text().to_string(),
             sel: (now.1.anchor, now.1.focus),
             pause: self.pause,
+            base: Some(self.seeded.clone()),
         };
-        match edit_ipc::write_buffer_to(&self.paths.buffer, &snap) {
+        let Some(paths) = &self.paths else {
+            self.written = Some(now);
+            return;
+        };
+        match edit_ipc::write_buffer_to(&paths.buffer, &snap) {
             Ok(()) => self.written = Some(now),
             Err(e) => tracing::warn!("could not write the edit buffer: {e}"),
         }
     }
 
     fn send(&mut self, cmd: EditCmd) {
-        if let Err(e) = edit_ipc::append_cmd_to(&self.paths.cmds, self.session, cmd) {
+        let Some(paths) = &self.paths else {
+            return;
+        };
+        if let Err(e) = edit_ipc::append_cmd_to(&paths.cmds, self.session, cmd) {
             tracing::warn!("could not send {cmd:?} to the daemon: {e}");
         }
     }
@@ -290,6 +337,8 @@ impl EditLink {
         if self.buffer.is_some() {
             self.write();
             self.send(EditCmd::Resume { rev: self.rev });
+            self.sending = false;
+            self.handed_back = Some(self.pause);
             self.move_on(Phase::Releasing);
         }
     }
@@ -302,6 +351,8 @@ impl EditLink {
                 mode,
                 rev: self.rev,
             });
+            self.sending = true;
+            self.handed_back = Some(self.pause);
             self.move_on(Phase::Releasing);
         }
     }
@@ -400,6 +451,68 @@ mod tests {
         let after = read_buffer_from(&dir.path().join("edit-buffer.json")).unwrap();
         assert_eq!(after.rev, before + 1);
         assert_eq!(after.text, "hell!o world");
+    }
+
+    /// Enter while the tail settles: the daemon's next block (Editing, with
+    /// the tail frozen) was written before it read the Finish. The popup
+    /// does not take the text back, writes nothing, and the daemon accepts
+    /// the Finish.
+    #[test]
+    fn a_late_block_does_not_take_the_text_back_after_enter() {
+        let dir = TempDir::new().unwrap();
+        let mut link = EditLink::new(paths(&dir));
+        link.sync(Some(&block("settling", "one", 1)));
+        act(&mut link, EditAction::Insert("!".into()));
+        link.finish(FinishMode::PasteEnter);
+        let rev = read_buffer_from(&dir.path().join("edit-buffer.json"))
+            .unwrap()
+            .rev;
+        assert_eq!(
+            link.sync(Some(&block("editing", "one two", 1))),
+            Change::Nothing
+        );
+        assert!(!link.editable());
+        assert_eq!(link.phase(), Some(Phase::Releasing));
+        let buffer = read_buffer_from(&dir.path().join("edit-buffer.json"));
+        assert_eq!(buffer.as_ref().unwrap().rev, rev, "no write after Enter");
+        let mut reader = CmdReader::default();
+        assert_eq!(
+            reader.poll(&dir.path().join("edit-cmd"), 7, buffer.as_ref()),
+            [Accepted::Finish {
+                mode: FinishMode::PasteEnter,
+                text: "one!".into()
+            }]
+        );
+        // The daemon's answer, and then a new pause, are taken as before.
+        assert_eq!(
+            link.sync(Some(&block("releasing", "one!", 1))),
+            Change::Nothing
+        );
+        assert_eq!(
+            link.sync(Some(&block("settling", "one! three", 2))),
+            Change::Entered
+        );
+        assert!(link.editable());
+    }
+
+    /// The popup stopped while the tail settled, and the daemon froze the
+    /// tail before it started again: the reloaded text gets the tail.
+    #[test]
+    fn a_restarted_popup_gets_the_tail_it_missed() {
+        let dir = TempDir::new().unwrap();
+        let mut link = EditLink::new(paths(&dir));
+        link.sync(Some(&block("settling", "one", 1)));
+        act(&mut link, EditAction::Insert("!".into()));
+        drop(link);
+        let mut again = EditLink::new(paths(&dir));
+        assert_eq!(
+            again.sync(Some(&block("editing", "one two", 1))),
+            Change::Entered
+        );
+        assert_eq!(again.buffer().unwrap().text(), "one! two");
+        let file = read_buffer_from(&dir.path().join("edit-buffer.json")).unwrap();
+        assert_eq!(file.text, "one! two");
+        assert_eq!(file.base.as_deref(), Some("one two"));
     }
 
     #[test]

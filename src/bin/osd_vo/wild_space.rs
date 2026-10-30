@@ -156,6 +156,8 @@ pub(crate) fn fit_look(mut look: LatticeLook, g: &LineGutter) -> LatticeLook {
 pub(crate) struct State {
     /// One sculpture per popup, so its glyph meshes upload once.
     sculpture: OnceLock<(Arc<Sculpture>, Arc<dyn vo::scene::gpu::GpuSource>)>,
+    /// The sculpture's rows as last shaped, and the letters last given to it.
+    sculpt: RefCell<SculptCache>,
     /// The voice as the lattice hears it, fed from the raw levels at each view.
     voice: RefCell<LatticeVoice>,
     /// Each word's loudness and the sound it was measured over, kept once
@@ -163,6 +165,20 @@ pub(crate) struct State {
     /// quiet when its sound scrolls out of that history (LT-12).
     loudness: RefCell<HashMap<WordId, KeptLoudness>>,
 }
+
+/// What the sound sculpture keeps between views (z5fk). On room tone the
+/// rows and their depths stay the same frame after frame: each row is shaped
+/// again only when its text or style changes, and the sculpture is given its
+/// letters only when they change.
+#[derive(Default)]
+struct SculptCache {
+    /// Per row: its text, style, and its glyphs.
+    rows: Vec<(String, TextStyle, Vec<RowGlyph>)>,
+    letters: Vec<Letter>,
+}
+
+/// A shaped glyph of a sculpture row: glyph, font, cluster and pen.
+type RowGlyph = (u32, u32, usize, Point);
 
 /// A word's loudness and the sound (start, end) it was measured over.
 type KeptLoudness = ((f64, f64), f32);
@@ -624,10 +640,13 @@ impl Popup {
     ) -> Option<Element<Msg>> {
         let (sculpture, source) = self.sculpture(style.font)?;
         let t = self.extra.now;
+        let mut cache = self.wild.sculpt.borrow_mut();
         if done {
             sculpture.flatten(t);
+            cache.letters.clear();
         } else {
             let mut letters = Vec::new();
+            cache.rows.truncate(rows.len());
             for (r, (words, origin)) in rows.iter().enumerate() {
                 let newest = r + 1 == rows.len();
                 let text = words
@@ -635,37 +654,66 @@ impl Popup {
                     .map(|w| w.text.as_str())
                     .collect::<Vec<_>>()
                     .join(" ");
-                let shaped = self.measure.layout(&text, style, None);
+                if cache
+                    .rows
+                    .get(r)
+                    .is_none_or(|c| c.0 != text || c.1 != *style)
+                {
+                    let shaped = self.measure.layout(&text, style, None);
+                    let glyphs = shaped
+                        .glyphs
+                        .iter()
+                        .map(|g| (g.glyph, g.font, g.cluster as usize, g.pos))
+                        .collect();
+                    let row = (text, *style, glyphs);
+                    match cache.rows.get_mut(r) {
+                        Some(c) => *c = row,
+                        None => cache.rows.push(row),
+                    }
+                }
                 let mut starts = Vec::with_capacity(words.len());
                 let mut at = 0usize;
                 for w in words {
                     starts.push(at);
                     at += w.text.len() + 1;
                 }
-                for g in &shaped.glyphs {
-                    let c = g.cluster as usize;
+                // Each word's depth, once per word.
+                let depths: Vec<f32> = words
+                    .iter()
+                    .map(|word| {
+                        // A word still fading in waits flat, so its body never shows
+                        // through letters that are not yet solid.
+                        let fading = self
+                            .heard
+                            .word(word.id)
+                            .is_some_and(|h| t - h.born < SCULPT_WAIT);
+                        if newest && !fading {
+                            SCULPT_DEPTH * self.word_loudness(word.id).max(0.15)
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                for &(glyph, font, c, pos) in &cache.rows[r].2 {
                     let wi = starts.iter().rposition(|&s| s <= c).unwrap_or(0);
                     let word = &words[wi];
-                    // A word still fading in waits flat, so its body never shows
-                    // through letters that are not yet solid.
-                    let fading = self.heard.word(word.id).is_some_and(|h| t - h.born < SCULPT_WAIT);
-                    let depth = if newest && !fading {
-                        SCULPT_DEPTH * self.word_loudness(word.id).max(0.15)
-                    } else {
-                        0.0
-                    };
                     letters.push(Letter {
-                        glyph: g.glyph,
-                        font: g.font,
-                        pos: Point::new(origin.x + g.pos.x, origin.y + g.pos.y),
+                        glyph,
+                        font,
+                        pos: Point::new(origin.x + pos.x, origin.y + pos.y),
                         size: style.size,
-                        key: (word.id as u64) << 24 | ((c - starts[wi]) as u64) << 8 | (g.glyph as u64 & 0xff),
-                        depth,
+                        key: (word.id as u64) << 24 | ((c - starts[wi]) as u64) << 8 | (glyph as u64 & 0xff),
+                        depth: depths[wi],
                         run: words.first().map_or(0, |w| w.id as u64),
                     });
                 }
             }
-            sculpture.set(t, &letters, Some(moves));
+            // The same letters as last time change nothing: `set` would only
+            // retarget each body to where it is already going.
+            if letters != cache.letters {
+                sculpture.set(t, &letters, Some(moves));
+                cache.letters = letters;
+            }
         }
         Some(kit::at(Element::gpu("sculpture", source.clone()).size(size.w, size.h), 0.0, 0.0))
     }

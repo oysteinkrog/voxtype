@@ -46,6 +46,9 @@ pub(crate) enum Moment {
     /// A spelled correction (COR-5): the letters fill in while the key is
     /// held, then the word is placed and learned.
     Spell,
+    /// A keyboard edit (plan M7.6): a tap in a pause, the caret up two
+    /// lines, a word typed, Enter.
+    Edit,
 }
 
 impl Moment {
@@ -70,6 +73,7 @@ impl Moment {
         Moment::Lookahead,
         Moment::Correction,
         Moment::Spell,
+        Moment::Edit,
     ];
 
     /// The name on the command line.
@@ -95,6 +99,7 @@ impl Moment {
             Moment::Lookahead => "lookahead",
             Moment::Correction => "correction",
             Moment::Spell => "spell",
+            Moment::Edit => "edit",
         }
     }
 
@@ -273,6 +278,21 @@ impl Take {
             signals: Default::default(),
             unsure: vec!["popup", "swish", "confi"],
         }
+    }
+
+    /// The daemon's edit block at `t`: `phase` with the text so far frozen,
+    /// or None when the edit is over.
+    fn edit(&mut self, t: f64, phase: Option<&str>) {
+        self.doc.edit = phase.map(|phase| voxtype::osd::edit_ipc::EditBlock {
+            session: 1,
+            phase: phase.into(),
+            frozen: self.files.preview.clone(),
+            tail: String::new(),
+            pause: 1,
+            raw_words: self.files.preview.split_whitespace().count(),
+        });
+        self.files.live = Some(self.doc.clone());
+        self.files_at(t);
     }
 
     fn files_at(&mut self, t: f64) {
@@ -1002,6 +1022,7 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             k.end(shown + 0.2, Outcome::Done);
             k.scenario(look, shown + 1.4)
         }
+        Moment::Edit => edit_scenario(look, 2),
         Moment::TimeLimit => {
             // Runs to the limit: the recording stops itself. `Files` does not
             // carry the limit yet; MO-35 adds it.
@@ -1015,6 +1036,88 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             k.scenario(look, shown + 1.4)
         }
     }
+}
+
+/// A keyboard edit as `look` would get it (plan M7.6): 26 words dictated,
+/// a tap in the pause, the caret `ups` lines up from the end, " quickly"
+/// typed, Enter, and the daemon releasing and delivering. The `edit`
+/// moment is `ups = 2`. Run it on [`popup_for`]`(Moment::Edit, ..)`.
+pub(crate) fn edit_scenario(look: &Look, ups: usize) -> vo::Scenario<Msg> {
+    use vo::scene::input::{LogicalKey, Mods, NamedKey};
+    let s0 = 0.2;
+    let mut k = Take::new(s0);
+    k.record(s0);
+    let t = k.speak(s0, &sentence_words(0, 26), 0.32);
+    // A tap in the pause: pending, then the text is the user's.
+    let up = t + 0.7;
+    let typed = up + 0.25 * ups as f64 + 0.35;
+    let (enter, done) = (typed + 0.9, typed + 1.15);
+    k.sound(t, done + 1.6, Sound::Quiet);
+    k.edit(t + 0.1, Some("pending"));
+    k.edit(t + 0.35, Some("editing"));
+    k.inputs.push((
+        t + 0.4,
+        Input::KeyboardFocus {
+            gained: true,
+            requested: true,
+        },
+    ));
+    // The daemon takes the edited text from the buffer, as the popup's
+    // keys leave it, and publishes and delivers that.
+    let edited = edited_text(look, &k.files.preview, ups, " quickly");
+    k.say(done, &edited);
+    k.edit(done, Some("releasing"));
+    k.edit(done + 0.2, None);
+    deliver(&mut k, done + 0.2, Delivery::PastedEnter);
+    let mut s = k.scenario(look, done + 1.6);
+    // Keys well apart, so the daemon's answers fall after them.
+    for i in 0..ups {
+        s.key(
+            up + 0.25 * i as f64,
+            LogicalKey::Named(NamedKey::Up),
+            None,
+            Mods::NONE,
+        );
+    }
+    s.type_text(typed, " quickly");
+    s.key(enter, LogicalKey::Named(NamedKey::Enter), None, Mods::NONE);
+    s
+}
+
+/// `text` after the edit moment's keys in `look`: the caret from the end
+/// `ups` lines up by the look's own line breaks, then `typed`.
+fn edited_text(look: &Look, text: &str, ups: usize, typed: &str) -> String {
+    use vo::scene::text::TextLayout;
+    use vo_core::edit::{EditAction, EditBuffer};
+    // A popup showing the text, for a look whose box depends on its state.
+    let mut shown = Popup::scripted(look.clone(), &look.fonts);
+    shown.text(text);
+    let text_box = super::edit_site::site(look.theme).text_box_in(&shown);
+    let measure = vo::ShapedLayout::new(look.fonts.clone());
+    let lines = measure.layout(
+        text,
+        &super::edit::edit_style(text_box.style),
+        Some(text_box.width),
+    );
+    let mut buffer = EditBuffer::new(text);
+    for _ in 0..ups {
+        let up = EditAction::MoveLine {
+            down: false,
+            extend: false,
+        };
+        buffer.apply(up, &lines, 0.0);
+    }
+    buffer.apply_plain(EditAction::Insert(typed.into()), 0.0);
+    buffer.text().to_string()
+}
+
+/// `popup` set up for `moment`: in the edit moment it has a keyboard edit
+/// link that reads and writes no files.
+pub(crate) fn popup_for(moment: Moment, mut popup: Popup) -> Popup {
+    if moment == Moment::Edit {
+        popup.edit = Some(super::edit_link::EditLink::offline());
+    }
+    popup
 }
 
 /// `--offline DIR --moment NAME`: renders one moment to PNG frames.
@@ -1036,8 +1139,14 @@ pub(crate) fn offline(
         renderer_setup: Some(Arc::new(vo_3d::install)),
         ..Options::default()
     };
-    let n = vo::render_offline_with(Popup::scripted(look, &fonts), &s, fps, dir, options)
-        .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
+    let n = vo::render_offline_with(
+        popup_for(m, Popup::scripted(look, &fonts)),
+        &s,
+        fps,
+        dir,
+        options,
+    )
+    .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
     eprintln!(
         "voxtype-osd-vo: wrote {n} frames of {} to {}",
         m.name(),
@@ -1413,5 +1522,276 @@ mod tests {
         assert!(texts.iter().any(|t| t.ends_with("swish.")));
         assert!(f.last().unwrap().1.preview.contains("file, and"));
         assert!(f.last().unwrap().1.preview.contains("swiss. Then"));
+    }
+
+    /// M7.6 and R35: the edit moment pauses, moves the caret up two lines,
+    /// types and presses Enter, and Swiss keeps the reading-line envelope
+    /// with the caret line as its reading line.
+    #[test]
+    fn the_edit_moment_edits_within_the_envelope() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let mut look = test_look();
+        look.theme = OsdTheme::Swiss;
+        let s = scenario(&look, Moment::Edit);
+        let options = || Options {
+            fonts: fonts.clone(),
+            default_motion: default_motion(&look),
+            ..Options::default()
+        };
+        let popup = || popup_for(Moment::Edit, Popup::scripted(look.clone(), &fonts));
+        let keys: Vec<f64> = s
+            .inputs
+            .iter()
+            .filter_map(|(t, i)| matches!(i, Input::Key(_)).then_some(*t))
+            .collect();
+        let (first, last) = (keys[0], *keys.last().unwrap());
+        let mut feet = Vec::new();
+        vo::envelope::sample_scenario(popup(), &s, 30.0, options(), &mut |_, t, dl| {
+            feet.push((t, dl.edit_caret));
+        });
+        let at = |t: f64| feet.iter().rev().find(|f| f.0 <= t).unwrap().1;
+        let before = at(first - 0.01).expect("the caret shows once the text is the user's");
+        let up = at(first + 0.5).expect("the caret after two Ups");
+        let typed = at(last - 0.1).expect("the caret after typing");
+        let line = look.text_style().line_height;
+        assert!(
+            ((before.y - up.y) / line - 2.0).abs() < 0.1,
+            "two lines up: {before:?} to {up:?}, lines {line}"
+        );
+        assert!(
+            (typed.y - up.y).abs() < 1.0 && typed.x > up.x,
+            "typed on that line: {typed:?}"
+        );
+        assert_eq!(at(s.duration), None, "Enter ends the edit");
+        // At several frame rates, so the keys fall at every phase of a
+        // frame and a pass does not hang on one frame timing; with one to
+        // three lines up, so the typed word lands on different lines.
+        for ups in 1..=3 {
+            let s = edit_scenario(&look, ups);
+            for fps in [30.0, 47.0, 60.0] {
+                let report = vo::envelope::check_scenario(
+                    popup(),
+                    &s,
+                    fps,
+                    options(),
+                    &vo::envelope::Envelope {
+                        transcript: 0..1 << 20,
+                        ..vo::envelope::Envelope::default()
+                    },
+                );
+                assert!(report.is_ok(), "{ups} up at {fps} fps: {report}");
+            }
+        }
+    }
+
+    /// What [`EditSpy`] saw after each message, key and focus change.
+    #[derive(Clone, Debug, Default)]
+    struct EditSeen {
+        t: f64,
+        badge: Option<(&'static str, bool)>,
+        drawn: bool,
+        hint: Option<f32>,
+        /// The look's quiet list is on.
+        quiet: bool,
+        /// The marked words' text in the edit view, or in the shown words
+        /// once the view is gone.
+        marked: Vec<String>,
+    }
+
+    /// The popup, recording its edit badge, hint and marks.
+    struct EditSpy(Popup, std::rc::Rc<std::cell::RefCell<Vec<EditSeen>>>);
+
+    impl EditSpy {
+        fn seen(&self, t: f64) {
+            let p = &self.0;
+            let marked = match &p.edit_view {
+                Some(v) => v
+                    .decor
+                    .marks
+                    .iter()
+                    .map(|r| v.text[r.clone()].to_string())
+                    .collect(),
+                None => p
+                    .shown
+                    .iter()
+                    .filter(|w| p.edit_marks.contains(&w.id))
+                    .map(|w| w.text.clone())
+                    .collect(),
+            };
+            self.1.borrow_mut().push(EditSeen {
+                t,
+                badge: p.edit_badge(),
+                drawn: p.look_badge().is_some(),
+                hint: p.edit_hint(),
+                quiet: !p.look.quiet.is_empty(),
+                marked,
+            });
+        }
+    }
+
+    impl vo::App for EditSpy {
+        type Msg = Msg;
+
+        fn init(&mut self, cx: &mut Cx<Msg>) {
+            self.0.init(cx);
+        }
+
+        fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
+            self.0.update(msg, cx);
+            self.seen(cx.t());
+        }
+
+        fn key(&mut self, ev: &vo::scene::input::KeyEvent, cx: &mut Cx<Msg>) -> bool {
+            let used = self.0.key(ev, cx);
+            self.seen(ev.t);
+            used
+        }
+
+        fn keyboard_focus(&mut self, gained: bool, requested: bool, cx: &mut Cx<Msg>) {
+            self.0.keyboard_focus(gained, requested, cx);
+            self.seen(cx.t());
+        }
+
+        fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
+            self.0.view(tokens)
+        }
+
+        fn surfaces(&self, tokens: &vo::Tokens) -> Vec<vo::SurfaceView<Msg>> {
+            self.0.surfaces(tokens)
+        }
+
+        fn main_surface(&self) -> Option<(Size, vo::Placement)> {
+            self.0.main_surface()
+        }
+    }
+
+    fn spy_run(look: &Look, s: &vo::Scenario<Msg>) -> Vec<EditSeen> {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut p = popup_for(Moment::Edit, Popup::scripted(look.clone(), &fonts));
+        p.live_surface = true;
+        let spy = EditSpy(p, seen.clone());
+        let options = Options {
+            fonts: fonts.clone(),
+            default_motion: default_motion(look),
+            ..Options::default()
+        };
+        vo::envelope::sample_scenario(spy, s, 30.0, options, &mut |_, _, _| {});
+        let out = seen.borrow().clone();
+        out
+    }
+
+    fn edit_look() -> Look {
+        let cfg = OsdConfig {
+            keyboard_edit: true,
+            ..OsdConfig::default()
+        };
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        Look::new(&cfg, &plasma, String::new(), &fonts)
+    }
+
+    /// M7.7: the dimmed "EDIT" shows while a tap is pending and goes away
+    /// when the tap is cancelled; with `keyboard_edit` off there is no
+    /// badge strip at all.
+    #[test]
+    fn the_dimmed_edit_badge_shows_while_a_tap_is_pending() {
+        let look = edit_look();
+        let mut k = Take::new(0.2);
+        k.record(0.2);
+        let t = k.speak(0.2, &sentence_words(0, 6), 0.32);
+        k.edit(t + 0.1, Some("pending"));
+        // The daemon drops the block: a key came within 300 ms.
+        k.edit(t + 0.4, None);
+        let s = k.scenario(&look, t + 1.0);
+        let seen = spy_run(&look, &s);
+        let at = |t: f64| seen.iter().rev().find(|e| e.t <= t + 1e-9).unwrap();
+        assert_eq!(
+            (at(t).badge, at(t).drawn),
+            (None, false),
+            "no badge before the tap"
+        );
+        assert_eq!(
+            at(t + 0.2).badge,
+            Some(("EDIT", true)),
+            "dimmed while pending"
+        );
+        assert!(at(t + 0.2).drawn);
+        assert_eq!(
+            (at(t + 0.6).badge, at(t + 0.6).drawn),
+            (None, false),
+            "gone on cancel"
+        );
+        assert!(look.live_surface().h > look.surface().h);
+        let plain = test_look();
+        assert_eq!(plain.live_surface().h, plain.surface().h, "off: no strip");
+    }
+
+    /// M7.7: the badge follows the edit, the hint shows while editing, and
+    /// the typed word is marked, in the edit view and after Enter until the
+    /// next recording.
+    #[test]
+    fn the_edit_badge_hint_and_marks_follow_the_edit() {
+        let look = edit_look();
+        let s = edit_scenario(&look, 2);
+        let keys: Vec<f64> = s
+            .inputs
+            .iter()
+            .filter_map(|(t, i)| matches!(i, Input::Key(_)).then_some(*t))
+            .collect();
+        let seen = spy_run(&look, &s);
+        let at = |t: f64| seen.iter().rev().find(|e| e.t <= t + 1e-9).unwrap();
+        let first = keys[0];
+        let enter = *keys.last().unwrap() - 0.05;
+        assert_eq!(at(first - 0.05).badge, Some(("EDIT \u{b7} paused", false)));
+        let hint = at(first - 0.05).hint.expect("the hint on the first edit");
+        assert!(hint > 0.6, "{hint}");
+        assert_eq!(at(enter).marked, ["quickly"], "the typed word is marked");
+        let released = seen
+            .iter()
+            .find(|e| e.t > enter + 0.05 && e.badge.is_some())
+            .unwrap();
+        assert_eq!(released.badge, Some(("sending", false)), "{released:?}");
+        assert_eq!(seen.last().unwrap().badge, None);
+        // The typed word stays from Enter through the release and the
+        // delivery, underlined (prio-lane's M7.L7 finding).
+        for e in seen.iter().filter(|e| e.t >= enter) {
+            assert_eq!(e.marked, ["quickly"], "at {:.2} s", e.t);
+            // The final text keeps the edit's stillness (R34: Enter is not
+            // a resume).
+            assert!(e.quiet, "quiet at {:.2} s", e.t);
+        }
+    }
+
+    /// Plan 4.1: after the edit the marked words stay underlined, also when
+    /// more speech arrives, until the next recording.
+    #[test]
+    fn edit_marks_stay_after_the_edit() {
+        use vo::scene::scene::Scene;
+        use vo::scene::text::ShapedLayout;
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let mut look = edit_look();
+        look.theme = OsdTheme::Swiss;
+        let mut p = Popup::scripted(look, &fonts);
+        p.text("alpha beta gamma");
+        let beta = p.shown[1].id;
+        let shapes = |p: &Popup| {
+            let mut scene: Scene<Msg> =
+                Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+            scene.set_viewport(0.0, p.look.live_surface(), 1.0);
+            scene.apply(p.view(&vo::Tokens::default()), 1.0);
+            scene.sample(2.0).shapes.len()
+        };
+        let plain = shapes(&p);
+        p.edit_marks.insert(beta);
+        p.text("alpha beta gamma delta");
+        assert_eq!(
+            p.shown[1].id, beta,
+            "the word keeps its id as speech goes on"
+        );
+        assert!(shapes(&p) > plain, "the marked word is underlined");
     }
 }

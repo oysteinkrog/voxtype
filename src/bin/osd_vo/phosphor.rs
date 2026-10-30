@@ -110,17 +110,16 @@ struct Fonts {
 }
 
 /// JetBrains Mono, the face closest to the concept's, or the look's own
-/// fixed font when it is not installed.
+/// fixed font when it is not installed. Added to the look's registry once
+/// (`FontRegistry::system`), so every registry, such as a test's, has its
+/// own ids.
 fn fonts(look: &Look) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |family: &str| look.fonts.add_system(family).unwrap_or(MONO);
-        Fonts {
-            text: add("JetBrains Mono:medium"),
-            caption: add("JetBrains Mono:medium"),
-            status: add("JetBrains Mono:medium italic"),
-        }
-    })
+    let add = |family: &str| look.fonts.system(family).unwrap_or(MONO);
+    Fonts {
+        text: add("JetBrains Mono:medium"),
+        caption: add("JetBrains Mono:medium"),
+        status: add("JetBrains Mono:medium italic"),
+    }
 }
 
 /// Sizes in logical pixels, from the concept's.
@@ -528,7 +527,8 @@ impl Popup {
             self.phos.ended_at = Some(t);
         }
         let seen: Vec<(u32, String)> = self.shown.iter().map(|w| (w.id, w.text.clone())).collect();
-        if self.extra.final_at.is_none() {
+        // An edit is no revision: no reverse-video flash for it.
+        if self.extra.final_at.is_none() && !self.phosphor_editing() {
             for (id, text) in &seen {
                 let before = self.phos.seen.iter().find(|(i, _)| i == id);
                 let revised = before.is_some_and(|(_, old)| {
@@ -601,10 +601,17 @@ impl Popup {
         ))
     }
 
+    /// The text is edited, or was and is sent: the edit caret is the one
+    /// caret, until the next recording.
+    fn phosphor_editing(&self) -> bool {
+        self.edit_view.is_some() || self.edit_sent
+    }
+
     /// Where the caret's top left goes, in screen coordinates: a space after
-    /// the last word.
+    /// the last word. None while editing (`PhosphorSite` draws the caret).
     fn phosphor_caret_target(&self) -> Option<Point> {
-        if self.extra.final_at.is_some()
+        if self.phosphor_editing()
+            || self.extra.final_at.is_some()
             || self.phos.ended_at.is_some()
             || self.status().finishing && !self.status().loading
         {
@@ -1106,6 +1113,47 @@ fn done_or_ended(p: &Popup) -> bool {
     p.extra.final_at.is_some() || p.phos.ended_at.is_some()
 }
 
+/// Phosphor's edit adapter (plan section 4.5): the edit caret in the
+/// block caret's green, drawn by the transcript's Flow so it bows with the
+/// glyphs. It is a bar, not a block: a block over a letter would hide it,
+/// with no reverse video to show it. The beam write is in the quiet list.
+pub(crate) struct PhosphorSite;
+
+impl edit_site::EditSite for PhosphorSite {
+    fn caret(&self, look: &Look) -> edit_site::CaretStyle {
+        let k = Geo::new(look).k;
+        edit_site::CaretStyle {
+            caret: vo::scene::flow::Caret {
+                width: (3.0 * k).max(2.0),
+                color: Some(hex(GREEN, 1.0)),
+                ..vo::scene::flow::Caret::default()
+            },
+            selection: hex(GREEN, 0.35),
+            mark: hex(GREEN, 1.0),
+        }
+    }
+
+    /// Only the transcript shows the window: the status row is a live
+    /// text too, with words of its own.
+    fn place(&self, look: &Look, el: Element<Msg>, view: &edit::EditView) -> Element<Msg> {
+        let style = self.caret(look);
+        let decor = vo::scene::flow::EditDecor {
+            caret_style: style.caret,
+            selection_color: Some(style.selection),
+            mark_color: Some(style.mark),
+            ..view.decor.clone()
+        };
+        el.map_live_texts(&mut |e| {
+            if e.key().to_string() != "words" {
+                return e;
+            }
+            e.live_source(view.text.clone())
+                .edit(decor.clone())
+                .still_motion(true)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1148,5 +1196,53 @@ mod tests {
         let mid = (COLUMNS - 1) / 2;
         assert!(s.blocks(1.0, mid) > 0);
         assert_eq!(s.blocks(1.0 + SINK_SECS, mid), 0);
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::swiss_look::edit_check::{envelope, Rig};
+    use super::{hex, GREEN};
+    use vo_core::edit::{Dir, EditAction, Unit};
+    use voxtype::osd::config::OsdTheme;
+
+    /// M7.L6: Phosphor edits in its own layout, its beam write and
+    /// reverse-video flash off. With the caret on the newest, a middle and
+    /// the top line, at both widths: the caret on its glyph within 1 px in
+    /// every frame, the popup's size unchanged, and the golden
+    /// `tests/fixtures/osd-vo/edit-phosphor.txt`.
+    #[test]
+    fn phosphor_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Phosphor, "phosphor");
+    }
+
+    /// M7.L6: the edit moment keeps the reading-line envelope (R35).
+    #[test]
+    fn phosphor_edits_within_the_envelope() {
+        envelope(OsdTheme::Phosphor, "phosphor");
+    }
+
+    /// The block caret after the last word gives way to the edit caret in
+    /// its green, and an edit flashes no word in reverse video.
+    #[test]
+    fn phosphor_edits_with_one_green_caret_and_no_flash() {
+        let mut r = Rig::new(OsdTheme::Phosphor, false);
+        r.p.files.recording = true;
+        r.dictate(40);
+        assert!(r.p.phos.caret.is_some(), "the block caret while listening");
+        r.enter(1.0);
+        assert!(r.p.phos.caret.is_none(), "no block caret while editing");
+        assert_eq!(r.carets(hex(GREEN, 1.0)), 1, "the edit caret");
+        // "w39" becomes "w9": a change inside the word, which in a
+        // dictation is a revision.
+        let back = EditAction::MoveBy {
+            dir: Dir::Back,
+            unit: Unit::Grapheme,
+            extend: false,
+        };
+        r.act(back, 1.2);
+        r.act(EditAction::Delete(Dir::Back, Unit::Grapheme), 1.3);
+        assert!(r.buffer_text().ends_with(" w9"), "{}", r.buffer_text());
+        assert!(r.p.phos.flash.is_none(), "no reverse-video flash");
     }
 }

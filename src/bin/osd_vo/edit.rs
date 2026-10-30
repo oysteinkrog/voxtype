@@ -10,14 +10,21 @@
 //! look, with the window's text as the live source and an `EditDecor` for
 //! the caret and selection, so the look's `Flow` draws them at its own
 //! sprung glyph places. No cut and no ellipsis: what is shown is the buffer.
+//!
+//! Looks that draw one node per line take the window's lines from here
+//! ([`Popup::text_lines`](crate::Popup::text_lines)), so they break lines
+//! where the layer does (R54). Looks that centre each line centre it on
+//! [`EditView::centre`]: a line's left edge holds still while you type and
+//! re-centres [`RECENTRE_SECS`] after the last key (plan 4.2 item 5).
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use vo::scene::element::TextStyle;
 use vo::scene::flow::{Caret, EditDecor};
 use vo::scene::text::{ShapedText, TextLayout};
 use vo_core::edit::{EditBuffer, Selection};
-use vo_core::words::Word;
+use vo_core::words::{Word, WordId};
 
 /// What the look draws while editing.
 #[derive(Clone, Debug, PartialEq)]
@@ -33,7 +40,31 @@ pub(crate) struct EditView {
     pub lines: u32,
     /// The window line that holds the caret: the reading line (R35).
     pub caret_line: u32,
+    /// Each window line's bytes in `text`, as the layout broke them. A
+    /// soft-wrapped line keeps its trailing spaces; a hard break is in no
+    /// line.
+    pub line_bytes: Vec<Range<usize>>,
+    /// The width to centre each window line by: its width, except during a
+    /// typing run, when it keeps the width it had at the run's start so the
+    /// line's left edge holds still. A line that would overflow the box at
+    /// that place is centred on its own width at once.
+    pub centre: Vec<f32>,
 }
+
+impl EditView {
+    /// The left edge of window line `i` in a box `width` wide, centred by
+    /// the sticky rule.
+    // Unused until the first centred look's edit bead lands.
+    #[allow(dead_code)]
+    pub(crate) fn centred_left(&self, i: usize, width: f32) -> f32 {
+        self.centre
+            .get(i)
+            .map_or(0.0, |w| ((width - w) / 2.0).max(0.0))
+    }
+}
+
+/// How long after the last key a centred line re-centres.
+pub(crate) const RECENTRE_SECS: f64 = 0.5;
 
 /// The layer's state for one edit: the window's place and the last layout.
 #[derive(Debug, Default)]
@@ -47,6 +78,10 @@ pub(crate) struct EditLayer {
     /// changed (the caret is solid for a moment after a change).
     seen: Option<(u64, Selection)>,
     since: f64,
+    /// The centring widths of the window lines, and the first window line
+    /// they are for (a scroll centres every line again).
+    held: Vec<f32>,
+    held_top: Option<usize>,
 }
 
 /// The style the layer and the look's live text lay out with: the look's,
@@ -109,7 +144,29 @@ impl EditLayer {
         let end = lines
             .get(top + n - 1)
             .map_or(buffer.text().len(), |l| l.bytes.end);
+        let window_lines: Vec<(Range<usize>, f32)> = lines
+            .get(top..top + n)
+            .unwrap_or_default()
+            .iter()
+            .map(|l| (l.bytes.start - start..l.bytes.end - start, l.width))
+            .collect();
+        let (line_bytes, widths): (Vec<_>, Vec<_>) = if window_lines.is_empty() {
+            (std::iter::once(0..end - start).collect(), vec![0.0])
+        } else {
+            window_lines.into_iter().unzip()
+        };
         self.top = Some(top);
+        let typing = t - self.since < RECENTRE_SECS;
+        if self.held_top != Some(top) || self.held.len() != widths.len() {
+            self.held = widths.clone();
+            self.held_top = Some(top);
+        }
+        for (held, &w) in self.held.iter_mut().zip(&widths) {
+            let left = (width - *held) / 2.0;
+            if !typing || left + w > width {
+                *held = w;
+            }
+        }
         let window = start..end;
         let local = |b: usize| b.clamp(start, end) - start;
         let selection = sel.range();
@@ -133,6 +190,8 @@ impl EditLayer {
             decor,
             lines: n as u32,
             caret_line: (caret_line - top) as u32,
+            line_bytes,
+            centre: self.held.clone(),
         }
     }
 }
@@ -171,6 +230,76 @@ pub(crate) fn word_ranges(text: &str) -> Vec<Range<usize>> {
         out.push(s..text.len());
     }
     out
+}
+
+/// The window's words by line: each line's words, with the line's bytes in
+/// the window text. `shown` are the window's words in order. A word belongs
+/// to the line it starts on; the piece of a word the layout broke onto the
+/// next line belongs to no word.
+pub(crate) fn window_lines(view: &EditView, shown: &[Word]) -> Vec<(Vec<Word>, Range<usize>)> {
+    let mut words = shown.iter().peekable();
+    let starts: Vec<(usize, Word)> = word_ranges(&view.text)
+        .into_iter()
+        .filter_map(|r| {
+            let w = words.next_if(|w| w.text == view.text[r.clone()])?;
+            Some((r.start, w.clone()))
+        })
+        .collect();
+    view.line_bytes
+        .iter()
+        .map(|line| {
+            let in_line = starts
+                .iter()
+                .filter(|(s, _)| line.contains(s))
+                .map(|(_, w)| w.clone())
+                .collect();
+            (in_line, line.clone())
+        })
+        .collect()
+}
+
+impl crate::Popup {
+    /// The lines of a look that draws one node per line, with the width to
+    /// place each by. While editing: the edit window's lines, as the layer
+    /// broke them, and their sticky centring widths. Otherwise the look's
+    /// own stable lines.
+    pub(crate) fn text_lines(&self, style: &TextStyle, wrap: f32) -> Vec<(Vec<Word>, f32)> {
+        match &self.edit_view {
+            Some(v) => window_lines(v, &self.shown)
+                .into_iter()
+                .zip(&v.centre)
+                .map(|((words, _), w)| (words, *w))
+                .collect(),
+            None => self.stable_lines(style, wrap),
+        }
+    }
+
+    /// From a tap until the edit is resumed, cancelled or handed back and
+    /// over: the edit link is in a phase other than listening. A look keeps
+    /// its live dressing (a lit or hot newest word, particles, whole-line
+    /// fades) off meanwhile, so the edited text holds still.
+    pub(crate) fn edit_tapped(&self) -> bool {
+        self.edit
+            .as_ref()
+            .and_then(|l| l.phase())
+            .is_some_and(|p| p != crate::edit_link::Phase::Listening)
+    }
+}
+
+/// The bytes of the marked words of `text` that lie in `window`, in the
+/// window's bytes. `words` are the model's words of `text`, in order.
+pub(crate) fn mark_ranges(
+    words: &[Word],
+    text: &str,
+    window: Range<usize>,
+    marked: &HashSet<WordId>,
+) -> Vec<Range<usize>> {
+    words
+        .iter()
+        .zip(word_ranges(text))
+        .filter(|(w, r)| marked.contains(&w.id) && r.start >= window.start && r.end <= window.end)
+        .map(|(_, r)| r.start - window.start..r.end - window.start)
+        .collect()
 }
 
 /// The model's words that lie in `window` of `text`, whose words they are.
@@ -358,6 +487,9 @@ mod tests {
                 full_lines[top..top + v.lines as usize],
                 "text {text:?} width {width}"
             );
+            // The view's line bytes are those lines.
+            let view_lines: Vec<_> = v.line_bytes.iter().map(|r| &v.text[r.clone()]).collect();
+            assert_eq!(view_lines, shown_lines, "text {text:?} width {width}");
             // The caret line is in the window.
             assert!(v.caret_line < v.lines);
         }
@@ -372,6 +504,69 @@ mod tests {
         let names: Vec<_> = words.iter().map(|w| w.text.as_str()).collect();
         assert_eq!(names, ["two", "three"]);
         assert_eq!(word_ranges(text), [0..3, 5..8, 9..14, 15..19]);
+    }
+
+    #[test]
+    fn window_lines_hold_each_lines_words() {
+        let measure = layout();
+        let text = "one two three four five six seven\n\neight nine";
+        let mut model = WordModel::default();
+        model.update(text);
+        let b = EditBuffer::new(text);
+        let mut layer = EditLayer::default();
+        let v = layer.view(&b, &measure, style(), 120.0, 5, 0.0);
+        let shown = window_words(model.words(), text, v.start..v.start + v.text.len());
+        let lines = window_lines(&v, &shown);
+        assert_eq!(lines.len(), v.lines as usize);
+        let names: Vec<Vec<&str>> = lines
+            .iter()
+            .map(|(w, _)| w.iter().map(|w| w.text.as_str()).collect())
+            .collect();
+        // Every window word on exactly one line, in order, and the empty
+        // line between the two hard breaks holds none.
+        let flat: Vec<&str> = names.iter().flatten().copied().collect();
+        let all: Vec<&str> = shown.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(flat, all);
+        assert!(names.iter().any(|l| l.is_empty()), "{names:?}");
+        for (words, bytes) in &lines {
+            let line = &v.text[bytes.clone()];
+            let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+            assert_eq!(texts, line.split_whitespace().collect::<Vec<_>>());
+        }
+    }
+
+    /// Plan 4.2 item 5: a centred line keeps its left edge while you type,
+    /// re-centres 0.5 s after the last key, and re-centres at once when it
+    /// would overflow the box.
+    #[test]
+    fn centred_lines_hold_still_while_typing() {
+        let measure = layout();
+        let width = 300.0;
+        let mut b = EditBuffer::new("hello there");
+        let mut layer = EditLayer::default();
+        let v0 = layer.view(&b, &measure, style(), width, 3, 0.0);
+        let left0 = v0.centred_left(0, width);
+        assert!(left0 > 0.0);
+        // A typing run: the left edge holds.
+        for (k, t) in [(" you", 0.1), (" all", 0.3)] {
+            b.apply_plain(EditAction::Insert(k.into()), t);
+            let v = layer.view(&b, &measure, style(), width, 3, t);
+            assert_eq!(v.centred_left(0, width), left0, "at {t}");
+        }
+        // 0.5 s after the last key it centres on the new width.
+        let v = layer.view(&b, &measure, style(), width, 3, 0.85);
+        let w = layer.shaped(b.text(), &measure, style(), width).lines[0].width;
+        assert_eq!(v.centre[0], w);
+        assert!(v.centred_left(0, width) < left0);
+        // Typing that would run past the right edge re-centres at once.
+        let left1 = v.centred_left(0, width);
+        b.apply_plain(EditAction::Insert(" and everyone else".into()), 1.0);
+        let v = layer.view(&b, &measure, style(), width, 3, 1.0);
+        let w = layer.shaped(b.text(), &measure, style(), width).lines[0].width;
+        if left1 + w > width {
+            assert_eq!(v.centre[0], w);
+        }
+        assert!(v.centred_left(0, width) + w <= width + 0.5);
     }
 
     #[test]

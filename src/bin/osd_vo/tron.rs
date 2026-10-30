@@ -941,3 +941,24 @@ mod tests {
         assert!(!LightLine { reduced: true, ..l }.away(1.2));
     }
 }
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::swiss_look::edit_check::{envelope, Rig};
+    use voxtype::osd::config::OsdTheme;
+
+    /// M7.L2: Tron edits in its own layout, its blur-up entry off. With the caret on the
+    /// newest, a middle and the top line, at both widths: the caret on its
+    /// glyph within 1 px in every frame, the popup's size unchanged, and the
+    /// golden `tests/fixtures/osd-vo/edit-tron.txt`.
+    #[test]
+    fn tron_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Tron, "tron");
+    }
+
+    /// M7.L2: the edit moment keeps the reading-line envelope (R35).
+    #[test]
+    fn tron_edits_within_the_envelope() {
+        envelope(OsdTheme::Tron, "tron");
+    }
+}

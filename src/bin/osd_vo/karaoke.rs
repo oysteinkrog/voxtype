@@ -11,6 +11,11 @@
 //!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
+//!
+//! While editing ([`KaraokeSite`]) the three large slots hold the edit
+//! window and the two small ones the two lines above it, which the caret
+//! never enters. The lit word is off, and a line keeps its left edge while
+//! you type (the sticky centring of `EditView::centre`).
 
 use super::*;
 
@@ -136,14 +141,13 @@ struct Fonts {
 }
 
 fn fonts(reg: &FontRegistry) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |pattern: &str, or: u32| reg.add_system(pattern).unwrap_or(or);
-        Fonts {
-            text: add("Nunito:medium", SANS),
-            ui: add("Nunito", SANS),
-        }
-    })
+    // Added to the registry once (`FontRegistry::system`), so every
+    // registry, such as a test's, has its own ids.
+    let add = |pattern: &str, or: u32| reg.system(pattern).unwrap_or(or);
+    Fonts {
+        text: add("Nunito:medium", SANS),
+        ui: add("Nunito", SANS),
+    }
 }
 
 fn reduced() -> bool {
@@ -913,32 +917,78 @@ impl Popup {
         .size(LINE_BOX, LINE))
     }
 
+    /// While editing, the two lines above the edit window, oldest first,
+    /// each with its width: the small slots show them for context.
+    fn karaoke_context(&self) -> Vec<(Vec<Word>, f32)> {
+        let view = self.edit_view.as_ref();
+        let buffer = self.edit.as_ref().and_then(|l| l.buffer());
+        let (Some(v), Some(b)) = (view, buffer) else {
+            return Vec::new();
+        };
+        let text = b.text();
+        // The window starts a line, so the text before it breaks into the
+        // lines above the window as the whole text does.
+        let tb = edit_site::site(self.look.theme).text_box(&self.look);
+        let above = &text[..v.start.min(text.len())];
+        let shaped = self
+            .measure
+            .layout(above, &edit::edit_style(tb.style), Some(tb.width));
+        let lines = &shaped.lines;
+        lines[lines.len().saturating_sub(SLOTS.len() - KARAOKE_EDIT_LINES)..]
+            .iter()
+            .map(|l| {
+                let words = edit::window_words(self.model.words(), text, l.bytes.clone());
+                (words, l.width)
+            })
+            .filter(|(w, _)| !w.is_empty())
+            .collect()
+    }
+
     /// The rolling lines, the lit newest word and its underline, or the
     /// progress line while finishing.
     fn karaoke_text(&self, mut panel: Element<Msg>, mode: Mode, ox: f32, oy: f32) -> Element<Msg> {
         let style = self.look.text_style();
-        let all = self.stable_lines(&style, WRAP);
+        let all = self.text_lines(&style, WRAP);
+        let editing = self.edit_view.is_some();
+        // While editing, the window's lines and above them two lines of
+        // context. The window's lines come first, so `place_lines` gives
+        // them the window even when a context line has the same words.
+        let context = self.karaoke_context();
         let lines = &all[all.len().saturating_sub(SLOTS.len())..];
         let roll = Spring::critical_to_98(ROLL_SECS);
         let n = lines.len();
         let cancelled = mode == Mode::Cancelled;
+        // From a tap until the edit is handed back, a line whose first word
+        // changes (an edit reflowed it) swaps to its new node at once, so no
+        // word shows twice.
+        let tapped = self.edit_tapped();
         // A new line rolls in empty, and its words come once the line before has left the slot.
-        let waits = lines
-            .last()
-            .is_some_and(|(l, _)| self.karaoke_waits(l[0].id, all.len()));
+        let waits = !tapped
+            && lines
+                .last()
+                .and_then(|(l, _)| l.first())
+                .is_some_and(|w| self.karaoke_waits(w.id, all.len()));
         // The lit newest word and its underline ride on the newest line.
         let hot = match (mode, lines.last()) {
-            _ if waits => Vec::new(),
+            _ if waits || tapped => Vec::new(),
             (Mode::Listening, Some((last, w))) => self.karaoke_hot(last, (LINE_BOX - w) / 2.0, &style),
             _ => Vec::new(),
         };
         let mut hot = Some(hot);
-        for (i, (words, _)) in lines.iter().enumerate() {
-            let age = n - 1 - i;
+        let rows = lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (n - 1 - i, l))
+            .chain(context.iter().rev().enumerate().map(|(k, l)| (n + k, l)));
+        for (age, (words, lw)) in rows {
             let Some(&(cy, scale, opacity)) = SLOTS.get(age) else {
                 continue;
             };
-            let key = format!("line-{}", words[0].id);
+            let i = n.saturating_sub(age + 1);
+            let key = words
+                .first()
+                .map_or_else(|| format!("slot-{age}"), |w| w.id.to_string());
+            let key = format!("line-{key}");
             // Laid out but not drawn while it waits, so the line is already centred when
             // its words fade in.
             let hidden = age == 0 && waits;
@@ -949,7 +999,11 @@ impl Popup {
                 .color(hex(WHITE))
                 .motion(Prop::Opacity, Motion::Snap)
                 .motion(Prop::Offset, Spring::POP)
-                .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 8.0)));
+                .word_enter(if tapped {
+                    Transition::NONE
+                } else {
+                    self.ghost_enter(Transition::fade().offset(0.0, 8.0))
+                });
             let text = self.karaoke_channels(text, words, age == 0);
             // The words sit in a box of their own, with the lit newest word in it, so the
             // two move as one when the line re-centres.
@@ -959,6 +1013,11 @@ impl Popup {
                 Vec::new()
             };
             let mut inline = Element::column("inline").child(text.rewind_hide(self.rewinding()));
+            if editing {
+                // Placed by its sticky centring width rather than centred by
+                // the box, so it holds still while you type.
+                inline = at(inline, ((LINE_BOX - lw) / 2.0).max(0.0), 0.0);
+            }
             if hidden {
                 // Re-centres at once while hidden, so it does not slide when it shows.
                 inline = inline.motion(Prop::Position, Motion::Snap);
@@ -971,7 +1030,7 @@ impl Popup {
                 // box: the line is centred, so that is half the free room.
                 let tail = model_signals::TailText {
                     style,
-                    width: WRAP.min((LINE_BOX + lines[i].1) / 2.0),
+                    width: WRAP.min((LINE_BOX + lw) / 2.0),
                     rows: 1,
                 };
                 inline = self.signal_marks_in(inline, words, &tail, (0.0, 0.0), hex(WHITE));
@@ -982,7 +1041,11 @@ impl Popup {
                 .child(inline)
                 .children(self.karaoke_rewind(words, &style))
                 .children(hot)
-                .children((age == 1).then(|| self.karaoke_mark_top(lines, i, &style)).flatten());
+                .children(
+                    (age == 1 && !editing)
+                        .then(|| self.karaoke_mark_top(lines, i, &style))
+                        .flatten(),
+                );
             let line = at(column, ox + (CARD_W - LINE_BOX) / 2.0, oy + cy - LINE / 2.0)
                 .scale(scale)
                 .opacity(if cancelled { opacity * 0.4 } else { opacity })
@@ -994,7 +1057,11 @@ impl Popup {
                 // and a fade or slide of its own would still be running when they show.
                 .presence(
                     Transition::NONE,
-                    Transition::fade().offset(0.0, -24.0).scale(0.9),
+                    if tapped {
+                        Transition::NONE
+                    } else {
+                        Transition::fade().offset(0.0, -24.0).scale(0.9)
+                    },
                 );
             panel = panel.child(line);
         }
@@ -1093,5 +1160,78 @@ mod tests {
         // Reduced motion: straight, whatever the pitch.
         assert_eq!(bow_sag(0.0, Some(1.0), true), 0.0);
         assert_eq!(bow_sag(1.0, None, true), 0.0);
+    }
+}
+
+/// Lines the caret can be on while editing: the three large slots.
+const KARAOKE_EDIT_LINES: usize = 3;
+
+/// Karaoke's edit adapter (plan section 4.5): the window in the three
+/// large slots, one node per line, the default caret.
+pub(crate) struct KaraokeSite;
+
+impl edit_site::EditSite for KaraokeSite {
+    fn edit_lines(&self, _look: &Look) -> u32 {
+        KARAOKE_EDIT_LINES as u32
+    }
+
+    fn quiet(&self) -> &'static [&'static str] {
+        // It marks the newest line's sound, which an edit has not got.
+        &[sounding::ACOUSTIC_RECEIPTS]
+    }
+
+    fn place(&self, look: &Look, el: Element<Msg>, view: &edit::EditView) -> Element<Msg> {
+        edit_site::place_lines(self, look, el, view)
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::scope::edit_tests::check_edit_envelope;
+    use super::super::swiss_look::edit_check::Rig;
+    use super::*;
+
+    /// M7.L9: Karaoke edits in its own card. With the caret on the newest, a
+    /// middle and the top large line, at both widths: the caret on its glyph
+    /// within 1 px in every frame, the popup's size unchanged, and the
+    /// golden `tests/fixtures/osd-vo/edit-karaoke.txt`.
+    #[test]
+    fn karaoke_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Karaoke, "karaoke");
+    }
+
+    /// The caret is only in the three large slots; the two small ones show
+    /// the two lines above the window.
+    #[test]
+    fn karaoke_small_slots_show_the_lines_above() {
+        let mut r = Rig::new(OsdTheme::Karaoke, false);
+        r.dictate(160);
+        r.enter(1.0);
+        let v = r.p.edit_view.clone().unwrap();
+        assert_eq!(v.lines as usize, KARAOKE_EDIT_LINES);
+        let context = r.p.karaoke_context();
+        assert_eq!(context.len(), 2);
+        let text = r.buffer_text();
+        let before: Vec<&str> = text[..v.start].split_whitespace().collect();
+        let shown: Vec<&str> = context
+            .iter()
+            .flat_map(|(w, _)| w.iter().map(|w| w.text.as_str()))
+            .collect();
+        assert!(before.ends_with(&shown), "{shown:?}");
+        // No lit copy of the newest word while editing.
+        let mut keys = Vec::new();
+        let _ = r.p.view(&vo::Tokens::default()).map_live_texts(&mut |e| {
+            keys.push(e.key().to_string());
+            e
+        });
+        assert_eq!(keys.iter().filter(|k| *k == "words").count(), 5, "{keys:?}");
+        assert!(!keys.iter().any(|k| k == "word"), "{keys:?}");
+    }
+
+    /// R35: the edit moment with the caret on each large line stays inside
+    /// the reading-line envelope, at both widths.
+    #[test]
+    fn karaoke_edit_moment_keeps_the_envelope() {
+        check_edit_envelope(OsdTheme::Karaoke, &[0, 1, 2]);
     }
 }
