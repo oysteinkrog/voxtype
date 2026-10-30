@@ -308,29 +308,35 @@ impl Corrections {
     /// the words it was placed on (the newest match before the hold's
     /// start). Its words are the final engine's own text of the hold when
     /// the worker gave one ([`FinalClip`]) that differs from the replaced
-    /// words, else the live words. When the hold's audio was not cut out of
+    /// words and places in the final text, else the live words. When the hold's audio was not cut out of
     /// the final text, the engine heard the respoken words as well, so that
     /// copy (the newest match before the hold's end) goes first. The final
     /// text has no timing: the live word counts say how far to look. A
-    /// text with no placed correction comes back unchanged.
+    /// text with no placed correction comes back unchanged; when the newest
+    /// correction places nowhere, its note says so.
     pub fn apply_final(&mut self, text: &str) -> String {
         self.render_with(None, true);
-        let placed: Vec<(f32, f32, Vec<String>, bool)> = self
+        // Each placed hold with the words to try: the clip's, then the live
+        // words for when the clip's words fit nowhere in the final text.
+        let placed: Vec<(f32, f32, Vec<Vec<String>>, bool)> = self
             .windows
             .iter()
             .filter_map(|w| match &w.state {
                 State::Placed { wrong, right, .. } => {
                     let clip = self.clips.iter().find(|c| (c.t0 - w.t0).abs() < 0.05);
                     let cut = clip.is_some_and(|c| c.cut);
-                    let words = clip
+                    let mut tries: Vec<Vec<String>> = clip
                         .map(|c| clip_words(&c.text, wrong))
-                        .filter(|words| !same_words(&words.join(" "), wrong))
-                        .unwrap_or_else(|| right.clone());
-                    if same_words(&words.join(" "), wrong) {
+                        .into_iter()
+                        .chain([clip_words(&right.join(" "), wrong)])
+                        .filter(|words| !words.is_empty() && !same_words(&words.join(" "), wrong))
+                        .collect();
+                    tries.dedup();
+                    if tries.is_empty() {
                         tracing::info!(%wrong, "Correction heard as the same words: spell it");
                         return None;
                     }
-                    Some((w.t0, w.t1, words, cut))
+                    Some((w.t0, w.t1, tries, cut))
                 }
                 _ => None,
             })
@@ -346,18 +352,40 @@ impl Corrections {
             let n = self.raw.iter().filter(|(w, _)| middle(w) < t).count() as isize;
             (n + shift).max(0) as usize + FINAL_SLACK_WORDS
         };
-        for (t0, t1, right, cut) in placed {
+        let newest = placed.last().map(|p| p.0);
+        let mut newest_missed = false;
+        for (t0, t1, tries, cut) in placed {
             if cut {
                 // The live count includes the respoken words; the text not.
                 shift -= self.raw.iter().filter(|(w, _)| inside(w, t0, t1)).count() as isize;
-            } else if let Ok(copy) = align::place_before(&words, before(t1, shift), &right) {
+            } else if let Some(copy) = tries
+                .iter()
+                .find_map(|right| align::place_before(&words, before(t1, shift), right).ok())
+            {
                 words.drain(copy.start..copy.end);
                 shift -= (copy.end - copy.start) as isize;
             }
             let hold_start = before(t0, shift);
-            if let Ok(span) = align::place_before(&words, hold_start, &right) {
+            let found = tries.into_iter().find_map(|right| {
+                align::place_before(&words, hold_start, &right)
+                    .ok()
+                    .map(|span| (span, right))
+            });
+            if let Some((span, right)) = found {
                 shift += right.len() as isize - (span.end - span.start) as isize;
                 words.splice(span.start..span.end, right);
+            } else {
+                tracing::warn!(t0, "Correction not found in the final text");
+                newest_missed |= newest == Some(t0);
+            }
+        }
+        if newest_missed {
+            // A new outcome, so a popup that showed "Corrected" shows it.
+            self.notes += 1;
+            if let Some(note) = &mut self.note {
+                note.id = self.notes;
+                note.from.clear();
+                note.dropped = Some("not in the final text".into());
             }
         }
         words.join(" ")
@@ -369,16 +397,19 @@ impl Corrections {
 fn same_words(a: &str, b: &str) -> bool {
     let key = |s: &str| -> Vec<String> {
         s.split_whitespace()
-            .map(|w| {
-                w.chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .flat_map(char::to_lowercase)
-                    .collect::<String>()
-            })
+            .map(word_key)
             .filter(|w| !w.is_empty())
             .collect()
     };
     key(a) == key(b)
+}
+
+/// A word in lower case without its punctuation.
+fn word_key(w: &str) -> String {
+    w.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// The words of a hold's final text, fitted into the sentence: the final
@@ -401,8 +432,10 @@ fn clip_words(text: &str, wrong: &str) -> Vec<String> {
 }
 
 /// The words each hold replaces in `raw`, the live words with no correction
-/// made: what the final pass pushes down when it decodes the hold. None for
-/// a hold that places nowhere.
+/// made: what the final pass pushes down when it decodes the hold. A word
+/// that is also among the respoken words stays out, so the push does not
+/// spoil the right words ("test" when "longer test" is respoken as "quiet
+/// test"). None for a hold that places nowhere or replaces only such words.
 pub fn wrong_spans(raw: Vec<Word>, holds: &[(f32, f32)]) -> Vec<Option<String>> {
     let mut c = Corrections::default();
     let now = Instant::now();
@@ -415,7 +448,14 @@ pub fn wrong_spans(raw: Vec<Word>, holds: &[(f32, f32)]) -> Vec<Option<String>> 
     c.windows
         .iter()
         .map(|w| match &w.state {
-            State::Placed { wrong, .. } => Some(wrong.clone()),
+            State::Placed { wrong, right, .. } => {
+                let right: Vec<String> = right.iter().map(|w| word_key(w)).collect();
+                let kept: Vec<&str> = wrong
+                    .split_whitespace()
+                    .filter(|w| !right.contains(&word_key(w)))
+                    .collect();
+                (!kept.is_empty()).then(|| kept.join(" "))
+            }
             _ => None,
         })
         .collect()
@@ -764,6 +804,54 @@ mod tests {
         raw.extend(spoken(3.4, "Kubernetes"));
         let spans = wrong_spans(raw, &[(1.2, 2.0), (3.3, 4.0)]);
         assert_eq!(spans, [Some("franken term".to_string()), None]);
+    }
+
+    #[test]
+    fn wrong_spans_leave_out_the_respoken_words() {
+        let mut raw = spoken(0.0, "this is a longer test of voice");
+        raw.extend(spoken(2.4, "quiet test"));
+        let spans = wrong_spans(raw, &[(2.3, 3.0)]);
+        assert_eq!(spans.len(), 1);
+        let span = spans[0].clone().unwrap_or_default();
+        assert!(!span.contains("test"), "{span:?}");
+    }
+
+    #[test]
+    fn a_clip_that_fits_nowhere_falls_back_to_the_live_words() {
+        let mut c = Corrections::default();
+        let mut raw = spoken(0.0, "this is a longer test of voice");
+        raw.extend(spoken(2.4, "quiet test"));
+        c.start(2.3);
+        c.end(3.0, Instant::now());
+        c.overlay(raw, Instant::now());
+        c.clips = vec![FinalClip {
+            t0: 2.3,
+            t1: 3.0,
+            text: "Client's Pest".into(),
+            cut: true,
+        }];
+        let pasted = c.apply_final("This is a longer test of voice.");
+        assert_eq!(pasted, "This is a longer quiet test of voice.");
+        assert_eq!(c.note.and_then(|n| n.dropped), None);
+    }
+
+    #[test]
+    fn a_correction_missing_from_the_final_text_is_noted() {
+        let mut c = Corrections::default();
+        let mut raw = spoken(0.0, "this is a longer test of voice");
+        raw.extend(spoken(2.4, "quiet test"));
+        c.start(2.3);
+        c.end(3.0, Instant::now());
+        c.overlay(raw, Instant::now() + SETTLE);
+        let live = c.view().and_then(|v| v.note).expect("a live note");
+        assert_eq!(live.dropped, None);
+        assert_eq!(
+            c.apply_final("Something else entirely."),
+            "Something else entirely."
+        );
+        let note = c.view().and_then(|v| v.note).expect("a final note");
+        assert!(note.id > live.id);
+        assert_eq!(note.dropped.as_deref(), Some("not in the final text"));
     }
 
     #[test]
