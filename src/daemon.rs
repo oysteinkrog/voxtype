@@ -328,6 +328,8 @@ struct EditLink {
     /// Where a discarded edited dictation is kept for a minute.
     discarded: PathBuf,
     reader: crate::osd::edit_ipc::CmdReader,
+    /// Asks the compositor which window is active, for the paste gate.
+    windows: Arc<std::sync::Mutex<Box<dyn crate::osd::target::Windows>>>,
 }
 
 impl Default for EditLink {
@@ -346,6 +348,7 @@ impl Default for EditLink {
             hotkey_last: Config::runtime_dir().join("hotkey-last"),
             discarded: crate::osd::edit_journal::discarded_path(),
             reader: Default::default(),
+            windows: Arc::new(std::sync::Mutex::new(Box::new(crate::osd::target::Kdotool))),
         }
     }
 }
@@ -1271,6 +1274,11 @@ pub struct Daemon {
     /// Pauses for a keyboard edit in this recording.
     edit_pauses: u32,
     edit_link: EditLink,
+    // The window active when a keyboard-editable recording started, looked
+    // up in the background, then kept: an edited dictation pastes only
+    // into it.
+    edit_target: Option<tokio::task::JoinHandle<Option<crate::osd::target::Window>>>,
+    edit_window: Option<crate::osd::target::Window>,
     streaming_failure: Option<String>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
@@ -1416,6 +1424,8 @@ impl Daemon {
             edit_doc: None,
             edit_pauses: 0,
             edit_link: EditLink::default(),
+            edit_target: None,
+            edit_window: None,
             streaming_failure: None,
             eager_chunk_tasks: Vec::new(),
             vad,
@@ -1782,6 +1792,8 @@ impl Daemon {
         self.edit_doc = None;
         self.edit_pauses = 0;
         self.edit_link.reader = Default::default();
+        self.edit_target = None;
+        self.edit_window = None;
         // An override model has its own transcriber, which records in batch
         // mode; streaming would run the default model instead.
         if let Some(name) = model_override.as_deref() {
@@ -1842,6 +1854,15 @@ impl Daemon {
             pause: Default::default(),
         };
         self.update_state("streaming");
+        // The window the text is for, saved before an edit's focus proxy
+        // can take focus (R26).
+        if self.keyboard_edit {
+            let windows = self.edit_link.windows.clone();
+            self.edit_target = Some(tokio::task::spawn_blocking(move || {
+                let mut w = windows.lock().unwrap_or_else(|e| e.into_inner());
+                crate::osd::target::active_window(&mut **w)
+            }));
+        }
         self.play_feedback(SoundEvent::RecordingStart);
 
         if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -2297,6 +2318,107 @@ impl Daemon {
             tokio::time::sleep(edit_journal::KEEP).await;
             edit_journal::expire_in(&path, at, edit_journal::now_ms());
         });
+    }
+
+    /// The id of the window saved at record start, once its lookup is done.
+    async fn edit_saved_window(&mut self) -> Option<String> {
+        if let Some(task) = self.edit_target.take() {
+            self.edit_window = task.await.ok().flatten();
+        }
+        self.edit_window.as_ref().map(|w| w.id.clone())
+    }
+
+    /// Run a window query off the async threads; kdotool can stall.
+    async fn edit_windows(
+        &self,
+        f: impl FnOnce(&mut dyn crate::osd::target::Windows) -> crate::osd::target::Verdict
+            + Send
+            + 'static,
+    ) -> crate::osd::target::Verdict {
+        let windows = self.edit_link.windows.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut w = windows.lock().unwrap_or_else(|e| e.into_inner());
+            f(&mut **w)
+        })
+        .await
+        .unwrap_or(crate::osd::target::Verdict::Failed)
+    }
+
+    /// Deliver a keyboard-edited dictation, only into the window it was
+    /// dictated for. After the popup gave focus back, that window must be
+    /// active again within 500 ms (R27), and still be active right before
+    /// the paste, after the modifiers are up (R28). Otherwise, or when it
+    /// was closed (R29), the text goes to `clipboard` only and neither
+    /// output hook runs, so an Enter hook cannot press Enter in the wrong
+    /// window. Returns the verdict with the delivery's result.
+    async fn deliver_edited(
+        &mut self,
+        session: &mut StreamingSession,
+        chain: &[Box<dyn TextOutput>],
+        clipboard: &[Box<dyn TextOutput>],
+        text: &str,
+    ) -> (
+        crate::osd::target::Verdict,
+        std::result::Result<(), crate::error::OutputError>,
+    ) {
+        use crate::osd::target::{self, Verdict};
+        let mut verdict = match self.edit_saved_window().await {
+            Some(id) => {
+                self.edit_windows(move |w| target::hand_back(w, &id, target::HAND_BACK))
+                    .await
+            }
+            None => Verdict::Failed,
+        };
+        if verdict.confirmed() {
+            if !modifiers_released(LIVE_TYPING_FINAL_WAIT).await {
+                tracing::warn!("Modifier still held; sending the final text anyway");
+            }
+            let id = self.edit_window.as_ref().map(|w| w.id.clone());
+            verdict = match id {
+                Some(id) => self.edit_windows(move |w| target::check(w, &id)).await,
+                None => Verdict::Failed,
+            };
+        }
+        if verdict.confirmed() {
+            let pre = self.config.output.pre_output_command.as_deref();
+            let post = self.config.output.post_output_command.as_deref();
+            return (verdict, session.commit_exact(chain, text, pre, post).await);
+        }
+        tracing::warn!("Copied, not pasted: {}", verdict.reason());
+        session.skip_post_hook();
+        (
+            verdict,
+            session.commit_exact(clipboard, text, None, None).await,
+        )
+    }
+
+    /// Tell the popup and the desktop that an edited dictation is on the
+    /// clipboard and was not pasted.
+    async fn report_not_pasted(
+        &self,
+        text: &str,
+        verdict: crate::osd::target::Verdict,
+        started: Instant,
+    ) {
+        use crate::osd::outcome;
+        outcome::write_not_pasted(verdict.reason());
+        outcome::write_delivery(&outcome::Delivery {
+            text: text.to_string(),
+            chars: text.chars().count(),
+            method: "clipboard".to_string(),
+            enter: false,
+            output_ms: started.elapsed().as_millis() as u64,
+            latency_ms: outcome::since_stop_ms(),
+            audio_s: None,
+        });
+        send_notification(
+            "Copied, not pasted",
+            &format!("The text is on the clipboard: {}.", verdict.reason()),
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            "normal",
+        )
+        .await;
     }
 
     /// The popup's commands ready to act on: the buffer file holds the
@@ -5703,16 +5825,30 @@ impl Daemon {
                                     } else {
                                         &text
                                     };
-                                    if self.config.live_preview_active()
-                                        && !modifiers_released(LIVE_TYPING_FINAL_WAIT).await
-                                    {
-                                        tracing::warn!("Modifier still held; sending the final text anyway");
-                                    }
-                                    let pre = self.config.output.pre_output_command.as_deref();
-                                    let post = self.config.output.post_output_command.as_deref();
                                     let committed = match &edited {
-                                        Some(edited) => s.commit_exact(chain, edited, pre, post).await,
-                                        None => s.commit_segment(chain, text, Some(&self.text_processor), pre, post).await,
+                                        Some(edited) => {
+                                            let clipboard: Vec<Box<dyn TextOutput>> =
+                                                vec![Box::new(output::clipboard::ClipboardOutput::new(
+                                                    self.config.output.append_text.clone(),
+                                                ))];
+                                            let started = Instant::now();
+                                            let (verdict, committed) =
+                                                self.deliver_edited(s, chain, &clipboard, edited).await;
+                                            if !verdict.confirmed() && committed.is_ok() {
+                                                self.report_not_pasted(edited, verdict, started).await;
+                                            }
+                                            committed
+                                        }
+                                        None => {
+                                            if self.config.live_preview_active()
+                                                && !modifiers_released(LIVE_TYPING_FINAL_WAIT).await
+                                            {
+                                                tracing::warn!("Modifier still held; sending the final text anyway");
+                                            }
+                                            let pre = self.config.output.pre_output_command.as_deref();
+                                            let post = self.config.output.post_output_command.as_deref();
+                                            s.commit_segment(chain, text, Some(&self.text_processor), pre, post).await
+                                        }
                                     };
                                     if let Err(e) = committed {
                                         tracing::error!("Streaming commit_segment failed: {}", e);
@@ -6428,6 +6564,7 @@ mod tests {
             hotkey_last: dir.path().join("hotkey-last"),
             discarded: dir.path().join("discarded.json"),
             reader: Default::default(),
+            windows: Arc::new(std::sync::Mutex::new(Box::new(FakeWindows::default()))),
         };
         TestLink {
             dir,
@@ -6910,6 +7047,267 @@ mod tests {
         link.show("plain dictation");
         daemon.edit_keep_discarded(&state);
         assert!(!link.dir.path().join("discarded.json").exists());
+    }
+
+    /// Windows for the paste gate: `actives` is what each `active` call
+    /// sees in turn, the last one repeating.
+    #[derive(Default)]
+    struct FakeWindows {
+        windows: Vec<(&'static str, &'static str)>,
+        actives: std::collections::VecDeque<Option<&'static str>>,
+        activated: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl crate::osd::target::Windows for FakeWindows {
+        fn active(&mut self) -> Option<String> {
+            let a = if self.actives.len() > 1 {
+                self.actives.pop_front().flatten()
+            } else {
+                self.actives.front().copied().flatten()
+            };
+            a.map(str::to_string)
+        }
+        fn class_of(
+            &mut self,
+            id: &str,
+        ) -> std::result::Result<Option<String>, crate::osd::target::ToolFailed> {
+            Ok(self
+                .windows
+                .iter()
+                .find(|(w, _)| *w == id)
+                .map(|(_, c)| c.to_string()))
+        }
+        fn activate(&mut self, id: &str) {
+            self.activated.lock().unwrap().push(id.to_string());
+        }
+    }
+
+    /// An edited dictation's delivery: what the paste chain and the
+    /// clipboard got, which hooks ran, and which windows were activated.
+    struct Delivered {
+        verdict: crate::osd::target::Verdict,
+        pasted: Option<String>,
+        copied: Option<String>,
+        hooks: String,
+        activated: Vec<String>,
+    }
+
+    /// Deliver "edited text" for a recording that started in window "a",
+    /// with `windows` open and `actives` seen in turn, then end the stream
+    /// as the daemon does. `saved: false` is a start where kdotool failed.
+    async fn deliver_edited_with(
+        windows: &[(&'static str, &'static str)],
+        actives: &[Option<&'static str>],
+        saved: bool,
+    ) -> Delivered {
+        let (mut daemon, _rx, _state, link) = edit_daemon_linked();
+        let hooks = link.dir.path().join("hooks");
+        let hook = |name: &str| format!("echo {name} >> '{}'", hooks.display());
+        daemon.config.output.pre_output_command = Some(hook("pre"));
+        daemon.config.output.post_output_command = Some(hook("post"));
+        let activated = Arc::new(std::sync::Mutex::new(Vec::new()));
+        daemon.edit_link.windows = Arc::new(std::sync::Mutex::new(Box::new(FakeWindows {
+            windows: windows.to_vec(),
+            actives: actives.iter().copied().collect(),
+            activated: activated.clone(),
+        })));
+        daemon.edit_window = saved.then(|| crate::osd::target::Window {
+            id: "a".into(),
+            class: "term".into(),
+        });
+        let pasted = Arc::new(std::sync::Mutex::new(None));
+        let copied = Arc::new(std::sync::Mutex::new(None));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: pasted.clone(),
+            succeed: true,
+        })];
+        let clipboard: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: copied.clone(),
+            succeed: true,
+        })];
+        let mut session = StreamingSession::new();
+        let (verdict, result) = daemon
+            .deliver_edited(&mut session, &chain, &clipboard, "edited text")
+            .await;
+        result.unwrap();
+        end_streaming_hook(&daemon.config.output, Some(&session)).await;
+        let delivered = Delivered {
+            verdict,
+            pasted: pasted.lock().unwrap().clone(),
+            copied: copied.lock().unwrap().clone(),
+            hooks: fs::read_to_string(&hooks).unwrap_or_default(),
+            activated: activated.lock().unwrap().clone(),
+        };
+        delivered
+    }
+
+    #[tokio::test]
+    async fn edited_text_is_pasted_into_the_window_it_was_dictated_for() {
+        use crate::osd::target::Verdict;
+        let d = deliver_edited_with(&[("a", "term")], &[Some("a")], true).await;
+        assert_eq!(d.verdict, Verdict::Confirmed);
+        assert_eq!(d.pasted.as_deref(), Some("edited text"));
+        assert_eq!(d.copied, None);
+        assert_eq!(d.hooks, "pre\npost\n", "each hook once");
+        assert!(d.activated.is_empty());
+    }
+
+    #[tokio::test]
+    async fn focus_given_to_another_window_is_taken_back_once() {
+        use crate::osd::target::Verdict;
+        // The focus chain picked "b"; activating "a" works.
+        let d = deliver_edited_with(
+            &[("a", "term"), ("b", "term")],
+            &[None, Some("b"), Some("a")],
+            true,
+        )
+        .await;
+        assert_eq!(d.verdict, Verdict::Confirmed);
+        assert_eq!(d.activated, ["a"]);
+        assert_eq!(d.pasted.as_deref(), Some("edited text"));
+    }
+
+    #[tokio::test]
+    async fn a_window_of_the_same_class_gets_no_paste_and_no_enter() {
+        use crate::osd::target::Verdict;
+        // "b" is the same app and keeps focus: activating "a" fails.
+        let d = deliver_edited_with(&[("a", "term"), ("b", "term")], &[Some("b")], true).await;
+        assert_eq!(d.verdict, Verdict::Timeout);
+        assert_eq!(d.activated, ["a"], "one activation, no more");
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.hooks, "", "no output hook, so no Enter, also at the end");
+    }
+
+    #[tokio::test]
+    async fn focus_lost_again_before_the_paste_gives_the_clipboard() {
+        use crate::osd::target::Verdict;
+        // The hand-back confirms "a"; right before the paste "b" has it.
+        let d = deliver_edited_with(
+            &[("a", "term"), ("b", "term")],
+            &[Some("a"), Some("b")],
+            true,
+        )
+        .await;
+        assert_eq!(d.verdict, Verdict::Mismatch);
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.hooks, "");
+    }
+
+    #[tokio::test]
+    async fn a_closed_window_gets_the_clipboard() {
+        use crate::osd::target::Verdict;
+        let d = deliver_edited_with(&[("b", "term")], &[Some("b")], true).await;
+        assert_eq!(d.verdict, Verdict::Gone);
+        assert!(d.activated.is_empty(), "a closed window is never activated");
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.hooks, "");
+    }
+
+    #[tokio::test]
+    async fn no_saved_window_gets_the_clipboard() {
+        use crate::osd::target::Verdict;
+        let d = deliver_edited_with(&[("a", "term")], &[Some("a")], false).await;
+        assert_eq!(d.verdict, Verdict::Failed);
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.hooks, "");
+    }
+
+    /// Wait up to 3 s for `f` to give something.
+    fn within_3s<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
+        let end = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < end {
+            if let Some(v) = f() {
+                return Some(v);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
+    /// R26 to R29 against a real KWin and kdotool: two windows of one app.
+    /// Runs only inside the private nested KWin that
+    /// scripts/osd-paste-gate.sh starts, never on a real desktop.
+    #[tokio::test]
+    #[ignore = "needs a private nested KWin: scripts/osd-paste-gate.sh"]
+    async fn nested_kwin_same_class_window_gets_no_paste_and_no_enter() {
+        use crate::osd::target::{self, Kdotool, Verdict, Windows};
+        let probe = std::env::var("VOXTYPE_TEST_FOCUS_PROBE").expect("run by osd-paste-gate.sh");
+        let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_default();
+        assert!(
+            display.starts_with("voxtype-paste-gate-"),
+            "not the script's nested KWin: {display}"
+        );
+        let window = |title: &str| {
+            std::process::Command::new(&probe)
+                .args(["target", "--title", title])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let mut kd = Kdotool;
+        let mut first = window("paste-gate-term");
+        // R26: the window active at record start, id and class.
+        let saved = within_3s(|| target::active_window(&mut Kdotool)).expect("first window");
+        assert_eq!(saved.class, "paste-gate-term");
+        let mut second = window("paste-gate-term");
+        let other = within_3s(|| kd.active().filter(|id| *id != saved.id)).expect("second window");
+        assert_eq!(kd.class_of(&other), Ok(Some(saved.class.clone())));
+
+        // A window of the same class is not a match (R28).
+        assert_eq!(target::check(&mut kd, &saved.id), Verdict::Mismatch);
+        // The hand-back activates the saved window (R27).
+        assert_eq!(
+            target::hand_back(&mut kd, &saved.id, target::HAND_BACK),
+            Verdict::Confirmed
+        );
+        assert_eq!(kd.active().as_deref(), Some(saved.id.as_str()));
+
+        // The target closes mid-edit and the other window of the same app
+        // gets focus: no paste and no Enter (R29).
+        first.kill().unwrap();
+        first.wait().unwrap();
+        within_3s(|| (kd.active().as_deref() == Some(other.as_str())).then_some(()))
+            .expect("focus moves to the second window");
+        let (mut daemon, _rx, _state, link) = edit_daemon_linked();
+        daemon.edit_link.windows = Arc::new(std::sync::Mutex::new(Box::new(Kdotool)));
+        daemon.edit_window = Some(saved.clone());
+        let hooks = link.dir.path().join("hooks");
+        daemon.config.output.pre_output_command =
+            Some(format!("echo pre >> '{}'", hooks.display()));
+        daemon.config.output.post_output_command =
+            Some(format!("echo post >> '{}'", hooks.display()));
+        let pasted = Arc::new(std::sync::Mutex::new(None));
+        let copied = Arc::new(std::sync::Mutex::new(None));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: pasted.clone(),
+            succeed: true,
+        })];
+        let clipboard: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: copied.clone(),
+            succeed: true,
+        })];
+        let mut session = StreamingSession::new();
+        let (verdict, result) = daemon
+            .deliver_edited(&mut session, &chain, &clipboard, "edited text")
+            .await;
+        result.unwrap();
+        end_streaming_hook(&daemon.config.output, Some(&session)).await;
+        assert_eq!(verdict, Verdict::Gone);
+        assert_eq!(*pasted.lock().unwrap(), None, "no paste");
+        assert_eq!(copied.lock().unwrap().as_deref(), Some("edited text"));
+        assert!(!hooks.exists(), "no output hook ran, so no Enter");
+        assert_eq!(
+            kd.active().as_deref(),
+            Some(other.as_str()),
+            "the other window was not touched"
+        );
+        second.kill().unwrap();
+        second.wait().unwrap();
     }
 
     #[tokio::test]

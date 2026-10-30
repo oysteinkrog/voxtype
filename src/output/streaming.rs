@@ -159,6 +159,13 @@ impl StreamingSession {
         &self.finalized_text
     }
 
+    /// The text went to the clipboard instead of the window it was meant
+    /// for: the end of the stream must not run the post-output hook either,
+    /// since it may press Enter.
+    pub fn skip_post_hook(&mut self) {
+        self.post_hook_ran = true;
+    }
+
     /// Whether an output call of this session ran the post-output hook.
     pub fn post_hook_ran(&self) -> bool {
         self.post_hook_ran
