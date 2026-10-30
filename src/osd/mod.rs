@@ -24,6 +24,7 @@
 
 pub mod config;
 pub mod correction;
+pub mod edit_doc;
 pub mod gtk_env;
 pub mod ipc;
 pub mod live;
