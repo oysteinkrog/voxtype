@@ -21,7 +21,7 @@ use std::collections::{HashSet, VecDeque};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use clap::Parser;
@@ -689,6 +689,27 @@ fn color(c: OsdColor) -> Color {
     Color::rgba(c.r, c.g, c.b, c.a)
 }
 
+/// A centred position: `bottom-center` or `top-center`.
+fn centred(cfg: &OsdConfig) -> bool {
+    matches!(
+        cfg.position,
+        OsdPosition::BottomCenter | OsdPosition::TopCenter
+    )
+}
+
+/// The live surface's layout (`Look::live_frame`).
+struct LiveFrame {
+    /// Room above and left of the look.
+    top: f32,
+    left: f32,
+    /// The badge strip's top and the badge's left edge.
+    badge_top: f32,
+    badge_left: f32,
+    /// The height the centre anchor puts on the reading line.
+    line: f32,
+    size: Size,
+}
+
 /// Everything the view needs that does not change during a dictation.
 #[derive(Clone)]
 struct Look {
@@ -731,6 +752,15 @@ struct Look {
     /// With `anchor = "reading-line"`: the newest text line's height on the
     /// output, as a fraction. `None` places the popup by its top edge.
     reading_line: Option<f32>,
+    /// `anchor = "center"` with a centred position: each look's panel is
+    /// centred on the reading line, and the badge strip reaches up to the
+    /// tallest look's panel (`live_frame`).
+    centre_anchor: bool,
+    /// A centred position: the badge lines up with the left edge of a
+    /// `width` wide panel in every look.
+    centred: bool,
+    /// `frame_reach`, worked out once.
+    frame_reach: Arc<OnceLock<f32>>,
     /// Motion features asked for by name (`--motion`, `[osd] motion`, a
     /// station exhibit), `no-<name>` entries included.
     features: Arc<[String]>,
@@ -802,6 +832,9 @@ impl Look {
             mic: load_mic_icon(fonts),
             reading_line: (cfg.anchor == OsdAnchor::ReadingLine)
                 .then(|| cfg.reading_line.clamp(0.0, 1.0)),
+            centre_anchor: centred(cfg) && cfg.anchor == OsdAnchor::Center,
+            centred: centred(cfg),
+            frame_reach: Arc::default(),
             features: Arc::from([]),
             look_set: false,
             quiet: Arc::from([]),
@@ -814,6 +847,8 @@ impl Look {
         let (names, look_set) = defaults::resolve(m);
         self.features = names.into();
         self.look_set = look_set;
+        // A look's size can depend on its features.
+        self.frame_reach = Arc::default();
     }
 
     fn asked(&self, name: &str) -> bool {
@@ -1142,8 +1177,87 @@ impl Look {
     /// effect needs more (EG-08).
     /// The live surface: `surface` plus the look badge's strip on top.
     fn live_surface(&self) -> Size {
+        self.live_frame().size
+    }
+
+    /// Where the live surface puts the look and its badge. With the centre
+    /// anchor every look's panel middle sits on the same line, and the badge
+    /// sits just above the tallest look's panel; with a centred position it
+    /// lines up with the left edge of a `width` wide panel. So the badge is
+    /// on the same screen pixel in every look and through a whole dictation.
+    fn live_frame(&self) -> LiveFrame {
         let s = self.surface();
-        Size::new(s.w, s.h + self.badge_h())
+        let badge = self.badge_h();
+        let mid = self.panel_middle();
+        let (top, badge_top) = if self.centre_anchor && badge > 0.0 {
+            // The badge's strip ends where the tallest panel starts. The
+            // line is on a whole pixel, so the host's rounding of the
+            // surface's place moves no look's badge.
+            let reach = self.frame_reach().ceil() + badge;
+            let line = reach.max(mid.ceil());
+            (line - mid, line - reach)
+        } else {
+            (badge, 0.0)
+        };
+        // An even width keeps the surface's left edge on a whole pixel.
+        let mut w = s.w;
+        if self.centred {
+            if badge > 0.0 {
+                w = w.max(self.width.ceil());
+            }
+            w = (w / 2.0).ceil() * 2.0;
+        }
+        LiveFrame {
+            top,
+            left: ((w - s.w) / 2.0).floor(),
+            badge_top,
+            badge_left: if self.centred {
+                ((w - self.width) / 2.0).floor().max(0.0)
+            } else {
+                0.0
+            },
+            line: top + mid,
+            size: Size::new(w, (top + s.h).ceil()),
+        }
+    }
+
+    /// The height in the look's own surface, drawn unshifted, that the
+    /// centre anchor puts on the reading line: the middle of the panel at
+    /// its tallest. Room a look keeps only for ink in motion is left out.
+    fn panel_middle(&self) -> f32 {
+        match self.theme {
+            OsdTheme::Radial => radial::panel_middle(self),
+            OsdTheme::Particles => particles::panel_middle(self),
+            _ => self.surface().h / 2.0,
+        }
+    }
+
+    /// The top of the panel in the look's own surface: below the room some
+    /// looks keep above it for their glow or sparks.
+    fn panel_top(&self) -> f32 {
+        match self.theme {
+            OsdTheme::Radial => radial::panel_top(self),
+            OsdTheme::Particles => particles::panel_top(self),
+            OsdTheme::Showcase => voxtype::osd::showcase::MARGIN_PX,
+            OsdTheme::Jarvis => jarvis::panel_top(),
+            _ => 0.0,
+        }
+    }
+
+    /// How far above the reading line the tallest panel reaches, of all
+    /// the looks the look chord steps through.
+    fn frame_reach(&self) -> f32 {
+        *self.frame_reach.get_or_init(|| {
+            let mut look = self.clone();
+            OsdTheme::VO_LOOKS
+                .iter()
+                .chain([&self.theme])
+                .map(|&theme| {
+                    look.theme = theme;
+                    look.panel_middle() - look.panel_top()
+                })
+                .fold(0.0, f32::max)
+        })
     }
 
     /// Height of the look badge's strip above the panel, or 0 without it.
@@ -2297,9 +2411,10 @@ impl App for Popup {
                 .child(look),
             None => look,
         };
-        let root = if self.live_surface && (self.look.badge || self.look.edit_badge) {
-            let strip = Element::column("badged").pad_edges(BADGE_H, 0.0, 0.0, 0.0);
-            match self.look_badge() {
+        let frame = self.look.live_frame();
+        let root = if self.live_surface && (self.look.badge_h() > 0.0 || frame.left > 0.0) {
+            let strip = Element::column("badged").pad_edges(frame.top, 0.0, 0.0, frame.left);
+            match self.look_badge(frame.badge_top, frame.badge_left) {
                 Some(badge) => strip.child(badge),
                 None => strip,
             }
@@ -2312,14 +2427,14 @@ impl App for Popup {
 }
 
 /// Height of the look badge's strip above the panel.
-const BADGE_H: f32 = 22.0;
+const BADGE_H: f32 = 30.0;
 
 impl Popup {
     /// "3/20 Type": the look's place in the look chord's list and its
-    /// name, small and dim at the strip's left, so a chord press shows
+    /// name, in bright text on a dark pill at the strip's left, so a chord press shows
     /// where it landed. With a keyboard edit, the edit's state after it,
     /// and while editing the keys' hint. None when it has nothing to say.
-    fn look_badge(&self) -> Option<Element<Msg>> {
+    fn look_badge(&self, top: f32, left: f32) -> Option<Element<Msg>> {
         let theme = self.look.theme;
         let name = format!("{theme:?}");
         let look =
@@ -2339,23 +2454,23 @@ impl Popup {
         let ink = |a: f32| Color::rgba(1.0, 1.0, 1.0, a);
         let mut row = Element::row(format!("look-badge-{theme:?}"))
             .align_items(AlignItems::CENTER)
-            .pad_edges(2.0, 7.0, 2.0, 7.0)
-            .radius(4.0)
-            .fill(Color::rgba(0.0, 0.0, 0.0, 0.62))
+            .pad_edges(3.0, 10.0, 3.0, 10.0)
+            .radius(5.0)
+            .fill(Color::rgba(0.0, 0.0, 0.0, 0.86))
             .layout(|s| {
                 s.position = vo::scene::taffy::Position::Absolute;
-                s.inset.left = vo::scene::taffy::LengthPercentageAuto::length(0.0);
-                s.inset.top = vo::scene::taffy::LengthPercentageAuto::length(1.0);
+                s.inset.left = vo::scene::taffy::LengthPercentageAuto::length(left);
+                s.inset.top = vo::scene::taffy::LengthPercentageAuto::length(top + 1.0);
             })
             .child(
                 Element::label("look-badge-text", text)
-                    .text_style(TextStyle::new(SANS, 11.0, 15.0).tracking(0.3))
-                    .color(ink(if dim == Some(true) { 0.45 } else { 0.82 })),
+                    .text_style(TextStyle::new(SANS, 15.0, 20.0).tracking(0.3))
+                    .color(ink(if dim == Some(true) { 0.5 } else { 1.0 })),
             );
         if let Some(a) = self.edit_hint() {
             row = row.child(
                 Element::label("edit-hint", EDIT_HINT)
-                    .text_style(TextStyle::new(SANS, 11.0, 15.0).tracking(0.3))
+                    .text_style(TextStyle::new(SANS, 15.0, 20.0).tracking(0.3))
                     .color(ink(a))
                     .pad_edges(0.0, 0.0, 0.0, 10.0),
             );
@@ -2493,7 +2608,7 @@ impl Popup {
 /// that ask for a minimum so entry causes no resize.
 pub(crate) fn surface_margin(look: &Look) -> vo::SurfaceMargin {
     match look.theme {
-        OsdTheme::Showcase => Popup::showcase_margin(),
+        OsdTheme::Showcase => Popup::showcase_margin(look.live_frame().top),
         _ => vo::SurfaceMargin::default(),
     }
 }
@@ -2601,7 +2716,7 @@ fn placement(cfg: &OsdConfig, look: &Look) -> Placement {
         OsdPosition::BottomCenter | OsdPosition::TopCenter if cfg.anchor == OsdAnchor::Center => {
             Placement::LineAt {
                 fraction: cfg.reading_line.clamp(0.0, 1.0),
-                y: look.badge_h() + look.surface().h / 2.0,
+                y: look.live_frame().line,
             }
         }
         OsdPosition::BottomCenter | OsdPosition::TopCenter => match look.reading_line {
@@ -3589,6 +3704,44 @@ mod tests {
         assert_eq!(unsure(voxtype::osd::config::DOUBT_BELOW), 1);
         assert_eq!(unsure(0.6), 2);
         assert_eq!(unsure(0.3), 0);
+    }
+
+    /// With the centre anchor the badge sits on the same spot for every
+    /// look: the same distance above and left of the reading line's middle,
+    /// on whole pixels, above every look's panel. Each panel's middle is on
+    /// the reading line.
+    #[test]
+    fn the_badge_keeps_its_spot_in_every_look() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let cfg = OsdConfig {
+            anchor: OsdAnchor::Center,
+            look_badge: true,
+            width_px: 600,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        let spot = |look: &Look| {
+            let f = look.live_frame();
+            (f.line - f.badge_top, f.size.w / 2.0 - f.badge_left)
+        };
+        let first = spot(&look);
+        assert_eq!(first.0.fract(), 0.0, "{first:?}");
+        for &theme in OsdTheme::VO_LOOKS.iter() {
+            look.theme = theme;
+            let f = look.live_frame();
+            assert_eq!(spot(&look), first, "{theme:?}");
+            assert_eq!(f.size.w % 2.0, 0.0, "{theme:?}: even width");
+            assert_eq!(f.line, f.top + look.panel_middle(), "{theme:?}");
+            let panel_top = f.top + look.panel_top();
+            assert!(
+                panel_top >= f.badge_top + BADGE_H,
+                "{theme:?}: badge over the panel"
+            );
+            let fraction = cfg.reading_line;
+            let y = f.line;
+            assert_eq!(placement(&cfg, &look), Placement::LineAt { fraction, y });
+        }
     }
 
     /// The warm-up's scripted dictation logs nothing, so the log shows only

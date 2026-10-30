@@ -4559,8 +4559,11 @@ fonts, and draws the `swiss` look. Differences from the GTK4 popup:
   once, as in the GTK4 popup.
 - `look_badge = true` in `[osd]` (or `--look-badge`, or
   `VOXTYPE_OSD_LOOK_BADGE=1`) shows the active look's place in the look
-  chord's list and its name, such as "3/20 Type", above the popup's
-  top-left corner. Off by default.
+  chord's list and its name, such as "3/20 Type", in white on a dark
+  pill above the popup's top-left corner. With a centred position it stays
+  on the same screen spot for every look: with `anchor = "center"` just
+  above the tallest look's panel, lined up with the left edge of a
+  `width_px` wide panel. Off by default.
 - While it shows, the popup's own threads run at real-time priority
   (`SCHED_RR` 1, the same as KWin), so CPU load from builds or other apps
   does not make it wait. They go back to normal priority when it hides. A

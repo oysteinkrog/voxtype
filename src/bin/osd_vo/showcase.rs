@@ -617,9 +617,12 @@ impl Popup {
     /// The least transparent room round the showcase panel. The voice glow
     /// creeps outward in the first 0.4 s and reaches this much in every show,
     /// so asking for it up front means entry causes no resize. Sized to that
-    /// reach and no more, since the room costs idle memory.
-    pub(crate) fn showcase_margin() -> vo::SurfaceMargin {
-        vo::SurfaceMargin::AtLeast(vo::scene::Insets::new(237.0, 263.0, 237.0, 238.0))
+    /// reach and no more, since the room costs idle memory. `above` is room
+    /// the live surface already has over the look (the badge's frame), so
+    /// the surface does not grow taller than the glow needs.
+    pub(crate) fn showcase_margin(above: f32) -> vo::SurfaceMargin {
+        let top = (263.0 - above).max(0.0);
+        vo::SurfaceMargin::AtLeast(vo::scene::Insets::new(237.0, top, 237.0, 238.0))
     }
 
     pub(crate) fn showcase_view(&self) -> Element<Msg> {

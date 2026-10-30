@@ -608,6 +608,17 @@ impl EmitterSource for Wing {
     }
 }
 
+/// The top of the card in the surface, below the room for the
+/// medallion's sparks.
+pub(crate) fn panel_top(look: &Look) -> f32 {
+    ROOM_TOP * scale(look)
+}
+
+/// The middle of the card at its tallest, in the surface.
+pub(crate) fn panel_middle(look: &Look) -> f32 {
+    (ROOM_TOP + 0.5 * card_h(swiss::MAX_LINES as u32, Phase::Finishing)) * scale(look)
+}
+
 impl Popup {
     pub(crate) fn particles_surface(look: &Look) -> Size {
         let s = scale(look);

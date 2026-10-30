@@ -356,7 +356,7 @@ impl Popup {
         if self.closing {
             return root;
         }
-        root.child(self.palette_panel().margin_edges(12.0, 0.0, 0.0, 0.0))
+        root.child(self.palette_panel().margin_edges(12.0, 0.0, 0.0, 12.0))
     }
 
     pub(crate) fn palette_panel(&self) -> Element<Msg> {

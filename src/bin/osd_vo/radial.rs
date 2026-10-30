@@ -379,6 +379,19 @@ pub(crate) fn text_width(look: &Look) -> f32 {
     585.0 * k
 }
 
+/// The top of the dial's ticks at rest, in the surface: the room above
+/// them for loud bars is left out.
+pub(crate) fn panel_top(look: &Look) -> f32 {
+    MARGIN + (RING_Y - BAR_R - BAR_MIN) * Geo::new(look).k
+}
+
+/// The middle of the dial at rest and the card at its tallest, in the
+/// surface.
+pub(crate) fn panel_middle(look: &Look) -> f32 {
+    let bottom = MARGIN + Geo::bottom(swiss::MAX_LINES as u32) * Geo::new(look).k;
+    0.5 * (panel_top(look) + bottom)
+}
+
 impl Popup {
     pub(crate) fn radial_surface(look: &Look) -> Size {
         Geo::new(look).surface()

@@ -540,7 +540,7 @@ impl Popup {
         if self.closing {
             return root;
         }
-        root.child(self.mission_panel().margin_edges(12.0, 0.0, 0.0, 0.0))
+        root.child(self.mission_panel().margin_edges(12.0, 0.0, 0.0, 12.0))
     }
 
     pub(crate) fn mission_panel(&self) -> Element<Msg> {

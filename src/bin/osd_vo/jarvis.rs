@@ -662,6 +662,11 @@ pub(crate) fn text_width(look: &Look) -> f32 {
     look.width - 2.0 * 64.0 * look.width / CONCEPT_W
 }
 
+/// The top of the ring in the surface, below the room for its glow.
+pub(crate) fn panel_top() -> f32 {
+    MARGIN
+}
+
 impl Popup {
     pub(crate) fn jarvis_surface(look: &Look) -> Size {
         Geo::new(look).surface()
