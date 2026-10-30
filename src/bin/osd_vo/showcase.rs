@@ -746,6 +746,10 @@ impl Popup {
             // The rim element in front draws the border line.
             .border(Color::TRANSPARENT, BORDER)
             .glow(c(aura.0), GLOW_PX, aura.1)
+            // The card, the strip and the status row snap to a new line
+            // count, as the rim does: growing on a spring, they left a new
+            // line drawn below the strip, over the status row.
+            .motion(Prop::Size, Motion::Snap)
             .motion(Prop::Glow, Spring::SOFT)
             .motion(Prop::Scale, Spring::POP)
             .presence(Transition::fade().scale(0.94).offset(0.0, 14.0), exit)
@@ -920,6 +924,7 @@ impl Popup {
         let negatives = self.negatives(phase);
         let strip = Element::panel("strip")
             .height(self.lines as f32 * l.text_line + 2.0 * STRIP_PAD_Y)
+            .motion(Prop::Size, Motion::Snap)
             .pad_edges(STRIP_PAD_Y, STRIP_PAD_X, STRIP_PAD_Y, STRIP_PAD_X)
             .margin_edges(0.0, -STRIP_PAD_X, 0.0, -STRIP_PAD_X)
             .radius(8.0)
@@ -1119,6 +1124,7 @@ impl Popup {
         };
         let mut row = Element::row("status")
             .height(Self::status_h(l))
+            .motion(Prop::Position, Motion::Snap)
             .align_items(AlignItems::CENTER)
             .margin_edges(STATUS_MARGIN_TOP, 0.0, 0.0, 0.0)
             .child(dot)
