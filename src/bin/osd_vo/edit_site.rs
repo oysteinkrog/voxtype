@@ -249,9 +249,11 @@ pub(crate) fn place_marks(
         if marks.is_empty() {
             return e;
         }
+        // The look's own end caret stays while the text grows again.
         e.edit(styled(
             EditDecor {
                 marks,
+                end_caret: true,
                 ..EditDecor::default()
             },
             style,
@@ -399,6 +401,35 @@ mod tests {
             let row = Element::<Msg>::live_text(key, &words(&ws));
             assert!(!shows_window(&row, &view), "{key}");
         }
+    }
+
+    /// After a resume, the underline of an edited word does not hide the
+    /// look's end-of-text caret: Swissfi's wild-motion caret still shows.
+    #[test]
+    fn marks_after_a_resume_keep_swissfis_end_caret() {
+        use vo::scene::scene::Scene;
+        use vo::scene::text::ShapedLayout;
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut p, fonts) = popup(&dir, OsdTheme::Swissfi);
+        p.look.features = [super::super::wild_motion::MAGNETIC_CARET.to_string()].into();
+        p.text("alpha beta gamma");
+        let size = p.look.text_style().size;
+        let bars = |p: &Popup| {
+            let mut scene: Scene<Msg> =
+                Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+            scene.set_viewport(0.0, p.look.live_surface(), 1.0);
+            scene.apply(p.view(&vo::Tokens::default()), 1.0);
+            // Bars as tall as the text and 2 px wide: the end caret.
+            let dl = scene.sample(1.1);
+            dl.shapes
+                .iter()
+                .filter(|s| s.geom[3] > 0.5 * size && (s.geom[2] - 2.0).abs() < 0.01)
+                .count()
+        };
+        let plain = bars(&p);
+        assert!(plain >= 1, "the end caret shows");
+        p.edit_marks.insert(p.shown[1].id);
+        assert_eq!(bars(&p), plain, "and still with a marked word");
     }
 
     #[test]
