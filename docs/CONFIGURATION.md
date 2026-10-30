@@ -25,6 +25,27 @@ A macOS install that predates this and stored files under
 `~/Library/Application Support/voxtype` keeps working until you move them into
 `~/.config/voxtype` and `~/.local/share/voxtype`.
 
+### Overlays in config.d
+
+Files named `*.toml` in a `config.d` directory next to the config file are
+read after it, in name order, and each one overrides what came before. Tables
+merge key by key; any other value, lists included, replaces the earlier one.
+Without a `config.d` directory nothing changes.
+
+This lets several machines share one config file (for example from a dotfiles
+repo) and keep what differs in a small file per machine:
+
+```toml
+# ~/.config/voxtype/config.d/50-host.toml
+[osd]
+theme = "showcase"
+```
+
+An overlay that cannot be read or parsed is named in the log and skipped; the
+rest of the config still loads. Settings written by `voxtype setup` go to the
+main file, so a key that an overlay also sets keeps the overlay's value.
+Environment variables and CLI flags still override both.
+
 ## What Happens When the Config Has an Error
 
 Since 1.1.0 the config parses section by section. One unreadable value no
@@ -4240,6 +4261,15 @@ fonts, and draws the `swiss` look. Differences from the GTK4 popup:
 - `word_fade = true` in `[osd]` (or `--word-fade`, or
   `VOXTYPE_OSD_WORD_FADE=1`) fades new words in. By default they appear at
   once, as in the GTK4 popup.
+- While it shows, the popup's own threads run at real-time priority
+  (`SCHED_RR` 1, the same as KWin), so CPU load from builds or other apps
+  does not make it wait. They go back to normal priority when it hides. A
+  thread that runs 100 ms without a pause is put back to normal at once
+  (`RLIMIT_RTTIME`). This needs real-time rights (`ulimit -r` above 0,
+  usually from the `audio` or `realtime` group); without them the popup
+  uses the lowest nice value it may, down to -10, or keeps its priority.
+  Turn it off with `realtime = false` in `[osd]`, `--realtime false`, or
+  `VOXTYPE_OSD_REALTIME=false`.
 - The microphone icon is drawn from shapes, not taken from the icon theme.
 
 It also draws two more looks that only this frontend has (the GTK4 popup

@@ -191,7 +191,18 @@ impl Learning {
         let Some((from, to)) = rule(&entry.wrong, &entry.right).filter(|_| learn) else {
             return Ok(None);
         };
-        let mut rules = self.rules();
+        let mut rules = match load_rules(&self.rules) {
+            Ok(rules) => rules,
+            Err(e) => {
+                tracing::warn!(
+                    %from, %to,
+                    "Not learning a word: {}. Fix or remove the file; the \
+                     correction is still in the log",
+                    e
+                );
+                return Ok(None);
+            }
+        };
         if rules.get(&from) == Some(&to) {
             return Ok(None);
         }
@@ -201,14 +212,18 @@ impl Learning {
         Ok(Some((from, to)))
     }
 
-    /// The learned rules; none when there is no file or it does not parse.
+    /// The learned rules; none when there is no file or it cannot be read.
     pub fn rules(&self) -> BTreeMap<String, String> {
-        read_rules(&self.rules)
+        load_rules(&self.rules).unwrap_or_else(|e| {
+            tracing::warn!("Skipping learned words: {}", e);
+            BTreeMap::new()
+        })
     }
 
     /// Removes the learned rule for `wrong`. Returns whether there was one.
+    /// Fails, and leaves the file as it is, when the file cannot be read.
     pub fn forget(&self, wrong: &str) -> std::io::Result<bool> {
-        let mut rules = self.rules();
+        let mut rules = load_rules(&self.rules).map_err(std::io::Error::other)?;
         if rules.remove(&key(wrong)).is_none() {
             return Ok(false);
         }
@@ -232,17 +247,31 @@ impl Learning {
     }
 }
 
-fn read_rules(path: &Path) -> BTreeMap<String, String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return BTreeMap::new();
+/// The learned rules in `path`. A missing file has none. A file that does
+/// not parse as a whole is read line by line, so a key written twice (two
+/// machines merging the file with git) keeps every other rule, and the last
+/// one wins. Err when the file exists but still cannot be read: the caller
+/// must then leave it alone, since writing would replace every rule in it.
+fn load_rules(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(format!("cannot read {:?}: {}", path, e)),
     };
-    match toml::from_str(&text) {
-        Ok(rules) => rules,
-        Err(e) => {
-            tracing::warn!("Skipping learned words {:?}: {}", path, e);
-            BTreeMap::new()
-        }
+    if let Ok(rules) = toml::from_str(&text) {
+        return Ok(rules);
     }
+    let mut rules = BTreeMap::new();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let one: BTreeMap<String, String> = toml::from_str(line)
+            .map_err(|e| format!("{:?} line {} does not parse: {}", path, n + 1, e))?;
+        rules.extend(one);
+    }
+    Ok(rules)
 }
 
 /// The current local time for [`Entry::time`].
@@ -367,5 +396,43 @@ mod tests {
         assert!(l.enabled);
         assert_eq!(l.log, Config::data_dir().join("corrections.jsonl"));
         assert_eq!(l.rules, Config::data_dir().join("words-learned.toml"));
+    }
+
+    #[test]
+    fn a_key_written_twice_keeps_the_other_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = learning(dir.path());
+        std::fs::write(
+            &l.rules,
+            "# Words voxtype learned\n\"glim bot\" = \"GlimBot\"\npdq = \"PDQ\"\n\
+             \"glim bot\" = \"Glimbot\"\n",
+        )
+        .unwrap();
+        let rules = l.rules();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules.get("glim bot").map(String::as_str), Some("Glimbot"));
+        assert_eq!(rules.get("pdq").map(String::as_str), Some("PDQ"));
+        // Learning a new word writes the merged rules back as one valid file.
+        assert!(l.record(&entry("zed nine", "Zed9")).unwrap().is_some());
+        let rules = l.rules();
+        assert_eq!(rules.len(), 3);
+        assert!(toml::from_str::<BTreeMap<String, String>>(
+            &std::fs::read_to_string(&l.rules).unwrap()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_garbled_file_is_left_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = learning(dir.path());
+        let garbled = b"\"glim bot\" = \"GlimBot\"\n<<<<<<< HEAD\npdq = \n";
+        std::fs::write(&l.rules, garbled).unwrap();
+        assert!(l.rules().is_empty());
+        assert_eq!(l.record(&entry("zed nine", "Zed9")).unwrap(), None);
+        assert!(l.forget("glim bot").is_err());
+        assert_eq!(std::fs::read(&l.rules).unwrap(), garbled);
+        // The correction itself is still logged.
+        assert_eq!(l.entries().len(), 1);
     }
 }

@@ -88,7 +88,7 @@ pub fn parse_config_salvaging(contents: &str) -> Result<(Config, Vec<String>), t
 /// Arrays are replaced wholesale rather than concatenated. Extending a
 /// defaulted list (e.g. `language_to_layout`) requires the user to spell out
 /// the full replacement value.
-fn merge_toml_values(base: &mut toml::Value, overlay: toml::Value) {
+pub(super) fn merge_toml_values(base: &mut toml::Value, overlay: toml::Value) {
     match (base, overlay) {
         (toml::Value::Table(b), toml::Value::Table(o)) => {
             for (k, v) in o {
