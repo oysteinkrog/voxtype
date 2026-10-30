@@ -1829,6 +1829,33 @@ The worker logs the ticks of each recording, for example
 streaming_tail_secs = 0     # one tail per step
 ```
 
+### streaming_pause_commit_secs
+
+**Type:** Float (seconds)
+**Default:** `0.3`
+**Required:** No
+
+How long a pause in speech lasts before the live preview shows the tail as
+text. Normally a word joins the preview text only when the next streaming step
+has its right context, about 0.8 s after the word ends. When you stop for a
+moment, the tail already holds the last words, so the preview shows them as
+soon as the audio has been quiet for this long and the model's last tail word
+ended at least this long ago. The next step replaces them with its own reading.
+The final text does not change.
+
+- `0` turns it off.
+- Values above 60 turn it off too.
+- It needs the tail ticks (`streaming_tail_secs`); with one tail per step it
+  can only act when a step lands inside the pause.
+- Short pauses gain nothing: on LibriSpeech most pauses between words are 0.3
+  to 0.5 s, and the next word starts before the pause is long enough.
+
+**Example:**
+```toml
+[parakeet]
+streaming_pause_commit_secs = 0   # words show only after the next step
+```
+
 ### Complete Example
 
 ```toml

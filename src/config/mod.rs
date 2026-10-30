@@ -30,7 +30,8 @@ pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{
     CohereConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
     ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
-    StreamingWindow, TranscriptionEngine, DEFAULT_STREAMING_TAIL_SECS,
+    StreamingWindow, TranscriptionEngine, DEFAULT_STREAMING_PAUSE_COMMIT_SECS,
+    DEFAULT_STREAMING_TAIL_SECS,
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};
 pub use language::LanguageConfig;

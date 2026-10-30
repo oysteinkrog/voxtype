@@ -417,6 +417,15 @@ impl PauseSplitter {
         (sorted[sorted.len() / 20] * 3.0).max(1e-3)
     }
 
+    /// How long the audio has been quiet up to the last whole frame: the
+    /// frames at the end of the current part under its quiet threshold.
+    #[cfg(feature = "parakeet")] // only the parakeet live worker uses this
+    fn quiet_secs(&self) -> f32 {
+        let t = self.threshold();
+        let quiet = self.frames.iter().rev().take_while(|&&r| r < t).count();
+        (quiet * SPLIT_FRAME) as f32 / 16000.0
+    }
+
     /// True if frames `[from, to)` of the current part hold enough speech
     /// to be worth transcribing. Silence alone makes some models invent text.
     fn has_speech(&self, from: usize, to: usize) -> bool {
@@ -830,6 +839,14 @@ fn live_session(
                 p.streaming_tail_secs()
             }),
     );
+    let mut pause = PauseCommit::new(
+        config
+            .parakeet
+            .as_ref()
+            .map_or(crate::config::DEFAULT_STREAMING_PAUSE_COMMIT_SECS, |p| {
+                p.streaming_pause_commit_secs()
+            }),
+    );
     let mut more = false;
     for msg in blocks_rx.iter() {
         let Some(block) = msg else {
@@ -874,7 +891,9 @@ fn live_session(
                     let words = preview_words(u, vocab);
                     signals.note_words(&words, samples.len());
                     writeln!(out, "{}{}", WORDS_PREFIX, serde_json::to_string(&words)?)?;
-                    writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(shown)?)?;
+                    if let Some(shown) = pause.committed(shown) {
+                        writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(shown)?)?;
+                    }
                     if let Some(log) = revlog.as_mut() {
                         log.preview(samples.len() as f32 / 16000.0, shown, words);
                     }
@@ -893,6 +912,24 @@ fn live_session(
                                 eprintln!("[worker] Tail tick failed, stopping them: {}", e);
                                 ticks.every = 0;
                             }
+                        }
+                    }
+                    // A tail decoded in this block, over a long enough pause.
+                    let tail_end = u
+                        .tentative()
+                        .last()
+                        .map(|t| (t.abs_frame + 1) as f32 * LIVE_FRAME_SECS);
+                    if let (true, Some(tail_end)) = (ticks.fresh_at == samples.len(), tail_end) {
+                        let quiet = splitter.quiet_secs();
+                        let with_tail = u.transcript_with_tentative();
+                        if let Some(text) = pause.tail(
+                            samples.len() as f32 / 16000.0,
+                            quiet,
+                            tail_end,
+                            last_partial.trim(),
+                            with_tail.trim(),
+                        ) {
+                            writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(&text)?)?;
                         }
                     }
                 }
@@ -933,12 +970,9 @@ fn live_session(
                 signals.note_words(&words, samples.len());
                 writeln!(out, "{}{}", WORDS_PREFIX, serde_json::to_string(&words)?)?;
             }
-            writeln!(
-                out,
-                "{}{}",
-                PARTIAL_PREFIX,
-                serde_json::to_string(last_partial.trim())?
-            )?;
+            if let Some(shown) = pause.committed(last_partial.trim()) {
+                writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(shown)?)?;
+            }
             out.flush()?;
             if let (Some(log), Some(u)) = (revlog.as_mut(), unified.as_ref()) {
                 log.preview(
@@ -1248,6 +1282,72 @@ impl TailTicks {
         } else {
             self.slow = 0;
         }
+    }
+}
+
+/// The live preview's text after a pause (`[parakeet]
+/// streaming_pause_commit_secs`): once the audio has been quiet that long
+/// and a tail was decoded over the quiet, the tail's words show as preview
+/// text at once instead of waiting a step for their right context. The
+/// committed text, and so the final text, do not change: while the steps
+/// catch up with words already shown, their shorter text is not sent; text
+/// that differs is sent, and the daemon shows it as a revision.
+#[cfg(feature = "parakeet")]
+struct PauseCommit {
+    /// Seconds of quiet before the tail shows as text; 0 is off.
+    after: f32,
+    /// The preview text a pause sent, while the steps have not caught up.
+    shown: Option<String>,
+}
+
+#[cfg(feature = "parakeet")]
+impl PauseCommit {
+    fn new(after: f32) -> Self {
+        Self { after, shown: None }
+    }
+
+    /// The preview text to send for newly committed text `committed`, or
+    /// `None` while the text a pause sent still begins with it or is it.
+    fn committed<'a>(&mut self, committed: &'a str) -> Option<&'a str> {
+        match &self.shown {
+            Some(shown) if shown == committed => {
+                self.shown = None;
+                None
+            }
+            Some(shown) if shown.starts_with(committed) => None,
+            _ => {
+                self.shown = None;
+                Some(committed)
+            }
+        }
+    }
+
+    /// After a tail decoded at `now` (seconds into the recording) over audio
+    /// that has been quiet for `quiet_secs`: the committed text and the
+    /// tail, `with_tail`, to send as preview text. Only when the pause is
+    /// long enough both by the sound level and by the model, whose last tail
+    /// token ended at `tail_end` (a guess the model keeps making up to the
+    /// newest frame, as from noise, stays a guess), and it adds words to
+    /// what shows.
+    fn tail(
+        &mut self,
+        now: f32,
+        quiet_secs: f32,
+        tail_end: f32,
+        committed: &str,
+        with_tail: &str,
+    ) -> Option<String> {
+        let shows = self.shown.as_deref().unwrap_or(committed);
+        if self.after <= 0.0
+            || quiet_secs < self.after
+            || now - tail_end < self.after
+            || with_tail.len() <= shows.len()
+            || !with_tail.starts_with(committed)
+        {
+            return None;
+        }
+        self.shown = Some(with_tail.to_string());
+        self.shown.clone()
     }
 }
 
@@ -1655,6 +1755,66 @@ mod tests {
                 a * (i as f32 * 200.0 * std::f32::consts::TAU / 16000.0).sin() + noise
             })
             .collect()
+    }
+
+    /// LAT-4: the quiet at the end of the audio, in seconds, across a
+    /// pause and after speech starts again.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn pause_splitter_measures_the_quiet_at_the_end() {
+        let mut audio = tone(2.0, 0.3);
+        let mut sp = PauseSplitter::new();
+        sp.push(&audio);
+        assert!(sp.quiet_secs() < 0.06, "{}", sp.quiet_secs());
+        audio.extend(tone(0.4, 0.0));
+        sp.push(&audio);
+        assert!((sp.quiet_secs() - 0.4).abs() < 0.06, "{}", sp.quiet_secs());
+        audio.extend(tone(0.2, 0.3));
+        sp.push(&audio);
+        assert!(sp.quiet_secs() < 0.06, "{}", sp.quiet_secs());
+    }
+
+    /// LAT-4: after a pause the tail shows as text; the steps that catch up
+    /// with it send nothing, and text that reads differently is sent.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn pause_commit_shows_the_tail_and_waits_for_the_steps() {
+        let mut p = PauseCommit::new(0.3);
+        // At 2.5 s; the tail's last token ended at 2.1 s.
+        let tail = |p: &mut PauseCommit, quiet: f32, end: f32, with_tail: &str| {
+            p.tail(2.5, quiet, end, "open the", with_tail)
+        };
+        // Not quiet long enough, or nothing to add.
+        assert_eq!(tail(&mut p, 0.2, 2.1, "open the file"), None);
+        assert_eq!(tail(&mut p, 0.4, 2.1, "open the"), None);
+        // A tail that does not start with the committed text.
+        assert_eq!(tail(&mut p, 0.4, 2.1, "opened a file"), None);
+        // A tail token the model heard less than the pause ago, as from
+        // noise alone.
+        assert_eq!(tail(&mut p, 0.4, 2.3, "open the file"), None);
+        assert_eq!(
+            tail(&mut p, 0.4, 2.1, "open the file and"),
+            Some("open the file and".into())
+        );
+        // A longer tail in the same pause shows too; a shorter one does not.
+        assert_eq!(tail(&mut p, 0.6, 2.1, "open the file"), None);
+        assert_eq!(
+            tail(&mut p, 0.6, 2.1, "open the file and save"),
+            Some("open the file and save".into())
+        );
+        // Steps catching up send nothing, nor does reaching it.
+        assert_eq!(p.committed("open the file"), None);
+        assert_eq!(p.committed("open the file and save"), None);
+        assert_eq!(
+            p.committed("open the file and save it"),
+            Some("open the file and save it")
+        );
+        // A step that reads it differently is sent at once.
+        p.tail(2.5, 0.4, 2.1, "open the", "open the file and");
+        assert_eq!(p.committed("open a"), Some("open a"));
+        // Off.
+        let mut off = PauseCommit::new(0.0);
+        assert_eq!(off.tail(2.5, 5.0, 2.1, "open", "open the file"), None);
     }
 
     #[test]
