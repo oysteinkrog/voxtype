@@ -447,7 +447,10 @@ impl Popup {
                 }
                 _ => (&words[..], None),
             };
-            let line_el = |key: String, ws: &[Word], colour: Color| {
+            // While live, a word reaches the body from the hot node, where it
+            // already came in, so the body takes it as it stands: a second
+            // entry there dimmed it to 79 % ink and dropped it 4 px.
+            let line_el = |key: String, ws: &[Word], colour: Color, enter: bool| {
                 let text = Element::live_text(key, ws)
                     .text_style(style)
                     .revision_motion(revision::motion(&self.look))
@@ -456,7 +459,7 @@ impl Popup {
                     .motion(Prop::TextColor, Spring::critical_to_98(0.15))
                     .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                     .motion(Prop::Offset, Spring::POP)
-                    .word_enter(if tapped {
+                    .word_enter(if tapped || !enter {
                         Transition::NONE
                     } else {
                         self.ghost_enter(enter_word)
@@ -481,14 +484,14 @@ impl Popup {
             let mut row = Element::column(format!("line-{key}"))
                 .size(*w + 4.0, LINE)
                 .child(at(
-                    line_el("body".into(), body, hex(WHITE)).width(body_w),
+                    line_el("body".into(), body, hex(WHITE), !live).width(body_w),
                     0.0,
                     0.0,
                 ));
             if let Some(hot) = hot {
                 let one = std::slice::from_ref(hot);
                 row = row.child(at(
-                    line_el(format!("hot-{}", hot.id), one, hex(ACCENT)).width(width(one)),
+                    line_el(format!("hot-{}", hot.id), one, hex(ACCENT), true).width(width(one)),
                     bw,
                     0.0,
                 ));
@@ -718,6 +721,54 @@ mod edit_tests {
     #[test]
     fn captions_edit_moment_keeps_the_envelope() {
         check_edit_envelope(OsdTheme::Captions, &[0, 1]);
+    }
+
+    /// The hot word keeps its ink when the next word comes and it moves to
+    /// the line's body: it came in once, as the hot word.
+    #[test]
+    fn captions_hot_word_keeps_its_ink_in_the_body() {
+        use super::super::moments::{scenario, Moment};
+        use vo::scene::display::ItemKind;
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Captions,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        look.set_motion(&cfg.motion);
+        let options = Options {
+            fonts: fonts.clone(),
+            default_motion: default_motion(&look),
+            ..Options::default()
+        };
+        // Word 2 comes at 1.19 s and moves to the body when word 3 comes at
+        // 1.51 s.
+        let mut low = Vec::new();
+        vo::envelope::sample_scenario(
+            Popup::new(look.clone(), &fonts),
+            &scenario(&look, Moment::Cancel),
+            30.0,
+            options,
+            &mut |_, t, dl| {
+                if !(1.4..2.0).contains(&t) {
+                    return;
+                }
+                for (i, _) in dl.layers.iter().enumerate() {
+                    for it in dl
+                        .layer_items(i as _)
+                        .iter()
+                        .filter(|it| it.kind == ItemKind::Glyphs)
+                    {
+                        let glyphs = &dl.glyphs[it.start as usize..(it.start + it.len) as usize];
+                        for g in glyphs.iter().filter(|g| g.word == 2 && g.color.a < 0.99) {
+                            low.push(format!("{t:.3}: {:.2}", g.color.a));
+                        }
+                    }
+                }
+            },
+        );
+        assert!(low.is_empty(), "word 2 below full ink: {low:?}");
     }
 
     /// RD-09 with the pitch channel on, as in a real dictation: a word that
