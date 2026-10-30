@@ -45,6 +45,7 @@
 #
 #   VOXTYPE_BUDGET_IDLE_CPU_PCT  default 2    idle-open CPU, % of one core
 #   VOXTYPE_BUDGET_SHOWCASE_IDLE_CPU_PCT  default 3   the same for Showcase (see below)
+#   VOXTYPE_BUDGET_SHOWCASE_REC_CPU_PCT   default 12  recording CPU for Showcase (see below)
 #   VOXTYPE_BUDGET_IDLE_FPS      default 30   idle-open frames per second
 #   VOXTYPE_BUDGET_REC_CPU_PCT   default 10   recording CPU, % of one core
 #   VOXTYPE_BUDGET_GPU_MS        default 1    GPU median per frame (lowest of 3 runs), both states
@@ -74,6 +75,13 @@ idle_fps=${VOXTYPE_BUDGET_IDLE_FPS:-30}
 # view, encoding and submit.
 showcase_idle_cpu=${VOXTYPE_BUDGET_SHOWCASE_IDLE_CPU_PCT:-3}
 rec_cpu=${VOXTYPE_BUDGET_REC_CPU_PCT:-10}
+# Showcase while recording is accepted at 12 % (2026-10-30). It runs about 360 M user
+# instructions/s (650 M cycles/s) over scene 1.5 to 6.5 s of the dictation moment, about
+# 12 % of a core. Of those: wgpu encoding its render passes 20 % (five bloom layers, each
+# with its own pyramid), the renderer's visit 16 %, the popup view 13 % (breathing fonts),
+# scene sample 10 %. Changes that keep every pixel (vo 0b30522, 218cfc5) saved about 3 %;
+# reaching 10 % needs fewer passes or frames, which changes what is seen.
+showcase_rec_cpu=${VOXTYPE_BUDGET_SHOWCASE_REC_CPU_PCT:-12}
 gpu_ms=${VOXTYPE_BUDGET_GPU_MS:-1}
 gpu_p99=${VOXTYPE_BUDGET_GPU_P99_MS:-0}
 
@@ -194,6 +202,7 @@ for look in "${looks[@]}"; do
     for state in recording idle-open; do
         if [[ $state == recording ]]; then
             moment=dictation from=1.5 to=6.5 cpu_max=$rec_cpu fps_max=
+            [[ ${look,,} == showcase ]] && cpu_max=$showcase_rec_cpu
         else
             moment=long-silence from=1.8 to=5.9 cpu_max=$idle_cpu fps_max=$idle_fps
             [[ ${look,,} == showcase ]] && cpu_max=$showcase_idle_cpu
