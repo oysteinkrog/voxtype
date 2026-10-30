@@ -4174,7 +4174,7 @@ dependencies = [
 [[package]]
 name = "parakeet-rs"
 version = "0.3.5"
-source = "git+https://github.com/oysteinkrog/parakeet-rs?rev=30091c75e74b762be020f54fbc531c7e18f39c9a#30091c75e74b762be020f54fbc531c7e18f39c9a"
+source = "git+https://github.com/oysteinkrog/parakeet-rs?rev=7de213be99f05945ef9bac9e350c7cac4908c64f#7de213be99f05945ef9bac9e350c7cac4908c64f"
 dependencies = [
  "eyre",
  "hound",

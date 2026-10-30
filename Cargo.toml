@@ -382,4 +382,4 @@ openvino-genai = { git = "https://github.com/voxtype/openvino-rs", branch = "whi
 # score of each emitted token (voxtype-confidence), and the per-step
 # distribution summaries and lookahead tail of ParakeetUnified
 # (voxtype-signals), and decode_tail for the tail ticks between steps.
-parakeet-rs = { git = "https://github.com/oysteinkrog/parakeet-rs", rev = "30091c75e74b762be020f54fbc531c7e18f39c9a" }
+parakeet-rs = { git = "https://github.com/oysteinkrog/parakeet-rs", rev = "7de213be99f05945ef9bac9e350c7cac4908c64f" }
