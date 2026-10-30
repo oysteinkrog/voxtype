@@ -127,6 +127,7 @@ impl MoonshineTranscriber {
                 TranscribeError::InitFailed(format!("ONNX encoder session builder failed: {}", e))
             })?
             .with_intra_threads(threads)
+            .and_then(super::onnx_ep::sleeping_threads)
             .map_err(|e| {
                 TranscribeError::InitFailed(format!("Failed to set encoder threads: {}", e))
             })?
@@ -143,6 +144,7 @@ impl MoonshineTranscriber {
                 TranscribeError::InitFailed(format!("ONNX decoder session builder failed: {}", e))
             })?
             .with_intra_threads(threads)
+            .and_then(super::onnx_ep::sleeping_threads)
             .map_err(|e| {
                 TranscribeError::InitFailed(format!("Failed to set decoder threads: {}", e))
             })?

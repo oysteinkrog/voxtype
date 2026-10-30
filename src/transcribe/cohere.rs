@@ -631,6 +631,7 @@ fn build_session(
     let builder = Session::builder()
         .map_err(|e| TranscribeError::InitFailed(format!("{label} builder: {e}")))?
         .with_intra_threads(threads)
+        .and_then(super::onnx_ep::sleeping_threads)
         .map_err(|e| TranscribeError::InitFailed(format!("{label} threads: {e}")))?;
 
     let mut builder = if use_gpu {

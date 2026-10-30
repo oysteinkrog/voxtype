@@ -26,6 +26,16 @@ use ort::execution_providers::ExecutionProviderDispatch;
 #[cfg(feature = "onnx-common")]
 use ort::session::builder::{BuilderResult, SessionBuilder};
 
+/// Lets the session's threads sleep while they wait for work. ORT's
+/// default lets them spin, which keeps whole cores busy for the same text
+/// and speed.
+#[cfg(feature = "onnx-common")]
+pub fn sleeping_threads(builder: SessionBuilder) -> BuilderResult {
+    builder
+        .with_intra_op_spinning(false)?
+        .with_inter_op_spinning(false)
+}
+
 /// Register GPU EPs onto a session builder.
 ///
 /// `engine_label` and `session_label` are used only for logging
