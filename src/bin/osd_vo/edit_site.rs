@@ -274,6 +274,7 @@ pub(crate) fn site(theme: OsdTheme) -> &'static dyn EditSite {
         OsdTheme::Cyberpunk => &super::cyberpunk::CyberpunkSite,
         OsdTheme::Island => &super::island::IslandSite,
         OsdTheme::Jarvis => &super::jarvis::JarvisSite,
+        OsdTheme::Karaoke => &super::karaoke::KaraokeSite,
         OsdTheme::Palette => &super::palette::PaletteSite,
         OsdTheme::Particles => &super::particles::ParticlesSite,
         OsdTheme::Phosphor => &super::phosphor::PhosphorSite,
