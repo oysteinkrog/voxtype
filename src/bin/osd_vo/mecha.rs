@@ -1044,11 +1044,25 @@ fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
 /// Shaped labels by text, font and size in 1/64 units.
 type ShapedCache = HashMap<(String, u32, u32), Arc<ShapedText>>;
 
-/// Shaped labels, kept: the view is built for every audio batch.
+/// Shaped labels, kept: the view is built for every audio batch. Font ids
+/// belong to a font table, so each table has its own cache (tests each load
+/// their own table).
 fn shaped(measure: &vo::ShapedLayout, text: &str, font: u32, px: f32) -> Arc<ShapedText> {
-    static CACHE: OnceLock<Mutex<ShapedCache>> = OnceLock::new();
+    static CACHES: Mutex<Vec<(FontRegistry, ShapedCache)>> = Mutex::new(Vec::new());
     let key = (text.to_string(), font, (px * 64.0) as u32);
-    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
+    let mut caches = CACHES.lock().unwrap();
+    let same = |(f, _): &(FontRegistry, ShapedCache)| f.same_table(measure.fonts());
+    let i = match caches.iter().position(same) {
+        Some(i) => i,
+        None => {
+            if caches.len() >= 4 {
+                caches.remove(0);
+            }
+            caches.push((measure.fonts().clone(), ShapedCache::new()));
+            caches.len() - 1
+        }
+    };
+    let cache = &mut caches[i].1;
     if let Some(s) = cache.get(&key) {
         return s.clone();
     }
@@ -1687,6 +1701,22 @@ mod edit_tests {
     #[test]
     fn mecha_edits_within_the_envelope() {
         envelope(OsdTheme::Mecha, "mecha");
+    }
+
+    /// Labels shaped with one font table are not reused for another, where
+    /// the same font id is another face.
+    #[test]
+    fn shaped_labels_are_kept_per_font_table() {
+        use super::super::*;
+        let plasma = PlasmaTheme::default();
+        let (a, b) = (load_fonts(&plasma).unwrap(), load_fonts(&plasma).unwrap());
+        let id = a.add_system("monospace").unwrap();
+        assert_eq!(b.add_system("serif").unwrap(), id);
+        let (ma, mb) = (vo::ShapedLayout::new(a), vo::ShapedLayout::new(b));
+        let text = "MMMM iiii";
+        let wa = super::shaped(&ma, text, id, 20.0).size.w;
+        let wb = super::shaped(&mb, text, id, 20.0).size.w;
+        assert_ne!(wa, wb, "a monospace and a serif face");
     }
 
     /// The hydraulic chain's caret block shows while listening; while
