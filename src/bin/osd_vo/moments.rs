@@ -46,6 +46,9 @@ pub(crate) enum Moment {
     /// A spelled correction (COR-5): the letters fill in while the key is
     /// held, then the word is placed and learned.
     Spell,
+    /// A keyboard edit (plan M7.6): a tap in a pause, the caret up two
+    /// lines, a word typed, Enter.
+    Edit,
 }
 
 impl Moment {
@@ -70,6 +73,7 @@ impl Moment {
         Moment::Lookahead,
         Moment::Correction,
         Moment::Spell,
+        Moment::Edit,
     ];
 
     /// The name on the command line.
@@ -95,6 +99,7 @@ impl Moment {
             Moment::Lookahead => "lookahead",
             Moment::Correction => "correction",
             Moment::Spell => "spell",
+            Moment::Edit => "edit",
         }
     }
 
@@ -273,6 +278,21 @@ impl Take {
             signals: Default::default(),
             unsure: vec!["popup", "swish", "confi"],
         }
+    }
+
+    /// The daemon's edit block at `t`: `phase` with the text so far frozen,
+    /// or None when the edit is over.
+    fn edit(&mut self, t: f64, phase: Option<&str>) {
+        self.doc.edit = phase.map(|phase| voxtype::osd::edit_ipc::EditBlock {
+            session: 1,
+            phase: phase.into(),
+            frozen: self.files.preview.clone(),
+            tail: String::new(),
+            pause: 1,
+            raw_words: self.files.preview.split_whitespace().count(),
+        });
+        self.files.live = Some(self.doc.clone());
+        self.files_at(t);
     }
 
     fn files_at(&mut self, t: f64) {
@@ -1002,6 +1022,7 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             k.end(shown + 0.2, Outcome::Done);
             k.scenario(look, shown + 1.4)
         }
+        Moment::Edit => edit_scenario(look, 2),
         Moment::TimeLimit => {
             // Runs to the limit: the recording stops itself. `Files` does not
             // carry the limit yet; MO-35 adds it.
@@ -1015,6 +1036,57 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             k.scenario(look, shown + 1.4)
         }
     }
+}
+
+/// A keyboard edit as `look` would get it (plan M7.6): 26 words dictated,
+/// a tap in the pause, the caret `ups` lines up from the end, " quickly"
+/// typed, Enter, and the daemon releasing and delivering. The `edit`
+/// moment is `ups = 2`. Run it on [`popup_for`]`(Moment::Edit, ..)`.
+pub(crate) fn edit_scenario(look: &Look, ups: usize) -> vo::Scenario<Msg> {
+    use vo::scene::input::{LogicalKey, Mods, NamedKey};
+    let s0 = 0.2;
+    let mut k = Take::new(s0);
+    k.record(s0);
+    let t = k.speak(s0, &sentence_words(0, 26), 0.32);
+    // A tap in the pause: pending, then the text is the user's.
+    let up = t + 0.7;
+    let typed = up + 0.25 * ups as f64 + 0.35;
+    let (enter, done) = (typed + 0.9, typed + 1.15);
+    k.sound(t, done + 1.6, Sound::Quiet);
+    k.edit(t + 0.1, Some("pending"));
+    k.edit(t + 0.35, Some("editing"));
+    k.inputs.push((
+        t + 0.4,
+        Input::KeyboardFocus {
+            gained: true,
+            requested: true,
+        },
+    ));
+    k.edit(done, Some("releasing"));
+    k.edit(done + 0.2, None);
+    deliver(&mut k, done + 0.2, Delivery::PastedEnter);
+    let mut s = k.scenario(look, done + 1.6);
+    // Keys well apart, so the daemon's answers fall after them.
+    for i in 0..ups {
+        s.key(
+            up + 0.25 * i as f64,
+            LogicalKey::Named(NamedKey::Up),
+            None,
+            Mods::NONE,
+        );
+    }
+    s.type_text(typed, " quickly");
+    s.key(enter, LogicalKey::Named(NamedKey::Enter), None, Mods::NONE);
+    s
+}
+
+/// `popup` set up for `moment`: in the edit moment it has a keyboard edit
+/// link that reads and writes no files.
+pub(crate) fn popup_for(moment: Moment, mut popup: Popup) -> Popup {
+    if moment == Moment::Edit {
+        popup.edit = Some(super::edit_link::EditLink::offline());
+    }
+    popup
 }
 
 /// `--offline DIR --moment NAME`: renders one moment to PNG frames.
@@ -1036,8 +1108,14 @@ pub(crate) fn offline(
         renderer_setup: Some(Arc::new(vo_3d::install)),
         ..Options::default()
     };
-    let n = vo::render_offline_with(Popup::scripted(look, &fonts), &s, fps, dir, options)
-        .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
+    let n = vo::render_offline_with(
+        popup_for(m, Popup::scripted(look, &fonts)),
+        &s,
+        fps,
+        dir,
+        options,
+    )
+    .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
     eprintln!(
         "voxtype-osd-vo: wrote {n} frames of {} to {}",
         m.name(),
@@ -1413,5 +1491,58 @@ mod tests {
         assert!(texts.iter().any(|t| t.ends_with("swish.")));
         assert!(f.last().unwrap().1.preview.contains("file, and"));
         assert!(f.last().unwrap().1.preview.contains("swiss. Then"));
+    }
+
+    /// M7.6 and R35: the edit moment pauses, moves the caret up two lines,
+    /// types and presses Enter, and Swiss keeps the reading-line envelope
+    /// with the caret line as its reading line.
+    #[test]
+    fn the_edit_moment_edits_within_the_envelope() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let mut look = test_look();
+        look.theme = OsdTheme::Swiss;
+        let s = scenario(&look, Moment::Edit);
+        let options = || Options {
+            fonts: fonts.clone(),
+            default_motion: default_motion(&look),
+            ..Options::default()
+        };
+        let popup = || popup_for(Moment::Edit, Popup::scripted(look.clone(), &fonts));
+        let keys: Vec<f64> = s
+            .inputs
+            .iter()
+            .filter_map(|(t, i)| matches!(i, Input::Key(_)).then_some(*t))
+            .collect();
+        let (first, last) = (keys[0], *keys.last().unwrap());
+        let mut feet = Vec::new();
+        vo::envelope::sample_scenario(popup(), &s, 30.0, options(), &mut |_, t, dl| {
+            feet.push((t, dl.edit_caret));
+        });
+        let at = |t: f64| feet.iter().rev().find(|f| f.0 <= t).unwrap().1;
+        let before = at(first - 0.01).expect("the caret shows once the text is the user's");
+        let up = at(first + 0.5).expect("the caret after two Ups");
+        let typed = at(last - 0.1).expect("the caret after typing");
+        let line = look.text_style().line_height;
+        assert!(
+            ((before.y - up.y) / line - 2.0).abs() < 0.1,
+            "two lines up: {before:?} to {up:?}, lines {line}"
+        );
+        assert!(
+            (typed.y - up.y).abs() < 1.0 && typed.x > up.x,
+            "typed on that line: {typed:?}"
+        );
+        assert_eq!(at(s.duration), None, "Enter ends the edit");
+        let report = vo::envelope::check_scenario(
+            popup(),
+            &s,
+            30.0,
+            options(),
+            &vo::envelope::Envelope {
+                transcript: 0..1 << 20,
+                ..vo::envelope::Envelope::default()
+            },
+        );
+        assert!(report.is_ok(), "{report}");
     }
 }

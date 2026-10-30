@@ -77,7 +77,8 @@ pub(crate) enum Change {
 /// The popup's edit state for one dictation.
 #[derive(Debug, Default)]
 pub(crate) struct EditLink {
-    paths: Paths,
+    /// None for a link that reads and writes no files (`EditLink::offline`).
+    paths: Option<Paths>,
     session: u64,
     pause: u32,
     phase: Option<Phase>,
@@ -101,9 +102,15 @@ pub(crate) struct EditLink {
 impl EditLink {
     pub(crate) fn new(paths: Paths) -> EditLink {
         EditLink {
-            paths,
+            paths: Some(paths),
             ..EditLink::default()
         }
+    }
+
+    /// A link that reads and writes no files, for scripted moments
+    /// (`--moment edit`): the daemon's side comes from the script.
+    pub(crate) fn offline() -> EditLink {
+        EditLink::default()
     }
 
     pub(crate) fn phase(&self) -> Option<Phase> {
@@ -187,7 +194,10 @@ impl EditLink {
             // A new pause of a running popup: the frozen text holds the
             // last edit and the speech since; an undo floor starts here.
             buffer.seed(block.frozen.clone());
-        } else if let Some(snap) = edit_ipc::read_buffer_from(&self.paths.buffer)
+        } else if let Some(snap) = self
+            .paths
+            .as_ref()
+            .and_then(|p| edit_ipc::read_buffer_from(&p.buffer))
             .filter(|b| b.session == block.session && b.pause == block.pause)
         {
             let mut buffer = EditBuffer::new(snap.text);
@@ -263,14 +273,21 @@ impl EditLink {
             sel: (now.1.anchor, now.1.focus),
             pause: self.pause,
         };
-        match edit_ipc::write_buffer_to(&self.paths.buffer, &snap) {
+        let Some(paths) = &self.paths else {
+            self.written = Some(now);
+            return;
+        };
+        match edit_ipc::write_buffer_to(&paths.buffer, &snap) {
             Ok(()) => self.written = Some(now),
             Err(e) => tracing::warn!("could not write the edit buffer: {e}"),
         }
     }
 
     fn send(&mut self, cmd: EditCmd) {
-        if let Err(e) = edit_ipc::append_cmd_to(&self.paths.cmds, self.session, cmd) {
+        let Some(paths) = &self.paths else {
+            return;
+        };
+        if let Err(e) = edit_ipc::append_cmd_to(&paths.cmds, self.session, cmd) {
             tracing::warn!("could not send {cmd:?} to the daemon: {e}");
         }
     }

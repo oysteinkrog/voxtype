@@ -29,17 +29,28 @@ pub(crate) fn run(
     cancel: bool,
     moment: Option<&str>,
 ) -> anyhow::Result<()> {
-    let scenario = match moment {
-        Some(name) => {
-            let m = super::moments::Moment::parse(name).ok_or_else(|| {
+    let moment = moment
+        .map(|name| {
+            super::moments::Moment::parse(name).ok_or_else(|| {
                 anyhow::anyhow!(
                     "no moment {name:?}; the moments are {}",
                     super::moments::Moment::names()
                 )
-            })?;
-            super::moments::scenario(&look, m)
-        }
+            })
+        })
+        .transpose()?;
+    let scenario = match moment {
+        Some(m) => super::moments::scenario(&look, m),
         None => scenario(&look, cancel),
+    };
+    // The edit moment's popup has an edit link; with it the envelope's
+    // reading line is the caret line (M4.9).
+    let popup = || {
+        let p = Popup::new(look.clone(), &fonts);
+        match moment {
+            Some(m) => super::moments::popup_for(m, p),
+            None => p,
+        }
     };
     let options = || Options {
         fonts: fonts.clone(),
@@ -48,7 +59,7 @@ pub(crate) fn run(
         ..Options::default()
     };
     let report = check_scenario(
-        Popup::new(look.clone(), &fonts),
+        popup(),
         &scenario,
         fps,
         options(),
@@ -71,7 +82,7 @@ pub(crate) fn run(
             );
         }
     }
-    let budget = measure_budget(Popup::new(look.clone(), &fonts), &scenario, fps, options())
+    let budget = measure_budget(popup(), &scenario, fps, options())
         .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
     let mut over = None;
     match &budget {
