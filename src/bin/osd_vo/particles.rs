@@ -651,7 +651,10 @@ impl Popup {
         }
         let phase = self.particles_phase();
         let (x0, y0) = (ROOM_SIDE * s, ROOM_TOP * s);
-        let card_h = card_h(self.lines, phase) * s;
+        // The progress bar pushes the status row down while a model loads
+        // too, not only while finishing, so the card makes room for it then.
+        let bar = phase != Phase::Done && self.shows_progress(&self.status());
+        let card_h = card_h(self.lines, if bar { Phase::Finishing } else { phase }) * s;
         // The swirl keeps to a band round the button, so its layer is no bigger than it needs.
         let band = Size::new(surface.w, 2.0 * SWIRL_HALF * s);
         let onsets: Arc<[f64]> = if l.on(showcase::PARTICLE_SOURCE) && !self.still() {
@@ -675,7 +678,7 @@ impl Popup {
             onsets,
             scrub: self.scrub(),
         };
-        root.child(at(self.particles_card(card_h), x0, y0))
+        root.child(at(self.particles_card(card_h, bar), x0, y0))
             .child(at(
                 self.particles_swirl(&swirl, band),
                 0.0,
@@ -692,8 +695,10 @@ impl Popup {
             .child(self.particles_bottom(phase, x0, y0))
     }
 
-    /// The navy glass card with its thin blue-violet edge.
-    fn particles_card(&self, h: f32) -> Element<Msg> {
+    /// The navy glass card with its thin blue-violet edge. With the progress
+    /// bar shown its height snaps: the bar and the row below it land at once,
+    /// and a card growing after them left the row across its bottom edge.
+    fn particles_card(&self, h: f32, bar: bool) -> Element<Msg> {
         let l = &self.look;
         let s = scale(l);
         let cancelled = self.extra.final_at.is_none();
@@ -703,14 +708,19 @@ impl Popup {
             Transition::fade().offset(0.0, -6.0)
         };
         let a = l.background.a.max(0.86);
-        Element::panel("card")
+        let card = Element::panel("card")
             .size(l.width, h)
             .radius(CARD_RADIUS * s)
             .fill_gradient(Color::hex(CARD_TOP, a), Color::hex(CARD_BOTTOM, a))
             .border(Color::hex(EDGE, 0.55), self.exhale_width(1.0))
             .motion(Prop::StrokeWidth, self.exhale_snap())
             .rim(Color::hex(VIOLET, 0.35), 1.0, 0.18, -0.4, 0.0)
-            .presence(Transition::fade().offset(0.0, 8.0), exit)
+            .presence(Transition::fade().offset(0.0, 8.0), exit);
+        if bar {
+            card.motion(Prop::Size, Motion::Snap)
+        } else {
+            card
+        }
     }
 
     /// The swirl as light: strands, rings and dust, in a band `surface`.
