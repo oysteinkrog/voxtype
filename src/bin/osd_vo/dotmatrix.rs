@@ -848,6 +848,7 @@ mod tests {
         for (moment, label) in [
             (Moment::Cancel, "Cancelled · noth"),
             (Moment::NoSpeech, "No speech"),
+            (Moment::Failure, "Failed · noth"),
         ] {
             for width_px in [400, 600] {
                 let cfg = OsdConfig {

@@ -314,6 +314,18 @@ enum Mode {
     Cancelled,
 }
 
+impl From<kit::Mode> for Mode {
+    fn from(mode: kit::Mode) -> Self {
+        match mode {
+            kit::Mode::Loading => Mode::Loading,
+            kit::Mode::Listening => Mode::Listening,
+            kit::Mode::Finishing => Mode::Finishing,
+            kit::Mode::Done => Mode::Done,
+            kit::Mode::Cancelled => Mode::Cancelled,
+        }
+    }
+}
+
 impl Mode {
     fn name(self) -> &'static str {
         match self {
@@ -711,22 +723,7 @@ impl Scene {
 
 impl Popup {
     fn scope_mode(&self) -> Mode {
-        let status = self.status();
-        if self.extra.final_at.is_some() {
-            Mode::Done
-        } else if self.ended() {
-            if self.extra.finish_at.is_some() {
-                Mode::Done
-            } else {
-                Mode::Cancelled
-            }
-        } else if status.loading {
-            Mode::Loading
-        } else if status.finishing || self.extra.finish_at.is_some() {
-            Mode::Finishing
-        } else {
-            Mode::Listening
-        }
+        self.kit_mode().into()
     }
 
     /// The input level in dBFS from the newest levels, or `None` when quiet.
