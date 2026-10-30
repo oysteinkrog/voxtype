@@ -100,6 +100,11 @@ pub(crate) struct EditLink {
     /// The popup last handed the text back to be delivered, not to listen
     /// again: the badge says "sending" while releasing.
     sending: bool,
+    /// The pause whose text the popup handed back (resume or finish). A
+    /// block that still gives it the text of that pause was written before
+    /// the daemon read the hand-back: taking it would make the text
+    /// editable again and write a revision the hand-back does not name.
+    handed_back: Option<u32>,
 }
 
 impl EditLink {
@@ -149,6 +154,13 @@ impl EditLink {
             self.rev = 0;
         }
         let phase = Phase::parse(&block.phase);
+        let owns = phase.is_some_and(Phase::owns_text);
+        if owns && self.handed_back == Some(block.pause) {
+            return Change::Nothing;
+        }
+        if !owns || self.handed_back != Some(block.pause) {
+            self.handed_back = None;
+        }
         if phase.is_some() && phase == self.ahead_of {
             return Change::Nothing;
         }
@@ -184,6 +196,7 @@ impl EditLink {
     fn leave(&mut self) -> Change {
         self.phase = None;
         self.ahead_of = None;
+        self.handed_back = None;
         self.tail.clear();
         self.written = None;
         if self.buffer.take().is_some() {
@@ -316,6 +329,7 @@ impl EditLink {
             self.write();
             self.send(EditCmd::Resume { rev: self.rev });
             self.sending = false;
+            self.handed_back = Some(self.pause);
             self.move_on(Phase::Releasing);
         }
     }
@@ -329,6 +343,7 @@ impl EditLink {
                 rev: self.rev,
             });
             self.sending = true;
+            self.handed_back = Some(self.pause);
             self.move_on(Phase::Releasing);
         }
     }
@@ -427,6 +442,48 @@ mod tests {
         let after = read_buffer_from(&dir.path().join("edit-buffer.json")).unwrap();
         assert_eq!(after.rev, before + 1);
         assert_eq!(after.text, "hell!o world");
+    }
+
+    /// Enter while the tail settles: the daemon's next block (Editing, with
+    /// the tail frozen) was written before it read the Finish. The popup
+    /// does not take the text back, writes nothing, and the daemon accepts
+    /// the Finish.
+    #[test]
+    fn a_late_block_does_not_take_the_text_back_after_enter() {
+        let dir = TempDir::new().unwrap();
+        let mut link = EditLink::new(paths(&dir));
+        link.sync(Some(&block("settling", "one", 1)));
+        act(&mut link, EditAction::Insert("!".into()));
+        link.finish(FinishMode::PasteEnter);
+        let rev = read_buffer_from(&dir.path().join("edit-buffer.json"))
+            .unwrap()
+            .rev;
+        assert_eq!(
+            link.sync(Some(&block("editing", "one two", 1))),
+            Change::Nothing
+        );
+        assert!(!link.editable());
+        assert_eq!(link.phase(), Some(Phase::Releasing));
+        let buffer = read_buffer_from(&dir.path().join("edit-buffer.json"));
+        assert_eq!(buffer.as_ref().unwrap().rev, rev, "no write after Enter");
+        let mut reader = CmdReader::default();
+        assert_eq!(
+            reader.poll(&dir.path().join("edit-cmd"), 7, buffer.as_ref()),
+            [Accepted::Finish {
+                mode: FinishMode::PasteEnter,
+                text: "one!".into()
+            }]
+        );
+        // The daemon's answer, and then a new pause, are taken as before.
+        assert_eq!(
+            link.sync(Some(&block("releasing", "one!", 1))),
+            Change::Nothing
+        );
+        assert_eq!(
+            link.sync(Some(&block("settling", "one! three", 2))),
+            Change::Entered
+        );
+        assert!(link.editable());
     }
 
     #[test]
