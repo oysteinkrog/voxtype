@@ -1044,11 +1044,12 @@ pub(crate) mod edit_check {
         }
     }
 
-    /// A font's ligature ("ij" in Jarvis' Barlow) is one glyph for two
-    /// letters: the caret still finds its glyph, also inside the ligature.
+    /// A font's ligature ("fi" in Swiss' face, "ij" in Jarvis' Barlow) is
+    /// one glyph for two letters: the caret still finds its glyph, also
+    /// inside the ligature.
     #[test]
     fn the_caret_follows_ligatures() {
-        let mut r = Rig::new(OsdTheme::Jarvis, false);
+        let mut r = Rig::new(OsdTheme::Swiss, false);
         r.dictate(12);
         r.enter(1.0);
         r.act(EditAction::Insert(" fijord".into()), 1.2);
