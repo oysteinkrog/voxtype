@@ -4261,6 +4261,15 @@ fonts, and draws the `swiss` look. Differences from the GTK4 popup:
 - `word_fade = true` in `[osd]` (or `--word-fade`, or
   `VOXTYPE_OSD_WORD_FADE=1`) fades new words in. By default they appear at
   once, as in the GTK4 popup.
+- While it shows, the popup's own threads run at real-time priority
+  (`SCHED_RR` 1, the same as KWin), so CPU load from builds or other apps
+  does not make it wait. They go back to normal priority when it hides. A
+  thread that runs 100 ms without a pause is put back to normal at once
+  (`RLIMIT_RTTIME`). This needs real-time rights (`ulimit -r` above 0,
+  usually from the `audio` or `realtime` group); without them the popup
+  uses the lowest nice value it may, down to -10, or keeps its priority.
+  Turn it off with `realtime = false` in `[osd]`, `--realtime false`, or
+  `VOXTYPE_OSD_REALTIME=false`.
 - The microphone icon is drawn from shapes, not taken from the icon theme.
 
 It also draws two more looks that only this frontend has (the GTK4 popup

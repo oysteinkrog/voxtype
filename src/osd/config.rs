@@ -628,6 +628,11 @@ pub struct OsdConfig {
     /// such as "3/20 Type", above the vo popup's top-left corner. Off by
     /// default.
     pub look_badge: bool,
+    /// Run the vo popup's threads at real-time priority (`SCHED_RR` 1)
+    /// while it shows, so a busy machine does not make it stutter. Needs
+    /// `RLIMIT_RTPRIO` (the `audio` or `realtime` group); without it the
+    /// popup takes the lowest nice value it may, down to -10. On by default.
+    pub realtime: bool,
     /// Motion features of the vo popup: `"look"` (each look's own set),
     /// `"none"`, or a list of names (see [`OsdMotion`]).
     pub motion: OsdMotion,
@@ -676,6 +681,7 @@ impl Default for OsdConfig {
             theme: OsdTheme::Default,
             word_fade: false,
             look_badge: false,
+            realtime: true,
             motion: OsdMotion::Look,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,

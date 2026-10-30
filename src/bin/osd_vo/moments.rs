@@ -1110,6 +1110,7 @@ pub(crate) fn live(
         },
         inputs,
     };
+    let _boost = crate::realtime::raise(cfg.realtime);
     resident
         .run(played, spec, options)
         .map_err(|e| anyhow::anyhow!("live moment: {e}"))

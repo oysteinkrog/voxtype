@@ -151,6 +151,8 @@ mod ruler;
 mod model_signals;
 #[path = "osd_vo/forming.rs"]
 mod forming;
+#[path = "osd_vo/realtime.rs"]
+mod realtime;
 #[path = "osd_vo/correction_note.rs"]
 mod correction_note;
 
@@ -254,6 +256,11 @@ struct Args {
     /// the live popup's top-left corner. Also `[osd] look_badge = true`.
     #[arg(long, env = "VOXTYPE_OSD_LOOK_BADGE")]
     look_badge: bool,
+
+    /// Real-time CPU priority for the popup while it shows: `true` (the
+    /// default) or `false`. Also `[osd] realtime`.
+    #[arg(long, env = "VOXTYPE_OSD_REALTIME")]
+    realtime: Option<bool>,
 
     /// Look to draw: `swiss` (default here), `showcase`, a rich look that
     /// shows off the GPU renderer, or `type`, led by type and line. Also
@@ -2361,6 +2368,7 @@ type Shared = Arc<(Mutex<Sink>, Condvar)>;
 /// batch, with the voice features when the daemon sends version 2 frames.
 /// Reconnects when the daemon goes away.
 fn read_audio(shared: Shared, socket: PathBuf, reconnect: Duration) {
+    realtime::register_thread();
     loop {
         if let Ok(mut reader) = UnixStream::connect(&socket).and_then(AudioReader::new) {
             tracing::info!(
@@ -2432,6 +2440,7 @@ fn read_files() -> Files {
 /// reports one, and every `POLL_INTERVAL` anyway, which also ages out a stale
 /// status.
 fn poll_files(shared: Shared) {
+    realtime::register_thread();
     let mut watch = voxtype::osd::watch::RuntimeWatch::new(VoxtypeConfig::runtime_dir());
     let mut last = None;
     let mut last_signals = None;
@@ -2483,6 +2492,9 @@ fn main() -> anyhow::Result<()> {
     }
     cfg.word_fade |= args.word_fade;
     cfg.look_badge |= args.look_badge;
+    if let Some(r) = args.realtime {
+        cfg.realtime = r;
+    }
     if let Some(a) = args.anchor.as_deref().and_then(OsdAnchor::from_name) {
         cfg.anchor = a;
     }
@@ -2613,7 +2625,9 @@ fn main() -> anyhow::Result<()> {
         popup.recorder = args.record.as_deref().and_then(replay::recorder);
         popup.osd = Some(cfg.clone());
         popup.live_surface = true;
+        let boost = realtime::raise(cfg.realtime);
         let result = resident.run(popup, live_spec(&cfg, &look), options);
+        drop(boost);
         // The popup may have picked a look with the look chord.
         if let Some(theme) = look_step::saved() {
             look.theme = theme;
