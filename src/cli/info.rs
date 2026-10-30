@@ -15,6 +15,8 @@ pub enum InfoAction {
     ///
     /// The values accepted by `voxtype config set audio.device`. The
     /// synthetic `default` entry follows the system default at record time.
+    /// PipeWire nodes are not listed here; select one with
+    /// `pipewire:<node.name>` (names from `pactl list sources short`).
     Devices {
         /// Emit machine-readable JSON instead of human-readable text
         #[arg(long)]

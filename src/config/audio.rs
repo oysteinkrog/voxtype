@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 /// Audio capture configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AudioConfig {
-    /// PipeWire/PulseAudio device name, or "default"
+    /// ALSA device name, "default", or "pipewire:<node.name>" for one
+    /// PipeWire node (Linux)
     #[serde(default = "default_audio_device")]
     pub device: String,
 

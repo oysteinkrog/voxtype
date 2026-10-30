@@ -21,7 +21,7 @@ use crate::output;
 use crate::output::post_process::PostProcessor;
 use crate::output::streaming::StreamingSession;
 use crate::output::TextOutput;
-use crate::state::{ChunkResult, State};
+use crate::state::{ChunkResult, Phase, State};
 use crate::text::TextProcessor;
 use crate::transcribe::{StreamHandle, StreamingEvent, Transcriber};
 use pidlock::Pidlock;
@@ -295,6 +295,108 @@ fn cleanup_pid_file(path: &PathBuf) {
 }
 
 /// Check if cancel has been requested (via file trigger)
+/// Keyboard editing pauses a live preview recording, so it needs one, and
+/// one that types nothing while it records.
+fn keyboard_edit_on(config: &Config) -> bool {
+    let usable = config.live_preview_active() && !config.live_typing;
+    if config.osd.keyboard_edit && !usable {
+        tracing::warn!("osd.keyboard_edit needs live_preview_model and no live_typing; it is off");
+    }
+    config.osd.keyboard_edit && usable
+}
+
+/// Trigger file `voxtype record edit` writes in the runtime dir.
+pub const EDIT_REQUEST_FILE: &str = "edit";
+
+/// Consume a `voxtype record edit` trigger.
+fn check_edit_requested() -> bool {
+    std::fs::remove_file(Config::runtime_dir().join(EDIT_REQUEST_FILE)).is_ok()
+}
+
+/// Where the keyboard edit link reads and writes: `preview.json` and the
+/// runtime dir, or a test's own.
+struct EditLink {
+    publish: Box<dyn Fn(Option<crate::osd::edit_ipc::EditBlock>) + Send + Sync>,
+    shown: Box<dyn Fn() -> String + Send + Sync>,
+    /// Stop spoken corrections from replacing words spoken before this
+    /// many seconds of audio.
+    freeze: Box<dyn Fn(f32) + Send + Sync>,
+    buffer: PathBuf,
+    cmds: PathBuf,
+    /// Where a finish says how the recording was stopped (`hotkey-last`).
+    hotkey_last: PathBuf,
+    /// Where a discarded edited dictation is kept for a minute.
+    discarded: PathBuf,
+    reader: crate::osd::edit_ipc::CmdReader,
+    /// Asks the compositor which window is active, for the paste gate.
+    windows: Arc<std::sync::Mutex<Box<dyn crate::osd::target::Windows>>>,
+    /// Waits up to the given time for the modifiers and Enter to be up;
+    /// false when one is still held.
+    keys_up: KeysUp,
+}
+
+type KeysUp = Box<dyn Fn(Duration) -> futures_util::future::BoxFuture<'static, bool> + Send + Sync>;
+
+impl Default for EditLink {
+    fn default() -> Self {
+        Self {
+            publish: Box::new(crate::osd::live::set_edit),
+            shown: Box::new(crate::osd::live::shown_text),
+            freeze: Box::new(|t| {
+                crate::osd::correction::freeze(t);
+                if crate::osd::correction::active() {
+                    refresh_live_correction();
+                }
+            }),
+            buffer: crate::osd::edit_ipc::buffer_path(),
+            cmds: crate::osd::edit_ipc::cmd_path(),
+            hotkey_last: Config::runtime_dir().join("hotkey-last"),
+            discarded: crate::osd::edit_journal::discarded_path(),
+            reader: Default::default(),
+            windows: Arc::new(std::sync::Mutex::new(Box::new(crate::osd::target::Kdotool))),
+            keys_up: Box::new(|t| Box::pin(modifiers_released(t))),
+        }
+    }
+}
+
+/// How a keyboard-edited dictation was delivered.
+struct EditDelivery {
+    /// The check before the paste: anything but confirmed gave the
+    /// clipboard only.
+    paste: crate::osd::target::Verdict,
+    /// The check right before the post-output hook, when there was one; the
+    /// hook was skipped unless confirmed.
+    before_hook: Option<crate::osd::target::Verdict>,
+    result: std::result::Result<(), crate::error::OutputError>,
+}
+
+/// Seconds of audio at `at`: from the recording's start, or, given the
+/// samples sent by `now`, counted back from them.
+fn audio_secs_at(clock: Option<usize>, started_at: Instant, at: Instant, now: Instant) -> f32 {
+    match clock {
+        Some(sent) => {
+            (sent as f32 / 16000.0 - now.saturating_duration_since(at).as_secs_f32()).max(0.0)
+        }
+        None => at.saturating_duration_since(started_at).as_secs_f32(),
+    }
+}
+
+/// Settling ends by then even if the live model reports no progress.
+const EDIT_SETTLE_MAX: Duration = Duration::from_millis(1200);
+
+/// A recording paused for a keyboard edit.
+#[derive(Debug, Default)]
+struct EditPause {
+    /// The audio clock at the pause point, in seconds: once the live model
+    /// has decoded past it, every word spoken before the tap is in.
+    pause_at: f32,
+    /// While settling: when to stop waiting for that.
+    settle_by: Option<Instant>,
+    /// The pending tap's hold passed its cap, so the tap counts as
+    /// cancelled and its late confirmation is dropped.
+    dropped_tap: bool,
+}
+
 fn check_cancel_requested() -> bool {
     let cancel_file = Config::runtime_dir().join("cancel");
     if cancel_file.exists() {
@@ -428,6 +530,7 @@ fn clear_live_preview() {
     let _ = std::fs::remove_file(Config::live_preview_path());
     let _ = std::fs::remove_file(Config::live_status_path());
     crate::osd::live::clear();
+    crate::osd::edit_ipc::clear();
 }
 
 fn discard_stale_cancel(start_at: Option<u128>) {
@@ -1019,6 +1122,7 @@ async fn deliver_to_file(
                         post_output_command: None,
                         wait_for_modifier_release: false,
                         modifier_release_timeout: Duration::ZERO,
+                        normalize: true,
                     },
                 )
                 .await
@@ -1178,6 +1282,20 @@ pub struct Daemon {
     // The streaming session's audio gate: holds or drops the mic audio for
     // a keyboard edit, and says which audio the backend really got.
     audio_gate: Option<audio::levels::SharedGate>,
+    // Keyboard editing of a live preview recording; off until configured.
+    keyboard_edit: bool,
+    // The current recording's keyboard edit pause, while there is one.
+    edit: EditPause,
+    // The current recording's text once a keyboard edit froze part of it.
+    edit_doc: Option<crate::osd::edit_doc::EditDoc>,
+    /// Pauses for a keyboard edit in this recording.
+    edit_pauses: u32,
+    edit_link: EditLink,
+    // The window active when a keyboard-editable recording started, looked
+    // up in the background, then kept: an edited dictation pastes only
+    // into it.
+    edit_target: Option<tokio::task::JoinHandle<Option<crate::osd::target::Window>>>,
+    edit_window: Option<crate::osd::target::Window>,
     streaming_failure: Option<String>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
@@ -1289,6 +1407,7 @@ impl Daemon {
             None
         };
 
+        let keyboard_edit = keyboard_edit_on(&config);
         Self {
             start_request: None,
             config,
@@ -1317,6 +1436,13 @@ impl Daemon {
             rescued_audio: Arc::new(std::sync::Mutex::new(None)),
             streaming_samples: None,
             audio_gate: None,
+            keyboard_edit,
+            edit: EditPause::default(),
+            edit_doc: None,
+            edit_pauses: 0,
+            edit_link: EditLink::default(),
+            edit_target: None,
+            edit_window: None,
             streaming_failure: None,
             eager_chunk_tasks: Vec::new(),
             vad,
@@ -1677,6 +1803,14 @@ impl Daemon {
         // an is_recording() state, so a leftover cancel file would kill the
         // session moments after it starts. See #606.
         discard_stale_cancel(self.start_request);
+        // An edit asked for before this recording is not for it.
+        let _ = check_edit_requested();
+        self.edit = EditPause::default();
+        self.edit_doc = None;
+        self.edit_pauses = 0;
+        self.edit_link.reader = Default::default();
+        self.edit_target = None;
+        self.edit_window = None;
         // An override model has its own transcriber, which records in batch
         // mode; streaming would run the default model instead.
         if let Some(name) = model_override.as_deref() {
@@ -1737,6 +1871,15 @@ impl Daemon {
             pause: Default::default(),
         };
         self.update_state("streaming");
+        // The window the text is for, saved before an edit's focus proxy
+        // can take focus (R26).
+        if self.keyboard_edit {
+            let windows = self.edit_link.windows.clone();
+            self.edit_target = Some(tokio::task::spawn_blocking(move || {
+                let mut w = windows.lock().unwrap_or_else(|e| e.into_inner());
+                crate::osd::target::active_window(&mut **w)
+            }));
+        }
         self.play_feedback(SoundEvent::RecordingStart);
 
         if let Some(cmd) = &self.config.output.pre_recording_command {
@@ -1935,6 +2078,446 @@ impl Daemon {
         if let Some(Ok(mut gate)) = self.audio_gate.as_ref().map(|g| g.lock()) {
             gate.close();
         }
+    }
+
+    /// Silence sent to flush the live model's lookahead at a pause: one
+    /// chunk and the right context of its streaming window.
+    fn edit_pad_samples(&self) -> usize {
+        let window = self
+            .config
+            .parakeet
+            .clone()
+            .unwrap_or_default()
+            .streaming_window()
+            .unwrap_or_default();
+        (window.chunk_steps + window.right_steps) as usize * 1280
+    }
+
+    /// Seconds of audio at `at`, as the live model times its words. After a
+    /// keyboard edit pause the paused time is not in the audio and the
+    /// silence pads are, so it is read from the gate's clock.
+    fn correction_secs(&self, started_at: Instant, at: Instant) -> f32 {
+        let mut clock = None;
+        self.with_gate(|g| {
+            if !g.pads().is_empty() {
+                clock = Some(g.clock());
+            }
+        });
+        audio_secs_at(clock, started_at, at, Instant::now())
+    }
+
+    fn with_gate(&self, f: impl FnOnce(&mut audio::levels::AudioGate)) {
+        if let Some(Ok(mut gate)) = self.audio_gate.as_ref().map(|g| g.lock()) {
+            f(&mut gate);
+        }
+    }
+
+    /// Freeze the shown text past the boundary, processed and normalised
+    /// as delivery would.
+    fn edit_freeze(&mut self) {
+        let mut clock = 0;
+        self.with_gate(|g| clock = g.clock());
+        // Spoken corrections first: one that ended just before the tap is
+        // placed now and frozen with the rest.
+        (self.edit_link.freeze)(clock as f32 / 16000.0);
+        let shown = (self.edit_link.shown)();
+        let tp = &self.text_processor;
+        let doc = self
+            .edit_doc
+            .get_or_insert_with(|| crate::osd::edit_doc::EditDoc::new(crate::osd::live::session()));
+        doc.freeze(&shown, |t| {
+            output::normalize_quotes(&tp.process(t)).into_owned()
+        });
+    }
+
+    /// Tell the popup the edit phase and the frozen text. Nothing is shown
+    /// for a recording that never paused.
+    fn edit_publish(&mut self, state: &State) {
+        let shown = (self.edit_link.shown)();
+        let block = match (&mut self.edit_doc, state.phase()) {
+            (Some(doc), Some(phase)) => {
+                doc.live(&shown);
+                Some(crate::osd::edit_ipc::EditBlock {
+                    session: doc.session(),
+                    phase: phase.as_str().to_string(),
+                    frozen: doc.frozen(),
+                    tail: if phase == Phase::Settling {
+                        doc.live_text().to_string()
+                    } else {
+                        String::new()
+                    },
+                    pause: self.edit_pauses,
+                    raw_words: doc.frozen_words(),
+                })
+            }
+            (None, Some(Phase::Pending)) => Some(crate::osd::edit_ipc::EditBlock {
+                session: crate::osd::live::session(),
+                phase: Phase::Pending.as_str().to_string(),
+                ..Default::default()
+            }),
+            _ => None,
+        };
+        (self.edit_link.publish)(block);
+    }
+
+    /// A single edit tap ended while listening: hold the audio and stop the
+    /// clocks until it is confirmed or cancelled.
+    async fn edit_tap_pending(&mut self, state: &mut State) {
+        if !self.keyboard_edit || !state.is_streaming() || state.phase() != Some(Phase::Listening) {
+            return;
+        }
+        self.with_gate(|g| g.hold());
+        if let Some(tracker) = &self.silence_tracker {
+            tracker.pause().await;
+        }
+        state.set_phase(Phase::Pending, Instant::now());
+        self.edit_publish(state);
+    }
+
+    /// The pending tap became something else: the held audio goes on, in
+    /// order, and the recording listens again.
+    async fn edit_tap_cancelled(&mut self, state: &mut State) {
+        self.edit.dropped_tap = false;
+        if state.phase() != Some(Phase::Pending) {
+            return;
+        }
+        self.with_gate(|g| g.release());
+        if let Some(tracker) = &self.silence_tracker {
+            tracker.resume().await;
+        }
+        state.set_phase(Phase::Listening, Instant::now());
+        self.edit_publish(state);
+    }
+
+    /// A confirmed single tap.
+    async fn edit_tap_confirmed(&mut self, state: &mut State) {
+        if std::mem::take(&mut self.edit.dropped_tap) {
+            return;
+        }
+        self.edit_toggle(state).await;
+    }
+
+    /// A confirmed single tap, or `voxtype record edit`: pause to edit when
+    /// listening, listen again when editing, edit again when detached.
+    async fn edit_toggle(&mut self, state: &mut State) {
+        if !self.keyboard_edit || !state.is_streaming() {
+            return;
+        }
+        match state.phase() {
+            Some(Phase::Listening | Phase::Pending) => self.edit_pause(state).await,
+            Some(Phase::Settling | Phase::Editing) => self.edit_resume(state).await,
+            Some(Phase::Detached) => {
+                state.set_phase(Phase::Editing, Instant::now());
+                self.edit_publish(state);
+            }
+            _ => {}
+        }
+    }
+
+    /// Drop the held audio, send the silence pad so the live model decodes
+    /// every word before the pause, and stop passing mic audio.
+    async fn edit_pause(&mut self, state: &mut State) {
+        let pad = self.edit_pad_samples();
+        let mut pause_at = 0;
+        self.with_gate(|g| {
+            pause_at = g.clock();
+            g.pause(pad);
+        });
+        if let Some(tracker) = &self.silence_tracker {
+            tracker.pause().await;
+        }
+        let now = Instant::now();
+        self.edit = EditPause {
+            pause_at: pause_at as f32 / 16000.0,
+            settle_by: Some(now + EDIT_SETTLE_MAX),
+            dropped_tap: false,
+        };
+        state.set_phase(Phase::Settling, now);
+        self.edit_pauses += 1;
+        self.edit_freeze();
+        self.edit_publish(state);
+        tracing::info!("Paused for a keyboard edit");
+    }
+
+    /// Pass mic audio again; new speech goes after the edited text.
+    async fn edit_resume(&mut self, state: &mut State) {
+        // A resume by tap or `record edit` takes the popup's text from its
+        // buffer file; a Resume command has already put the same text in.
+        let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
+        if let (Some(doc), Some(snap)) = (self.edit_doc.as_mut(), snapshot) {
+            if snap.session == doc.session() && snap.pause == self.edit_pauses {
+                doc.replace_frozen(&snap.text);
+            }
+        }
+        self.with_gate(|g| g.resume());
+        if let Some(tracker) = &self.silence_tracker {
+            tracker.resume().await;
+        }
+        self.edit = EditPause::default();
+        state.set_phase(Phase::Listening, Instant::now());
+        self.edit_publish(state);
+        tracing::info!("Listening again after a keyboard edit");
+    }
+
+    /// Every poll: a hold past its cap counts as a cancelled tap, and
+    /// settling ends once the live model has decoded to the pause point
+    /// (`decoded`, seconds of its audio) or the wait runs out.
+    async fn edit_tick(&mut self, state: &mut State, now: Instant, decoded: Option<f32>) {
+        match state.phase() {
+            Some(Phase::Pending) => {
+                let mut overflowed = false;
+                self.with_gate(|g| overflowed = g.take_overflow());
+                if overflowed {
+                    tracing::debug!("Edit tap held audio past its cap; listening on");
+                    self.edit.dropped_tap = true;
+                    if let Some(tracker) = &self.silence_tracker {
+                        tracker.resume().await;
+                    }
+                    state.set_phase(Phase::Listening, now);
+                    self.edit_publish(state);
+                }
+            }
+            Some(Phase::Settling) => {
+                let decoded = decoded.is_some_and(|d| d >= self.edit.pause_at);
+                if decoded || self.edit.settle_by.is_some_and(|by| now >= by) {
+                    self.edit.settle_by = None;
+                    state.set_phase(Phase::Editing, now);
+                    self.edit_freeze();
+                }
+                // The tail as it lands; the block is written only when it
+                // changed.
+                self.edit_publish(state);
+            }
+            _ => {}
+        }
+    }
+
+    /// The text to paste for a dictation with a keyboard edit, None for one
+    /// without. The frozen region exactly as frozen or edited, then the
+    /// shown live text after the last resume, processed and normalised as
+    /// delivery would; the engine's final text is not used (preview
+    /// semantics). When the recording stopped while the popup still owned
+    /// the text (`phase` settling, editing or detached), its last buffer
+    /// snapshot is the frozen region.
+    fn edit_final_text(&mut self, phase: Option<Phase>) -> Option<String> {
+        let shown = (self.edit_link.shown)();
+        let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
+        let tp = &self.text_processor;
+        let doc = self.edit_doc.as_mut()?;
+        let popup_owned = matches!(
+            phase,
+            Some(Phase::Settling | Phase::Editing | Phase::Detached)
+        );
+        if let Some(snapshot) = snapshot.filter(|b| popup_owned && b.session == doc.session()) {
+            doc.replace_frozen(&snapshot.text);
+        }
+        doc.live(&shown);
+        Some(doc.final_text(|t| output::normalize_quotes(&tp.process(t)).into_owned()))
+    }
+
+    /// A dictation with a keyboard edit is discarded: keep the text it
+    /// would have pasted for a minute, for `voxtype record restore`.
+    fn edit_keep_discarded(&mut self, state: &State) {
+        use crate::osd::edit_journal;
+        let Some(text) = self.edit_final_text(state.phase()) else {
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        let path = self.edit_link.discarded.clone();
+        let at = edit_journal::now_ms();
+        if let Err(e) = edit_journal::keep_in(&path, &text, at) {
+            tracing::warn!("Could not keep the discarded text in {:?}: {}", path, e);
+            return;
+        }
+        tracing::info!("Discarded text kept for 60 s: `voxtype record restore` copies it");
+        tokio::spawn(async move {
+            tokio::time::sleep(edit_journal::KEEP).await;
+            edit_journal::expire_in(&path, at, edit_journal::now_ms());
+        });
+    }
+
+    /// The id of the window saved at record start, once its lookup is done.
+    async fn edit_saved_window(&mut self) -> Option<String> {
+        if let Some(task) = self.edit_target.take() {
+            self.edit_window = task.await.ok().flatten();
+        }
+        self.edit_window.as_ref().map(|w| w.id.clone())
+    }
+
+    /// Run a window query off the async threads; kdotool can stall.
+    async fn edit_windows(
+        &self,
+        f: impl FnOnce(&mut dyn crate::osd::target::Windows) -> crate::osd::target::Verdict
+            + Send
+            + 'static,
+    ) -> crate::osd::target::Verdict {
+        let windows = self.edit_link.windows.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut w = windows.lock().unwrap_or_else(|e| e.into_inner());
+            f(&mut **w)
+        })
+        .await
+        .unwrap_or(crate::osd::target::Verdict::Failed)
+    }
+
+    /// Deliver a keyboard-edited dictation, only into the window it was
+    /// dictated for. After the popup gave focus back, that window must be
+    /// active again within 500 ms (R27), and still be active right before
+    /// the paste, after the modifiers and Enter are up (R28, R30). Otherwise,
+    /// when it was closed (R29), or when a key that finished the edit is
+    /// still held, the text goes to `clipboard` only and neither
+    /// output hook runs, so an Enter hook cannot press Enter in the wrong
+    /// window. After a paste the window is checked once more right before
+    /// the post-output hook, which is skipped when it lost focus (R28).
+    async fn deliver_edited(
+        &mut self,
+        session: &mut StreamingSession,
+        chain: &[Box<dyn TextOutput>],
+        clipboard: &[Box<dyn TextOutput>],
+        text: &str,
+    ) -> EditDelivery {
+        use crate::osd::target::{self, Verdict};
+        let mut verdict = match self.edit_saved_window().await {
+            Some(id) => {
+                self.edit_windows(move |w| target::hand_back(w, &id, target::HAND_BACK))
+                    .await
+            }
+            None => Verdict::Failed,
+        };
+        if verdict.confirmed() {
+            // A held Enter, Right Ctrl or Right Shift would repeat into the
+            // window, or make the paste key another shortcut.
+            let id = self.edit_window.as_ref().map(|w| w.id.clone());
+            verdict = match id {
+                _ if !(self.edit_link.keys_up)(LIVE_TYPING_FINAL_WAIT).await => Verdict::KeyHeld,
+                Some(id) => self.edit_windows(move |w| target::check(w, &id)).await,
+                None => Verdict::Failed,
+            };
+        }
+        if verdict.confirmed() {
+            let pre = self.config.output.pre_output_command.as_deref();
+            let post = self.config.output.post_output_command.as_deref();
+            let before_hook = Arc::new(std::sync::Mutex::new(None));
+            let (windows, seen) = (self.edit_link.windows.clone(), before_hook.clone());
+            let id = self.edit_window.as_ref().map(|w| w.id.clone());
+            let confirm = move || -> futures_util::future::BoxFuture<'static, bool> {
+                Box::pin(async move {
+                    let v = match id {
+                        Some(id) => tokio::task::spawn_blocking(move || {
+                            let mut w = windows.lock().unwrap_or_else(|e| e.into_inner());
+                            target::check(&mut **w, &id)
+                        })
+                        .await
+                        .unwrap_or(Verdict::Failed),
+                        None => Verdict::Failed,
+                    };
+                    *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+                    v.confirmed()
+                })
+            };
+            let result = session
+                .commit_exact_confirmed(chain, text, pre, post, confirm)
+                .await;
+            let before_hook = *before_hook.lock().unwrap_or_else(|e| e.into_inner());
+            return EditDelivery {
+                paste: verdict,
+                before_hook,
+                result,
+            };
+        }
+        tracing::warn!("Copied, not pasted: {}", verdict.reason());
+        session.skip_post_hook();
+        EditDelivery {
+            paste: verdict,
+            before_hook: None,
+            result: session.commit_exact(clipboard, text, None, None).await,
+        }
+    }
+
+    /// Tell the popup and the desktop that an edited dictation is on the
+    /// clipboard and was not pasted.
+    async fn report_not_pasted(
+        &self,
+        text: &str,
+        verdict: crate::osd::target::Verdict,
+        started: Instant,
+    ) {
+        use crate::osd::outcome;
+        outcome::write_not_pasted(verdict.reason());
+        outcome::write_delivery(&outcome::Delivery {
+            text: text.to_string(),
+            chars: text.chars().count(),
+            method: "clipboard".to_string(),
+            enter: false,
+            output_ms: started.elapsed().as_millis() as u64,
+            latency_ms: outcome::since_stop_ms(),
+            audio_s: None,
+        });
+        send_notification(
+            "Copied, not pasted",
+            &format!("The text is on the clipboard: {}.", verdict.reason()),
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            "normal",
+        )
+        .await;
+    }
+
+    /// The popup's commands ready to act on: the buffer file holds the
+    /// revision they name.
+    fn edit_commands(&mut self) -> Vec<crate::osd::edit_ipc::Accepted> {
+        let Some(doc) = &self.edit_doc else {
+            return Vec::new();
+        };
+        let buffer = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
+        let link = &mut self.edit_link;
+        link.reader.poll(&link.cmds, doc.session(), buffer.as_ref())
+    }
+
+    /// Act on the popup's commands. Returns true when one asks to stop the
+    /// recording and deliver.
+    async fn edit_handle_commands(&mut self, state: &mut State) -> bool {
+        use crate::osd::edit_ipc::{Accepted, FinishMode};
+        let mut finish = false;
+        for cmd in self.edit_commands() {
+            match cmd {
+                Accepted::Resume { text } => {
+                    if let Some(doc) = self.edit_doc.as_mut() {
+                        doc.replace_frozen(&text);
+                    }
+                    if matches!(state.phase(), Some(p) if p.is_paused() && p != Phase::Pending) {
+                        self.edit_resume(state).await;
+                    }
+                }
+                Accepted::Finish { mode, text } => {
+                    if let Some(doc) = self.edit_doc.as_mut() {
+                        doc.replace_frozen(&text);
+                    }
+                    // How the output hook tells "paste" from "paste and
+                    // Enter", as for the double taps.
+                    let last = match mode {
+                        FinishMode::Paste => "alt",
+                        FinishMode::PasteEnter => "main",
+                    };
+                    let _ = std::fs::write(&self.edit_link.hotkey_last, last);
+                    state.set_phase(Phase::Releasing, Instant::now());
+                    self.edit_publish(state);
+                    finish = true;
+                }
+                Accepted::ProxyClosed => {
+                    tracing::debug!("Edit focus proxy closed");
+                }
+                Accepted::Detached => {
+                    if matches!(state.phase(), Some(Phase::Settling | Phase::Editing)) {
+                        state.set_phase(Phase::Detached, Instant::now());
+                        self.edit_publish(state);
+                    }
+                }
+            }
+        }
+        finish
     }
 
     /// Abort the OSD draining pump (if running) so the visualizer can
@@ -2214,6 +2797,7 @@ impl Daemon {
         streaming_chain: &mut Option<Vec<Box<dyn TextOutput>>>,
         notification_body: &str,
     ) {
+        self.edit_keep_discarded(state);
         clear_live_preview();
         let backend_task = streaming_handle.take().map(|h| {
             let _ = h.cancel.send(());
@@ -2283,8 +2867,9 @@ impl Daemon {
                     self.is_external_trigger = track_silence;
                     let speech_tracker = self.new_speech_tracker(track_silence);
                     self.silence_tracker = speech_tracker.clone();
-                    // Nothing pauses the gate yet, so it keeps no copy.
-                    let gate = audio::levels::AudioGate::new(streaming_tx, false).shared();
+                    // Only a gate that can pause keeps a rescue copy.
+                    let gate =
+                        audio::levels::AudioGate::new(streaming_tx, self.keyboard_edit).shared();
                     self.audio_gate = Some(gate.clone());
                     let handle = if let Some(hub) = &self.level_hub {
                         audio::levels::spawn_emitter_with_streaming_tap(
@@ -3874,6 +4459,7 @@ impl Daemon {
                         modifier_release_timeout: std::time::Duration::from_millis(
                             output_config.modifier_release_timeout_ms,
                         ),
+                        normalize: true,
                     };
 
                     let output_started = Instant::now();
@@ -4144,6 +4730,7 @@ impl Daemon {
                 Some(hotkey::create_listener(
                     &self.config.hotkey,
                     secondary_model,
+                    self.keyboard_edit,
                 )?)
             } else {
                 tracing::info!(
@@ -4279,11 +4866,13 @@ impl Daemon {
         // Spoken corrections work on the live words, so the listener
         // watches for a correction hold only while a live preview records.
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        let correction_armed = hotkey_listener
-            .as_ref()
-            .and_then(|l| l.correction_armed());
+        let correction_armed = hotkey_listener.as_ref().and_then(|l| l.correction_armed());
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let correction_armed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let edit_armed = hotkey_listener.as_ref().and_then(|l| l.edit_armed());
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let edit_armed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
         let corrections_on = self.config.live_preview_active() && !self.config.live_typing;
         if correction_armed.is_some() && !corrections_on {
             tracing::warn!(
@@ -4336,9 +4925,19 @@ impl Daemon {
         transcribing_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
+            // A paused recording takes no spoken correction (R10).
+            let edit_paused = state
+                .phase()
+                .is_some_and(|p| p.is_paused() && p != Phase::Pending);
             if let Some(armed) = &correction_armed {
                 armed.store(
-                    corrections_on && state.is_streaming(),
+                    corrections_on && state.is_streaming() && !edit_paused,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+            if let Some(armed) = &edit_armed {
+                armed.store(
+                    self.keyboard_edit && state.is_streaming(),
                     std::sync::atomic::Ordering::Relaxed,
                 );
             }
@@ -4736,15 +5335,17 @@ impl Daemon {
                         // Word times are seconds since the session started.
                         (HotkeyEvent::CorrectionStart { pressed_at }, _) => {
                             if let State::Streaming { started_at, .. } = &state {
-                                let t0 = pressed_at.saturating_duration_since(*started_at);
-                                tracing::debug!("Correction hold from {:.2} s", t0.as_secs_f32());
-                                crate::osd::correction::start(t0.as_secs_f32());
+                                let t0 = self.correction_secs(*started_at, pressed_at);
+                                tracing::debug!("Correction hold from {:.2} s", t0);
+                                crate::osd::correction::start(t0);
                                 refresh_live_correction();
                             }
                         }
                         (HotkeyEvent::CorrectionEnd, _) => {
                             if let State::Streaming { started_at, .. } = &state {
-                                crate::osd::correction::end(started_at.elapsed().as_secs_f32());
+                                crate::osd::correction::end(
+                                    self.correction_secs(*started_at, Instant::now()),
+                                );
                                 refresh_live_correction();
                             }
                         }
@@ -4756,16 +5357,36 @@ impl Daemon {
                         }
 
                         // === KEYBOARD EDIT TAP ===
-                        // Only sent while edit_armed is set, which nothing
-                        // sets until keyboard editing is wired in.
-                        (event @ (HotkeyEvent::EditTapPending | HotkeyEvent::EditTapConfirmed | HotkeyEvent::EditTapCancelled), _) => {
-                            tracing::debug!("Edit tap event {:?} ignored", event);
+                        (HotkeyEvent::EditTapPending, _) => {
+                            self.edit_tap_pending(&mut state).await;
+                        }
+                        (HotkeyEvent::EditTapConfirmed, _) => {
+                            self.edit_tap_confirmed(&mut state).await;
+                        }
+                        (HotkeyEvent::EditTapCancelled, _) => {
+                            self.edit_tap_cancelled(&mut state).await;
                         }
                     }
                 }
 
                 // Check for recording timeout and cancel requests
                 _ = recording_poll.tick(), if state.is_recording() => {
+                    if check_edit_requested() {
+                        self.edit_toggle(&mut state).await;
+                    }
+                    self.edit_tick(&mut state, Instant::now(), crate::osd::live::decoded_secs()).await;
+                    if self.edit_handle_commands(&mut state).await {
+                        self.stop_active_recording(
+                            &mut state,
+                            &mut audio_capture,
+                            &mut streaming_session,
+                            &mut streaming_chain,
+                            &mut eager_transcriber,
+                        )
+                        .await;
+                        continue;
+                    }
+
                     // Check for cancel request first
                     if check_cancel_requested() {
                         self.cancel_requested_session(
@@ -5218,6 +5839,13 @@ impl Daemon {
                                     // Right Ctrl to come up, or the paste
                                     // key becomes a different shortcut.
                                     let corrected;
+                                    // A dictation with a keyboard edit pastes
+                                    // what the popup showed, exactly.
+                                    let edited = self
+                                        .config
+                                        .live_preview_active()
+                                        .then(|| self.edit_final_text(state.phase()))
+                                        .flatten();
                                     let text = if self.config.live_preview_active() {
                                         // Spoken corrections, before the
                                         // clear below forgets them.
@@ -5239,18 +5867,40 @@ impl Daemon {
                                     } else {
                                         &text
                                     };
-                                    if self.config.live_preview_active()
-                                        && !modifiers_released(LIVE_TYPING_FINAL_WAIT).await
-                                    {
-                                        tracing::warn!("Modifier still held; sending the final text anyway");
-                                    }
-                                    if let Err(e) = s.commit_segment(
-                                        chain,
-                                        text,
-                                        Some(&self.text_processor),
-                                        self.config.output.pre_output_command.as_deref(),
-                                        self.config.output.post_output_command.as_deref(),
-                                    ).await {
+                                    let committed = match &edited {
+                                        Some(edited) => {
+                                            let clipboard: Vec<Box<dyn TextOutput>> =
+                                                vec![Box::new(output::clipboard::ClipboardOutput::new(
+                                                    self.config.output.append_text.clone(),
+                                                ))];
+                                            let started = Instant::now();
+                                            let d = self.deliver_edited(s, chain, &clipboard, edited).await;
+                                            if !d.paste.confirmed() && d.result.is_ok() {
+                                                self.report_not_pasted(edited, d.paste, started).await;
+                                            }
+                                            if let Some(v) = d.before_hook.filter(|v| !v.confirmed()) {
+                                                send_notification(
+                                                    "Pasted, Enter not sent",
+                                                    &format!("The output hook did not run: {}.", v.reason()),
+                                                    self.config.output.notification.show_engine_icon,
+                                                    self.config.engine,
+                                                    "normal",
+                                                ).await;
+                                            }
+                                            d.result
+                                        }
+                                        None => {
+                                            if self.config.live_preview_active()
+                                                && !modifiers_released(LIVE_TYPING_FINAL_WAIT).await
+                                            {
+                                                tracing::warn!("Modifier still held; sending the final text anyway");
+                                            }
+                                            let pre = self.config.output.pre_output_command.as_deref();
+                                            let post = self.config.output.post_output_command.as_deref();
+                                            s.commit_segment(chain, text, Some(&self.text_processor), pre, post).await
+                                        }
+                                    };
+                                    if let Err(e) = committed {
                                         tracing::error!("Streaming commit_segment failed: {}", e);
                                     }
                                 }
@@ -5925,6 +6575,887 @@ mod tests {
         assert_eq!(ready.transcribe(&[]).unwrap(), "loaded");
         assert!(daemon.override_load_task.is_none());
         assert!(matches!(&daemon.override_cache, Some((name, _)) if name == "base.en"));
+    }
+
+    // Keyboard edit pause, with the gate's receiver as the fake worker.
+
+    /// The edit link of a test: files in a temp dir, the shown text and the
+    /// published blocks in memory.
+    struct TestLink {
+        dir: TempDir,
+        shown: Arc<std::sync::Mutex<String>>,
+        published: Arc<std::sync::Mutex<Vec<Option<crate::osd::edit_ipc::EditBlock>>>>,
+        /// The audio times the spoken corrections were frozen at.
+        frozen_at: Arc<std::sync::Mutex<Vec<f32>>>,
+    }
+
+    impl TestLink {
+        fn show(&self, text: &str) {
+            *self.shown.lock().unwrap() = text.to_string();
+        }
+
+        fn last(&self) -> Option<crate::osd::edit_ipc::EditBlock> {
+            self.published.lock().unwrap().last().cloned().flatten()
+        }
+    }
+
+    fn test_link(daemon: &mut Daemon) -> TestLink {
+        let dir = TempDir::new().unwrap();
+        let shown = Arc::new(std::sync::Mutex::new(String::new()));
+        let published = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let frozen_at = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (s, p, f) = (shown.clone(), published.clone(), frozen_at.clone());
+        daemon.edit_link = EditLink {
+            publish: Box::new(move |b| p.lock().unwrap().push(b)),
+            shown: Box::new(move || s.lock().unwrap().clone()),
+            freeze: Box::new(move |t| f.lock().unwrap().push(t)),
+            buffer: dir.path().join("edit-buffer.json"),
+            cmds: dir.path().join("edit-cmd"),
+            hotkey_last: dir.path().join("hotkey-last"),
+            discarded: dir.path().join("discarded.json"),
+            reader: Default::default(),
+            windows: Arc::new(std::sync::Mutex::new(Box::new(FakeWindows::default()))),
+            keys_up: Box::new(|_| Box::pin(async { true })),
+        };
+        TestLink {
+            dir,
+            shown,
+            published,
+            frozen_at,
+        }
+    }
+
+    fn edit_daemon() -> (Daemon, tokio::sync::mpsc::Receiver<Vec<f32>>, State) {
+        let (daemon, rx, state, _link) = edit_daemon_linked();
+        (daemon, rx, state)
+    }
+
+    fn edit_daemon_linked() -> (
+        Daemon,
+        tokio::sync::mpsc::Receiver<Vec<f32>>,
+        State,
+        TestLink,
+    ) {
+        let mut daemon = parakeet_daemon(false);
+        daemon.keyboard_edit = true;
+        let link = test_link(&mut daemon);
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        daemon.audio_gate = Some(audio::levels::AudioGate::new(tx, true).shared());
+        let state = State::Streaming {
+            started_at: Instant::now(),
+            model_override: None,
+            partial_buffer: String::new(),
+            finalized_text: String::new(),
+            typed_chars: 0,
+            file_output_path: None,
+            pause: Default::default(),
+        };
+        (daemon, rx, state, link)
+    }
+
+    /// What the capture tap does with one mic chunk.
+    fn mic(daemon: &Daemon, v: f32) {
+        daemon.with_gate(|g| g.push(vec![v; 160]));
+    }
+
+    fn worker_got(rx: &mut tokio::sync::mpsc::Receiver<Vec<f32>>) -> Vec<f32> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|block| block[0])
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn edit_pending_then_double_tap_loses_no_audio() {
+        let (mut daemon, mut rx, mut state) = edit_daemon();
+        mic(&daemon, 1.0);
+        daemon.edit_tap_pending(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Pending));
+        mic(&daemon, 2.0);
+        mic(&daemon, 3.0);
+        assert_eq!(worker_got(&mut rx), [1.0]);
+        // The second tap's press cancels; then the double tap stops.
+        daemon.edit_tap_cancelled(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        daemon.cut_streaming_audio();
+        assert_eq!(worker_got(&mut rx), [2.0, 3.0]);
+        assert_eq!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        );
+        // A Confirmed that comes after the stop changes nothing.
+        daemon.edit_tap_confirmed(&mut State::Idle).await;
+    }
+
+    #[tokio::test]
+    async fn edit_pending_confirm_settle_and_resume() {
+        let (mut daemon, mut rx, mut state) = edit_daemon();
+        for _ in 0..10 {
+            mic(&daemon, 1.0); // 0.1 s
+        }
+        daemon.edit_tap_pending(&mut state).await;
+        mic(&daemon, 2.0);
+        daemon.edit_tap_confirmed(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        // Held audio dropped; then the silence pad, 1.12 s at the default
+        // window; mic audio dropped while paused.
+        mic(&daemon, 3.0);
+        let got = worker_got(&mut rx);
+        assert_eq!(&got[..10], [1.0; 10]);
+        assert!(got[10..].iter().all(|&v| v == 0.0));
+        assert_eq!(daemon.edit.pause_at, 0.1);
+        daemon.with_gate(|g| assert_eq!(g.pads().first(), Some(&(1600..19520))));
+        // Settles when the live model has decoded to the pause point.
+        let now = Instant::now();
+        daemon.edit_tick(&mut state, now, Some(0.08)).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        daemon.edit_tick(&mut state, now, Some(0.16)).await;
+        assert_eq!(state.phase(), Some(Phase::Editing));
+        // A second tap resumes; new audio flows.
+        daemon.edit_tap_confirmed(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        mic(&daemon, 4.0);
+        assert_eq!(worker_got(&mut rx), [4.0]);
+    }
+
+    #[tokio::test]
+    async fn edit_settling_ends_after_its_wait_without_progress() {
+        let (mut daemon, _rx, mut state) = edit_daemon();
+        mic(&daemon, 1.0);
+        daemon.edit_toggle(&mut state).await; // record edit: no pending
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        let now = Instant::now();
+        daemon.edit_tick(&mut state, now, None).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        daemon
+            .edit_tick(&mut state, now + EDIT_SETTLE_MAX, None)
+            .await;
+        assert_eq!(state.phase(), Some(Phase::Editing));
+    }
+
+    #[tokio::test]
+    async fn edit_hold_past_its_cap_counts_as_cancelled() {
+        let (mut daemon, mut rx, mut state) = edit_daemon();
+        daemon.edit_tap_pending(&mut state).await;
+        for i in 0..41 {
+            mic(&daemon, i as f32); // 4.1 frames of 0.01 s past 400 ms
+        }
+        daemon.edit_tick(&mut state, Instant::now(), None).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        assert_eq!(worker_got(&mut rx).len(), 41);
+        // The listener's late Confirmed for that tap is dropped.
+        daemon.edit_tap_confirmed(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        mic(&daemon, 9.0);
+        assert_eq!(worker_got(&mut rx), [9.0]);
+        // The next tap works again.
+        daemon.edit_tap_pending(&mut state).await;
+        daemon.edit_tap_confirmed(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+    }
+
+    #[tokio::test]
+    async fn edit_taps_do_nothing_with_keyboard_editing_off() {
+        let (mut daemon, mut rx, mut state) = edit_daemon();
+        daemon.keyboard_edit = false;
+        daemon.edit_tap_pending(&mut state).await;
+        mic(&daemon, 1.0);
+        daemon.edit_tap_confirmed(&mut state).await;
+        mic(&daemon, 2.0);
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        assert_eq!(worker_got(&mut rx), [1.0, 2.0]);
+    }
+
+    #[test]
+    fn correction_times_follow_the_audio_after_a_pause() {
+        let start = Instant::now();
+        let at = start + Duration::from_secs(10);
+        let now = at + Duration::from_millis(500);
+        // No pause: wall time since the start, as before.
+        assert_eq!(audio_secs_at(None, start, at, now), 10.0);
+        // After a pause: 6 s of audio sent by now, so 5.5 s at `at`.
+        assert_eq!(audio_secs_at(Some(96_000), start, at, now), 5.5);
+        assert_eq!(audio_secs_at(Some(1_600), start, at, now), 0.0);
+    }
+
+    #[tokio::test]
+    async fn edit_link_publishes_phases_and_the_frozen_text() {
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        // A tenth of a second of audio before the tap.
+        for _ in 0..10 {
+            mic(&daemon, 0.5);
+        }
+        link.show("so the \u{201C}quote\u{201D}");
+        daemon.edit_tap_pending(&mut state).await;
+        let block = link.last().unwrap();
+        assert_eq!(block.phase, "pending");
+        assert_eq!(block.frozen, "");
+        daemon.edit_tap_confirmed(&mut state).await;
+        // Frozen when the tap is confirmed, normalised as delivery would.
+        let block = link.last().unwrap();
+        assert_eq!(block.phase, "settling");
+        assert_eq!(block.frozen, "so the \"quote\"");
+        assert_eq!(block.pause, 1);
+        // The tail lands while settling, then is frozen too.
+        link.show("so the \u{201C}quote\u{201D} ends");
+        daemon.edit_tick(&mut state, Instant::now(), None).await;
+        assert_eq!(link.last().unwrap().tail, "ends");
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let block = link.last().unwrap();
+        assert_eq!(block.phase, "editing");
+        assert_eq!(block.frozen, "so the \"quote\" ends");
+        assert_eq!(block.tail, "");
+        // Spoken corrections were frozen at each freeze, at or after the
+        // audio before the tap and at the same point both times.
+        let frozen_at = link.frozen_at.lock().unwrap().clone();
+        assert_eq!(frozen_at.len(), 2);
+        assert!(frozen_at[0] >= 0.1, "{frozen_at:?}");
+        assert_eq!(frozen_at[0], frozen_at[1]);
+        // The published blocks are only written when they change.
+        let n = link.published.lock().unwrap().len();
+        daemon.edit_tick(&mut state, Instant::now(), None).await;
+        assert_eq!(link.published.lock().unwrap().len(), n);
+    }
+
+    #[tokio::test]
+    async fn edit_resume_takes_the_buffer_at_its_revision_only() {
+        use crate::osd::edit_ipc::{append_cmd_to, write_buffer_to, EditBuffer, EditCmd};
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("helo world");
+        daemon.edit_toggle(&mut state).await;
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        let buffer = |rev, text: &str| EditBuffer {
+            session,
+            rev,
+            text: text.into(),
+            sel: (0, 0),
+            pause: 1,
+        };
+        write_buffer_to(&daemon.edit_link.buffer, &buffer(1, "hello world")).unwrap();
+        append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev: 2 }).unwrap();
+        assert!(!daemon.edit_handle_commands(&mut state).await);
+        assert_eq!(state.phase(), Some(Phase::Editing), "rev 2 not written yet");
+        write_buffer_to(&daemon.edit_link.buffer, &buffer(2, "hello world!")).unwrap();
+        assert!(!daemon.edit_handle_commands(&mut state).await);
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        let block = link.last().unwrap();
+        assert_eq!(
+            (block.phase.as_str(), block.frozen.as_str()),
+            ("listening", "hello world!")
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_finish_says_how_to_deliver_and_stops() {
+        use crate::osd::edit_ipc::{
+            append_cmd_to, write_buffer_to, EditBuffer, EditCmd, FinishMode,
+        };
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("send this");
+        daemon.edit_toggle(&mut state).await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        write_buffer_to(
+            &daemon.edit_link.buffer,
+            &EditBuffer {
+                session,
+                rev: 3,
+                text: "Send this.".into(),
+                sel: (0, 0),
+                pause: 1,
+            },
+        )
+        .unwrap();
+        append_cmd_to(
+            &daemon.edit_link.cmds,
+            session,
+            EditCmd::Finish {
+                mode: FinishMode::PasteEnter,
+                rev: 3,
+            },
+        )
+        .unwrap();
+        assert!(daemon.edit_handle_commands(&mut state).await);
+        assert_eq!(state.phase(), Some(Phase::Releasing));
+        assert_eq!(
+            fs::read_to_string(link.dir.path().join("hotkey-last")).unwrap(),
+            "main"
+        );
+        assert_eq!(daemon.edit_doc.as_ref().unwrap().frozen(), "Send this.");
+        // Commands of another session are never acted on.
+        append_cmd_to(
+            &daemon.edit_link.cmds,
+            session + 1,
+            EditCmd::Resume { rev: 3 },
+        )
+        .unwrap();
+        assert!(!daemon.edit_handle_commands(&mut state).await);
+        assert_eq!(state.phase(), Some(Phase::Releasing));
+    }
+
+    #[tokio::test]
+    async fn edit_final_is_the_shown_text_byte_for_byte() {
+        use crate::osd::edit_ipc::{
+            append_cmd_to, write_buffer_to, EditBuffer, EditCmd, FinishMode,
+        };
+        for engine_final in [false, true] {
+            let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+            if engine_final {
+                daemon.config.live_preview_final = "engine".into();
+            }
+            link.show("um hello there");
+            daemon.edit_toggle(&mut state).await;
+            let session = daemon.edit_doc.as_ref().unwrap().session();
+            // Typed text processing or normalisation would change.
+            let typed = "Hello \u{2018}there\u{2019}, um comma";
+            write_buffer_to(
+                &daemon.edit_link.buffer,
+                &EditBuffer {
+                    session,
+                    rev: 1,
+                    text: typed.into(),
+                    sel: (0, 0),
+                    pause: 1,
+                },
+            )
+            .unwrap();
+            append_cmd_to(
+                &daemon.edit_link.cmds,
+                session,
+                EditCmd::Finish {
+                    mode: FinishMode::Paste,
+                    rev: 1,
+                },
+            )
+            .unwrap();
+            assert!(daemon.edit_handle_commands(&mut state).await);
+            assert_eq!(
+                daemon.edit_final_text(state.phase()).as_deref(),
+                Some(typed)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn edit_final_adds_the_speech_after_resume_processed() {
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        daemon.text_processor = crate::text::TextProcessor::new(&crate::config::TextConfig {
+            spoken_punctuation: true,
+            ..Default::default()
+        });
+        link.show("first part");
+        daemon.edit_toggle(&mut state).await;
+        daemon.edit.settle_by = Some(Instant::now());
+        daemon.edit_tick(&mut state, Instant::now(), None).await;
+        daemon
+            .edit_doc
+            .as_mut()
+            .unwrap()
+            .replace_frozen("First part.");
+        daemon.edit_toggle(&mut state).await; // resume
+        link.show("first part then \u{201C}more\u{201D} period");
+        assert_eq!(
+            daemon.edit_final_text(state.phase()).as_deref(),
+            Some("First part. then \"more\".")
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_stop_while_editing_pastes_the_last_snapshot() {
+        use crate::osd::edit_ipc::{write_buffer_to, EditBuffer};
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("draft text");
+        daemon.edit_toggle(&mut state).await;
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        // The popup edited, then a Right Shift double tap stopped the
+        // recording: no finish command, only the snapshot.
+        write_buffer_to(
+            &daemon.edit_link.buffer,
+            &EditBuffer {
+                session,
+                rev: 9,
+                text: "final text\n".into(),
+                sel: (0, 0),
+                pause: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            daemon.edit_final_text(state.phase()).as_deref(),
+            Some("final text\n")
+        );
+        // A snapshot of another dictation is never used.
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("draft text");
+        daemon.edit_toggle(&mut state).await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        write_buffer_to(
+            &daemon.edit_link.buffer,
+            &EditBuffer {
+                session: session + 1,
+                rev: 1,
+                text: "stale".into(),
+                sel: (0, 0),
+                pause: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            daemon.edit_final_text(state.phase()).as_deref(),
+            Some("draft text")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resume_by_tap_takes_the_popup_text() {
+        use crate::osd::edit_ipc::{write_buffer_to, EditBuffer};
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("helo world");
+        daemon.edit_toggle(&mut state).await;
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        let snap = |pause, text: &str| EditBuffer {
+            session,
+            rev: 2,
+            text: text.into(),
+            sel: (0, 0),
+            pause,
+        };
+        // A snapshot of an earlier pause is not this edit.
+        write_buffer_to(&daemon.edit_link.buffer, &snap(0, "stale")).unwrap();
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        assert_eq!(daemon.edit_doc.as_ref().unwrap().frozen(), "helo world");
+        // The second pause's edit, then a Right Shift tap to listen again.
+        daemon.edit_toggle(&mut state).await;
+        write_buffer_to(&daemon.edit_link.buffer, &snap(2, "hello world")).unwrap();
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        link.show("helo world and more");
+        assert_eq!(
+            daemon.edit_final_text(state.phase()).as_deref(),
+            Some("hello world and more")
+        );
+    }
+
+    #[tokio::test]
+    async fn focus_taken_away_detaches_until_a_tap() {
+        use crate::osd::edit_ipc::{append_cmd_to, EditCmd};
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("text");
+        daemon.edit_toggle(&mut state).await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Detached).unwrap();
+        assert!(!daemon.edit_handle_commands(&mut state).await);
+        assert_eq!(state.phase(), Some(Phase::Detached));
+        assert_eq!(link.last().unwrap().phase, "detached");
+        // A tap edits again.
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Editing));
+        // Detached only applies while the popup has the text.
+        daemon.edit_toggle(&mut state).await;
+        append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Detached).unwrap();
+        daemon.edit_handle_commands(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+    }
+
+    #[tokio::test]
+    async fn discarding_an_edited_dictation_keeps_its_text() {
+        use crate::osd::edit_ipc::{write_buffer_to, EditBuffer};
+        use crate::osd::edit_journal::{now_ms, restore_from};
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("draft text");
+        daemon.edit_toggle(&mut state).await;
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        write_buffer_to(
+            &daemon.edit_link.buffer,
+            &EditBuffer {
+                session,
+                rev: 3,
+                text: "typed fix".into(),
+                sel: (0, 0),
+                pause: 1,
+            },
+        )
+        .unwrap();
+        daemon.edit_keep_discarded(&state);
+        let kept = link.dir.path().join("discarded.json");
+        assert_eq!(restore_from(&kept, now_ms()).as_deref(), Some("typed fix"));
+
+        // A dictation that was never paused keeps nothing.
+        let (mut daemon, _rx, state, link) = edit_daemon_linked();
+        link.show("plain dictation");
+        daemon.edit_keep_discarded(&state);
+        assert!(!link.dir.path().join("discarded.json").exists());
+    }
+
+    /// Windows for the paste gate: `actives` is what each `active` call
+    /// sees in turn, the last one repeating.
+    #[derive(Default)]
+    struct FakeWindows {
+        windows: Vec<(&'static str, &'static str)>,
+        actives: std::collections::VecDeque<Option<&'static str>>,
+        activated: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl crate::osd::target::Windows for FakeWindows {
+        fn active(&mut self) -> Option<String> {
+            let a = if self.actives.len() > 1 {
+                self.actives.pop_front().flatten()
+            } else {
+                self.actives.front().copied().flatten()
+            };
+            a.map(str::to_string)
+        }
+        fn class_of(
+            &mut self,
+            id: &str,
+        ) -> std::result::Result<Option<String>, crate::osd::target::ToolFailed> {
+            Ok(self
+                .windows
+                .iter()
+                .find(|(w, _)| *w == id)
+                .map(|(_, c)| c.to_string()))
+        }
+        fn activate(&mut self, id: &str) {
+            self.activated.lock().unwrap().push(id.to_string());
+        }
+    }
+
+    /// An edited dictation's delivery: what the paste chain and the
+    /// clipboard got, which hooks ran, and which windows were activated.
+    struct Delivered {
+        verdict: crate::osd::target::Verdict,
+        before_hook: Option<crate::osd::target::Verdict>,
+        pasted: Option<String>,
+        copied: Option<String>,
+        hooks: String,
+        activated: Vec<String>,
+    }
+
+    /// Deliver "edited text" for a recording that started in window "a",
+    /// with `windows` open and `actives` seen in turn, then end the stream
+    /// as the daemon does. `saved: false` is a start where kdotool failed;
+    /// `keys_up: false`, a key held past the wait.
+    async fn deliver_edited_with(
+        windows: &[(&'static str, &'static str)],
+        actives: &[Option<&'static str>],
+        saved: bool,
+        keys_up: bool,
+    ) -> Delivered {
+        let (mut daemon, _rx, _state, link) = edit_daemon_linked();
+        daemon.edit_link.keys_up = Box::new(move |_| Box::pin(async move { keys_up }));
+        let hooks = link.dir.path().join("hooks");
+        let hook = |name: &str| format!("echo {name} >> '{}'", hooks.display());
+        daemon.config.output.pre_output_command = Some(hook("pre"));
+        daemon.config.output.post_output_command = Some(hook("post"));
+        let activated = Arc::new(std::sync::Mutex::new(Vec::new()));
+        daemon.edit_link.windows = Arc::new(std::sync::Mutex::new(Box::new(FakeWindows {
+            windows: windows.to_vec(),
+            actives: actives.iter().copied().collect(),
+            activated: activated.clone(),
+        })));
+        daemon.edit_window = saved.then(|| crate::osd::target::Window {
+            id: "a".into(),
+            class: "term".into(),
+        });
+        let pasted = Arc::new(std::sync::Mutex::new(None));
+        let copied = Arc::new(std::sync::Mutex::new(None));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: pasted.clone(),
+            succeed: true,
+        })];
+        let clipboard: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: copied.clone(),
+            succeed: true,
+        })];
+        let mut session = StreamingSession::new();
+        let d = daemon
+            .deliver_edited(&mut session, &chain, &clipboard, "edited text")
+            .await;
+        d.result.unwrap();
+        end_streaming_hook(&daemon.config.output, Some(&session)).await;
+        let delivered = Delivered {
+            verdict: d.paste,
+            before_hook: d.before_hook,
+            pasted: pasted.lock().unwrap().clone(),
+            copied: copied.lock().unwrap().clone(),
+            hooks: fs::read_to_string(&hooks).unwrap_or_default(),
+            activated: activated.lock().unwrap().clone(),
+        };
+        delivered
+    }
+
+    #[tokio::test]
+    async fn edited_text_is_pasted_into_the_window_it_was_dictated_for() {
+        use crate::osd::target::Verdict;
+        let d = deliver_edited_with(&[("a", "term")], &[Some("a")], true, true).await;
+        assert_eq!(d.verdict, Verdict::Confirmed);
+        assert_eq!(d.pasted.as_deref(), Some("edited text"));
+        assert_eq!(d.copied, None);
+        assert_eq!(d.hooks, "pre\npost\n", "each hook once");
+        assert_eq!(d.before_hook, Some(Verdict::Confirmed));
+        assert!(d.activated.is_empty());
+    }
+
+    #[tokio::test]
+    async fn focus_lost_after_the_paste_skips_the_post_output_hook() {
+        use crate::osd::target::Verdict;
+        // Confirmed for the hand-back and the paste; "b" (the same app)
+        // has focus by the time the hook would press Enter.
+        let d = deliver_edited_with(
+            &[("a", "term"), ("b", "term")],
+            &[Some("a"), Some("a"), Some("b")],
+            true,
+            true,
+        )
+        .await;
+        assert_eq!(d.verdict, Verdict::Confirmed);
+        assert_eq!(d.pasted.as_deref(), Some("edited text"));
+        assert_eq!(d.before_hook, Some(Verdict::Mismatch));
+        assert_eq!(d.hooks, "pre\n", "no post-output hook, also not at the end");
+    }
+
+    #[tokio::test]
+    async fn focus_given_to_another_window_is_taken_back_once() {
+        use crate::osd::target::Verdict;
+        // The focus chain picked "b"; activating "a" works.
+        let d = deliver_edited_with(
+            &[("a", "term"), ("b", "term")],
+            &[None, Some("b"), Some("a")],
+            true,
+            true,
+        )
+        .await;
+        assert_eq!(d.verdict, Verdict::Confirmed);
+        assert_eq!(d.activated, ["a"]);
+        assert_eq!(d.pasted.as_deref(), Some("edited text"));
+    }
+
+    #[tokio::test]
+    async fn a_window_of_the_same_class_gets_no_paste_and_no_enter() {
+        use crate::osd::target::Verdict;
+        // "b" is the same app and keeps focus: activating "a" fails.
+        let d =
+            deliver_edited_with(&[("a", "term"), ("b", "term")], &[Some("b")], true, true).await;
+        assert_eq!(d.verdict, Verdict::Timeout);
+        assert_eq!(d.activated, ["a"], "one activation, no more");
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.hooks, "", "no output hook, so no Enter, also at the end");
+    }
+
+    #[tokio::test]
+    async fn focus_lost_again_before_the_paste_gives_the_clipboard() {
+        use crate::osd::target::Verdict;
+        // The hand-back confirms "a"; right before the paste "b" has it.
+        let d = deliver_edited_with(
+            &[("a", "term"), ("b", "term")],
+            &[Some("a"), Some("b")],
+            true,
+            true,
+        )
+        .await;
+        assert_eq!(d.verdict, Verdict::Mismatch);
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.hooks, "");
+    }
+
+    #[tokio::test]
+    async fn a_closed_window_gets_the_clipboard() {
+        use crate::osd::target::Verdict;
+        let d = deliver_edited_with(&[("b", "term")], &[Some("b")], true, true).await;
+        assert_eq!(d.verdict, Verdict::Gone);
+        assert!(d.activated.is_empty(), "a closed window is never activated");
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.hooks, "");
+    }
+
+    #[tokio::test]
+    async fn a_key_still_held_gives_the_clipboard() {
+        use crate::osd::target::Verdict;
+        // Enter (or a Right Ctrl or Right Shift double tap) that finished
+        // the edit is held past the wait: pasting would repeat it.
+        let d = deliver_edited_with(&[("a", "term")], &[Some("a")], true, false).await;
+        assert_eq!(d.verdict, Verdict::KeyHeld);
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.hooks, "");
+    }
+
+    #[tokio::test]
+    async fn no_saved_window_gets_the_clipboard() {
+        use crate::osd::target::Verdict;
+        let d = deliver_edited_with(&[("a", "term")], &[Some("a")], false, true).await;
+        assert_eq!(d.verdict, Verdict::Failed);
+        assert_eq!(d.pasted, None);
+        assert_eq!(d.copied.as_deref(), Some("edited text"));
+        assert_eq!(d.hooks, "");
+    }
+
+    /// Wait up to 3 s for `f` to give something.
+    fn within_3s<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
+        let end = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < end {
+            if let Some(v) = f() {
+                return Some(v);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
+    /// R26 to R29 against a real KWin and kdotool: two windows of one app.
+    /// Runs only inside the private nested KWin that
+    /// scripts/osd-paste-gate.sh starts, never on a real desktop.
+    #[tokio::test]
+    #[ignore = "needs a private nested KWin: scripts/osd-paste-gate.sh"]
+    async fn nested_kwin_same_class_window_gets_no_paste_and_no_enter() {
+        use crate::osd::target::{self, Kdotool, Verdict, Windows};
+        let probe = std::env::var("VOXTYPE_TEST_FOCUS_PROBE").expect("run by osd-paste-gate.sh");
+        let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_default();
+        assert!(
+            display.starts_with("voxtype-paste-gate-"),
+            "not the script's nested KWin: {display}"
+        );
+        let window = |title: &str| {
+            std::process::Command::new(&probe)
+                .args(["target", "--title", title])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let mut kd = Kdotool;
+        let mut first = window("paste-gate-term");
+        // R26: the window active at record start, id and class.
+        let saved = within_3s(|| target::active_window(&mut Kdotool)).expect("first window");
+        assert_eq!(saved.class, "paste-gate-term");
+        let mut second = window("paste-gate-term");
+        let other = within_3s(|| kd.active().filter(|id| *id != saved.id)).expect("second window");
+        assert_eq!(kd.class_of(&other), Ok(Some(saved.class.clone())));
+
+        // A window of the same class is not a match (R28).
+        assert_eq!(target::check(&mut kd, &saved.id), Verdict::Mismatch);
+        // The hand-back activates the saved window (R27).
+        assert_eq!(
+            target::hand_back(&mut kd, &saved.id, target::HAND_BACK),
+            Verdict::Confirmed
+        );
+        assert_eq!(kd.active().as_deref(), Some(saved.id.as_str()));
+
+        // The target closes mid-edit and the other window of the same app
+        // gets focus: no paste and no Enter (R29).
+        first.kill().unwrap();
+        first.wait().unwrap();
+        within_3s(|| (kd.active().as_deref() == Some(other.as_str())).then_some(()))
+            .expect("focus moves to the second window");
+        let (mut daemon, _rx, _state, link) = edit_daemon_linked();
+        daemon.edit_link.windows = Arc::new(std::sync::Mutex::new(Box::new(Kdotool)));
+        daemon.edit_window = Some(saved.clone());
+        let hooks = link.dir.path().join("hooks");
+        daemon.config.output.pre_output_command =
+            Some(format!("echo pre >> '{}'", hooks.display()));
+        daemon.config.output.post_output_command =
+            Some(format!("echo post >> '{}'", hooks.display()));
+        let pasted = Arc::new(std::sync::Mutex::new(None));
+        let copied = Arc::new(std::sync::Mutex::new(None));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: pasted.clone(),
+            succeed: true,
+        })];
+        let clipboard: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: copied.clone(),
+            succeed: true,
+        })];
+        let mut session = StreamingSession::new();
+        let d = daemon
+            .deliver_edited(&mut session, &chain, &clipboard, "edited text")
+            .await;
+        d.result.unwrap();
+        end_streaming_hook(&daemon.config.output, Some(&session)).await;
+        assert_eq!(d.paste, Verdict::Gone);
+        assert_eq!(*pasted.lock().unwrap(), None, "no paste");
+        assert_eq!(copied.lock().unwrap().as_deref(), Some("edited text"));
+        assert!(!hooks.exists(), "no output hook ran, so no Enter");
+        assert_eq!(
+            kd.active().as_deref(),
+            Some(other.as_str()),
+            "the other window was not touched"
+        );
+        second.kill().unwrap();
+        second.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_dictation_without_an_edit_is_delivered_as_before() {
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("plain text");
+        daemon.edit_tap_pending(&mut state).await;
+        daemon.edit_tap_cancelled(&mut state).await;
+        assert_eq!(daemon.edit_final_text(state.phase()), None);
+    }
+
+    #[tokio::test]
+    async fn exact_commits_skip_processing_and_normalisation() {
+        let got = Arc::new(std::sync::Mutex::new(None));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: got.clone(),
+            succeed: true,
+        })];
+        let text = "It\u{2019}s \u{201C}exact\u{201D}";
+        let mut session = StreamingSession::new();
+        session
+            .commit_exact(&chain, text, None, None)
+            .await
+            .unwrap();
+        assert_eq!(got.lock().unwrap().as_deref(), Some(text));
+        session
+            .commit_segment(&chain, text, None, None, None)
+            .await
+            .unwrap();
+        assert_eq!(got.lock().unwrap().as_deref(), Some("It's \"exact\""));
+    }
+
+    #[test]
+    fn keyboard_edit_needs_a_live_preview_that_types_nothing() {
+        let mut config = Config::default();
+        assert!(!keyboard_edit_on(&config));
+        config.osd.keyboard_edit = true;
+        assert!(!keyboard_edit_on(&config), "no live preview");
+        config.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v2");
+        config.live_preview_model = Some("parakeet-unified-en-0.6b-int8".into());
+        config.engine_isolation = true;
+        assert!(keyboard_edit_on(&config));
+        config.live_typing = true;
+        assert!(!keyboard_edit_on(&config));
+    }
+
+    #[tokio::test]
+    async fn edit_pause_time_is_not_recording_time() {
+        let (mut daemon, _rx, mut state) = edit_daemon();
+        if let State::Streaming { started_at, .. } = &mut state {
+            *started_at = Instant::now() - Duration::from_secs(10);
+        }
+        daemon.edit_tap_confirmed(&mut state).await;
+        let at_pause = state.recording_duration().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(state.recording_duration().unwrap() - at_pause < Duration::from_millis(20));
+        daemon.edit_tap_confirmed(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
     }
 
     /// #643: the panic-recovery arm in handle_transcription_result must fire

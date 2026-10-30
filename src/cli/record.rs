@@ -185,6 +185,25 @@ pub enum RecordAction {
     },
     /// Cancel current recording or transcription (discard without output)
     Cancel,
+
+    /// Pause a live preview recording to fix its text by keyboard, or listen
+    /// again when paused
+    ///
+    /// Does what a confirmed single tap of the edit key does, without the
+    /// wait for a double tap. Needs keyboard editing on ([osd]
+    /// keyboard_edit); otherwise, and when not recording, it does nothing.
+    Edit,
+
+    /// Copy the text of a discarded keyboard-edit dictation to the clipboard
+    ///
+    /// Discarding a dictation that was paused for a keyboard edit keeps its
+    /// text for 60 seconds. This copies it with wl-copy, or prints it with
+    /// --print. Exits with an error when nothing is kept.
+    Restore {
+        /// Print the text to stdout instead of copying it
+        #[arg(long)]
+        print: bool,
+    },
 }
 
 /// Resolve a paired enable/disable flag set into a tri-state override.
@@ -225,7 +244,9 @@ impl RecordAction {
                 paste,
                 ..
             } => (*type_mode, *clipboard, *paste, None),
-            RecordAction::Cancel => return None,
+            RecordAction::Cancel | RecordAction::Edit | RecordAction::Restore { .. } => {
+                return None
+            }
         };
 
         if type_mode {
@@ -248,7 +269,10 @@ impl RecordAction {
     pub fn file_path(&self) -> Option<&str> {
         match self {
             RecordAction::Start { file, .. } | RecordAction::Toggle { file, .. } => file.as_deref(),
-            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+            RecordAction::Stop { .. }
+            | RecordAction::Cancel
+            | RecordAction::Edit
+            | RecordAction::Restore { .. } => None,
         }
     }
 
@@ -259,7 +283,10 @@ impl RecordAction {
             RecordAction::Start { model, .. } | RecordAction::Toggle { model, .. } => {
                 model.as_deref()
             }
-            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+            RecordAction::Stop { .. }
+            | RecordAction::Cancel
+            | RecordAction::Edit
+            | RecordAction::Restore { .. } => None,
         }
     }
 
@@ -270,7 +297,10 @@ impl RecordAction {
             RecordAction::Start { profile, .. } | RecordAction::Toggle { profile, .. } => {
                 profile.as_deref()
             }
-            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+            RecordAction::Stop { .. }
+            | RecordAction::Cancel
+            | RecordAction::Edit
+            | RecordAction::Restore { .. } => None,
         }
     }
 
@@ -288,7 +318,10 @@ impl RecordAction {
                 no_auto_submit,
                 ..
             } => override_from_flags(*auto_submit, *no_auto_submit),
-            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+            RecordAction::Stop { .. }
+            | RecordAction::Cancel
+            | RecordAction::Edit
+            | RecordAction::Restore { .. } => None,
         }
     }
 
@@ -300,7 +333,10 @@ impl RecordAction {
     pub fn suppress_osd(&self) -> bool {
         match self {
             RecordAction::Start { no_osd, .. } | RecordAction::Toggle { no_osd, .. } => *no_osd,
-            RecordAction::Stop { .. } | RecordAction::Cancel => false,
+            RecordAction::Stop { .. }
+            | RecordAction::Cancel
+            | RecordAction::Edit
+            | RecordAction::Restore { .. } => false,
         }
     }
 
@@ -318,7 +354,10 @@ impl RecordAction {
                 no_shift_enter_newlines,
                 ..
             } => override_from_flags(*shift_enter_newlines, *no_shift_enter_newlines),
-            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+            RecordAction::Stop { .. }
+            | RecordAction::Cancel
+            | RecordAction::Edit
+            | RecordAction::Restore { .. } => None,
         }
     }
 
@@ -336,7 +375,10 @@ impl RecordAction {
                 no_smart_auto_submit,
                 ..
             } => override_from_flags(*smart_auto_submit, *no_smart_auto_submit),
-            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+            RecordAction::Stop { .. }
+            | RecordAction::Cancel
+            | RecordAction::Edit
+            | RecordAction::Restore { .. } => None,
         }
     }
 }
@@ -431,6 +473,33 @@ mod tests {
                 assert_eq!(wait_file, None);
             }
             _ => panic!("Expected Record Stop command"),
+        }
+    }
+
+    #[test]
+    fn edit_parses_and_carries_no_overrides() {
+        let cli = Cli::parse_from(["voxtype", "record", "edit"]);
+        let Some(Commands::Record { action }) = cli.command else {
+            panic!("Expected Record command");
+        };
+        assert!(matches!(action, RecordAction::Edit));
+        assert_eq!(action.model_override(), None);
+        assert_eq!(action.profile(), None);
+        assert!(!action.suppress_osd());
+    }
+
+    #[test]
+    fn restore_parses_with_and_without_print() {
+        for (args, want) in [
+            (&["voxtype", "record", "restore"][..], false),
+            (&["voxtype", "record", "restore", "--print"][..], true),
+        ] {
+            let cli = Cli::parse_from(args);
+            let Some(Commands::Record { action }) = cli.command else {
+                panic!("Expected Record command");
+            };
+            assert!(matches!(action, RecordAction::Restore { print } if print == want));
+            assert_eq!(action.output_mode_override(), None);
         }
     }
 

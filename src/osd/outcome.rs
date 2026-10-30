@@ -19,6 +19,11 @@
 //! Enter was sent after it, `output_ms` how long typing or pasting took,
 //! `latency_ms` the time from the end of the recording to the text being
 //! delivered (null when unknown), and `audio_s` the seconds of audio.
+//!
+//! When a keyboard-edited dictation went to the clipboard because the
+//! window it was dictated for was not active (or was closed), the daemon
+//! also writes `not-pasted`, one line saying why, before `result.json`. The
+//! popup then says "Copied, not pasted".
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -77,6 +82,7 @@ pub fn write(outcome: Outcome) {
 pub fn clear() {
     let _ = std::fs::remove_file(path());
     let _ = std::fs::remove_file(result_path());
+    let _ = std::fs::remove_file(not_pasted_path());
     *STOPPED.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
@@ -125,6 +131,26 @@ pub fn write_delivery(delivery: &Delivery) {
     if std::fs::write(&tmp, json).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
     }
+}
+
+/// `not-pasted` in the runtime folder.
+pub fn not_pasted_path() -> PathBuf {
+    crate::config::Config::runtime_dir().join("not-pasted")
+}
+
+/// The text went to the clipboard, not to its window, for `reason`.
+pub fn write_not_pasted(reason: &str) {
+    let path = not_pasted_path();
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, reason).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// Why the last dictation was copied and not pasted, if it was.
+pub fn read_not_pasted() -> Option<String> {
+    let reason = std::fs::read_to_string(not_pasted_path()).ok()?;
+    Some(reason.trim().to_string())
 }
 
 /// The last delivery, if the file is there and parses.

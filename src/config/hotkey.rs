@@ -104,6 +104,29 @@ pub struct HotkeyConfig {
     /// `double_tap_ms` + 150, so a slow tap never starts a correction.
     #[serde(default = "default_correction_hold_ms")]
     pub correction_hold_ms: u64,
+
+    /// A key whose single clean tap while recording pauses the dictation
+    /// to fix its text by keyboard in the popup, and resumes it when
+    /// tapped again (needs `[osd] keyboard_edit`). Unset, it is
+    /// `double_tap_alt_key`. A key that also has a double-tap meaning waits
+    /// `double_tap_ms` after the tap to rule out a double tap.
+    #[serde(default)]
+    pub edit_key: Option<String>,
+
+    /// The edit key's tap counts only when no other key was pressed this
+    /// many milliseconds before it, so a Shift pressed while typing does not
+    /// pause the dictation.
+    #[serde(default = "default_edit_quiet_ms")]
+    pub edit_quiet_ms: u64,
+}
+
+impl HotkeyConfig {
+    /// The edit key in effect: `edit_key`, else `double_tap_alt_key`.
+    pub fn edit_key(&self) -> Option<&str> {
+        self.edit_key
+            .as_deref()
+            .or(self.double_tap_alt_key.as_deref())
+    }
 }
 
 fn default_double_tap_ms() -> u64 {
@@ -112,6 +135,10 @@ fn default_double_tap_ms() -> u64 {
 
 fn default_correction_hold_ms() -> u64 {
     450
+}
+
+fn default_edit_quiet_ms() -> u64 {
+    150
 }
 
 impl Default for HotkeyConfig {
@@ -131,6 +158,8 @@ impl Default for HotkeyConfig {
             look_chord: true,
             correction_key: None,
             correction_hold_ms: default_correction_hold_ms(),
+            edit_key: None,
+            edit_quiet_ms: default_edit_quiet_ms(),
         }
     }
 }
@@ -150,6 +179,24 @@ pub(super) fn default_hotkey_key() -> String {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn edit_key_defaults_to_the_alt_double_tap_key() {
+        let old: HotkeyConfig = toml::from_str(
+            "key = \"RIGHTCTRL\"\ndouble_tap = true\ndouble_tap_alt_key = \"RIGHTSHIFT\"",
+        )
+        .unwrap();
+        assert_eq!(old.edit_key, None);
+        assert_eq!(old.edit_key(), Some("RIGHTSHIFT"));
+        assert_eq!(old.edit_quiet_ms, 150);
+        let set: HotkeyConfig = toml::from_str(
+            "double_tap_alt_key = \"RIGHTSHIFT\"\nedit_key = \"F9\"\nedit_quiet_ms = 200",
+        )
+        .unwrap();
+        assert_eq!(set.edit_key(), Some("F9"));
+        assert_eq!(set.edit_quiet_ms, 200);
+        assert_eq!(HotkeyConfig::default().edit_key(), None);
+    }
 
     #[test]
     fn test_parse_hotkey_disabled_without_key() {

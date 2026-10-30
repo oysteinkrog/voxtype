@@ -136,6 +136,9 @@ pub struct Corrections {
     clips: Vec<FinalClip>,
     /// The corrections [`Corrections::apply_final`] made, for the log.
     applied: Vec<learn::Entry>,
+    /// Words whose middle is before this many seconds are frozen by a
+    /// keyboard edit: no correction placed from now on replaces them.
+    frozen_until: Option<f32>,
 }
 
 fn middle(w: &TimedWord) -> f32 {
@@ -170,6 +173,15 @@ impl Corrections {
     /// Another key was pressed during the hold: its words stay dictation.
     pub fn cancel(&mut self) {
         self.windows.retain(|w| w.state != State::Open);
+    }
+
+    /// A keyboard edit froze the text spoken before `t` seconds. Holds
+    /// that ended are placed first, so a correction made just before the
+    /// edit tap still counts; from then on no correction replaces a word
+    /// spoken before `t`.
+    pub fn freeze(&mut self, t: f32) {
+        self.render_with(None, true);
+        self.frozen_until = Some(self.frozen_until.map_or(t, |f| f.max(t)));
     }
 
     pub fn is_empty(&self) -> bool {
@@ -247,6 +259,10 @@ impl Corrections {
             .filter(|w| middle(w) < t0)
             .collect();
         let texts: Vec<&str> = before.iter().map(|w| w.text.as_str()).collect();
+        // The first word a correction may replace.
+        let open = self
+            .frozen_until
+            .map_or(0, |f| before.iter().take_while(|w| middle(w) < f).count());
         self.notes += 1;
         let mut note = CorrectionNote {
             id: self.notes,
@@ -266,12 +282,19 @@ impl Corrections {
         } else if target.is_empty() {
             Err("not letters")
         } else {
-            align::place(&texts, &target).map_err(|r| match r {
-                Refused::Empty => "nothing to replace",
-                Refused::NoMatch { .. } => "no match",
-                Refused::Ambiguous { .. } => "two places fit",
-                Refused::TooShort { .. } => "too short to place",
-            })
+            align::place(&texts[open..], &target)
+                .map(|span| span.start + open..span.end + open)
+                .map_err(|r| {
+                    if open > 0 && align::place(&texts, &target).is_ok() {
+                        return "frozen text";
+                    }
+                    match r {
+                        Refused::Empty => "nothing to replace",
+                        Refused::NoMatch { .. } => "no match",
+                        Refused::Ambiguous { .. } => "two places fit",
+                        Refused::TooShort { .. } => "too short to place",
+                    }
+                })
         };
         let state = match placed {
             Ok(span) => {
@@ -621,6 +644,11 @@ pub fn cancel() {
 /// The final engine's text of each hold, from the worker's response.
 pub fn final_clips(clips: Vec<FinalClip>) {
     with(|c| c.clips = clips);
+}
+
+/// A keyboard edit froze the text spoken before `t` seconds.
+pub fn freeze(t: f32) {
+    with(|c| c.freeze(t));
 }
 
 /// The dictation ended.
@@ -1057,5 +1085,132 @@ mod tests {
         c.start(1.0);
         c.cancel();
         assert_eq!(c.apply_final("Hello,  there.\n"), "Hello,  there.\n");
+    }
+
+    #[test]
+    fn a_correction_never_replaces_frozen_words() {
+        let lists = steps(&[
+            (0.0, "use franken term here"),
+            (1.2, "and then more"),
+            (3.0, "FrankenTerm"),
+            (3.6, "done"),
+        ]);
+        let t = Instant::now();
+        let mut c = Corrections::default();
+        c.overlay(lists[1].clone(), t);
+        // A keyboard edit froze everything before 2.0 s.
+        c.freeze(2.0);
+        c.start(2.9);
+        c.overlay(lists[2].clone(), t);
+        c.end(3.4, t);
+        let shown = c.overlay(lists[3].clone(), t);
+        assert_eq!(text(&shown), "use franken term here and then more done");
+        let note = c.view().unwrap().note.unwrap();
+        assert_eq!(note.dropped.as_deref(), Some("frozen text"));
+        assert_eq!(
+            c.apply_final("Use franken term here and then more done."),
+            "Use franken term here and then more done."
+        );
+    }
+
+    #[test]
+    fn a_correction_skips_a_frozen_match_for_an_open_one() {
+        // "franken term" twice: once frozen, once after the resume. Without
+        // the freeze two places fit; with it, only the open one does.
+        let lists = steps(&[
+            (0.0, "use franken term"),
+            (1.0, "then franken term again"),
+            (3.0, "FrankenTerm"),
+            (3.6, "done"),
+        ]);
+        let t = Instant::now();
+        let mut c = Corrections::default();
+        c.overlay(lists[1].clone(), t);
+        c.freeze(0.9);
+        c.start(2.9);
+        c.overlay(lists[2].clone(), t);
+        c.end(3.4, t);
+        let shown = c.overlay(lists[3].clone(), t);
+        assert_eq!(text(&shown), "use franken term then FrankenTerm again done");
+    }
+
+    #[test]
+    fn a_hold_that_ended_before_the_freeze_is_placed_by_it() {
+        let lists = steps(&[(0.0, "use franken term here"), (1.3, "FrankenTerm")]);
+        let t = Instant::now();
+        let mut c = Corrections::default();
+        c.overlay(lists[0].clone(), t);
+        c.start(1.2);
+        c.overlay(lists[1].clone(), t);
+        c.end(2.0, t);
+        // The edit tap came before the live model heard past the hold.
+        c.freeze(2.0);
+        assert_eq!(text(&c.current()), "use FrankenTerm here");
+        assert_eq!(c.view().unwrap().note.unwrap().dropped, None);
+    }
+
+    /// R21: random dictations with random holds and a freeze at a random
+    /// time. No correction placed after the freeze replaces a word spoken
+    /// before it, so the shown words before the boundary only change when
+    /// the live model revises them.
+    #[test]
+    fn corrections_after_a_freeze_leave_frozen_words_alone() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rand = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let vocab = [
+            "use",
+            "franken",
+            "term",
+            "here",
+            "the",
+            "fox",
+            "FrankenTerm",
+            "run",
+        ];
+        let t = Instant::now();
+        for _ in 0..300 {
+            let mut words: Vec<Word> = Vec::new();
+            let mut c = Corrections::default();
+            let mut at = 0.0f32;
+            let freeze_after = rand(20);
+            let mut frozen: Option<(f32, Vec<String>)> = None;
+            for step in 0..30 {
+                match rand(6) {
+                    0 if frozen.is_none() || rand(2) == 0 => {
+                        c.start(at);
+                    }
+                    1 => c.end(at, t),
+                    _ => {}
+                }
+                for _ in 0..=rand(2) {
+                    let w = vocab[rand(vocab.len() as u64) as usize];
+                    words.extend(spoken(at, w));
+                    at += 0.25;
+                }
+                let shown = c.overlay(words.clone(), t);
+                if step == freeze_after {
+                    c.freeze(at);
+                    let kept = c
+                        .current()
+                        .iter()
+                        .filter(|(w, _)| middle(w) < at)
+                        .map(|(w, _)| w.text.clone())
+                        .collect();
+                    frozen = Some((at, kept));
+                } else if let Some((f, kept)) = &frozen {
+                    let now: Vec<String> = shown
+                        .iter()
+                        .filter(|(w, _)| middle(w) < *f)
+                        .map(|(w, _)| w.text.clone())
+                        .collect();
+                    assert_eq!(&now, kept, "a frozen word changed at step {step}");
+                }
+            }
+        }
     }
 }

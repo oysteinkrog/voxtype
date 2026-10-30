@@ -157,6 +157,16 @@ mod display;
 mod realtime;
 #[path = "osd_vo/correction_note.rs"]
 mod correction_note;
+// Parts of the keyboard edit link the edit layer (M7.3) draws from.
+#[allow(dead_code)]
+#[path = "osd_vo/edit_link.rs"]
+mod edit_link;
+
+#[path = "osd_vo/edit_focus.rs"]
+mod edit_focus;
+
+#[path = "osd_vo/edit.rs"]
+mod edit;
 
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;
@@ -1438,6 +1448,17 @@ struct Popup {
     signal_state: model_signals::State,
     /// The outcome of the newest spoken correction, while it shows.
     correction_note: correction_note::State,
+    /// The keyboard edit link, in a live popup with `[osd] keyboard_edit`.
+    edit: Option<edit_link::EditLink>,
+    /// Keyboard focus for an edit (the focus proxy).
+    focus: edit_focus::Focus,
+    /// The shared edit layer and what it shows while the popup owns the
+    /// text (`osd_vo/edit.rs`).
+    edit_layer: edit::EditLayer,
+    edit_view: Option<edit::EditView>,
+    /// The text the words were last built from: the preview, or after an
+    /// edit the edited text and the speech since.
+    source: String,
 }
 
 impl Popup {
@@ -1456,6 +1477,11 @@ impl Popup {
             model_signals: None,
             signal_state: model_signals::State::default(),
             correction_note: correction_note::State::default(),
+            edit: None,
+            focus: edit_focus::Focus::default(),
+            edit_layer: edit::EditLayer::default(),
+            edit_view: None,
+            source: String::new(),
             recorder: None,
             measure: vo::ShapedLayout::new(fonts.clone()),
             levels: VecDeque::new(),
@@ -1755,6 +1781,65 @@ impl Popup {
         self.shown = shown;
     }
 
+    /// While the popup owns the edit text, the buffer is the text source
+    /// and the edit layer picks the window of lines the look shows
+    /// (`osd_vo/edit.rs`). Returns false when it does not own the text.
+    fn edit_text(&mut self, t: f64) -> bool {
+        let owned = self.edit.as_ref().and_then(|l| {
+            l.buffer()
+                .filter(|_| l.phase().is_some_and(edit_link::Phase::owns_text))
+        });
+        let Some(buffer) = owned else {
+            if self.edit_view.take().is_some() {
+                self.edit_layer.reset();
+                // Back to the source text, now the edited text.
+                self.source.clear();
+            }
+            return false;
+        };
+        let text = buffer.text().to_string();
+        self.model.update(&text);
+        let view = self.edit_layer.view(
+            buffer,
+            &self.measure,
+            self.look.text_style(),
+            self.look.text_width(),
+            self.look.max_lines(),
+            t,
+        );
+        let window = view.start..view.start + view.text.len();
+        self.shown = edit::window_words(self.model.words(), &text, window);
+        self.word_count = self.model.words().len();
+        // Grows upward by whole lines, never shrinks (R53).
+        self.lines = self.lines.max(view.lines);
+        self.edit_view = Some(view);
+        true
+    }
+
+    /// The text the look shows when the popup does not own the edit text:
+    /// the preview, or after an edit the edited text, then the preview's
+    /// words after the freeze boundary.
+    fn source_text(&self) -> String {
+        let block = self
+            .edit
+            .as_ref()
+            .and(self.files.live.as_ref())
+            .and_then(|l| l.edit.as_ref())
+            .filter(|b| !b.frozen.is_empty());
+        let preview = &self.files.preview;
+        match block {
+            Some(b) => {
+                let after = voxtype::osd::edit_doc::after_words(preview, b.raw_words).trim();
+                if after.is_empty() {
+                    b.frozen.clone()
+                } else {
+                    format!("{} {after}", b.frozen.trim_end())
+                }
+            }
+            None => preview.clone(),
+        }
+    }
+
     /// How many shown words have room in the text area now. In the looks
     /// whose panel springs open for a new line (type, mission), just after
     /// the area gains a line only the words that fit the old lines, for
@@ -1891,10 +1976,17 @@ impl App for Popup {
                     // Looks again once the outcome has had time to come.
                     cx.after(OUTCOME_GRACE_SECS + 0.01, Msg::Check);
                 }
-                if preview_changed {
-                    let preview = self.files.preview.clone();
+                if let (true, Some(link)) = (live_changed, self.edit.as_mut()) {
+                    link.sync(self.files.live.as_ref().and_then(|l| l.edit.as_ref()));
+                    self.focus.follow(link, cx, t);
+                }
+                let editing = self.edit_text(t);
+                let source = self.source_text();
+                if !editing && source != self.source {
+                    self.source = source;
+                    let source = self.source.clone();
                     let before = self.lines;
-                    self.text(&preview);
+                    self.text(&source);
                     if self.lines > before {
                         self.grew = Some((t, before));
                         // A wake-up for the view once the new line has room.
@@ -2005,6 +2097,36 @@ impl App for Popup {
         self.pace
     }
 
+    fn key(&mut self, ev: &vo::scene::input::KeyEvent, cx: &mut Cx<Msg>) -> bool {
+        let Some(link) = self.edit.as_mut() else {
+            return false;
+        };
+        // Up, Down, Home and End move by the lines the look draws.
+        let lines = match link.buffer() {
+            Some(b) if self.edit_view.is_some() => Some(self.edit_layer.shaped(
+                b.text(),
+                &self.measure,
+                self.look.text_style(),
+                self.look.text_width(),
+            ) as &dyn vo_core::edit::Lines),
+            _ => None,
+        };
+        let used = self.focus.key(ev, link, lines);
+        self.focus.follow(link, cx, ev.t);
+        if used {
+            self.edit_text(ev.t);
+        }
+        used
+    }
+
+    fn keyboard_focus(&mut self, gained: bool, requested: bool, cx: &mut Cx<Msg>) {
+        if let Some(link) = self.edit.as_mut() {
+            let t = cx.t();
+            self.focus.changed(gained, requested, link, t);
+            self.focus.follow(link, cx, t);
+        }
+    }
+
     /// A look picked with the look chord has its own size and place.
     fn main_surface(&self) -> Option<(Size, Placement)> {
         let spec = live_spec(self.osd.as_ref()?, &self.look);
@@ -2018,6 +2140,14 @@ impl App for Popup {
         // Each look hangs under a node named for it, so a look switch drops
         // the old look whole at once: no exit of it, its status row
         // included, draws over the new look.
+        let look = match &self.edit_view {
+            Some(v) => look.map_live_texts(&mut |e| {
+                e.live_source(v.text.clone())
+                    .edit(v.decor.clone())
+                    .still_motion(true)
+            }),
+            None => look,
+        };
         let look = correction_note::dim(look, self.correction_view());
         let look = Element::column(format!("look-{:?}", self.look.theme)).child(look);
         // The shift and the taller panel come in the same frame, on a
@@ -2645,6 +2775,9 @@ fn main() -> anyhow::Result<()> {
         popup.recorder = args.record.as_deref().and_then(replay::recorder);
         popup.osd = Some(cfg.clone());
         popup.live_surface = true;
+        if cfg.keyboard_edit {
+            popup.edit = Some(edit_link::EditLink::new(edit_link::Paths::default()));
+        }
         let boost = realtime::raise(cfg.realtime);
         let result = resident.run(popup, live_spec(&cfg, &look), options);
         drop(boost);

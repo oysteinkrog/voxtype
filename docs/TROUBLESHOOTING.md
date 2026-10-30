@@ -18,6 +18,7 @@ Solutions to common issues when using Voxtype.
 - [Soniox Backend Issues](#soniox-backend-issues)
 - [Media Does Not Pause While Recording (Omarchy Quattro)](#media-does-not-pause-while-recording-omarchy-quattro)
 - [Quickshell OSD Issues](#quickshell-osd-issues)
+- [Keyboard Editing](#keyboard-editing)
 - [Systemd Service Issues](#systemd-service-issues)
 - [Debug Mode](#debug-mode)
 
@@ -257,10 +258,23 @@ aplay test.wav
 If test recording works, check your Voxtype config:
 ```toml
 [audio]
-device = "default"  # Or specific device name from pactl
+device = "default"  # Or an ALSA name from `voxtype info devices`
 ```
 
-#### 2. Microphone muted or volume too low
+To record from one PipeWire source, use its name from `pactl list sources short`
+with a `pipewire:` prefix, for example
+`device = "pipewire:alsa_input.usb-046d_Logitech_StreamCam_0123ABCD-02.analog-stereo"`.
+
+#### 2. Start of speech cut off, or quiet speech missing
+
+If the default source is a noise-suppression filter with a voice gate (RNNoise
+with a VAD threshold, for example), it outputs exact silence until it decides you
+are speaking. That cuts off the first word, and quiet speech can vanish entirely.
+Check what the default source is with `pactl get-default-source`. Point voxtype at
+the raw microphone instead with `device = "pipewire:<node name>"` (see above).
+Other apps keep using the filter.
+
+#### 3. Microphone muted or volume too low
 
 ```bash
 # Check PulseAudio/PipeWire volume
@@ -269,7 +283,7 @@ pavucontrol
 pactl list sources | grep -A 10 "Default"
 ```
 
-#### 3. PipeWire/PulseAudio not running
+#### 4. PipeWire/PulseAudio not running
 
 ```bash
 # Check audio server status
@@ -1284,6 +1298,42 @@ systemctl --user restart voxtype
 
 Omarchy theme switches are picked up without a restart only if the style file
 is rewritten; re-launching the OSD refreshes the palette.
+
+---
+
+## Keyboard Editing
+
+These apply with `[osd] keyboard_edit = true` (see the user manual, "Fixing Text by Keyboard").
+
+### A tap of the edit key does nothing
+
+Check the daemon log at start (`journalctl --user -u voxtype -b | grep -i edit`):
+
+- `osd.keyboard_edit needs live_preview_model and no live_typing; it is off`: set `live_preview_model` and turn `live_typing` off. Keyboard editing pastes at the end, so it cannot work while words are typed as you speak.
+- `edit_key ... also starts, stops or cancels recording on a press`: the edit key is the hotkey without `double_tap`, or the cancel key. Pick another `[hotkey] edit_key`.
+- No `A single tap of ... asks for a keyboard edit` line: there is no edit key. Set `edit_key` or `double_tap_alt_key`, or bind `voxtype record edit` in your compositor.
+
+A tap also does nothing outside a recording, and when it was not clean: another key held or pressed in the 150 ms before it (`edit_quiet_ms`), another key pressed while it was down, or held longer than `double_tap_ms`.
+
+### The pause starts late, or my first keys went to the other app
+
+When the edit key also has a double-tap meaning, voxtype waits `double_tap_ms` (300 ms) after the tap for a second one. The caret appears about 350 ms after you let go. Keys pressed before that go to the window you were dictating into. Wait for the caret. A lower `double_tap_ms` shortens the wait, but makes double taps harder.
+
+### Recordings pause when I did not mean to (stray Shift taps)
+
+A Right Shift pressed and let go on its own while you dictate counts as a tap. Shift+click and Shift+scroll look the same, because voxtype only sees the keyboard. Any key pressed in the 300 ms after the tap cancels it, and a second tap resumes, so nothing is lost. If it happens often, raise `edit_quiet_ms`, or set `edit_key` to a key you do not use for typing.
+
+### The popup shows "paused · Shift to edit"
+
+The popup lost the keyboard while you were editing: a click on another window, Alt+Tab, the lock screen, or its screen was unplugged. With focus-follows-mouse, resting the pointer on another window for about 300 ms does it too. The text, caret and paused recording are kept. Tap the edit key once to edit again; it takes the keyboard from the window that has it. Voxtype never takes it back by itself.
+
+### The popup says "Copied, not pasted"
+
+Before pasting, and again before pressing Enter, voxtype checks that the window you dictated into is active. It was not: you closed it, switched away, or the check timed out. The text is on the clipboard; paste it with Ctrl+V. `post_output_command` does not run in this case.
+
+### I discarded an edited dictation by mistake
+
+Run `voxtype record restore` within 60 seconds to copy its text to the clipboard (`--print` prints it). Only dictations that were paused for an edit are kept. The copy lives in `$XDG_RUNTIME_DIR/voxtype/discarded.json` and is deleted after 60 s.
 
 ---
 

@@ -117,6 +117,72 @@ new engine to take effect.
 
 ---
 
+## engine_isolation
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Run the ONNX engines (Parakeet, Cohere, Moonshine and the rest) in a short-lived `transcribe-worker` child process, as `[whisper] gpu_isolation` does for Whisper. The worker loads the model while you speak and exits after the transcription, so the CUDA context and the ONNX Runtime memory leave both VRAM and the daemon's RAM. Pair it with the engine's `on_demand_loading = true`. A live preview (`live_preview_model`) needs it.
+
+```toml
+engine_isolation = true
+```
+
+## live_preview_model
+
+**Type:** String (model name)
+**Default:** unset (no live preview)
+**Required:** No
+
+Show your words in the popup while you speak. The worker runs this Parakeet cache-aware streaming model on the CPU, for example `"parakeet-unified-en-0.6b"`, and the OSD shows its running transcript. The engine's own model still makes the text that gets typed; it loads in the background while you speak. Preview words are not typed at the cursor unless `live_typing = true`.
+
+Needs `engine_isolation = true` and the engine's `on_demand_loading = false`.
+
+```toml
+engine_isolation = true
+live_preview_model = "parakeet-unified-en-0.6b"
+```
+
+## live_typing
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+With a live preview, also type the preview words at the cursor as they arrive. When you stop, voxtype swaps them for the engine model's text and keeps the start both agree on. Use `[hotkey] mode = "toggle"` or a key that is not a modifier: letters typed while a modifier is held would become shortcuts, so updates wait until modifiers are up.
+
+```toml
+live_typing = true
+```
+
+## live_preview_final
+
+**Type:** String
+**Default:** `"engine"`
+**Required:** No
+
+Where the final text comes from with a live preview:
+
+- `"engine"`: the configured engine, for example Cohere on the GPU.
+- `"preview"`: the live preview model's own text. CPU only, and no second model is loaded.
+
+```toml
+live_preview_final = "preview"
+```
+
+## live_preview_min_free_vram_mib
+
+**Type:** Integer (MiB)
+**Default:** `0` (no check)
+**Required:** No
+
+With a live preview, load the engine model only when the GPU has at least this much free memory, as `nvidia-smi` reports it. With less, the preview text is the final text.
+
+```toml
+live_preview_min_free_vram_mib = 4096
+```
+
 ## live_preview_warm_secs
 
 **Type:** Integer (seconds)
@@ -215,6 +281,30 @@ Run with `sh -c` every 10 s while a warm worker waits (and, with `live_preview_w
 
 ```toml
 live_preview_warm_release_command = "grep -q 'level=pause' ~/.local/state/pressure/level"
+```
+
+## live_preview_corpus_dir
+
+**Type:** String (directory path)
+**Default:** unset (keep nothing)
+**Required:** No
+
+Keep every live preview recording in this directory, for later review or model fine-tuning: `<time>.wav` (16 kHz mono) and `<time>.json` with the final and the preview text. `~` is expanded.
+
+```toml
+live_preview_corpus_dir = "~/voxtype-corpus"
+```
+
+## live_preview_revisions_dir
+
+**Type:** String (directory path)
+**Default:** unset (log nothing)
+**Required:** No
+
+Log every change of the live preview text in this directory, with times, word timing and the final text: one `<time>.revisions.jsonl` per recording, in a directory with mode 0700. This is for tuning how the popup animates words. `~` is expanded.
+
+```toml
+live_preview_revisions_dir = "~/voxtype-revisions"
 ```
 
 ---
@@ -451,6 +541,57 @@ post_process_command = "my-script.sh --formal"
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --profile <name>` instead. Avoid using the same key in both `modifiers` and `profile_modifiers` -- every hotkey press would always activate that profile.
 
+### double_tap
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Start and stop recording with a double tap of `key` instead of a single press. A tap is a press and release of the key within `double_tap_ms`, with no other key pressed meanwhile, so shortcuts that use the key (Ctrl+C on Right Ctrl) never count. Two taps within `double_tap_ms` count as one press. Use it with `mode = "toggle"`.
+
+```toml
+[hotkey]
+key = "RIGHTCTRL"
+mode = "toggle"
+double_tap = true
+```
+
+### double_tap_ms
+
+**Type:** Integer (milliseconds)
+**Default:** `300`
+**Required:** No
+
+The longest tap, and the longest gap between the two taps of a double tap.
+
+### double_tap_alt_key
+
+**Type:** String (key name)
+**Default:** unset
+**Required:** No
+
+A second key whose double tap also starts and stops recording (with `double_tap = true`). Each double tap writes which key fired, `main` or `alt`, to `hotkey-last` in the runtime directory, so an output hook can act on how the recording was stopped, for example paste without pressing Enter.
+
+```toml
+[hotkey]
+double_tap = true
+double_tap_alt_key = "RIGHTSHIFT"
+```
+
+### double_tap_cancel_key
+
+**Type:** String (key name)
+**Default:** unset
+**Required:** No
+
+A key whose double tap discards the recording, like `cancel_key` (with `double_tap = true`). Unlike a single-press cancel key, a stray press of the key never throws a dictation away.
+
+```toml
+[hotkey]
+double_tap = true
+double_tap_cancel_key = "ESC"
+```
+
 ### look_chord
 
 **Type:** Boolean
@@ -504,6 +645,39 @@ correction_key = "RIGHTSHIFT"   # tap twice: paste only; hold: correct
 
 How long `correction_key` must be held before a correction starts. The correction itself starts at key-down, so words you say during the wait count. With `double_tap = true` the value is raised to at least `double_tap_ms` + 150, so a slow tap never starts a correction.
 
+### edit_key
+
+**Type:** String (evdev key name)
+**Default:** unset (uses `double_tap_alt_key`)
+**Required:** No
+**CLI:** `--edit-key KEY` · **Env:** `VOXTYPE_EDIT_KEY`
+
+The key whose single tap pauses a recording for keyboard editing, and resumes it again. Only used with `[osd] keyboard_edit = true` (see [Keyboard editing](#keyboard-editing)). Unset, it is your `double_tap_alt_key`, so with the example below one Right Shift tap edits, two taps stop and paste, and a hold is a spoken correction.
+
+A tap only counts when it is clean: no other key held when the key goes down, no other key pressed in the `edit_quiet_ms` before it, no other key pressed while it is down, and released within `double_tap_ms`. When the key also has a double-tap meaning, the tap is confirmed only after `double_tap_ms` passes with no second tap, so the pause starts about 300 ms after you let go. A key that starts, stops or cancels recording on a single press (the hotkey without `double_tap`, or `cancel_key`) cannot be the edit key: voxtype logs a warning and edit taps stay off. With neither `edit_key` nor `double_tap_alt_key` set there is no edit tap; `voxtype record edit` still works.
+
+```toml
+[hotkey]
+double_tap = true
+key = "RIGHTCTRL"
+double_tap_alt_key = "RIGHTSHIFT"
+correction_key = "RIGHTSHIFT"   # tap twice: paste only; hold: correct
+# edit_key unset: one tap of RIGHTSHIFT pauses to edit
+
+[osd]
+frontend = "vo"
+keyboard_edit = true
+```
+
+### edit_quiet_ms
+
+**Type:** Integer (milliseconds)
+**Default:** `150`
+**Required:** No
+**CLI:** `--edit-quiet-ms MS` · **Env:** `VOXTYPE_EDIT_QUIET_MS`
+
+How long no other key may be pressed before an edit tap. A Shift pressed in the middle of typing and then let go does not count as a tap. Raise it if stray taps pause your recordings; set it to 0 to turn the guard off.
+
 ---
 
 ## [audio]
@@ -526,7 +700,29 @@ arecord -L               # the same names, from ALSA directly
 
 `audio.device` takes an **ALSA** device name. PulseAudio and PipeWire source
 names, such as those from `pactl list sources short`, are a different namespace
-and will not match — a name like `alsa_input.usb-...` looks plausible but fails.
+and will not match as they are. To record from one PipeWire node, put
+`pipewire:` in front of its name (Linux only):
+
+```bash
+pactl list sources short    # second column is the node name
+```
+
+```toml
+[audio]
+# The microphone itself, whatever the system default source is
+device = "pipewire:alsa_input.usb-046d_Logitech_StreamCam_0123ABCD-02.analog-stereo"
+```
+
+Use this when the default source is not the raw microphone, for example a
+noise-suppression filter chain or a remote-desktop microphone. Noise
+suppression with a voice gate (such as RNNoise's VAD threshold) writes silence
+until it is sure you are speaking, which cuts off the first word. The speech
+models handle background noise themselves, so they do best on the raw
+microphone. The setting changes only voxtype's capture stream: the system
+default source, other apps and voxtype's feedback sounds are not affected.
+The node name of a USB microphone includes its serial number, so it stays the
+same when you unplug and replug it. If the node does not exist, PipeWire
+records from the default source instead.
 
 **Example:**
 ```toml
@@ -2259,6 +2455,22 @@ paste_keys = "shift+insert"  # For Hyprland/Omarchy
 - Letters: `a-z`
 - Special: `insert`, `enter`
 
+### paste_primary
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+**Applies to:** Paste mode only
+
+Also copy the text to the primary selection. Terminals such as WezTerm and Konsole paste the primary selection on Shift+Insert, while GUI apps paste the clipboard. With `paste_keys = "shift+insert"`, this makes one key work in both.
+
+```toml
+[output]
+mode = "paste"
+paste_keys = "shift+insert"
+paste_primary = true
+```
+
 ### restore_clipboard
 
 **Type:** Boolean
@@ -3862,6 +4074,9 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_HOTKEY` | string | `hotkey.key` |
 | `VOXTYPE_HOTKEY_ENABLED` | bool | `hotkey.enabled` |
 | `VOXTYPE_CANCEL_KEY` | string | `hotkey.cancel_key` |
+| `VOXTYPE_EDIT_KEY` | string | `hotkey.edit_key` |
+| `VOXTYPE_EDIT_QUIET_MS` | integer | `hotkey.edit_quiet_ms` |
+| `VOXTYPE_OSD_KEYBOARD_EDIT` | bool | `osd.keyboard_edit` |
 
 **Whisper / Engine:**
 
@@ -4239,6 +4454,25 @@ positions ignore `anchor`. Both the `gtk4` and the `vo` popups take
 `VOXTYPE_OSD_ANCHOR` and `VOXTYPE_OSD_READING_LINE`. In the `vo` popup, the
 looks other than `swiss` center the whole popup on the line for now.
 
+### Keyboard editing
+
+**Type:** Boolean (`[osd] keyboard_edit`)
+**Default:** `false`
+**Required:** No
+**CLI:** `--osd-keyboard-edit` · **Env:** `VOXTYPE_OSD_KEYBOARD_EDIT`
+
+Lets you pause a live preview dictation and fix its text by keyboard in the popup, then go on talking. One tap of `[hotkey] edit_key` pauses; another tap (or Esc) resumes. `voxtype record edit` does the same from a script or a compositor binding. The [user manual](USER_MANUAL.md#fixing-text-by-keyboard) describes the keys.
+
+It needs `live_preview_model` set and `live_typing` off, because the text is pasted at the end, not typed as you speak. The vo popup (`frontend = "vo"`) draws the editing. When the other settings do not allow it, the daemon logs a warning at start and leaves it off.
+
+With it off, nothing changes: the edit key's taps do nothing new, and dictation output is the same.
+
+```toml
+[osd]
+frontend = "vo"
+keyboard_edit = true
+```
+
 ### vo OSD (experimental)
 
 `frontend = "vo"` runs `voxtype-osd-vo`, which draws the `swiss` look on
@@ -4261,6 +4495,10 @@ fonts, and draws the `swiss` look. Differences from the GTK4 popup:
 - `word_fade = true` in `[osd]` (or `--word-fade`, or
   `VOXTYPE_OSD_WORD_FADE=1`) fades new words in. By default they appear at
   once, as in the GTK4 popup.
+- `look_badge = true` in `[osd]` (or `--look-badge`, or
+  `VOXTYPE_OSD_LOOK_BADGE=1`) shows the active look's place in the look
+  chord's list and its name, such as "3/20 Type", above the popup's
+  top-left corner. Off by default.
 - While it shows, the popup's own threads run at real-time priority
   (`SCHED_RR` 1, the same as KWin), so CPU load from builds or other apps
   does not make it wait. They go back to normal priority when it hides. A

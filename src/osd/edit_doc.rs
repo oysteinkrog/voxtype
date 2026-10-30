@@ -61,6 +61,11 @@ impl EditDoc {
             })
     }
 
+    /// Words of the live preview text through the freeze boundary.
+    pub fn frozen_words(&self) -> usize {
+        self.frozen_words
+    }
+
     /// Raw live text after the freeze boundary.
     pub fn live_text(&self) -> &str {
         &self.live
@@ -139,7 +144,7 @@ fn starts_word_gap(s: &str) -> bool {
 }
 
 /// `s` after its first `n` whitespace-separated words.
-fn after_words(s: &str, n: usize) -> &str {
+pub fn after_words(s: &str, n: usize) -> &str {
     let mut words = 0;
     let mut in_word = false;
     for (i, c) in s.char_indices() {

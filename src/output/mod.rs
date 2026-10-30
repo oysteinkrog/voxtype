@@ -111,7 +111,7 @@ pub fn find_ydotool_socket() -> Option<PathBuf> {
 /// keyboard simulation tools (wtype, dotool, ydotool). This function converts
 /// them to standard ASCII quotes to prevent unexpected line breaks or other
 /// typing artifacts.
-fn normalize_quotes(text: &str) -> Cow<'_, str> {
+pub(crate) fn normalize_quotes(text: &str) -> Cow<'_, str> {
     // Quick check to avoid allocation if no normalization needed
     let needs_normalization = text.chars().any(|c| {
         matches!(
@@ -463,6 +463,9 @@ pub struct OutputOptions<'a> {
     /// Maximum time to wait for modifier release before skipping keystroke
     /// methods and falling through to clipboard-only methods.
     pub modifier_release_timeout: std::time::Duration,
+    /// Turn curly quotes into ASCII first. Off for text that must arrive
+    /// exactly as shown, such as keyboard-edited text.
+    pub normalize: bool,
 }
 
 /// Output methods that synthesize keystrokes the compositor can interpret as
@@ -498,8 +501,25 @@ pub async fn output_via(
     text: &str,
     options: OutputOptions<'_>,
 ) -> Result<&'static str, OutputError> {
+    output_via_confirmed(chain, text, options, || Box::pin(async { true })).await
+}
+
+/// Like [`output_via`], and asks `confirm` right before the post-output
+/// hook. When it says no, the hook is skipped: after a keyboard edit, a hook
+/// that presses Enter must not run once the target window lost focus (plan
+/// R28). `confirm` is asked only when there is a post-output hook.
+pub async fn output_via_confirmed(
+    chain: &[Box<dyn TextOutput>],
+    text: &str,
+    options: OutputOptions<'_>,
+    confirm: impl FnOnce() -> futures_util::future::BoxFuture<'static, bool>,
+) -> Result<&'static str, OutputError> {
     // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
-    let normalized_text = normalize_quotes(text);
+    let normalized_text = if options.normalize {
+        normalize_quotes(text)
+    } else {
+        Cow::Borrowed(text)
+    };
 
     // If the modifier guard is enabled, snapshot kernel-level key state and
     // wait for any held modifiers to be released. This prevents typed letters
@@ -575,9 +595,12 @@ pub async fn output_via(
     }
 
     // Run post-output hook if configured (e.g., reset submap)
-    // Always run this, even on failure, to ensure cleanup
+    // Always run this, even on failure, to ensure cleanup, unless `confirm`
+    // says the target is gone.
     if let Some(cmd) = options.post_output_command {
-        if let Err(e) = run_hook(cmd, "post_output").await {
+        if !confirm().await {
+            tracing::warn!("Target window changed before the post-output hook; skipping it");
+        } else if let Err(e) = run_hook(cmd, "post_output").await {
             tracing::warn!("{}", e);
         }
     }
