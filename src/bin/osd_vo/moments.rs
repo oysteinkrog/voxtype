@@ -212,6 +212,22 @@ const LOOKAHEAD_STEPS: &[LookaheadStep] = &[
     (32, &[], &[(-1.913, Some((",", -4.41))), (-1.043, Some((" and", -2.64))), (-3.762, None), (-0.927, Some((" ph", -2.15))), (-4.604, None), (-2.106, Some((".", -4.86))), (-1.163, Some((".", -2.68))), (-0.527, Some((".", -1.21))), (-5.398, None), (-5.338, None), (-6.0, None)]),
 ];
 
+/// The sound strip's phones at each step of the lookahead moment (ASR-10),
+/// from the live worker with `sound-strip` on, on the same fixture: the
+/// frames the step committed and the lookahead frames after them, each as
+/// (likeliest phone, its probability).
+type LookaheadSounds = (&'static [(&'static str, f32)], &'static [(&'static str, f32)]);
+const LOOKAHEAD_SOUNDS: &[LookaheadSounds] = &[
+    (&[("DH", 0.90), ("IH", 0.42), ("IH", 0.58), ("M", 0.46), ("AH", 0.96), ("L", 0.83), ("N", 0.45)], &[("AH", 0.69), ("AH", 0.92), ("AH", 0.63), ("EH", 0.95), ("T", 0.82), ("AA", 0.76), ("M", 0.93), ("M", 0.58)]),
+    (&[("AH", 0.64), ("AH", 0.88), ("AH", 0.55), ("EH", 0.96), ("T", 0.72), ("AA", 0.91), ("M", 0.67)], &[("M", 0.99), ("OY", 0.85), ("OY", 0.89), ("AA", 0.49), ("K", 0.77), ("K", 0.75), ("IH", 0.63), ("P", 0.40)]),
+    (&[("M", 1.00), ("OY", 0.86), ("OY", 0.81), ("AA", 0.47), ("K", 0.87), ("K", 0.91), ("IH", 0.67)], &[("M", 0.40), ("IH", 0.51), ("T", 0.93), ("IH", 0.68), ("IH", 0.53), ("T", 0.84), ("AH", 0.48), ("EH", 0.53)]),
+    (&[("DH", 0.34), ("IH", 0.64), ("T", 0.93), ("IH", 0.77), ("IH", 0.47), ("T", 0.88), ("AH", 0.78)], &[("K", 0.99), ("K", 0.74), ("SH", 0.50), ("N", 0.49), ("W", 1.00), ("DH", 0.82), ("M", 1.00), ("T", 0.34)]),
+    (&[("K", 0.97), ("K", 0.67), ("SH", 0.67), ("N", 0.55), ("W", 1.00), ("DH", 0.90), ("M", 1.00)], &[("L", 0.62), ("T", 0.71), ("IH", 0.55), ("AH", 0.86), ("L", 0.97), ("W", 1.00), ("ER", 0.97), ("ER", 0.54)]),
+    (&[("L", 0.48), ("T", 0.65), ("IH", 0.63), ("AH", 0.83), ("L", 0.97), ("W", 1.00), ("ER", 0.92)], &[("ER", 0.59), ("AH", 0.32), ("Z", 0.58), ("sil", 0.35), ("AH", 0.50), ("D", 0.42), ("D", 0.72), ("AA", 0.14)]),
+    (&[("ER", 0.64), ("AH", 0.39), ("Z", 0.50), ("sil", 0.21), ("AH", 0.50), ("N", 0.53), ("D", 0.49)], &[("P", 0.23), ("R", 0.74), ("EY", 0.98), ("NG", 0.22), ("EH", 0.41), ("IH", 0.44), ("Z", 0.72), ("sil", 0.41)]),
+    (&[("P", 0.18), ("R", 0.74), ("EY", 0.98), ("NG", 0.25), ("AH", 0.35), ("IH", 0.74), ("Z", 0.62), ("N", 0.50), ("sil", 0.74), ("sil", 0.57)], &[("sil", 0.49)]),
+];
+
 /// Seconds of audio per live model step, and per encoder frame.
 const STEP_SECS: f64 = 0.56;
 const FRAME_SECS: f32 = 0.08;
@@ -431,8 +447,14 @@ impl Take {
 
     /// One step of the live model at `t`: its new frames and its tail, as
     /// `preview-signals.json` gets them.
-    fn signals_step(&mut self, t: f64, tail: &[(&str, u32, f32)], frames: &[LookaheadFrame]) {
-        use voxtype::osd::live::{FrameLevel, Guess, SignalsStep, TailToken};
+    fn signals_step(
+        &mut self,
+        t: f64,
+        tail: &[(&str, u32, f32)],
+        frames: &[LookaheadFrame],
+        sounds: Option<&LookaheadSounds>,
+    ) {
+        use voxtype::osd::live::{FrameLevel, Guess, SignalsStep, SoundFrame, TailToken};
         let audio_s = (t - self.rec_start) as f32;
         let first = self.signals.frames_total as usize;
         let levels = frames
@@ -469,12 +491,40 @@ impl Take {
         for tk in &tail {
             with_tail.push_str(&tk.text);
         }
+        // The sounds go on from the last committed one.
+        let next = self
+            .signals
+            .sounds
+            .last()
+            .map_or(0, |f| (f.t / FRAME_SECS).round() as usize + 1);
+        let sound_frames = |first: usize, phones: &[(&str, f32)]| -> Vec<SoundFrame> {
+            phones
+                .iter()
+                .enumerate()
+                .map(|(i, &(text, p))| SoundFrame {
+                    t: (first + i) as f32 * FRAME_SECS,
+                    top: vec![Guess {
+                        text: text.into(),
+                        logp: p.ln(),
+                    }],
+                })
+                .collect()
+        };
+        let (sounds, sound_tail) = match sounds {
+            Some((firm, ahead)) => (
+                sound_frames(next, firm),
+                sound_frames(next + firm.len(), ahead),
+            ),
+            None => Default::default(),
+        };
         self.signals.apply(SignalsStep {
             step: self.signals.step + 1,
             audio_s,
             frames: levels,
             tail,
             with_tail: with_tail.trim().to_string(),
+            sounds,
+            sound_tail,
         });
         self.inputs.push((
             t,
@@ -827,7 +877,7 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
                     k.say_tokens(t, *committed);
                     said = *committed;
                 }
-                k.signals_step(t, tail, frames);
+                k.signals_step(t, tail, frames, LOOKAHEAD_SOUNDS.get(i));
             }
             let text = k.files.preview.clone();
             let shown = k.finish(t, 0.6, &text);

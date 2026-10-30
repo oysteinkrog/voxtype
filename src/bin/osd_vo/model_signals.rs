@@ -55,6 +55,16 @@
 //!   that keeps changing its mind shows it. Under reduced motion the old
 //!   word holds still for the 300 ms.
 //!
+//! - `sound-strip`: the speech sounds the model has heard but not yet
+//!   written as words, running ahead of the text: small phone labels
+//!   (ARPAbet, lowercase) after the last word, one per run of 80 ms frames
+//!   that the phone probe on encoder layer 8 hears as the same phone
+//!   (ASR-10). Committed frames' sounds are firmer than the lookahead
+//!   frames', which the next step hears again; silence shows nothing. As
+//!   words commit, their sounds leave the strip. The worker sends the
+//!   sounds only when `sound-strip` is in `[osd] motion` (it then runs the
+//!   encoder with layer 8 as an extra output).
+//!
 //! Nothing shows once the recording stops, so the signals end with the
 //! dictation and nothing moves at room tone. Under reduced motion the ghosts
 //! swap at once (no fades) and the floor jumps between steps: the ink tiers
@@ -78,9 +88,11 @@ pub(crate) const PRE_ECHO_LETTERS: &str = "pre-echo-letters";
 pub(crate) const TWIN_SPELLING: &str = "twin-spelling";
 pub(crate) const BIRTH_BURST: &str = "birth-burst";
 pub(crate) const MIND_CHANGE: &str = "mind-change";
+pub(crate) const SOUND_STRIP: &str = "sound-strip";
 
 /// Every model signal feature.
-const ALL: [&str; 10] = [
+const ALL: [&str; 11] = [
+    SOUND_STRIP,
     MIND_CHANGE,
     BIRTH_BURST,
     TWIN_SPELLING,
@@ -153,6 +165,63 @@ const FLICKER_SECS: f64 = 3.0;
 const FLICKER_INK: f32 = 0.2;
 const FLICKER_MAX: f32 = 0.7;
 const EDGE_BAR_PX: f32 = 2.0;
+/// Sound strip: the labels' size against the text, and the ink of a firm
+/// and of a lookahead sound at probability 1.
+const SOUND_SCALE: f32 = 0.55;
+const SOUND_INK: f32 = 0.6;
+const SOUND_TAIL_INK: f32 = 0.35;
+/// Seconds per encoder frame.
+const SOUND_FRAME_SECS: f32 = 0.08;
+
+/// One run of frames the probe hears as the same sound.
+#[derive(Debug, PartialEq)]
+struct SoundRun {
+    /// The first frame, counted from the start of the recording.
+    frame: u32,
+    frames: u32,
+    /// The phone, lowercase ARPAbet.
+    label: String,
+    /// Its mean probability over the run.
+    p: f32,
+    /// From the lookahead frames.
+    tail: bool,
+}
+
+/// The runs of the committed sounds, then of the lookahead sounds after
+/// them, oldest first. Silence and frames with no sound leave gaps.
+fn sound_runs(s: &ModelSignals) -> Vec<SoundRun> {
+    let last = s.sounds.last().map_or(f32::NEG_INFINITY, |f| f.t);
+    let frames = s.sounds.iter().map(|f| (f, false)).chain(
+        s.sound_tail
+            .iter()
+            .filter(|f| f.t > last + 0.01)
+            .map(|f| (f, true)),
+    );
+    let mut runs: Vec<SoundRun> = Vec::new();
+    for (f, tail) in frames {
+        let frame = (f.t / SOUND_FRAME_SECS).round() as u32;
+        let Some(top) = f.top.first() else { continue };
+        if top.text == "sil" {
+            continue;
+        }
+        let label = top.text.to_ascii_lowercase();
+        let p = top.logp.exp();
+        match runs.last_mut() {
+            Some(r) if r.label == label && r.tail == tail && r.frame + r.frames == frame => {
+                r.p = (r.p * r.frames as f32 + p) / (r.frames + 1) as f32;
+                r.frames += 1;
+            }
+            _ => runs.push(SoundRun {
+                frame,
+                frames: 1,
+                label,
+                p,
+                tail,
+            }),
+        }
+    }
+    runs
+}
 
 /// The runner-up's text style, for text in `style`.
 fn twin_style(style: &TextStyle) -> TextStyle {
@@ -413,6 +482,9 @@ impl Popup {
             for e in self.floor(s, width, origin) {
                 text = text.child(e);
             }
+            for e in self.sound_strip(s, laid.as_ref(), width, origin, ink) {
+                text = text.child(e);
+            }
             for e in self.commit_cursor(laid.as_ref(), origin) {
                 text = text.child(e);
             }
@@ -432,7 +504,7 @@ impl Popup {
     fn tail_layout(&self, s: &ModelSignals, words: &[Word], text: &TailText) -> Option<TailLayout> {
         // On room tone the tail is empty: with only the ghost tail on there
         // is nothing to lay out.
-        let ends = [COMMIT_CURSOR, BREATHING_STOP, PRE_ECHO_LETTERS];
+        let ends = [COMMIT_CURSOR, BREATHING_STOP, PRE_ECHO_LETTERS, SOUND_STRIP];
         let forming = self.forming_on() && self.hearing.voice.active();
         if s.tail.is_empty() && !forming && !ends.iter().any(|f| self.look.on(f)) {
             return None;
@@ -1069,11 +1141,128 @@ impl Popup {
             })
             .collect()
     }
+
+    /// `sound-strip`: the speech sounds the model has heard since the last
+    /// word it wrote, after the text (after the ghost tail when it shows):
+    /// one small phone label per run of frames, firm ones at
+    /// [`SOUND_INK`] and lookahead ones at [`SOUND_TAIL_INK`], each times
+    /// how sure the probe is. As many as fit on the line, oldest first.
+    fn sound_strip(
+        &self,
+        s: &ModelSignals,
+        laid: Option<&TailLayout>,
+        width: f32,
+        origin: (f32, f32),
+        ink: Color,
+    ) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        let Some(laid) = laid.filter(|_| l.on(SOUND_STRIP)) else {
+            return Vec::new();
+        };
+        // The frames after the newest written word's last token.
+        let written = self
+            .files
+            .live
+            .as_ref()
+            .and_then(|d| d.words.last())
+            .and_then(|w| w.end)
+            .unwrap_or(0.0);
+        let from = (written / SOUND_FRAME_SECS).round() as u32;
+        let ghosts = (l.on(GHOST_TAIL) || l.on(THREE_TIER)) && !s.tail.is_empty();
+        let (mut x, top) = if ghosts {
+            laid.tail_end
+        } else {
+            laid.committed_end
+        };
+        let style = laid.style;
+        let mut small = style;
+        small.size *= SOUND_SCALE;
+        small.line_height *= SOUND_SCALE;
+        let gap = self.measure.layout("a a", &small, None).size.w
+            - self.measure.layout("aa", &small, None).size.w;
+        if x > 0.0 {
+            x += self.measure.layout("a a", &style, None).size.w
+                - self.measure.layout("aa", &style, None).size.w;
+        }
+        // On the text's baseline: the small line's box sits as far below
+        // the line top as its baseline is higher.
+        let y = top + (laid.line_h - small.line_height) * 0.8;
+        let presence = if self.signals_reduced() {
+            (Transition::NONE, Transition::NONE)
+        } else {
+            (Transition::fade(), Transition::fade())
+        };
+        let mut out = Vec::new();
+        for r in sound_runs(s).iter().filter(|r| r.frame + r.frames > from) {
+            let w = self.measure.layout(&r.label, &small, None).size.w;
+            if x + w > width {
+                break;
+            }
+            let base = if r.tail { SOUND_TAIL_INK } else { SOUND_INK };
+            let e = Element::label(format!("sound-{}", r.frame), r.label.clone())
+                .text_style(small)
+                .color(ink)
+                .opacity(base * (0.35 + 0.65 * r.p))
+                .presence(presence.0, presence.1);
+            out.push(kit::at(e, origin.0 + x, origin.1 + y));
+            x += w + gap;
+        }
+        out
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sound(t: f32, phone: &str, p: f32) -> voxtype::osd::live::SoundFrame {
+        voxtype::osd::live::SoundFrame {
+            t,
+            top: vec![voxtype::osd::live::Guess {
+                text: phone.into(),
+                logp: p.ln(),
+            }],
+        }
+    }
+
+    #[test]
+    fn sounds_group_into_runs_with_gaps_for_silence() {
+        let s = ModelSignals {
+            sounds: vec![
+                sound(0.0, "sil", 0.9),
+                sound(0.08, "DH", 0.8),
+                sound(0.16, "IH", 0.6),
+                sound(0.24, "IH", 0.8),
+                sound(0.32, "sil", 0.9),
+                sound(0.40, "S", 0.5),
+            ],
+            // The lookahead starts after the committed frames; one that
+            // overlaps them is left out.
+            sound_tail: vec![
+                sound(0.40, "Z", 0.9),
+                sound(0.48, "S", 0.9),
+                sound(0.56, "S", 0.7),
+            ],
+            ..ModelSignals::default()
+        };
+        let runs = sound_runs(&s);
+        let got: Vec<_> = runs
+            .iter()
+            .map(|r| (r.frame, r.frames, r.label.as_str(), r.tail))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (1, 1, "dh", false),
+                (2, 2, "ih", false),
+                (5, 1, "s", false),
+                (6, 2, "s", true)
+            ]
+        );
+        assert!((runs[1].p - 0.7).abs() < 1e-5);
+        assert!((runs[3].p - 0.8).abs() < 1e-5);
+        assert!(sound_runs(&ModelSignals::default()).is_empty());
+    }
 
     #[test]
     fn a_token_with_a_word_marker_starts_a_word() {

@@ -68,6 +68,12 @@
 //! A token that starts with a space starts a word. `with_tail` is the
 //! committed live text followed by the tail.
 //!
+//! With the sound strip on (`sound-strip` in `[osd] motion`), the file also
+//! has `sounds`, the newest committed frames' likeliest speech sounds
+//! (`{"t": 6.08, "top": [{"text": "AH", "logp": -0.2}, ...]}`, ARPAbet,
+//! `sil` for silence), and `sound_tail`, the same for the lookahead frames.
+//! Without it both are left out, and the file is as before.
+//!
 //! Both files are written to a temporary name and renamed, so a reader never
 //! sees half of one. They are removed when the dictation ends.
 
@@ -184,6 +190,17 @@ pub struct Guess {
     pub logp: f32,
 }
 
+/// The speech sounds the sound strip's probe hears in one encoder frame
+/// (80 ms).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SoundFrame {
+    /// Start of the frame, seconds into the recording.
+    pub t: f32,
+    /// The likeliest phones (ARPAbet, `sil` for silence), likeliest first,
+    /// with their natural log probability.
+    pub top: Vec<Guess>,
+}
+
 /// A tentative token decoded from the newest audio. Never typed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TailToken {
@@ -207,6 +224,14 @@ pub struct SignalsStep {
     pub frames: Vec<FrameLevel>,
     pub tail: Vec<TailToken>,
     pub with_tail: String,
+    /// With the sound strip on: the sounds of the frames this step
+    /// committed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<SoundFrame>,
+    /// With the sound strip on: the sounds of the lookahead frames after
+    /// them, heard again by the next step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sound_tail: Vec<SoundFrame>,
 }
 
 /// `preview-signals.json`.
@@ -219,6 +244,14 @@ pub struct ModelSignals {
     pub frames: Vec<FrameLevel>,
     pub tail: Vec<TailToken>,
     pub with_tail: String,
+    /// With the sound strip on: the newest [`SIGNALS_KEEP_FRAMES`] committed
+    /// frames' sounds, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<SoundFrame>,
+    /// With the sound strip on: the lookahead frames' sounds of the last
+    /// step or tail tick.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sound_tail: Vec<SoundFrame>,
 }
 
 impl ModelSignals {
@@ -234,6 +267,10 @@ impl ModelSignals {
         self.frames.drain(..excess);
         self.tail = step.tail;
         self.with_tail = step.with_tail;
+        self.sounds.extend(step.sounds);
+        let excess = self.sounds.len().saturating_sub(SIGNALS_KEEP_FRAMES);
+        self.sounds.drain(..excess);
+        self.sound_tail = step.sound_tail;
     }
 }
 
@@ -387,6 +424,8 @@ static LIVE: Mutex<Live> = Mutex::new(Live {
         frames: Vec::new(),
         tail: Vec::new(),
         with_tail: String::new(),
+        sounds: Vec::new(),
+        sound_tail: Vec::new(),
     },
 });
 
@@ -420,8 +459,7 @@ pub fn timed_words(words: Vec<TimedWord>) {
 /// The live worker's word list for the preview text that follows: timing,
 /// and each word's detail when the worker gives it.
 pub fn word_lines(lines: Vec<WordLine>) {
-    let (words, details): (Vec<_>, Vec<_>) =
-        lines.into_iter().map(|l| (l.word, l.detail)).unzip();
+    let (words, details): (Vec<_>, Vec<_>) = lines.into_iter().map(|l| (l.word, l.detail)).unzip();
     let mut live = LIVE.lock().unwrap_or_else(|e| e.into_inner());
     live.timed = Some(words);
     live.details = details.iter().any(Option::is_some).then_some(details);
@@ -471,9 +509,11 @@ fn render(live: &mut Live, fresh: bool) {
         live.doc.correction = correction::view();
         return;
     };
-    let matching = timed
-        .as_ref()
-        .filter(|t| t.iter().map(|w| w.text.as_str()).eq(text.split_whitespace()));
+    let matching = timed.as_ref().filter(|t| {
+        t.iter()
+            .map(|w| w.text.as_str())
+            .eq(text.split_whitespace())
+    });
     if let Some(words) = matching {
         let n = words.len();
         let details = details.clone().filter(|d| d.len() == n);
@@ -736,6 +776,7 @@ mod tests {
             frames: (0..50).map(|i| frame(i as f32 * 0.08)).collect(),
             tail: vec![tail(" on")],
             with_tail: "test on".into(),
+            ..SignalsStep::default()
         });
         s.apply(SignalsStep {
             step: 2,
@@ -743,6 +784,7 @@ mod tests {
             frames: (50..57).map(|i| frame(i as f32 * 0.08)).collect(),
             tail: vec![tail(" of")],
             with_tail: "test of".into(),
+            ..SignalsStep::default()
         });
         assert_eq!(s.version, SIGNALS_VERSION);
         assert_eq!(s.frames_total, 57);
@@ -756,8 +798,42 @@ mod tests {
         assert_eq!(s.frames_total, 80);
         assert!((s.frames[0].t - 0.8).abs() < 1e-6);
         assert!(s.tail.is_empty());
-        let back: ModelSignals =
-            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        let back: ModelSignals = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+        // Without the sound strip the file has no sound keys at all.
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("sound"));
+    }
+
+    #[test]
+    fn sounds_keep_the_newest_frames_and_replace_their_tail() {
+        let sound = |t: f32, p: &str| SoundFrame {
+            t,
+            top: vec![Guess {
+                text: p.into(),
+                logp: -0.1,
+            }],
+        };
+        let mut s = ModelSignals::default();
+        s.apply(SignalsStep {
+            step: 1,
+            sounds: (0..60).map(|i| sound(i as f32 * 0.08, "AH")).collect(),
+            sound_tail: vec![sound(4.8, "S")],
+            ..SignalsStep::default()
+        });
+        s.apply(SignalsStep {
+            step: 2,
+            sounds: (60..77).map(|i| sound(i as f32 * 0.08, "T")).collect(),
+            sound_tail: vec![sound(6.16, "IY")],
+            ..SignalsStep::default()
+        });
+        assert_eq!(s.sounds.len(), SIGNALS_KEEP_FRAMES);
+        assert!((s.sounds[0].t - 0.56).abs() < 1e-6);
+        assert_eq!(s.sound_tail, [sound(6.16, "IY")]);
+        // A step without sounds (a tail tick with none) clears the tail.
+        s.apply(SignalsStep::default());
+        assert!(s.sound_tail.is_empty());
+        let back: ModelSignals = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back, s);
     }
 
