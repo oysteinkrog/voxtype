@@ -318,6 +318,9 @@ fn check_edit_requested() -> bool {
 struct EditLink {
     publish: Box<dyn Fn(Option<crate::osd::edit_ipc::EditBlock>) + Send + Sync>,
     shown: Box<dyn Fn() -> String + Send + Sync>,
+    /// Stop spoken corrections from replacing words spoken before this
+    /// many seconds of audio.
+    freeze: Box<dyn Fn(f32) + Send + Sync>,
     buffer: PathBuf,
     cmds: PathBuf,
     /// Where a finish says how the recording was stopped (`hotkey-last`).
@@ -330,11 +333,28 @@ impl Default for EditLink {
         Self {
             publish: Box::new(crate::osd::live::set_edit),
             shown: Box::new(crate::osd::live::shown_text),
+            freeze: Box::new(|t| {
+                crate::osd::correction::freeze(t);
+                if crate::osd::correction::active() {
+                    refresh_live_correction();
+                }
+            }),
             buffer: crate::osd::edit_ipc::buffer_path(),
             cmds: crate::osd::edit_ipc::cmd_path(),
             hotkey_last: Config::runtime_dir().join("hotkey-last"),
             reader: Default::default(),
         }
+    }
+}
+
+/// Seconds of audio at `at`: from the recording's start, or, given the
+/// samples sent by `now`, counted back from them.
+fn audio_secs_at(clock: Option<usize>, started_at: Instant, at: Instant, now: Instant) -> f32 {
+    match clock {
+        Some(sent) => {
+            (sent as f32 / 16000.0 - now.saturating_duration_since(at).as_secs_f32()).max(0.0)
+        }
+        None => at.saturating_duration_since(started_at).as_secs_f32(),
     }
 }
 
@@ -2028,6 +2048,19 @@ impl Daemon {
         (window.chunk_steps + window.right_steps) as usize * 1280
     }
 
+    /// Seconds of audio at `at`, as the live model times its words. After a
+    /// keyboard edit pause the paused time is not in the audio and the
+    /// silence pads are, so it is read from the gate's clock.
+    fn correction_secs(&self, started_at: Instant, at: Instant) -> f32 {
+        let mut clock = None;
+        self.with_gate(|g| {
+            if !g.pads().is_empty() {
+                clock = Some(g.clock());
+            }
+        });
+        audio_secs_at(clock, started_at, at, Instant::now())
+    }
+
     fn with_gate(&self, f: impl FnOnce(&mut audio::levels::AudioGate)) {
         if let Some(Ok(mut gate)) = self.audio_gate.as_ref().map(|g| g.lock()) {
             f(&mut gate);
@@ -2037,6 +2070,11 @@ impl Daemon {
     /// Freeze the shown text past the boundary, processed and normalised
     /// as delivery would.
     fn edit_freeze(&mut self) {
+        let mut clock = 0;
+        self.with_gate(|g| clock = g.clock());
+        // Spoken corrections first: one that ended just before the tap is
+        // placed now and frozen with the rest.
+        (self.edit_link.freeze)(clock as f32 / 16000.0);
         let shown = (self.edit_link.shown)();
         let tp = &self.text_processor;
         let doc = self
@@ -5086,15 +5124,17 @@ impl Daemon {
                         // Word times are seconds since the session started.
                         (HotkeyEvent::CorrectionStart { pressed_at }, _) => {
                             if let State::Streaming { started_at, .. } = &state {
-                                let t0 = pressed_at.saturating_duration_since(*started_at);
-                                tracing::debug!("Correction hold from {:.2} s", t0.as_secs_f32());
-                                crate::osd::correction::start(t0.as_secs_f32());
+                                let t0 = self.correction_secs(*started_at, pressed_at);
+                                tracing::debug!("Correction hold from {:.2} s", t0);
+                                crate::osd::correction::start(t0);
                                 refresh_live_correction();
                             }
                         }
                         (HotkeyEvent::CorrectionEnd, _) => {
                             if let State::Streaming { started_at, .. } = &state {
-                                crate::osd::correction::end(started_at.elapsed().as_secs_f32());
+                                crate::osd::correction::end(
+                                    self.correction_secs(*started_at, Instant::now()),
+                                );
                                 refresh_live_correction();
                             }
                         }
@@ -6312,6 +6352,8 @@ mod tests {
         dir: TempDir,
         shown: Arc<std::sync::Mutex<String>>,
         published: Arc<std::sync::Mutex<Vec<Option<crate::osd::edit_ipc::EditBlock>>>>,
+        /// The audio times the spoken corrections were frozen at.
+        frozen_at: Arc<std::sync::Mutex<Vec<f32>>>,
     }
 
     impl TestLink {
@@ -6328,10 +6370,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let shown = Arc::new(std::sync::Mutex::new(String::new()));
         let published = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (s, p) = (shown.clone(), published.clone());
+        let frozen_at = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (s, p, f) = (shown.clone(), published.clone(), frozen_at.clone());
         daemon.edit_link = EditLink {
             publish: Box::new(move |b| p.lock().unwrap().push(b)),
             shown: Box::new(move || s.lock().unwrap().clone()),
+            freeze: Box::new(move |t| f.lock().unwrap().push(t)),
             buffer: dir.path().join("edit-buffer.json"),
             cmds: dir.path().join("edit-cmd"),
             hotkey_last: dir.path().join("hotkey-last"),
@@ -6341,6 +6385,7 @@ mod tests {
             dir,
             shown,
             published,
+            frozen_at,
         }
     }
 
@@ -6484,9 +6529,25 @@ mod tests {
         assert_eq!(worker_got(&mut rx), [1.0, 2.0]);
     }
 
+    #[test]
+    fn correction_times_follow_the_audio_after_a_pause() {
+        let start = Instant::now();
+        let at = start + Duration::from_secs(10);
+        let now = at + Duration::from_millis(500);
+        // No pause: wall time since the start, as before.
+        assert_eq!(audio_secs_at(None, start, at, now), 10.0);
+        // After a pause: 6 s of audio sent by now, so 5.5 s at `at`.
+        assert_eq!(audio_secs_at(Some(96_000), start, at, now), 5.5);
+        assert_eq!(audio_secs_at(Some(1_600), start, at, now), 0.0);
+    }
+
     #[tokio::test]
     async fn edit_link_publishes_phases_and_the_frozen_text() {
         let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        // A tenth of a second of audio before the tap.
+        for _ in 0..10 {
+            mic(&daemon, 0.5);
+        }
         link.show("so the \u{201C}quote\u{201D}");
         daemon.edit_tap_pending(&mut state).await;
         let block = link.last().unwrap();
@@ -6508,6 +6569,12 @@ mod tests {
         assert_eq!(block.phase, "editing");
         assert_eq!(block.frozen, "so the \"quote\" ends");
         assert_eq!(block.tail, "");
+        // Spoken corrections were frozen at each freeze, at or after the
+        // audio before the tap and at the same point both times.
+        let frozen_at = link.frozen_at.lock().unwrap().clone();
+        assert_eq!(frozen_at.len(), 2);
+        assert!(frozen_at[0] >= 0.1, "{frozen_at:?}");
+        assert_eq!(frozen_at[0], frozen_at[1]);
         // The published blocks are only written when they change.
         let n = link.published.lock().unwrap().len();
         daemon.edit_tick(&mut state, Instant::now(), None).await;
