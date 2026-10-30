@@ -994,11 +994,10 @@ pub(crate) mod edit_check {
     }
 
     /// R35: the edit moment (`moments::edit_scenario`) keeps the reading-line
-    /// envelope, read on the caret line, with the caret on the newest line,
-    /// one line up and on the top line (four Ups), at both widths. Checked
-    /// from the moment the popup takes the keyboard until the edit ends: the
-    /// dictation before it is the look's own `--envelope` run, and the
-    /// delivery after it is the look's ending.
+    /// envelope, read on the caret line, with the caret on the newest line
+    /// and 1, 2 and 4 lines up, at both widths. Checked from the moment the
+    /// popup takes the keyboard through the release and the delivery: the
+    /// dictation before it is the look's own `--envelope` run.
     pub(crate) fn envelope(theme: OsdTheme, name: &str) {
         let plasma = PlasmaTheme::default();
         let fonts = fonts();
@@ -1013,7 +1012,7 @@ pub(crate) mod edit_check {
             }
             let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
             look.set_motion(&cfg.motion);
-            for ups in [0, 1, 4] {
+            for ups in [0, 1, 2, 4] {
                 let s = moments::edit_scenario(&look, ups);
                 let popup = moments::popup_for(
                     moments::Moment::Edit,
@@ -1030,17 +1029,9 @@ pub(crate) mod edit_check {
                     .find(|(_, i)| matches!(i, vo::Input::KeyboardFocus { .. }))
                     .expect("the popup takes the keyboard")
                     .0;
-                // The daemon releases the text 0.25 s after the last key.
-                let last_key = s
-                    .inputs
-                    .iter()
-                    .filter(|(_, i)| matches!(i, vo::Input::Key(_)))
-                    .map(|(t, _)| *t)
-                    .fold(focus, f64::max);
                 let env = vo::envelope::Envelope {
                     transcript: 0..1 << 20,
                     from: focus,
-                    until: last_key + 0.2,
                     ..vo::envelope::Envelope::default()
                 };
                 let report = vo::envelope::check_scenario(popup, &s, 30.0, options, &env);
