@@ -301,6 +301,8 @@ pub(super) fn sleeping_threads(config: ExecutionConfig) -> ExecutionConfig {
 }
 
 /// The GPU execution provider compiled in and usable, if any.
+// Each cfg block returns; which one ends the body depends on the features.
+#[allow(clippy::needless_return)]
 fn gpu_execution_config() -> Option<ExecutionConfig> {
     #[cfg(feature = "parakeet-cuda")]
     {
@@ -373,12 +375,7 @@ fn probe_cuda_runtime() -> bool {
         return false;
     }
 
-    let sym = unsafe {
-        libc::dlsym(
-            handle,
-            b"cudaRuntimeGetVersion\0".as_ptr() as *const libc::c_char,
-        )
-    };
+    let sym = unsafe { libc::dlsym(handle, c"cudaRuntimeGetVersion".as_ptr()) };
 
     if sym.is_null() {
         tracing::warn!("Could not find cudaRuntimeGetVersion in CUDA runtime library");

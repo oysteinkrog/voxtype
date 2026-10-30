@@ -268,7 +268,7 @@ pub(super) fn preview_main() -> anyhow::Result<()> {
         move || vo::Options {
             fonts: fonts.clone(),
             default_motion: motion,
-            renderer_setup: Some(Arc::new(vo_3d::install)),
+            renderer_setup: Some(std::sync::Arc::new(vo_3d::install)),
             ..vo::Options::default()
         },
         scenario,
