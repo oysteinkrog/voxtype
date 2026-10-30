@@ -88,6 +88,8 @@ pub mod model_catalog;
 pub mod model_manager;
 pub mod notification;
 pub mod osd;
+#[cfg(target_os = "linux")]
+pub mod presence;
 pub mod output;
 pub mod setup;
 pub mod state;

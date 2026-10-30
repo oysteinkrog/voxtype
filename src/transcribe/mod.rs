@@ -142,6 +142,11 @@ pub trait Transcriber: Send + Sync {
         // Default: no-op
     }
 
+    /// Keep what the next recording needs loaded from now on, e.g. a warm
+    /// live worker (`live_preview_warm_idle_secs`). The daemon calls this
+    /// once for the transcriber it keeps; default: nothing.
+    fn keep_warm(&self) {}
+
     /// Streaming-capable view of this transcriber, if it supports streaming.
     ///
     /// Returns `None` by default. Streaming-capable backends override this to

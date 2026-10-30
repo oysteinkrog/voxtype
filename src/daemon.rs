@@ -2591,6 +2591,7 @@ impl Daemon {
                         match created {
                             Ok(Ok(t)) => {
                                 let t: Arc<dyn Transcriber> = Arc::from(t);
+                                t.keep_warm();
                                 self.transcriber_preloaded = Some(t.clone());
                                 Ok(t)
                             }
@@ -4114,9 +4115,11 @@ impl Daemon {
                 | crate::config::TranscriptionEngine::Soniox => {
                     // Non-Whisper engines do their own setup; Soniox just validates
                     // API key + endpoint at construction (no model to download).
-                    self.transcriber_preloaded = Some(Arc::from(
-                        crate::transcribe::create_transcriber(&self.config)?,
-                    ));
+                    let t: Arc<dyn Transcriber> =
+                        Arc::from(crate::transcribe::create_transcriber(&self.config)?);
+                    // A warm live worker loads now, not after the first recording.
+                    t.keep_warm();
+                    self.transcriber_preloaded = Some(t);
                 }
             }
             tracing::info!("Model loaded, ready for voice input");
