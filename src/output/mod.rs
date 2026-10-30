@@ -501,6 +501,19 @@ pub async fn output_via(
     text: &str,
     options: OutputOptions<'_>,
 ) -> Result<&'static str, OutputError> {
+    output_via_confirmed(chain, text, options, || Box::pin(async { true })).await
+}
+
+/// Like [`output_via`], and asks `confirm` right before the post-output
+/// hook. When it says no, the hook is skipped: after a keyboard edit, a hook
+/// that presses Enter must not run once the target window lost focus (plan
+/// R28). `confirm` is asked only when there is a post-output hook.
+pub async fn output_via_confirmed(
+    chain: &[Box<dyn TextOutput>],
+    text: &str,
+    options: OutputOptions<'_>,
+    confirm: impl FnOnce() -> futures_util::future::BoxFuture<'static, bool>,
+) -> Result<&'static str, OutputError> {
     // Normalize curly quotes to ASCII to prevent line break issues with keyboard tools
     let normalized_text = if options.normalize {
         normalize_quotes(text)
@@ -582,9 +595,12 @@ pub async fn output_via(
     }
 
     // Run post-output hook if configured (e.g., reset submap)
-    // Always run this, even on failure, to ensure cleanup
+    // Always run this, even on failure, to ensure cleanup, unless `confirm`
+    // says the target is gone.
     if let Some(cmd) = options.post_output_command {
-        if let Err(e) = run_hook(cmd, "post_output").await {
+        if !confirm().await {
+            tracing::warn!("Target window changed before the post-output hook; skipping it");
+        } else if let Err(e) = run_hook(cmd, "post_output").await {
             tracing::warn!("{}", e);
         }
     }

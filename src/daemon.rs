@@ -359,6 +359,17 @@ impl Default for EditLink {
     }
 }
 
+/// How a keyboard-edited dictation was delivered.
+struct EditDelivery {
+    /// The check before the paste: anything but confirmed gave the
+    /// clipboard only.
+    paste: crate::osd::target::Verdict,
+    /// The check right before the post-output hook, when there was one; the
+    /// hook was skipped unless confirmed.
+    before_hook: Option<crate::osd::target::Verdict>,
+    result: std::result::Result<(), crate::error::OutputError>,
+}
+
 /// Seconds of audio at `at`: from the recording's start, or, given the
 /// samples sent by `now`, counted back from them.
 fn audio_secs_at(clock: Option<usize>, started_at: Instant, at: Instant, now: Instant) -> f32 {
@@ -2358,17 +2369,15 @@ impl Daemon {
     /// when it was closed (R29), or when a key that finished the edit is
     /// still held, the text goes to `clipboard` only and neither
     /// output hook runs, so an Enter hook cannot press Enter in the wrong
-    /// window. Returns the verdict with the delivery's result.
+    /// window. After a paste the window is checked once more right before
+    /// the post-output hook, which is skipped when it lost focus (R28).
     async fn deliver_edited(
         &mut self,
         session: &mut StreamingSession,
         chain: &[Box<dyn TextOutput>],
         clipboard: &[Box<dyn TextOutput>],
         text: &str,
-    ) -> (
-        crate::osd::target::Verdict,
-        std::result::Result<(), crate::error::OutputError>,
-    ) {
+    ) -> EditDelivery {
         use crate::osd::target::{self, Verdict};
         let mut verdict = match self.edit_saved_window().await {
             Some(id) => {
@@ -2390,14 +2399,41 @@ impl Daemon {
         if verdict.confirmed() {
             let pre = self.config.output.pre_output_command.as_deref();
             let post = self.config.output.post_output_command.as_deref();
-            return (verdict, session.commit_exact(chain, text, pre, post).await);
+            let before_hook = Arc::new(std::sync::Mutex::new(None));
+            let (windows, seen) = (self.edit_link.windows.clone(), before_hook.clone());
+            let id = self.edit_window.as_ref().map(|w| w.id.clone());
+            let confirm = move || -> futures_util::future::BoxFuture<'static, bool> {
+                Box::pin(async move {
+                    let v = match id {
+                        Some(id) => tokio::task::spawn_blocking(move || {
+                            let mut w = windows.lock().unwrap_or_else(|e| e.into_inner());
+                            target::check(&mut **w, &id)
+                        })
+                        .await
+                        .unwrap_or(Verdict::Failed),
+                        None => Verdict::Failed,
+                    };
+                    *seen.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+                    v.confirmed()
+                })
+            };
+            let result = session
+                .commit_exact_confirmed(chain, text, pre, post, confirm)
+                .await;
+            let before_hook = *before_hook.lock().unwrap_or_else(|e| e.into_inner());
+            return EditDelivery {
+                paste: verdict,
+                before_hook,
+                result,
+            };
         }
         tracing::warn!("Copied, not pasted: {}", verdict.reason());
         session.skip_post_hook();
-        (
-            verdict,
-            session.commit_exact(clipboard, text, None, None).await,
-        )
+        EditDelivery {
+            paste: verdict,
+            before_hook: None,
+            result: session.commit_exact(clipboard, text, None, None).await,
+        }
     }
 
     /// Tell the popup and the desktop that an edited dictation is on the
@@ -5838,12 +5874,20 @@ impl Daemon {
                                                     self.config.output.append_text.clone(),
                                                 ))];
                                             let started = Instant::now();
-                                            let (verdict, committed) =
-                                                self.deliver_edited(s, chain, &clipboard, edited).await;
-                                            if !verdict.confirmed() && committed.is_ok() {
-                                                self.report_not_pasted(edited, verdict, started).await;
+                                            let d = self.deliver_edited(s, chain, &clipboard, edited).await;
+                                            if !d.paste.confirmed() && d.result.is_ok() {
+                                                self.report_not_pasted(edited, d.paste, started).await;
                                             }
-                                            committed
+                                            if let Some(v) = d.before_hook.filter(|v| !v.confirmed()) {
+                                                send_notification(
+                                                    "Pasted, Enter not sent",
+                                                    &format!("The output hook did not run: {}.", v.reason()),
+                                                    self.config.output.notification.show_engine_icon,
+                                                    self.config.engine,
+                                                    "normal",
+                                                ).await;
+                                            }
+                                            d.result
                                         }
                                         None => {
                                             if self.config.live_preview_active()
@@ -7093,6 +7137,7 @@ mod tests {
     /// clipboard got, which hooks ran, and which windows were activated.
     struct Delivered {
         verdict: crate::osd::target::Verdict,
+        before_hook: Option<crate::osd::target::Verdict>,
         pasted: Option<String>,
         copied: Option<String>,
         hooks: String,
@@ -7136,13 +7181,14 @@ mod tests {
             succeed: true,
         })];
         let mut session = StreamingSession::new();
-        let (verdict, result) = daemon
+        let d = daemon
             .deliver_edited(&mut session, &chain, &clipboard, "edited text")
             .await;
-        result.unwrap();
+        d.result.unwrap();
         end_streaming_hook(&daemon.config.output, Some(&session)).await;
         let delivered = Delivered {
-            verdict,
+            verdict: d.paste,
+            before_hook: d.before_hook,
             pasted: pasted.lock().unwrap().clone(),
             copied: copied.lock().unwrap().clone(),
             hooks: fs::read_to_string(&hooks).unwrap_or_default(),
@@ -7159,7 +7205,26 @@ mod tests {
         assert_eq!(d.pasted.as_deref(), Some("edited text"));
         assert_eq!(d.copied, None);
         assert_eq!(d.hooks, "pre\npost\n", "each hook once");
+        assert_eq!(d.before_hook, Some(Verdict::Confirmed));
         assert!(d.activated.is_empty());
+    }
+
+    #[tokio::test]
+    async fn focus_lost_after_the_paste_skips_the_post_output_hook() {
+        use crate::osd::target::Verdict;
+        // Confirmed for the hand-back and the paste; "b" (the same app)
+        // has focus by the time the hook would press Enter.
+        let d = deliver_edited_with(
+            &[("a", "term"), ("b", "term")],
+            &[Some("a"), Some("a"), Some("b")],
+            true,
+            true,
+        )
+        .await;
+        assert_eq!(d.verdict, Verdict::Confirmed);
+        assert_eq!(d.pasted.as_deref(), Some("edited text"));
+        assert_eq!(d.before_hook, Some(Verdict::Mismatch));
+        assert_eq!(d.hooks, "pre\n", "no post-output hook, also not at the end");
     }
 
     #[tokio::test]
@@ -7317,12 +7382,12 @@ mod tests {
             succeed: true,
         })];
         let mut session = StreamingSession::new();
-        let (verdict, result) = daemon
+        let d = daemon
             .deliver_edited(&mut session, &chain, &clipboard, "edited text")
             .await;
-        result.unwrap();
+        d.result.unwrap();
         end_streaming_hook(&daemon.config.output, Some(&session)).await;
-        assert_eq!(verdict, Verdict::Gone);
+        assert_eq!(d.paste, Verdict::Gone);
         assert_eq!(*pasted.lock().unwrap(), None, "no paste");
         assert_eq!(copied.lock().unwrap().as_deref(), Some("edited text"));
         assert!(!hooks.exists(), "no output hook ran, so no Enter");
