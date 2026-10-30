@@ -2303,12 +2303,17 @@ impl Daemon {
         let shown = (self.edit_link.shown)();
         let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
         let tp = &self.text_processor;
+        let pause = self.edit_pauses;
         let doc = self.edit_doc.as_mut()?;
         let popup_owned = matches!(
             phase,
             Some(Phase::Settling | Phase::Editing | Phase::Detached)
         );
-        if let Some(snapshot) = snapshot.filter(|b| popup_owned && b.session == doc.session()) {
+        // A buffer of an earlier pause lacks the words frozen since: the
+        // popup has not written this pause's yet, or it is not running.
+        if let Some(snapshot) =
+            snapshot.filter(|b| popup_owned && b.session == doc.session() && b.pause == pause)
+        {
             doc.replace_frozen(&snapshot.text);
         }
         doc.live(&shown);
@@ -7065,6 +7070,38 @@ mod tests {
         append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Detached).unwrap();
         daemon.edit_handle_commands(&mut state).await;
         assert_eq!(state.phase(), Some(Phase::Listening));
+    }
+
+    #[tokio::test]
+    async fn a_buffer_of_an_earlier_pause_does_not_replace_the_text() {
+        use crate::osd::edit_ipc::{write_buffer_to, EditBuffer};
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("first part");
+        daemon.edit_toggle(&mut state).await;
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        write_buffer_to(
+            &daemon.edit_link.buffer,
+            &EditBuffer {
+                session,
+                rev: 1,
+                text: "first fixed".into(),
+                sel: (0, 0),
+                pause: 1,
+            },
+        )
+        .unwrap();
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+        // More speech, then a second pause the popup has not written yet.
+        link.show("first part and more words");
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(state.phase(), Some(Phase::Settling));
+        let frozen = link.last().unwrap().frozen;
+        assert!(frozen.ends_with("and more words"), "{frozen}");
+        assert_eq!(daemon.edit_final_text(state.phase()), Some(frozen));
     }
 
     #[tokio::test]
