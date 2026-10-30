@@ -631,9 +631,9 @@ impl Popup {
         if !label.is_empty() {
             panel = panel.child(
                 at(
-                    Element::label(format!("status-{}", status.state), label)
-                        .text_style(ui)
-                        .color(colour),
+                    // Keyed once, not by state: a new key per state faded
+                    // the old word out under the new one ("Typed" over "Done").
+                    Element::label("status", label).text_style(ui).color(colour),
                     x + label_x,
                     y + STATUS_Y,
                 )
