@@ -51,6 +51,12 @@ pub trait Windows: Send {
     fn class_of(&mut self, id: &str) -> Result<Option<String>, ToolFailed>;
     /// Ask the compositor to activate window `id`.
     fn activate(&mut self, id: &str);
+    /// Whether window `id` is still open, for when [`Windows::class_of`]
+    /// failed: the tool may fail on a closed window's id.
+    fn exists(&mut self, id: &str) -> Result<bool, ToolFailed> {
+        let _ = id;
+        Err(ToolFailed)
+    }
 }
 
 /// [`Windows`] through `kdotool`.
@@ -72,6 +78,24 @@ impl Windows for Kdotool {
 
     fn activate(&mut self, id: &str) {
         let _ = run("kdotool", &["windowactivate", id]);
+    }
+
+    fn exists(&mut self, id: &str) -> Result<bool, ToolFailed> {
+        // An empty pattern matches every window.
+        let out = run("kdotool", &["search", ""]).ok_or(ToolFailed)?;
+        Ok(out.lines().any(|l| l.trim() == id))
+    }
+}
+
+/// The class of window `id`, `Ok(None)` when it is closed. When the class
+/// query fails, a window that is no longer listed counts as closed.
+fn class_or_closed(w: &mut dyn Windows, id: &str) -> Result<Option<String>, ToolFailed> {
+    match w.class_of(id) {
+        Err(ToolFailed) => match w.exists(id) {
+            Ok(false) => Ok(None),
+            _ => Err(ToolFailed),
+        },
+        known => known,
     }
 }
 
@@ -150,14 +174,14 @@ fn hand_back_with(
             return Verdict::Confirmed;
         }
         if elapsed() >= limit {
-            return match w.class_of(saved) {
+            return match class_or_closed(w, saved) {
                 Ok(None) => Verdict::Gone,
                 Ok(Some(_)) => Verdict::Timeout,
                 Err(ToolFailed) => Verdict::Failed,
             };
         }
         if !activated && (active.is_some() || elapsed() >= ACTIVATE_AFTER) {
-            match w.class_of(saved) {
+            match class_or_closed(w, saved) {
                 Ok(None) => return Verdict::Gone,
                 Err(ToolFailed) => return Verdict::Failed,
                 Ok(Some(_)) => {}
@@ -174,7 +198,7 @@ pub fn check(w: &mut dyn Windows, saved: &str) -> Verdict {
     if w.active().as_deref() == Some(saved) {
         return Verdict::Confirmed;
     }
-    match w.class_of(saved) {
+    match class_or_closed(w, saved) {
         Ok(None) => Verdict::Gone,
         Ok(Some(_)) => Verdict::Mismatch,
         Err(ToolFailed) => Verdict::Failed,
@@ -258,6 +282,8 @@ mod tests {
         windows: Vec<(&'static str, &'static str)>,
         active: Option<&'static str>,
         broken: bool,
+        /// As kdotool can: the class query fails for a closed window.
+        class_fails_when_closed: bool,
         focus_on_activate: bool,
         activated: Vec<String>,
     }
@@ -268,6 +294,7 @@ mod tests {
                 windows: windows.to_vec(),
                 active,
                 broken: false,
+                class_fails_when_closed: false,
                 focus_on_activate: true,
                 activated: Vec::new(),
             }
@@ -282,11 +309,21 @@ mod tests {
             if self.broken {
                 return Err(ToolFailed);
             }
-            Ok(self
+            let class = self
                 .windows
                 .iter()
                 .find(|(w, _)| *w == id)
-                .map(|(_, c)| c.to_string()))
+                .map(|(_, c)| c.to_string());
+            if class.is_none() && self.class_fails_when_closed {
+                return Err(ToolFailed);
+            }
+            Ok(class)
+        }
+        fn exists(&mut self, id: &str) -> Result<bool, ToolFailed> {
+            if self.broken {
+                return Err(ToolFailed);
+            }
+            Ok(self.windows.iter().any(|(w, _)| *w == id))
         }
         fn activate(&mut self, id: &str) {
             self.activated.push(id.to_string());
@@ -302,6 +339,20 @@ mod tests {
         hand_back_with(w, saved, HAND_BACK, &mut || now.get(), &mut |d| {
             now.set(now.get() + d)
         })
+    }
+
+    #[test]
+    fn a_closed_window_is_gone_when_its_class_query_fails() {
+        let mut w = Fake::new(&[("b", "term")], Some("b"));
+        w.class_fails_when_closed = true;
+        assert_eq!(check(&mut w, "a"), Verdict::Gone);
+        assert_eq!(hand_back_fake(&mut w, "a"), Verdict::Gone);
+        assert!(w.activated.is_empty());
+        // An open window whose class cannot be read stays unchecked.
+        let mut w = Fake::new(&[("b", "term")], Some("b"));
+        w.broken = true;
+        assert_eq!(check(&mut w, "a"), Verdict::Failed);
+        assert_eq!(hand_back_fake(&mut w, "a"), Verdict::Failed);
     }
 
     #[test]

@@ -590,7 +590,7 @@ check("with the window closed, nothing is typed into another window", not keys_a
       f"keys={keys_after(t_gone, olog)}")
 check("with the window closed, the text is on the clipboard", (clipboard() or "").strip() == shown3.strip(),
       f"clipboard={clipboard()!r}")
-check("with the window closed, the popup says it was not pasted", (read("not-pasted") or "").strip() != "",
+check("with the window closed, the popup says it was closed", (read("not-pasted") or "").strip() == "the window was closed",
       f"not-pasted={read('not-pasted')!r}")
 new_hooks = lines(os.path.join(work, "hook.log"))[hooks_before:]
 check("with the window closed, the hook sends no Enter", not hook_enters(new_hooks), f"hook={new_hooks}")
