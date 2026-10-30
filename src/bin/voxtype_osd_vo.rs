@@ -315,7 +315,8 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     offline: Option<PathBuf>,
 
-    /// Frames per second for `--offline`.
+    /// Frames per second for `--offline`, `--envelope` and `--exit-check`.
+    /// `--envelope` needs at least 15.
     #[arg(long, default_value = "30")]
     fps: f64,
 

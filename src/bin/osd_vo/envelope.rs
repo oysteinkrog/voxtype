@@ -58,16 +58,21 @@ pub(crate) fn run(
         renderer_setup: Some(std::sync::Arc::new(vo_3d::install)),
         ..Options::default()
     };
-    let report = check_scenario(
-        popup(),
-        &scenario,
-        fps,
-        options(),
-        &Envelope {
-            transcript: 0..TRANSCRIPT_IDS,
-            ..Envelope::default()
-        },
-    );
+    let envelope = Envelope {
+        transcript: 0..TRANSCRIPT_IDS,
+        ..Envelope::default()
+    };
+    // Slower, a word that holds still for less than two frames before it
+    // moves on never shows its rest there, and reads as a breach it is not
+    // (y50p: jarvis at 10 fps).
+    let slowest = envelope.slowest_fps();
+    if fps < slowest {
+        anyhow::bail!(
+            "--envelope needs --fps {slowest} or more: at {fps} fps a word that \
+             holds still for less than two frames is not seen at rest"
+        );
+    }
+    let report = check_scenario(popup(), &scenario, fps, options(), &envelope);
     println!("envelope:\n{report}");
     // Development: every breach, one line each, to find where a look goes wrong.
     if std::env::var_os("VO_ENVELOPE_DETAIL").is_some() {
