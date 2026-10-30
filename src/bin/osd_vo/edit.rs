@@ -263,8 +263,6 @@ impl crate::Popup {
     /// place each by. While editing: the edit window's lines, as the layer
     /// broke them, and their sticky centring widths. Otherwise the look's
     /// own stable lines.
-    // Unused until the first per-line look's edit bead lands.
-    #[allow(dead_code)]
     pub(crate) fn text_lines(&self, style: &TextStyle, wrap: f32) -> Vec<(Vec<Word>, f32)> {
         match &self.edit_view {
             Some(v) => window_lines(v, &self.shown)
@@ -274,6 +272,17 @@ impl crate::Popup {
                 .collect(),
             None => self.stable_lines(style, wrap),
         }
+    }
+
+    /// From a tap until the edit is resumed, cancelled or handed back and
+    /// over: the edit link is in a phase other than listening. A look keeps
+    /// its live dressing (a lit or hot newest word, particles, whole-line
+    /// fades) off meanwhile, so the edited text holds still.
+    pub(crate) fn edit_tapped(&self) -> bool {
+        self.edit
+            .as_ref()
+            .and_then(|l| l.phase())
+            .is_some_and(|p| p != crate::edit_link::Phase::Listening)
     }
 }
 

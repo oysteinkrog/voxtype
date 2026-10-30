@@ -15,6 +15,10 @@
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
 //!
+//! While editing ([`ScopeSite`]), each window line keeps one node at its
+//! row, the block caret is the edit caret, and the lattice's live strand
+//! runs to the caret on the caret line.
+//!
 //! While the popup is open it stays a little alive (m18, MOTION-PLAN rule 8):
 //! the trace keeps a floor of at most 1 px from the real room level, the
 //! graticule's glow breathes from 6 % to 9 % over 4 s, and the trigger
@@ -197,14 +201,13 @@ struct Fonts {
 }
 
 fn fonts(reg: &FontRegistry) -> Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    *FONTS.get_or_init(|| {
-        let add = |pattern: &str, or: u32| reg.add_system(pattern).unwrap_or(or);
-        Fonts {
-            mono: add("JetBrains Mono:medium", MONO),
-            bold: add("JetBrains Mono:semibold", MONO),
-        }
-    })
+    // Added to the registry once (`FontRegistry::system`), so every
+    // registry, such as a test's, has its own ids.
+    let add = |pattern: &str, or: u32| reg.system(pattern).unwrap_or(or);
+    Fonts {
+        mono: add("JetBrains Mono:medium", MONO),
+        bold: add("JetBrains Mono:semibold", MONO),
+    }
 }
 
 /// MO-50 with the lattice: a cancel takes the words back into the caret, so
@@ -857,6 +860,23 @@ impl Popup {
         [glow.ambient(LoopProp::Opacity, breathe), marker.ambient(LoopProp::Opacity, blink)]
     }
 
+    /// Where the edit caret stands in its line, from the line's left edge.
+    fn scope_edit_caret_x(&self, v: &edit::EditView, style: &TextStyle) -> f32 {
+        let line = v
+            .line_bytes
+            .get(v.caret_line as usize)
+            .cloned()
+            .unwrap_or(0..0);
+        let caret = v
+            .decor
+            .caret
+            .unwrap_or(line.end)
+            .clamp(line.start, line.end);
+        let before = &v.text[line.start..caret];
+        let style = edit::edit_style(*style);
+        self.measure.layout(before, &style, None).size.w + 1.5
+    }
+
     pub(crate) fn scope_surface(_look: &Look) -> Size {
         Size::new((W + 2.0 * MARGIN).ceil(), (H + 2.0 * MARGIN).ceil())
     }
@@ -877,10 +897,19 @@ impl Popup {
         let f = fonts(&l.fonts);
         let o = MARGIN;
         let style = l.text_style();
-        let all = self.stable_lines(&style, WRAP);
+        let all = self.text_lines(&style, WRAP);
         let lines = &all[all.len().saturating_sub(MAX_LINES as usize)..];
+        let editing = self.edit_view.as_ref();
+        // A line is keyed by its first word, while editing too, so a line
+        // keeps its node as the edit starts and ends and as the window
+        // scrolls. An edited window line with no words is keyed by its slot.
+        let line_key = |i: usize, words: &[Word]| {
+            words
+                .first()
+                .map_or_else(|| format!("slot-{i}"), |w| w.id.to_string())
+        };
 
-        let caret = (mode == Mode::Listening).then(|| {
+        let caret = (mode == Mode::Listening && !self.edit_tapped()).then(|| {
             let (row, w) = lines
                 .last()
                 .map_or((0usize, 0.0), |(_, w)| (lines.len() - 1, *w));
@@ -992,7 +1021,19 @@ impl Popup {
         if l.on(wild_space::KINETIC_LATTICE) {
             // The kinetic lattice under each line, the times on the newest.
             for (i, (words, _)) in lines.iter().enumerate() {
+                if words.is_empty() {
+                    continue;
+                }
                 let newest = i + 1 == lines.len();
+                // While editing, the live strand runs to the edit caret.
+                let strand = match editing {
+                    Some(v) => {
+                        (i == v.caret_line as usize).then(|| self.scope_edit_caret_x(v, &style))
+                    }
+                    None => caret
+                        .filter(|_| newest)
+                        .map(|(c, _)| c.x - TEXT_X + MARGIN + 1.5),
+                };
                 let text = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
                 let baseline = self
                     .measure
@@ -1002,32 +1043,46 @@ impl Popup {
                     .map_or(style.size, |l| l.baseline);
                 let look = lattice_look(&style, baseline, newest, mono(LATTICE_LABEL_PX));
                 let h = if newest { LINE + LATTICE_GUTTER } else { LINE };
-                panel = panel.child(lattice_rewind(at(
-                    self.lattice_line(
-                        format!("lattice-{}", words[0].id),
-                        words,
-                        &style,
-                        Size::new(WRAP + 40.0, h),
-                        &look,
-                        // LT-04: the live strand ends at the caret's foot, which
-                        // the scene draws a margin further in than `caret`.
-                        caret.filter(|_| newest).map(|(c, _)| c.x - TEXT_X + MARGIN + 1.5),
-                        // LT-09: only older lines drift, inside their own line.
-                        (!newest).then_some(LINE),
+                panel = panel.child(lattice_rewind(
+                    at(
+                        self.lattice_line(
+                            format!("lattice-{}", line_key(i, words)),
+                            words,
+                            &style,
+                            Size::new(WRAP + 40.0, h),
+                            &look,
+                            // LT-04: the live strand ends at the caret's foot, which
+                            // the scene draws a margin further in than `caret`.
+                            strand,
+                            // LT-09: only older lines drift, inside their own
+                            // line; none while editing.
+                            (!newest && editing.is_none()).then_some(LINE),
+                        ),
+                        o + TEXT_X,
+                        o + TEXT_TOP + i as f32 * LINE,
                     ),
-                    o + TEXT_X,
-                    o + TEXT_TOP + i as f32 * LINE,
-                ), rw, reduced() || l.on("reduced-motion")));
+                    rw,
+                    reduced() || l.on("reduced-motion"),
+                ));
             }
         }
+        // From a tap until the edit is handed back, a line whose first word
+        // changes (an edit reflowed it) swaps to its new node at once, so no
+        // word shows twice.
+        let tapped = self.edit_tapped();
+        let (enter, exit) = if tapped {
+            (Transition::NONE, Transition::NONE)
+        } else {
+            (self.ghost_enter(Transition::fade()), Transition::fade())
+        };
         for (i, (words, _)) in lines.iter().enumerate() {
             panel = panel.child(
                 at(
-                    Element::live_text(format!("line-{}", words[0].id), words)
+                    Element::live_text(format!("line-{}", line_key(i, words)), words)
                         .text_style(style)
                         .color(colour)
                         .motion(Prop::Opacity, Spring::critical_to_98(0.08))
-                        .word_enter(self.ghost_enter(Transition::fade())),
+                        .word_enter(enter),
                     o + TEXT_X,
                     o + TEXT_TOP + i as f32 * LINE,
                 )
@@ -1036,7 +1091,7 @@ impl Popup {
                 // A new line comes in through its words' own entry: a fade
                 // of the whole line from 0 put its first word under the
                 // reading line's 70 % ink floor (RD-09).
-                .presence(Transition::NONE, Transition::fade()),
+                .presence(Transition::NONE, exit),
             );
         }
         // The ghost tail after the newest line, which it does not wrap past.
@@ -1103,6 +1158,34 @@ impl Popup {
             )
             .presence(Transition::fade(), Transition::fade()),
         )
+    }
+}
+
+/// Scope's edit adapter (plan section 4.5): one node per line at its row,
+/// the block caret, and the audio marks under the newest line off.
+pub(crate) struct ScopeSite;
+
+impl edit_site::EditSite for ScopeSite {
+    fn caret(&self, _look: &Look) -> edit_site::CaretStyle {
+        edit_site::CaretStyle {
+            caret: vo::scene::flow::Caret {
+                width: 3.0,
+                gap: 0.0,
+                color: Some(hex(TEXT)),
+                gradient: None,
+            },
+            selection: Color::hex(TEXT, 0.35),
+            mark: hex(TRACE),
+        }
+    }
+
+    fn quiet(&self) -> &'static [&'static str] {
+        // They mark the newest line's sound, which an edit has not got.
+        &[sounding::ACOUSTIC_RECEIPTS, sounding::ONSET_JOINT]
+    }
+
+    fn place(&self, look: &Look, el: Element<Msg>, view: &edit::EditView) -> Element<Msg> {
+        edit_site::place_lines(self, look, el, view)
     }
 }
 
@@ -1217,6 +1300,123 @@ mod lattice_tests {
             assert!(node > baseline + TEXT_PX * 0.25, "nodes under the descenders");
             assert!(look.stem >= 2.0);
             assert!(node + look.stem + label.line_height <= g.top + g.height + 0.01, "baseline {baseline}");
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod edit_tests {
+    use super::super::moments::{edit_scenario, popup_for, Moment};
+    use super::super::swiss_look::edit_check::Rig;
+    use super::*;
+
+    /// M7.L7: Scope edits in its own panel. With the caret on the newest, a
+    /// middle and the top line, at both widths: the caret on its glyph
+    /// within 1 px in every frame, the popup's size unchanged, and the
+    /// golden `tests/fixtures/osd-vo/edit-scope.txt`.
+    #[test]
+    fn scope_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Scope, "scope");
+    }
+
+    /// The line nodes' keys in the view now.
+    fn line_keys(r: &Rig) -> Vec<String> {
+        let mut keys = Vec::new();
+        let _ = r.p.view(&vo::Tokens::default()).map_live_texts(&mut |e| {
+            keys.push(e.key().to_string());
+            e
+        });
+        keys.retain(|k| k.starts_with("line-"));
+        keys
+    }
+
+    /// Each line keeps its node as the edit starts and as it ends: a new
+    /// node would fade the reading line in from nothing.
+    #[test]
+    fn scope_lines_keep_their_nodes_across_an_edit() {
+        let mut r = Rig::new(OsdTheme::Scope, false);
+        r.dictate(160);
+        let before = line_keys(&r);
+        r.enter(1.0);
+        let n = r.p.edit_view.as_ref().unwrap().lines as usize;
+        assert_eq!(n, MAX_LINES as usize);
+        assert_eq!(line_keys(&r), before);
+        r.resume(2.0);
+        assert_eq!(line_keys(&r), before);
+    }
+
+    /// R35: the edit moment with the caret on each window line stays inside
+    /// the reading-line envelope, at both widths.
+    #[test]
+    fn scope_edit_moment_keeps_the_envelope() {
+        check_edit_envelope(OsdTheme::Scope, &[0, 1, 2, 3]);
+    }
+
+    /// R35 for `theme`'s edit (plan M7.6): the edit moment with the caret
+    /// each of `ups` lines up, at both widths, checked from the tap on. The
+    /// dictation before the tap is the plain envelope's (`osd-vo-looks.sh`).
+    pub(crate) fn check_edit_envelope(theme: OsdTheme, ups: &[usize]) {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        for wide in [false, true] {
+            let mut cfg = OsdConfig {
+                theme,
+                ..OsdConfig::default()
+            };
+            if wide {
+                cfg.width_px = 600;
+                cfg.preview_font_pt = Some(17.0);
+            }
+            let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+            look.set_motion(&cfg.motion);
+            for &up in ups {
+                let s = edit_scenario(&look, up);
+                let at = |pick: fn(&Input<Msg>) -> bool| {
+                    s.inputs
+                        .iter()
+                        .filter(|(_, i)| pick(i))
+                        .map(|(t, _)| *t)
+                        .collect::<Vec<f64>>()
+                };
+                // The focus comes 0.3 s after the tap.
+                let tap = at(|i| matches!(i, Input::KeyboardFocus { .. }))[0] - 0.3;
+                let options = Options {
+                    fonts: fonts.clone(),
+                    default_motion: default_motion(&look),
+                    ..Options::default()
+                };
+                let popup = popup_for(Moment::Edit, Popup::new(look.clone(), &fonts));
+                let report = vo::envelope::check_scenario(
+                    popup,
+                    &s,
+                    30.0,
+                    options,
+                    &vo::envelope::Envelope {
+                        transcript: 0..1 << 20,
+                        from: tap,
+                        ..vo::envelope::Envelope::default()
+                    },
+                );
+                let first: Vec<String> = report
+                    .violations
+                    .iter()
+                    .take(6)
+                    .map(|v| {
+                        format!(
+                            "t {:.3} word {} {} {:.3}",
+                            v.t,
+                            v.word,
+                            v.breach.kind(),
+                            v.breach.value()
+                        )
+                    })
+                    .collect();
+                assert!(
+                    report.is_ok(),
+                    "{theme:?} wide {wide}, {up} up: {report}\n{}",
+                    first.join("\n")
+                );
+            }
         }
     }
 }

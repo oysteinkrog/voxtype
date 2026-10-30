@@ -159,8 +159,6 @@ fn styled(decor: EditDecor, style: CaretStyle) -> EditDecor {
 /// node is matched to the first unused window line with the same words;
 /// live texts that hold no window line, such as a status row, are left as
 /// they are. A line node with no words matches an empty line.
-// Unused until the first per-line look's edit bead lands.
-#[allow(dead_code)]
 pub(crate) fn place_lines(
     site: &dyn EditSite,
     look: &Look,
@@ -254,6 +252,7 @@ pub(crate) fn site(theme: OsdTheme) -> &'static dyn EditSite {
         OsdTheme::Cyberpunk => &super::cyberpunk::CyberpunkSite,
         OsdTheme::Island => &super::island::IslandSite,
         OsdTheme::Palette => &super::palette::PaletteSite,
+        OsdTheme::Scope => &super::scope::ScopeSite,
         _ => &DefaultSite,
     }
 }
