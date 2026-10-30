@@ -761,3 +761,24 @@ mod tests {
         assert_eq!(band_level(255), 1.0);
     }
 }
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::swiss_look::edit_check::{envelope, Rig};
+    use voxtype::osd::config::OsdTheme;
+
+    /// M7.L2: Radial edits in its own layout, its text box at its `k` scale. With the caret on the
+    /// newest, a middle and the top line, at both widths: the caret on its
+    /// glyph within 1 px in every frame, the popup's size unchanged, and the
+    /// golden `tests/fixtures/osd-vo/edit-radial.txt`.
+    #[test]
+    fn radial_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Radial, "radial");
+    }
+
+    /// M7.L2: the edit moment keeps the reading-line envelope (R35).
+    #[test]
+    fn radial_edits_within_the_envelope() {
+        envelope(OsdTheme::Radial, "radial");
+    }
+}

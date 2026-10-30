@@ -876,8 +876,12 @@ pub(crate) mod edit_check {
 
         /// Whether a margin "…" is drawn: a glyph of no word left of every
         /// word's glyphs, level with the top line (a smaller "…" sits a
-        /// little higher).
+        /// little higher). Always false for a look with no margin "…",
+        /// whose labels may sit there.
         pub(crate) fn ellipsis_drawn(&self) -> bool {
+            if !self.p.look.margin_ellipsis() {
+                return false;
+            }
             let dl = self.scene.sample(self.t + 2.0);
             let glyphs = Self::glyphs(&dl);
             let words = glyphs.iter().filter(|g| g.0 != vo::scene::display::NO_WORD);
