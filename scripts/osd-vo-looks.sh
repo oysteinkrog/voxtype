@@ -10,13 +10,16 @@
 # and the run. The envelope runs need a GPU; the exit checks run on the CPU.
 # No display and no daemon.
 #
-# Environment: ENVELOPE_FPS (default 10) and EXIT_FPS (default 30) set the
-# frame rates, LOOKS="mecha swiss" checks only those looks.
+# Environment: ENVELOPE_FPS and EXIT_FPS (both default 30) set the frame
+# rates, LOOKS="mecha swiss" checks only those looks.
 set -uo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin=${1:-$root/target/debug/voxtype-osd-vo}
-envelope_fps=${ENVELOPE_FPS:-10}
+# The envelope tracker follows a word from frame to frame, so at a low rate a
+# word that moves far in one step reads as a breach (karaoke's centred block at
+# 10 fps). 30 fps is the rate every look is checked at (RD-09).
+envelope_fps=${ENVELOPE_FPS:-30}
 exit_fps=${EXIT_FPS:-30}
 
 if [[ ! -x $bin ]]; then
@@ -78,22 +81,10 @@ check() {
     fi
 }
 
-# Karaoke's centred block lifts a new line while the line rises in: sampled
-# at 10 fps the two land in one step and the envelope tracker cannot follow
-# the block, so karaoke's envelope is sampled at 30 fps at least (RD-09).
-look_fps() {
-    if [[ $1 == karaoke && $envelope_fps -lt 30 ]]; then
-        echo 30
-    else
-        echo "$envelope_fps"
-    fi
-}
-
 for look in "${looks[@]}"; do
-    fps=$(look_fps "$look")
-    check "$look" envelope -- --envelope --fps "$fps"
-    check "$look" "envelope --cancel" -- --envelope --cancel --fps "$fps"
-    check "$look" "envelope reduced" VO_REDUCED_MOTION=1 -- --envelope --fps "$fps"
+    check "$look" envelope -- --envelope --fps "$envelope_fps"
+    check "$look" "envelope --cancel" -- --envelope --cancel --fps "$envelope_fps"
+    check "$look" "envelope reduced" VO_REDUCED_MOTION=1 -- --envelope --fps "$envelope_fps"
     check "$look" exit-check -- --exit-check --fps "$exit_fps"
     check "$look" "exit-check --cancel" -- --exit-check --cancel --fps "$exit_fps"
     check "$look" "exit-check reduced" VO_REDUCED_MOTION=1 -- --exit-check --fps "$exit_fps"
