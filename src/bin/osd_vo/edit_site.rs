@@ -255,6 +255,7 @@ pub(crate) fn site(theme: OsdTheme) -> &'static dyn EditSite {
         OsdTheme::Palette => &super::palette::PaletteSite,
         OsdTheme::Particles => &super::particles::ParticlesSite,
         OsdTheme::Scope => &super::scope::ScopeSite,
+        OsdTheme::Synthwave => &super::synthwave::SynthwaveSite,
         _ => &DefaultSite,
     }
 }

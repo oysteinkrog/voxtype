@@ -11,6 +11,10 @@
 //!
 //! The tube, card, grid and waveform are canvases, pure in the frame time,
 //! so they move without view updates.
+//!
+//! While editing ([`SynthwaveSite`]) the rows hold the edit window's lines,
+//! still bottom-anchored, and a line keeps its left edge while you type
+//! (the sticky centring of `EditView::centre`).
 
 use super::*;
 
@@ -168,23 +172,23 @@ fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
     })
 }
 
-/// The look's own fonts, added to the shared registry once.
+/// The look's own fonts, added to each registry once.
+#[derive(Clone, Copy)]
 struct Fonts {
     title: u32,
     text: u32,
     status: u32,
 }
 
-fn fonts(reg: &FontRegistry) -> &'static Fonts {
-    static FONTS: OnceLock<Fonts> = OnceLock::new();
-    FONTS.get_or_init(|| {
-        let add = |pattern: &str, fallback: u32| reg.add_system(pattern).unwrap_or(fallback);
-        Fonts {
-            title: add("Exo 2:black:italic", SANS),
-            text: add("Roboto:medium", SANS),
-            status: add("Roboto", SANS),
-        }
-    })
+fn fonts(reg: &FontRegistry) -> Fonts {
+    // Added to the registry once (`FontRegistry::system`), so every
+    // registry, such as a test's, has its own ids.
+    let add = |pattern: &str, fallback: u32| reg.system(pattern).unwrap_or(fallback);
+    Fonts {
+        title: add("Exo 2:black:italic", SANS),
+        text: add("Roboto:medium", SANS),
+        status: add("Roboto", SANS),
+    }
 }
 
 /// The transcript's style, for the line fitting in `Popup::text` too.
@@ -899,25 +903,35 @@ impl Popup {
         let s = self.scale();
         let style = text_style(l);
         let width = text_width(l);
-        let joined: Vec<&str> = self.shown.iter().map(|w| w.text.as_str()).collect();
-        let text = joined.join(" ");
-        let shaped = self.measure.layout(&text, &style, Some(width));
-        // The line of each word, from where its first glyph landed.
+        // While editing: the window's lines, each with its sticky centring
+        // width.
+        let edited: Option<Vec<(Vec<Word>, f32)>> = self
+            .edit_view
+            .is_some()
+            .then(|| self.text_lines(&style, width));
         let mut lines: Vec<Vec<Word>> = Vec::new();
-        let mut offset = 0usize;
-        let first_y = shaped.glyphs.first().map_or(0.0, |g| g.pos.y);
-        for word in &self.shown {
-            let y = shaped
-                .glyphs
-                .iter()
-                .find(|g| g.cluster as usize >= offset)
-                .map_or(first_y, |g| g.pos.y);
-            let line = ((y - first_y) / style.line_height).round().max(0.0) as usize;
-            while lines.len() <= line {
-                lines.push(Vec::new());
+        if let Some(edited) = &edited {
+            lines = edited.iter().map(|(w, _)| w.clone()).collect();
+        } else {
+            let joined: Vec<&str> = self.shown.iter().map(|w| w.text.as_str()).collect();
+            let text = joined.join(" ");
+            let shaped = self.measure.layout(&text, &style, Some(width));
+            // The line of each word, from where its first glyph landed.
+            let mut offset = 0usize;
+            let first_y = shaped.glyphs.first().map_or(0.0, |g| g.pos.y);
+            for word in &self.shown {
+                let y = shaped
+                    .glyphs
+                    .iter()
+                    .find(|g| g.cluster as usize >= offset)
+                    .map_or(first_y, |g| g.pos.y);
+                let line = ((y - first_y) / style.line_height).round().max(0.0) as usize;
+                while lines.len() <= line {
+                    lines.push(Vec::new());
+                }
+                lines[line].push(word.clone());
+                offset += word.text.len() + 1;
             }
-            lines[line].push(word.clone());
-            offset += word.text.len() + 1;
         }
         let dim = if self.cancelled() { 0.3 } else { 1.0 };
         // The rows sit on the bottom of the tallest card's text box: a new
@@ -939,13 +953,20 @@ impl Popup {
                 .motion(Prop::Offset, Spring::POP)
                 .motion(Prop::Position, Spring::critical_to_98(0.2))
                 .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 8.0 * s)));
-            let mut row = Element::row(format!("row-{i}"))
+            let row = Element::row(format!("row-{i}"))
                 .width(l.width)
                 .height(style.line_height)
-                .justify(JustifyContent::CENTER)
-                .motion(Prop::Position, Spring::critical_to_98(GROW_SECS))
-                .child(words);
-            if i == newest {
+                .motion(Prop::Position, Spring::critical_to_98(GROW_SECS));
+            let mut row = match edited.as_ref().and_then(|e| e.get(i)) {
+                // Set by its sticky width rather than centred by the row,
+                // so it holds still while you type; as wide as the text box,
+                // so typing never wraps it.
+                Some((_, lw)) => {
+                    row.child(at(words.width(width), ((l.width - lw) / 2.0).max(0.0), 0.0))
+                }
+                None => row.justify(JustifyContent::CENTER).child(words),
+            };
+            if i == newest && edited.is_none() {
                 // The ghost tail after the newest line, where its centred
                 // words end, as far as the text's right edge.
                 let joined = line.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
@@ -1195,5 +1216,61 @@ mod tests {
         let a = onset_depths(&[1.0, 2.0], 3.0, 2.0, run);
         let b = onset_depths(&[1.0, 2.0], 4.0, 2.0, run);
         assert_eq!(a, b);
+    }
+}
+
+/// Synthwave's edit adapter (plan section 4.5): one row per window line,
+/// bottom-anchored, and the onset grid still.
+pub(crate) struct SynthwaveSite;
+
+impl edit_site::EditSite for SynthwaveSite {
+    fn quiet(&self) -> &'static [&'static str] {
+        &[ONSET_GRID]
+    }
+
+    fn place(&self, look: &Look, el: Element<Msg>, view: &edit::EditView) -> Element<Msg> {
+        edit_site::place_lines(self, look, el, view)
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::scope::edit_tests::check_edit_envelope;
+    use super::super::swiss_look::edit_check::Rig;
+    use super::*;
+
+    /// M7.L12: Synthwave edits in its own card. With the caret on the
+    /// newest, a middle and the top line, at both widths: the caret on its
+    /// glyph within 1 px in every frame, the popup's size unchanged, and
+    /// the golden `tests/fixtures/osd-vo/edit-synthwave.txt`.
+    #[test]
+    fn synthwave_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Synthwave, "synthwave");
+    }
+
+    /// While editing the rows are the window's lines, the newest at the
+    /// bottom, and the onset grid is still.
+    #[test]
+    fn synthwave_rows_are_the_window() {
+        let mut r = Rig::new(OsdTheme::Synthwave, false);
+        r.dictate(160);
+        r.enter(1.0);
+        assert!(!r.p.look.on(ONSET_GRID));
+        let v = r.p.edit_view.clone().unwrap();
+        let mut rows = Vec::new();
+        let _ = r.p.view(&vo::Tokens::default()).map_live_texts(&mut |e| {
+            if e.key().to_string().starts_with("line-") {
+                rows.push(e.live_words().map(|w| w.len()).unwrap_or(0));
+            }
+            e
+        });
+        assert_eq!(rows.len(), v.lines as usize);
+    }
+
+    /// R35: the edit moment with the caret on each line stays inside the
+    /// reading-line envelope, at both widths.
+    #[test]
+    fn synthwave_edit_moment_keeps_the_envelope() {
+        check_edit_envelope(OsdTheme::Synthwave, &[0, 1, 2]);
     }
 }
