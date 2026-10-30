@@ -40,7 +40,17 @@ pub struct OsdState {
     pub height_px: i64,
     pub margin_px: i64,
     pub top_margin: f64,
+    pub anchor: String,
+    pub reading_line: f64,
+    /// Live preview font size in points; 0.0 means unset (theme size).
+    pub preview_font_pt: f64,
     pub opacity: f64,
+    pub word_fade: bool,
+    pub look_badge: bool,
+    /// `None` when config.toml holds a list of motion names, which the
+    /// form shows but leaves alone unless cycled.
+    pub motion: Option<String>,
+    pub realtime: bool,
     pub waveform_window_secs: f64,
     pub peak_decay_db_per_sec: f64,
     pub waveform_gain: f64,
@@ -76,7 +86,14 @@ pub enum Field {
     HeightPx,
     MarginPx,
     TopMargin,
+    Anchor,
+    ReadingLine,
+    PreviewFontPt,
     Opacity,
+    WordFade,
+    LookBadge,
+    Motion,
+    Realtime,
     WaveformWindowSecs,
     PeakDecayDbPerSec,
     WaveformGain,
@@ -97,7 +114,14 @@ impl Field {
         Field::HeightPx,
         Field::MarginPx,
         Field::TopMargin,
+        Field::Anchor,
+        Field::ReadingLine,
+        Field::PreviewFontPt,
         Field::Opacity,
+        Field::WordFade,
+        Field::LookBadge,
+        Field::Motion,
+        Field::Realtime,
         Field::WaveformWindowSecs,
         Field::PeakDecayDbPerSec,
         Field::WaveformGain,
@@ -118,6 +142,8 @@ const POSITION_CHOICES: &[&str] = &[
     "top-left",
     "top-right",
 ];
+const ANCHOR_CHOICES: &[&str] = &["top", "reading-line", "center"];
+const MOTION_CHOICES: &[&str] = &["look", "none"];
 
 // Preset cycles for numeric fields. Picked to cover the common range
 // without forcing inline text edit; users who need a value off the cycle
@@ -128,6 +154,9 @@ const MARGIN_CHOICES: &[i64] = &[0, 8, 16, 24, 32, 48, 64];
 // Mirrors swayosd's `--top-margin` semantics. Default 0.85 matches the
 // position users already see for volume/brightness panels.
 const TOP_MARGIN_CHOICES: &[f64] = &[0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95];
+const READING_LINE_CHOICES: &[f64] = &[0.30, 0.40, 0.45, 0.50, 0.55, 0.60, 0.70];
+// 0.0 stands for unset: the theme's own font size.
+const PREVIEW_FONT_CHOICES: &[f64] = &[0.0, 10.0, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0];
 const OPACITY_CHOICES: &[f64] = &[0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0];
 const WAVEFORM_SECS_CHOICES: &[f64] = &[1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0];
 const PEAK_DECAY_CHOICES: &[f64] = &[1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 20.0];
@@ -163,7 +192,19 @@ impl OsdState {
             height_px: ed.get_int(TABLE, "height_px").unwrap_or(48),
             margin_px: ed.get_int(TABLE, "margin_px").unwrap_or(24),
             top_margin: ed.get_float(TABLE, "top_margin").unwrap_or(0.85),
+            anchor: ed
+                .get_string(TABLE, "anchor")
+                .unwrap_or_else(|| "top".to_string()),
+            reading_line: ed.get_float(TABLE, "reading_line").unwrap_or(0.5),
+            preview_font_pt: ed.get_float(TABLE, "preview_font_pt").unwrap_or(0.0),
             opacity: ed.get_float(TABLE, "opacity").unwrap_or(0.95),
+            word_fade: ed.get_bool(TABLE, "word_fade").unwrap_or(false),
+            look_badge: ed.get_bool(TABLE, "look_badge").unwrap_or(false),
+            motion: match ed.get_toml_value(TABLE, "motion") {
+                None => Some("look".to_string()),
+                Some(_) => ed.get_string(TABLE, "motion"),
+            },
+            realtime: ed.get_bool(TABLE, "realtime").unwrap_or(true),
             waveform_window_secs: ed.get_float(TABLE, "waveform_window_secs").unwrap_or(3.0),
             peak_decay_db_per_sec: ed.get_float(TABLE, "peak_decay_db_per_sec").unwrap_or(6.0),
             waveform_gain: ed.get_float(TABLE, "waveform_gain").unwrap_or(10.0),
@@ -214,7 +255,44 @@ impl OsdState {
         ed.set_int(TABLE, "height_px", self.height_px);
         ed.set_int(TABLE, "margin_px", self.margin_px);
         ed.set_float(TABLE, "top_margin", self.top_margin);
+        // The keys below stay out of the file while they hold the default.
+        if self.anchor == "top" {
+            ed.unset(TABLE, "anchor");
+        } else {
+            ed.set_string(TABLE, "anchor", &self.anchor);
+        }
+        if (self.reading_line - 0.5).abs() < 1e-3 {
+            ed.unset(TABLE, "reading_line");
+        } else {
+            ed.set_float(TABLE, "reading_line", self.reading_line);
+        }
+        if self.preview_font_pt > 0.0 {
+            ed.set_float(TABLE, "preview_font_pt", self.preview_font_pt);
+        } else {
+            ed.unset(TABLE, "preview_font_pt");
+        }
         ed.set_float(TABLE, "opacity", self.opacity);
+        if self.word_fade {
+            ed.set_bool(TABLE, "word_fade", true);
+        } else {
+            ed.unset(TABLE, "word_fade");
+        }
+        if self.look_badge {
+            ed.set_bool(TABLE, "look_badge", true);
+        } else {
+            ed.unset(TABLE, "look_badge");
+        }
+        match self.motion.as_deref() {
+            Some("look") => ed.unset(TABLE, "motion"),
+            Some(m) => ed.set_string(TABLE, "motion", m),
+            // A list of names: keep it as written.
+            None => {}
+        }
+        if self.realtime {
+            ed.unset(TABLE, "realtime");
+        } else {
+            ed.set_bool(TABLE, "realtime", false);
+        }
         ed.set_float(TABLE, "waveform_window_secs", self.waveform_window_secs);
         ed.set_float(TABLE, "peak_decay_db_per_sec", self.peak_decay_db_per_sec);
         ed.set_float(TABLE, "waveform_gain", self.waveform_gain);
@@ -276,7 +354,22 @@ impl OsdState {
             Field::TopMargin => {
                 self.top_margin = cycle_float(TOP_MARGIN_CHOICES, self.top_margin, delta)
             }
+            Field::Anchor => self.anchor = cycle_str(ANCHOR_CHOICES, &self.anchor, delta),
+            Field::ReadingLine => {
+                self.reading_line = cycle_float(READING_LINE_CHOICES, self.reading_line, delta)
+            }
+            Field::PreviewFontPt => {
+                self.preview_font_pt =
+                    cycle_float(PREVIEW_FONT_CHOICES, self.preview_font_pt, delta)
+            }
             Field::Opacity => self.opacity = cycle_float(OPACITY_CHOICES, self.opacity, delta),
+            Field::WordFade => self.word_fade = !self.word_fade,
+            Field::LookBadge => self.look_badge = !self.look_badge,
+            Field::Motion => {
+                let current = self.motion.as_deref().unwrap_or("");
+                self.motion = Some(cycle_str(MOTION_CHOICES, current, delta));
+            }
+            Field::Realtime => self.realtime = !self.realtime,
             Field::WaveformWindowSecs => {
                 self.waveform_window_secs =
                     cycle_float(WAVEFORM_SECS_CHOICES, self.waveform_window_secs, delta)
@@ -486,9 +579,51 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             format!("{:.2}", state.top_margin),
         ),
         FormRowSpec::new(
+            state.field == Field::Anchor,
+            "Vertical anchor",
+            state.anchor.clone(),
+        ),
+        FormRowSpec::new(
+            state.field == Field::ReadingLine,
+            "Reading line (fraction)",
+            format!("{:.2}", state.reading_line),
+        ),
+        FormRowSpec::new(
+            state.field == Field::PreviewFontPt,
+            "Preview font (pt)",
+            if state.preview_font_pt > 0.0 {
+                format!("{:.0}", state.preview_font_pt)
+            } else {
+                "(theme size)".to_string()
+            },
+        ),
+        FormRowSpec::new(
             state.field == Field::Opacity,
             "Opacity",
             format!("{:.2}", state.opacity),
+        ),
+        FormRowSpec::new(
+            state.field == Field::WordFade,
+            "Fade words in",
+            yesno(state.word_fade),
+        ),
+        FormRowSpec::new(
+            state.field == Field::LookBadge,
+            "Look badge",
+            yesno(state.look_badge),
+        ),
+        FormRowSpec::new(
+            state.field == Field::Motion,
+            "Motion",
+            state
+                .motion
+                .clone()
+                .unwrap_or_else(|| "(list in config.toml)".to_string()),
+        ),
+        FormRowSpec::new(
+            state.field == Field::Realtime,
+            "Real-time priority",
+            yesno(state.realtime),
         ),
         FormRowSpec::new(
             state.field == Field::WaveformWindowSecs,
@@ -731,6 +866,82 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from(""),
             dim("Default: 0.85 (matches swayosd). 0.0 = top of screen, 1.0 = bottom."),
         ],
+        Field::Anchor => vec![
+            heading("Vertical anchor"),
+            Line::from(""),
+            Line::from(
+                "What the centered positions (bottom-center, top-center) place \
+                 on the screen. Corner positions ignore it.",
+            ),
+            Line::from(""),
+            Line::from("  top           the popup's top edge, at Top margin"),
+            Line::from("  reading-line  the newest text line, at Reading line, so the"),
+            Line::from("                line you read stays in one place"),
+            Line::from("  center        the popup's middle, at Reading line"),
+            Line::from(""),
+            dim("Default: top."),
+        ],
+        Field::ReadingLine => vec![
+            heading("Reading line (fraction)"),
+            Line::from(""),
+            Line::from(
+                "Height of the newest text line (anchor reading-line) or of \
+                 the popup's middle (anchor center), as a fraction of the \
+                 monitor's height.",
+            ),
+            Line::from(""),
+            dim("Default: 0.50, the middle of the screen. 0.0 = top, 1.0 = bottom."),
+        ],
+        Field::PreviewFontPt => vec![
+            heading("Preview font (pt)"),
+            Line::from(""),
+            Line::from("Font size of the live preview text in points (gtk4 OSD)."),
+            Line::from(""),
+            dim("Default: unset, which keeps the theme's size."),
+        ],
+        Field::WordFade => vec![
+            heading("Fade words in"),
+            Line::from(""),
+            Line::from("Fade new live words in. Only the vo OSD does this."),
+            Line::from(""),
+            dim("Off by default: words appear at once, as in the gtk4 OSD."),
+        ],
+        Field::LookBadge => vec![
+            heading("Look badge"),
+            Line::from(""),
+            Line::from(
+                "Show the active look's place in the look chord's list and its \
+                 name, such as \"3/20 Type\", above the vo popup's top-left \
+                 corner.",
+            ),
+            Line::from(""),
+            dim("Off by default."),
+        ],
+        Field::Motion => vec![
+            heading("Motion"),
+            Line::from(""),
+            Line::from("Motion effects of the vo popup."),
+            Line::from(""),
+            Line::from("  look  each look's own set of effects"),
+            Line::from("  none  no motion effects"),
+            Line::from(""),
+            dim(
+                "Default: look. To pick single effects, write a list of names \
+                 in config.toml; this form keeps it unless you change it here.",
+            ),
+        ],
+        Field::Realtime => vec![
+            heading("Real-time priority"),
+            Line::from(""),
+            Line::from(
+                "Run the vo popup's threads at real-time priority while it \
+                 shows, so a busy machine does not make it stutter. Needs \
+                 real-time rights (the audio or realtime group); without them \
+                 the popup takes the lowest nice value it may, down to -10.",
+            ),
+            Line::from(""),
+            dim("On by default."),
+        ],
         Field::Opacity => vec![
             heading("Opacity"),
             Line::from(""),
@@ -887,7 +1098,14 @@ mod tests {
                 Field::HeightPx => "osd.height_px",
                 Field::MarginPx => "osd.margin_px",
                 Field::TopMargin => "osd.top_margin",
+                Field::Anchor => "osd.anchor",
+                Field::ReadingLine => "osd.reading_line",
+                Field::PreviewFontPt => "osd.preview_font_pt",
                 Field::Opacity => "osd.opacity",
+                Field::WordFade => "osd.word_fade",
+                Field::LookBadge => "osd.look_badge",
+                Field::Motion => "osd.motion",
+                Field::Realtime => "osd.realtime",
                 Field::WaveformWindowSecs => "osd.waveform_window_secs",
                 Field::PeakDecayDbPerSec => "osd.peak_decay_db_per_sec",
                 Field::WaveformGain => "osd.waveform_gain",
@@ -933,7 +1151,14 @@ mod tests {
             height_px: 48,
             margin_px: 24,
             top_margin: 0.85,
+            anchor: "top".to_string(),
+            reading_line: 0.5,
+            preview_font_pt: 0.0,
             opacity: 0.95,
+            word_fade: false,
+            look_badge: false,
+            motion: Some("look".to_string()),
+            realtime: true,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,
             waveform_gain: 10.0,
@@ -985,7 +1210,14 @@ mod tests {
             height_px: 48,
             margin_px: 24,
             top_margin: 0.85,
+            anchor: "top".to_string(),
+            reading_line: 0.5,
+            preview_font_pt: 0.0,
             opacity: 0.95,
+            word_fade: false,
+            look_badge: false,
+            motion: Some("look".to_string()),
+            realtime: true,
             waveform_window_secs: 3.0,
             peak_decay_db_per_sec: 6.0,
             waveform_gain: 10.0,
@@ -1006,5 +1238,20 @@ mod tests {
         state.style = "~/dev/my-style".to_string();
         state.cycle(1);
         assert_eq!(state.style, "~/dev/my-style");
+
+        // A motion list from config.toml stays until the field is cycled.
+        state.motion = None;
+        state.field = Field::Motion;
+        state.cycle(1);
+        assert_eq!(state.motion.as_deref(), Some("look"));
+        state.cycle(1);
+        assert_eq!(state.motion.as_deref(), Some("none"));
+
+        // The font size starts unset and cycles into real sizes.
+        state.field = Field::PreviewFontPt;
+        state.cycle(1);
+        assert_eq!(state.preview_font_pt, 10.0);
+        state.cycle(-1);
+        assert_eq!(state.preview_font_pt, 0.0);
     }
 }

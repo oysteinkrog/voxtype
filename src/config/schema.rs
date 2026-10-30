@@ -298,6 +298,8 @@ const STATE_FILE_CHOICES: &[&str] = &["auto", "disabled"];
 const MEETING_STORAGE_CHOICES: &[&str] = &["auto"];
 const DIARIZATION_BACKEND_CHOICES: &[&str] = &["simple", "ml"];
 const SUMMARY_BACKEND_CHOICES: &[&str] = &["local", "remote", "disabled"];
+const LIVE_PREVIEW_FINAL_CHOICES: &[&str] = &["engine", "preview"];
+const OSD_MOTION_CHOICES: &[&str] = &["look", "none"];
 
 pub const CONFIG_KEYS: &[KeySpec] = &[
     // -- Engine -------------------------------------------------------------
@@ -855,6 +857,34 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Seconds to wait for an async transcription before giving up.",
     )
     .for_engine("soniox"),
+    // live preview
+    spec(
+        "live_preview_model",
+        "",
+        "live_preview_model",
+        KeyType::String,
+        "Engine",
+        "Live preview model",
+        "Parakeet streaming model that shows your words in the popup while you speak, e.g. parakeet-unified-en-0.6b. The engine's own model still makes the typed text. Needs engine_isolation. Unset: no live preview.",
+    ),
+    spec(
+        "live_typing",
+        "",
+        "live_typing",
+        KeyType::Bool,
+        "Engine",
+        "Live typing",
+        "With a live preview, also type the preview words at the cursor as they come, then swap them for the engine's text when you stop.",
+    ),
+    spec(
+        "live_preview_final",
+        "",
+        "live_preview_final",
+        closed(LIVE_PREVIEW_FINAL_CHOICES),
+        "Engine",
+        "Final text from",
+        "Where the typed text comes from with a live preview: `engine` (the configured engine) or `preview` (the preview model's own text, CPU only, no second model).",
+    ),
     // -- Hotkey -------------------------------------------------------------
     spec(
         "hotkey.enabled",
@@ -936,6 +966,51 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Hotkey",
         "Edit tap quiet time",
         "Milliseconds with no other key pressed before an edit tap counts.",
+    ),
+    spec(
+        "hotkey.double_tap",
+        "hotkey",
+        "double_tap",
+        KeyType::Bool,
+        "Hotkey",
+        "Double tap",
+        "Start and stop recording with a quick double tap of the key instead of one press. Shortcuts that use the key never count. Use with mode = toggle.",
+    ),
+    spec(
+        "hotkey.double_tap_ms",
+        "hotkey",
+        "double_tap_ms",
+        KeyType::Int { min: 50, max: 2000 },
+        "Hotkey",
+        "Double tap time",
+        "Milliseconds for the longest tap and the longest gap between the two taps.",
+    ),
+    spec(
+        "hotkey.double_tap_alt_key",
+        "hotkey",
+        "double_tap_alt_key",
+        open(HOTKEY_KEY_CHOICES),
+        "Hotkey",
+        "Second double-tap key",
+        "A second key whose double tap also starts and stops recording. The runtime file hotkey-last says which key stopped it, so an output hook can act on that.",
+    ),
+    spec(
+        "hotkey.double_tap_cancel_key",
+        "hotkey",
+        "double_tap_cancel_key",
+        open(HOTKEY_CANCEL_CHOICES),
+        "Hotkey",
+        "Double-tap cancel key",
+        "A key whose double tap discards the recording. A single stray press never throws a dictation away.",
+    ),
+    spec(
+        "hotkey.look_chord",
+        "hotkey",
+        "look_chord",
+        KeyType::Bool,
+        "Hotkey",
+        "Look chord",
+        "Hold Left Ctrl and Right Ctrl, then press Down or Up, to switch the vo popup to its next or previous look while it shows.",
     ),
     // -- Audio --------------------------------------------------------------
     spec(
@@ -1137,6 +1212,42 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Text",
         "Drop filler words",
         "Remove \"uh\", \"um\" and the rest of text.filler_words from the output.",
+    ),
+    spec(
+        "text.replacements_file",
+        "text",
+        "replacements_file",
+        KeyType::String,
+        "Text",
+        "Replacements file",
+        "TOML file of extra \"from\" = \"to\" replacements, so a private word list can live outside the main config. Entries in text.replacements win.",
+    ),
+    spec(
+        "text.learn_corrections",
+        "text",
+        "learn_corrections",
+        KeyType::Bool,
+        "Text",
+        "Learn from corrections",
+        "Log each spoken correction and turn a fix made twice (or a name, once) into a rule in learned_words_file.",
+    ),
+    spec(
+        "text.corrections_log",
+        "text",
+        "corrections_log",
+        KeyType::String,
+        "Text",
+        "Corrections log",
+        "Where spoken corrections are logged, one JSON line each. Unset: ~/.local/share/voxtype/corrections.jsonl.",
+    ),
+    spec(
+        "text.learned_words_file",
+        "text",
+        "learned_words_file",
+        KeyType::String,
+        "Text",
+        "Learned words file",
+        "Where learned words are kept. Unset: ~/.local/share/voxtype/words-learned.toml.",
     ),
     spec(
         "text.replacements.<from>",
@@ -1413,6 +1524,42 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Background opacity of the panel.",
     ),
     spec(
+        "osd.word_fade",
+        "osd",
+        "word_fade",
+        KeyType::Bool,
+        "OSD",
+        "Fade words in",
+        "Fade new live words in (vo OSD). Off: words appear at once.",
+    ),
+    spec(
+        "osd.look_badge",
+        "osd",
+        "look_badge",
+        KeyType::Bool,
+        "OSD",
+        "Look badge",
+        "Show the active look's number and name, such as \"3/20 Type\", above the vo popup.",
+    ),
+    spec(
+        "osd.motion",
+        "osd",
+        "motion",
+        open(OSD_MOTION_CHOICES),
+        "OSD",
+        "Motion",
+        "Motion effects of the vo popup: `look` (each look's own set), `none`, or names separated by commas. A list in config.toml also works.",
+    ),
+    spec(
+        "osd.realtime",
+        "osd",
+        "realtime",
+        KeyType::Bool,
+        "OSD",
+        "Real-time priority",
+        "Run the vo popup's threads at real-time priority while it shows, so a busy machine does not make it stutter.",
+    ),
+    spec(
         "osd.waveform_window_secs",
         "osd",
         "waveform_window_secs",
@@ -1541,6 +1688,87 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     .live(),
     // -- Advanced -----------------------------------------------------------
     spec(
+        "engine_isolation",
+        "",
+        "engine_isolation",
+        KeyType::Bool,
+        "Advanced",
+        "Engine isolation",
+        "Run ONNX engines in a child process that exits after each transcription, so VRAM and daemon RAM are released. Needed for a live preview.",
+    ),
+    spec(
+        "live_preview_warm_secs",
+        "",
+        "live_preview_warm_secs",
+        KeyType::Int { min: 0, max: 86400 },
+        "Advanced",
+        "Keep live worker for",
+        "Seconds to keep the live preview worker loaded after a recording, so the next one shows words at once. It holds about 1 GB RAM. 0: a fresh worker each time.",
+    ),
+    spec(
+        "live_preview_warm_idle_secs",
+        "",
+        "live_preview_warm_idle_secs",
+        KeyType::Int { min: 0, max: 86400 },
+        "Advanced",
+        "Release live worker when idle",
+        "Keep the live preview worker loaded until this many seconds pass with no keyboard or mouse input. Needs the input group. 0: off.",
+    ),
+    spec(
+        "live_preview_warm_presence_file",
+        "",
+        "live_preview_warm_presence_file",
+        KeyType::String,
+        "Advanced",
+        "Presence file",
+        "JSON file with your presence state. While it is fresh it decides when the warm live worker goes, instead of the input timer.",
+    ),
+    spec(
+        "live_preview_warm_presence_grace_secs",
+        "",
+        "live_preview_warm_presence_grace_secs",
+        KeyType::Int { min: 0, max: 86400 },
+        "Advanced",
+        "Presence grace time",
+        "Seconds in a presence state not on the keep list, with no local input, before the warm live worker is released.",
+    ),
+    spec(
+        "live_preview_warm_release_command",
+        "",
+        "live_preview_warm_release_command",
+        KeyType::String,
+        "Advanced",
+        "Release command",
+        "Shell command run every 10 s while a warm worker waits. If it exits 0, the worker stops, e.g. to give RAM back under memory pressure.",
+    ),
+    spec(
+        "live_preview_min_free_vram_mib",
+        "",
+        "live_preview_min_free_vram_mib",
+        KeyType::Int { min: 0, max: 1048576 },
+        "Advanced",
+        "Minimum free VRAM",
+        "Load the engine model only with at least this much free GPU memory (MiB); otherwise the preview text is the final text. 0: no check.",
+    ),
+    spec(
+        "live_preview_corpus_dir",
+        "",
+        "live_preview_corpus_dir",
+        KeyType::String,
+        "Advanced",
+        "Recording archive",
+        "Keep every live preview recording here as a WAV file and a JSON file with the final and preview text. Unset: keep nothing.",
+    ),
+    spec(
+        "live_preview_revisions_dir",
+        "",
+        "live_preview_revisions_dir",
+        KeyType::String,
+        "Advanced",
+        "Preview revision log",
+        "Log every change of the live preview text here, one file per recording. For tuning the popup's word motion. Unset: no log.",
+    ),
+    spec(
         "whisper.gpu_isolation",
         "whisper",
         "gpu_isolation",
@@ -1648,6 +1876,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Output",
         "Paste keystroke",
         "Keystroke paste mode sends after copying, e.g. shift+insert or ctrl+shift+v for terminals.",
+    ),
+    spec(
+        "output.paste_primary",
+        "output",
+        "paste_primary",
+        KeyType::Bool,
+        "Output",
+        "Paste primary selection too",
+        "In paste mode, also copy the text to the primary selection. Terminals paste it on Shift+Insert, so one key works in terminals and GUI apps.",
     ),
     spec(
         "output.restore_clipboard",
@@ -2527,6 +2764,22 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
     let v = match key {
         "engine" => json!(cfg.engine.name()),
+        "engine_isolation" => json!(cfg.engine_isolation),
+        "live_preview_model" => opt_str(cfg.live_preview_model.as_ref()),
+        "live_typing" => json!(cfg.live_typing),
+        "live_preview_final" => json!(cfg.live_preview_final),
+        "live_preview_warm_secs" => json!(cfg.live_preview_warm_secs),
+        "live_preview_warm_idle_secs" => json!(cfg.live_preview_warm_idle_secs),
+        "live_preview_warm_presence_file" => opt_str(cfg.live_preview_warm_presence_file.as_ref()),
+        "live_preview_warm_presence_grace_secs" => {
+            json!(cfg.live_preview_warm_presence_grace_secs)
+        }
+        "live_preview_warm_release_command" => {
+            opt_str(cfg.live_preview_warm_release_command.as_ref())
+        }
+        "live_preview_min_free_vram_mib" => json!(cfg.live_preview_min_free_vram_mib),
+        "live_preview_corpus_dir" => opt_str(cfg.live_preview_corpus_dir.as_ref()),
+        "live_preview_revisions_dir" => opt_str(cfg.live_preview_revisions_dir.as_ref()),
 
         "whisper.model" => json!(cfg.whisper.model),
         "whisper.secondary_model" => opt_str(cfg.whisper.secondary_model.as_ref()),
@@ -2646,6 +2899,11 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "hotkey.correction_hold_ms" => json!(cfg.hotkey.correction_hold_ms),
         "hotkey.edit_key" => opt_str(cfg.hotkey.edit_key.as_ref()),
         "hotkey.edit_quiet_ms" => json!(cfg.hotkey.edit_quiet_ms),
+        "hotkey.double_tap" => json!(cfg.hotkey.double_tap),
+        "hotkey.double_tap_ms" => json!(cfg.hotkey.double_tap_ms),
+        "hotkey.double_tap_alt_key" => opt_str(cfg.hotkey.double_tap_alt_key.as_ref()),
+        "hotkey.double_tap_cancel_key" => opt_str(cfg.hotkey.double_tap_cancel_key.as_ref()),
+        "hotkey.look_chord" => json!(cfg.hotkey.look_chord),
 
         "audio.device" => json!(cfg.audio.device),
         "audio.max_duration_secs" => json!(cfg.audio.max_duration_secs),
@@ -2674,6 +2932,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "text.spoken_punctuation" => json!(cfg.text.spoken_punctuation),
         "text.smart_auto_submit" => json!(cfg.text.smart_auto_submit),
         "text.filter_filler_words" => json!(cfg.text.filter_filler_words),
+        "text.replacements_file" => opt_str(cfg.text.replacements_file.as_ref()),
+        "text.learn_corrections" => json!(cfg.text.learn_corrections),
+        "text.corrections_log" => opt_str(cfg.text.corrections_log.as_ref()),
+        "text.learned_words_file" => opt_str(cfg.text.learned_words_file.as_ref()),
         "text.replacements.<from>" => {
             let map: Map<String, Json> = cfg
                 .text
@@ -2728,6 +2990,10 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             None => Json::Null,
         },
         "osd.opacity" => f32_json(cfg.osd.opacity),
+        "osd.word_fade" => json!(cfg.osd.word_fade),
+        "osd.look_badge" => json!(cfg.osd.look_badge),
+        "osd.motion" => serde_json::to_value(&cfg.osd.motion).ok()?,
+        "osd.realtime" => json!(cfg.osd.realtime),
         "osd.theme" => serde_json::to_value(cfg.osd.theme).ok()?,
         "osd.waveform_window_secs" => f32_json(cfg.osd.waveform_window_secs),
         "osd.peak_decay_db_per_sec" => f32_json(cfg.osd.peak_decay_db_per_sec),
@@ -2753,6 +3019,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "output.file_mode" => json!(cfg.output.file_mode),
         "output.type_delay_ms" => json!(cfg.output.type_delay_ms),
         "output.paste_keys" => opt_str(cfg.output.paste_keys.as_ref()),
+        "output.paste_primary" => json!(cfg.output.paste_primary),
         "output.restore_clipboard" => json!(cfg.output.restore_clipboard),
         "output.restore_clipboard_delay_ms" => json!(cfg.output.restore_clipboard_delay_ms),
         "output.wait_for_modifier_release" => json!(cfg.output.wait_for_modifier_release),
