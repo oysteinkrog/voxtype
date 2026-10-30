@@ -381,5 +381,5 @@ openvino-genai = { git = "https://github.com/voxtype/openvino-rs", branch = "whi
 # Model signals for the live preview: parakeet-rs 0.3.5 plus the softmax
 # score of each emitted token (voxtype-confidence), and the per-step
 # distribution summaries and lookahead tail of ParakeetUnified
-# (voxtype-signals).
-parakeet-rs = { git = "https://github.com/oysteinkrog/parakeet-rs", rev = "a6e79312871f76de0ac89196a4baaff0b50919e6" }
+# (voxtype-signals), and decode_tail for the tail ticks between steps.
+parakeet-rs = { git = "https://github.com/oysteinkrog/parakeet-rs", rev = "30091c75e74b762be020f54fbc531c7e18f39c9a" }

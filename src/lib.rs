@@ -98,8 +98,8 @@ pub mod tui;
 pub mod vad;
 
 pub use cli::{
-    Cli, Commands, CompositorType, ConfigAction, InfoAction, MeetingAction, OutputModeOverride,
-    RecordAction, SetupAction,
+    Cli, Commands, CompositorType, ConfigAction, GlossaryAction, InfoAction, MeetingAction,
+    OutputModeOverride, RecordAction, SetupAction,
 };
 pub use config::Config;
 pub use daemon::Daemon;

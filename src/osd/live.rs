@@ -436,13 +436,20 @@ pub fn signals(step: SignalsStep) {
 
 /// A new preview text. On the first one of a dictation, looks up the app
 /// that will receive the text on another thread.
-pub fn preview(text: &str) {
+///
+/// Returns the text to show: `text` itself, or with the spoken corrections
+/// made when the dictation has any.
+pub fn preview(text: &str) -> String {
     let mut first = None;
+    let mut shown = text.to_string();
     with_live(|live| {
         let timed = live.timed.take();
         let details = live.details.take();
         live.raw = Some((text.to_string(), timed, details));
         render(live, true);
+        if live.doc.correction.is_some() {
+            shown = live.doc.text.clone();
+        }
         first = (live.doc.rev == 1).then_some(live.session);
     });
     if let Some(session) = first {
@@ -452,6 +459,7 @@ pub fn preview(text: &str) {
             }
         });
     }
+    shown
 }
 
 /// Puts the newest preview in the doc with the spoken corrections made.
@@ -498,9 +506,15 @@ fn render(live: &mut Live, fresh: bool) {
 }
 
 /// A spoken correction started, ended or was dropped: show the text and
-/// the correction afresh.
-pub fn refresh_correction() {
-    with_live(|live| render(live, false));
+/// the correction afresh. Returns the text to show, None before the first
+/// preview.
+pub fn refresh_correction() -> Option<String> {
+    let mut shown = None;
+    with_live(|live| {
+        render(live, false);
+        shown = live.raw.is_some().then(|| live.doc.text.clone());
+    });
+    shown
 }
 
 pub fn status(phase: Phase, fraction: Option<f64>, text: &str) {

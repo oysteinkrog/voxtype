@@ -78,6 +78,8 @@ pub(crate) struct State {
     /// style and the width stay the same: on room tone every view would lay
     /// out the same text again.
     laid: RefCell<Option<Rc<Laid>>>,
+    /// The voice as the forming cue reads it.
+    pub(crate) voice: super::forming::Voice,
 }
 
 impl Default for State {
@@ -93,6 +95,7 @@ impl Default for State {
             placed: Vec::new(),
             stopped_after: None,
             laid: RefCell::new(None),
+            voice: Default::default(),
         }
     }
 }
@@ -117,7 +120,7 @@ impl Popup {
     }
 
     fn hearing_any(&self) -> bool {
-        [PRE_ECHO, PAUSE_MARKS, EXHALE]
+        [PRE_ECHO, PAUSE_MARKS, EXHALE, super::forming::FORMING]
             .iter()
             .any(|n| self.hearing_on(n))
     }
@@ -136,6 +139,7 @@ impl Popup {
         if self.received < x.fed {
             *x = State::default();
         }
+        let (was_active, was_voiced) = (x.voice.active(), x.voice.voiced());
         let bus = self.signals.get();
         if !x.bus && !bus.is_empty() {
             x.bus = true;
@@ -146,17 +150,27 @@ impl Popup {
             for (_, f) in bus.frames().filter(|(_, f)| f.clock > after) {
                 let level = ((f.rms_dbfs + 60.0) / 60.0).clamp(0.0, 1.0);
                 x.hearing.hear(f.clock, level, Some(f.onset));
+                let t = *x.hearing.tune();
+                x.voice.hear(f.clock, level, t.voice, t.quiet);
             }
         } else {
             let new = (self.received - x.fed) as usize;
             let n = self.levels.len();
             for (i, &l) in self.levels.iter().skip(n.saturating_sub(new)).enumerate() {
                 let index = self.received - new.min(n) as u64 + i as u64;
-                x.hearing
-                    .hear(index as f64 / FRAME_HZ as f64, l as f32, None);
+                let clock = index as f64 / FRAME_HZ as f64;
+                x.hearing.hear(clock, l as f32, None);
+                let t = *x.hearing.tune();
+                x.voice.hear(clock, l as f32, t.voice, t.quiet);
             }
         }
         x.fed = self.received;
+        if !was_active && x.voice.active() {
+            super::forming::note_voice(self.extra.now, true);
+        }
+        if was_voiced && !x.voice.voiced() {
+            super::forming::note_voice(self.extra.now, false);
+        }
 
         // The words: blobs before the newest word's end are read.
         let words = self.model.words();
@@ -166,6 +180,15 @@ impl Popup {
             .filter_map(|w| self.model.info(w.id).and_then(|i| i.end))
             .fold(None, |m: Option<f32>, e| Some(m.map_or(e, |m| m.max(e))));
         let before: Vec<u64> = read_ids(&x.hearing);
+        // Words explain the audio to their end, but never past what was heard
+        // when they came: a word clock that runs ahead of the audio clock
+        // would otherwise hide the cue for good.
+        let heard = x.hearing.clock().unwrap_or(0.0) - UNTIMED_LAG;
+        match until {
+            Some(e) if new_words > 0 => x.voice.explain((e as f64).min(heard)),
+            None if new_words > 0 => x.voice.explain(heard),
+            _ => {}
+        }
         match until {
             Some(e) => x.hearing.read_until(e as f64, new_words),
             None if new_words > 0 => x.hearing.read_untimed(new_words, UNTIMED_LAG),
@@ -300,7 +323,9 @@ impl Popup {
         let laid = self.laid(style, width);
         let mut out = Vec::new();
 
-        if self.hearing_on(PRE_ECHO) && listening {
+        // The forming cue marks the same place, in the look's own way.
+        let forming = self.look.on(super::forming::FORMING);
+        if self.hearing_on(PRE_ECHO) && listening && !forming {
             let (caret, room) = laid.caret(width);
             // Each read blob goes to the box of the word it was handed to;
             // under reduced motion it only fades where it is.

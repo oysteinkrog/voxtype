@@ -9,10 +9,16 @@
 //! 0.1 s. A later reflow (a wrap, a scroll) moves a word that had already
 //! settled, so it does not count. Prints the median, 90th percentile and
 //! largest of each in milliseconds, and the word count.
+//!
+//! `--forming-latency` follows the forming cue (LAT-5) instead: how long
+//! after each voice onset its first frame comes, whether it ever overlaps a
+//! word glyph (committed or ghost), and whether it shows later than 150 ms
+//! into a quiet.
 
 use std::collections::HashMap;
 
 use vo::scene::display::{DisplayList, ItemKind, NO_WORD};
+use vo::scene::geom::Rect;
 use vo::scene::geom::Point;
 use vo::{FontRegistry, Options};
 
@@ -152,6 +158,121 @@ pub(crate) fn run(look: Look, fonts: FontRegistry, fps: f64, moment: Option<&str
         ms(&settled, 0.5),
         ms(&settled, 0.9),
         ms(&settled, 1.0),
+    );
+    Ok(())
+}
+
+/// The forming cue's rects in `list` (the probe draws it in
+/// `forming::PROBE_INK`), and how many glyphs with ink they overlap.
+fn cue_in(t: f64, list: &DisplayList) -> (Vec<Rect>, usize) {
+    let mut opacity = vec![1.0f32; list.layers.len()];
+    for (i, l) in list.layers.iter().enumerate() {
+        let parent = l.parent.map_or(1.0, |p| opacity[p as usize]);
+        opacity[i] = parent * l.opacity;
+    }
+    let mut cues = Vec::new();
+    let mut glyphs = Vec::new();
+    for (li, l) in list.layers.iter().enumerate() {
+        for item in &list.items[l.items.start as usize..l.items.end as usize] {
+            let range = item.start as usize..(item.start + item.len) as usize;
+            match item.kind {
+                ItemKind::Shapes => {
+                    for sh in &list.shapes[range] {
+                        let c = sh.fill.c0;
+                        if c.r == 0.0 && c.g == 1.0 && c.b == 0.0 && c.a > 0.0 && opacity[li] > 0.0 {
+                            let [x, y, w, h] = sh.geom;
+                            let a = l.transform.apply(Point::new(x, y));
+                            let b = l.transform.apply(Point::new(x + w, y + h));
+                            cues.push(Rect::new(a.x.min(b.x), a.y.min(b.y), (b.x - a.x).abs(), (b.y - a.y).abs()));
+                        }
+                    }
+                }
+                ItemKind::Glyphs => {
+                    for g in &list.glyphs[range] {
+                        if g.color.a * opacity[li] < 0.05 {
+                            continue;
+                        }
+                        let p = l.transform.apply(Point::new(g.pos.x + g.xform.offset.x, g.pos.y + g.xform.offset.y));
+                        let o = l.transform.apply(Point::new(0.0, 0.0));
+                        let s = g.size * (l.transform.apply(Point::new(1.0, 0.0)).x - o.x).abs();
+                        glyphs.push((g.word < TRANSCRIPT_IDS, s, Rect::new(p.x, p.y - 0.75 * s, 0.5 * s, 0.95 * s)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // One pixel of touching is not an overlap.
+    let hit = |a: &Rect, b: &Rect| {
+        a.x + 1.0 < b.x + b.w && b.x + 1.0 < a.x + a.w && a.y + 1.0 < b.y + b.h && b.y + 1.0 < a.y + a.h
+    };
+    // Committed words carry their id; a ghost is a label in the same size.
+    let sizes: Vec<f32> = glyphs.iter().filter(|g| g.0).map(|g| g.1).collect();
+    let text = |g: &(bool, f32, Rect)| g.0 || sizes.iter().any(|s| (g.1 - s).abs() < 0.05 * s);
+    let glyphs: Vec<Rect> = glyphs.iter().filter(|g| text(g)).map(|g| g.2).collect();
+    let overlaps = glyphs.iter().filter(|g| cues.iter().any(|c| hit(c, g))).count();
+    if overlaps > 0 && std::env::var("VO_FORMING_DEBUG").is_ok() {
+        for g in glyphs.iter().filter(|g| cues.iter().any(|c| hit(c, g))) {
+            eprintln!("overlap t={t:.3} glyph {:?} cues {:?}", g, cues);
+        }
+    }
+    (cues, overlaps)
+}
+
+pub(crate) fn forming(look: Look, fonts: FontRegistry, fps: f64, moment: Option<&str>) -> anyhow::Result<()> {
+    super::forming::start_probe();
+    let scenario = match moment {
+        Some(name) => {
+            let m = super::moments::Moment::parse(name).ok_or_else(|| {
+                anyhow::anyhow!("no moment {name:?}; the moments are {}", super::moments::Moment::names())
+            })?;
+            super::moments::scenario(&look, m)
+        }
+        None => scenario(&look, false),
+    };
+    let options = Options {
+        fonts: fonts.clone(),
+        default_motion: default_motion(&look),
+        ..Options::default()
+    };
+    let mut shown = Vec::new();
+    let mut overlaps = 0usize;
+    vo::envelope::sample_scenario(Popup::new(look.clone(), &fonts), &scenario, fps, options, &mut |_, t, list| {
+        let (cues, o) = cue_in(t, list);
+        overlaps += o;
+        if !cues.is_empty() {
+            shown.push(t);
+        }
+    });
+    let events = super::forming::take_onsets();
+    let onsets: Vec<f64> = events.iter().filter(|e| e.1).map(|e| e.0).collect();
+    let mut lat = Vec::new();
+    for &o in &onsets {
+        match shown.iter().find(|&&t| t >= o - 1e-9) {
+            Some(t) => lat.push(t - o),
+            None => lat.push(f64::INFINITY),
+        }
+    }
+    // Shown later than 150 ms (plus one frame) into a quiet that no voice ended.
+    let mut late = 0;
+    for (i, &(q, onset)) in events.iter().enumerate() {
+        if onset {
+            continue;
+        }
+        let until = events[i + 1..].iter().find(|e| e.1).map_or(f64::INFINITY, |e| e.0);
+        let from = q + super::forming::FADE_SECS + 1.0 / fps;
+        late += shown.iter().filter(|&&t| t > from && t < until).count();
+    }
+    let ms: Vec<String> = lat.iter().map(|l| format!("{:.0}", l * 1000.0)).collect();
+    println!(
+        "forming-latency: {:?} onsets={} latency_ms=[{}] max={:.0} ms; cue frames={}; glyph overlaps={}; frames past the quiet fade={}",
+        look.theme,
+        onsets.len(),
+        ms.join(","),
+        lat.iter().cloned().fold(0.0, f64::max) * 1000.0,
+        shown.len(),
+        overlaps,
+        late,
     );
     Ok(())
 }

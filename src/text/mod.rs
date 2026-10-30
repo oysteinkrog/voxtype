@@ -5,6 +5,8 @@
 //! - Custom word replacements
 
 pub mod align;
+pub mod learn;
+pub mod spell;
 
 use crate::config::TextConfig;
 use regex::Regex;
@@ -16,6 +18,9 @@ pub struct TextProcessor {
     spoken_punctuation: bool,
     /// Custom word replacements (lowercase key → replacement value)
     replacements: HashMap<String, String>,
+    /// Rules learned from spoken corrections ([`learn`]), without the keys
+    /// `replacements` has: hand rules win.
+    learned: HashMap<String, String>,
     /// Whether smart auto-submit is enabled
     smart_auto_submit: bool,
     /// Pre-compiled regex for submit trigger detection
@@ -136,6 +141,7 @@ impl TextProcessor {
         Self {
             spoken_punctuation: config.spoken_punctuation,
             replacements,
+            learned: HashMap::new(),
             smart_auto_submit: config.smart_auto_submit,
             submit_re,
             filter_filler_words: config.filter_filler_words,
@@ -161,7 +167,7 @@ impl TextProcessor {
         // Apply replacements first so phrases containing spoken punctuation words
         // (e.g. "slash pr" → "/pr") match before those words are converted to
         // punctuation characters.
-        if !self.replacements.is_empty() {
+        if !self.replacements.is_empty() || !self.learned.is_empty() {
             result = self.apply_replacements(&result);
         }
 
@@ -171,7 +177,7 @@ impl TextProcessor {
 
         // Apply replacements again to catch patterns that only became matchable
         // after spoken punctuation conversion.
-        if !self.replacements.is_empty() {
+        if !self.replacements.is_empty() || !self.learned.is_empty() {
             result = self.apply_replacements(&result);
         }
 
@@ -318,11 +324,30 @@ impl TextProcessor {
             .to_string()
     }
 
-    /// Apply custom word replacements (case-insensitive)
+    /// Sets the rules learned from spoken corrections, in place of the ones
+    /// set before. A rule whose words `replacements` has is left out.
+    pub fn set_learned(&mut self, rules: impl IntoIterator<Item = (String, String)>) {
+        self.learned = rules
+            .into_iter()
+            .map(|(from, to)| (from.to_lowercase(), to))
+            .filter(|(from, _)| !self.replacements.contains_key(from))
+            .collect();
+    }
+
+    /// Adds one learned rule, unless `replacements` has its words.
+    pub fn learn(&mut self, from: &str, to: &str) {
+        let from = from.to_lowercase();
+        if !self.replacements.contains_key(&from) {
+            self.learned.insert(from, to.to_string());
+        }
+    }
+
+    /// Apply custom word replacements (case-insensitive), then the learned
+    /// ones.
     fn apply_replacements(&self, text: &str) -> String {
         let mut result = text.to_string();
 
-        for (word, replacement) in &self.replacements {
+        for (word, replacement) in self.replacements.iter().chain(&self.learned) {
             result = replace_phrase_case_insensitive(&result, word, replacement);
         }
 
@@ -502,6 +527,27 @@ mod tests {
 
         assert_eq!(processor.process("hello PERIOD"), "hello.");
         assert_eq!(processor.process("hello Period"), "hello.");
+    }
+
+    #[test]
+    fn learned_rules_apply_and_hand_rules_win() {
+        let mut processor = TextProcessor::new(&make_config(false, &[("glim bot", "Glimbot")]));
+        processor.set_learned([
+            ("glim bot".to_string(), "GlimBot".to_string()),
+            ("blue barrel".to_string(), "blueberry".to_string()),
+        ]);
+        assert_eq!(
+            processor.process("a glim bot ate a blue barrel"),
+            "a Glimbot ate a blueberry"
+        );
+        processor.learn("zed nine", "Zed9");
+        processor.learn("Glim Bot", "GLIMBOT");
+        assert_eq!(
+            processor.process("zed nine and glim bot"),
+            "Zed9 and Glimbot"
+        );
+        processor.set_learned([]);
+        assert_eq!(processor.process("zed nine"), "zed nine");
     }
 
     #[test]

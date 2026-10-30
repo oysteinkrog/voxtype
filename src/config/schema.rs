@@ -1915,6 +1915,17 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
     .for_engine("parakeet")
     .gated("parakeet"),
     spec(
+        "parakeet.streaming_tail_secs",
+        "parakeet",
+        "streaming_tail_secs",
+        KeyType::Float { min: 0.0, max: 60.0 },
+        "Advanced",
+        "Live tail interval",
+        "Seconds of audio between new lookahead tails in the live preview; 0 is off.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
+    spec(
         "streaming.interval_secs",
         "streaming",
         "interval_secs",
@@ -2759,6 +2770,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(secs) => json!(secs),
             None => json!(centi(StreamingWindow::default().right_secs())),
         },
+        "parakeet.streaming_tail_secs" => json!(pk().streaming_tail_secs()),
         "streaming.interval_secs" => json!(cfg.streaming.unwrap_or_default().interval_secs),
         "streaming.max_buffer_secs" => json!(cfg.streaming.unwrap_or_default().max_buffer_secs),
         "streaming.min_speech_rms" => json!(cfg.streaming.unwrap_or_default().min_speech_rms),

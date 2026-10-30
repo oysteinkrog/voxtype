@@ -22,6 +22,24 @@ pub struct TextConfig {
     #[serde(default)]
     pub replacements_file: Option<String>,
 
+    /// Learn words from spoken corrections: log each one and turn a pair
+    /// seen twice (or a name, seen once) into a rule in
+    /// `learned_words_file`. Defaults to true; corrections only happen with
+    /// a correction key.
+    #[serde(default = "default_true")]
+    pub learn_corrections: bool,
+
+    /// Where spoken corrections are logged, one JSON line each.
+    /// Default: ~/.local/share/voxtype/corrections.jsonl. `~/` is expanded.
+    #[serde(default)]
+    pub corrections_log: Option<String>,
+
+    /// Where learned words are kept, as `"from" = "to"` lines. `replacements`
+    /// and `replacements_file` win over it.
+    /// Default: ~/.local/share/voxtype/words-learned.toml. `~/` is expanded.
+    #[serde(default)]
+    pub learned_words_file: Option<String>,
+
     /// Smart auto-submit: say "submit" at the end of dictation to press Enter.
     /// The word "submit" is stripped from the output and Enter is pressed.
     #[serde(default)]
@@ -46,11 +64,18 @@ impl Default for TextConfig {
             spoken_punctuation: false,
             replacements: HashMap::new(),
             replacements_file: None,
+            learn_corrections: true,
+            corrections_log: None,
+            learned_words_file: None,
             smart_auto_submit: false,
             filter_filler_words: true,
             filler_words: default_filler_words(),
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Default filler-word list. Conservative: single-syllable disfluencies only.

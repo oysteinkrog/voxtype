@@ -149,6 +149,10 @@ mod lifecycle;
 mod ruler;
 #[path = "osd_vo/model_signals.rs"]
 mod model_signals;
+#[path = "osd_vo/forming.rs"]
+mod forming;
+#[path = "osd_vo/correction_note.rs"]
+mod correction_note;
 
 /// Counts live heap bytes, for the own-heap figure in the diagnostics.
 struct Counting;
@@ -311,6 +315,12 @@ struct Args {
     /// `--motion` and `VO_REDUCED_MOTION=1`. Needs no GPU, display or daemon.
     #[arg(long, hide = true)]
     entry_latency: bool,
+
+    /// As `--entry-latency`, for the forming cue: how long after each voice
+    /// onset it first shows, its glyph overlaps and its frames past the
+    /// 150 ms quiet fade.
+    #[arg(long, hide = true)]
+    forming_latency: bool,
 
     /// Run the scripted dictation of `--offline` (or `--moment NAME`) with
     /// no PNGs and check that the popup's exit settles before vo's exit
@@ -1417,6 +1427,8 @@ struct Popup {
     model_signals: Option<voxtype::osd::live::ModelSignals>,
     /// What the model signal features keep between steps.
     signal_state: model_signals::State,
+    /// The outcome of the newest spoken correction, while it shows.
+    correction_note: correction_note::State,
 }
 
 impl Popup {
@@ -1434,6 +1446,7 @@ impl Popup {
             signals: SignalsCell::default(),
             model_signals: None,
             signal_state: model_signals::State::default(),
+            correction_note: correction_note::State::default(),
             recorder: None,
             measure: vo::ShapedLayout::new(fonts.clone()),
             levels: VecDeque::new(),
@@ -1496,6 +1509,11 @@ impl Popup {
         }
     }
 
+    /// The daemon's spoken correction state, when it has one.
+    fn correction_view(&self) -> Option<&voxtype::osd::correction::CorrectionView> {
+        self.files.live.as_ref()?.correction.as_ref()
+    }
+
     fn status(&self) -> StatusLine {
         if self
             .picked_at
@@ -1504,6 +1522,16 @@ impl Popup {
             return StatusLine {
                 state: format!("{:?}", self.look.theme),
                 detail: String::new(),
+                loading: false,
+                finishing: false,
+            };
+        }
+        if let Some((state, detail)) =
+            correction_note::status(self.correction_view(), &self.correction_note, self.extra.now)
+        {
+            return StatusLine {
+                state,
+                detail,
                 loading: false,
                 finishing: false,
             };
@@ -1871,6 +1899,13 @@ impl App for Popup {
                     self.word_info();
                     self.note_doubtful(t);
                 }
+                if live_changed {
+                    let view = self.files.live.as_ref().and_then(|l| l.correction.as_ref());
+                    if let Some(wait) = self.correction_note.files(view, t) {
+                        // Drawn again when the outcome leaves the status row.
+                        cx.after(wait + 0.01, Msg::Loop);
+                    }
+                }
                 if let Some(step) = step {
                     self.step_look(step.forward, t, cx);
                 }
@@ -1974,6 +2009,7 @@ impl App for Popup {
         // Each look hangs under a node named for it, so a look switch drops
         // the old look whole at once: no exit of it, its status row
         // included, draws over the new look.
+        let look = correction_note::dim(look, self.correction_view());
         let look = Element::column(format!("look-{:?}", self.look.theme)).child(look);
         // The shift and the taller panel come in the same frame, on a
         // surface that keeps its size, so the reading line never moves.
@@ -2476,6 +2512,9 @@ fn main() -> anyhow::Result<()> {
     }
     if args.entry_latency {
         return entry_latency::run(look, fonts, args.fps, args.moment.as_deref());
+    }
+    if args.forming_latency {
+        return entry_latency::forming(look, fonts, args.fps, args.moment.as_deref());
     }
     if args.exit_check {
         return exit_check(look, fonts, args.fps, args.cancel, args.moment.as_deref());

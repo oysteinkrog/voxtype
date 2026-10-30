@@ -364,10 +364,35 @@ impl Popup {
         ink: Color,
     ) -> Element<Msg> {
         let width = tail.width;
-        if !self.signals_on() {
+        let forming = self.forming_on() && self.hearing.voice.active();
+        if !forming {
+            // A loading line's end is for this call's cue only.
+            self.hearing.voice.hint.set(None);
+        }
+        if !self.signals_on() && !forming {
             return text;
         }
         let mut text = text;
+        if forming {
+            // After the ghost tail when there is one, else after the words.
+            let none = ModelSignals {
+                with_tail: self.files.preview.trim().to_string(),
+                ..ModelSignals::default()
+            };
+            let s = self.live_signals().unwrap_or(&none);
+            // A tail that is out of step with the words is left out.
+            let (laid, tail_end) = match self.tail_layout(s, words, tail) {
+                Some(l) => (Some(l), s.tail.last().map(|t| t.end as f64)),
+                None => (self.tail_layout(&none, words, tail), None),
+            };
+            let end = laid.map_or((0.0, 0.0), |l| l.tail_end);
+            if let Some(e) = self.forming_mark(words, end, tail_end, tail, origin, ink) {
+                text = text.child(e);
+            }
+        }
+        if !self.signals_on() {
+            return text;
+        }
         for e in self.graded_doubt(words, width, origin) {
             text = text.child(e);
         }
@@ -408,7 +433,8 @@ impl Popup {
         // On room tone the tail is empty: with only the ghost tail on there
         // is nothing to lay out.
         let ends = [COMMIT_CURSOR, BREATHING_STOP, PRE_ECHO_LETTERS];
-        if s.tail.is_empty() && !ends.iter().any(|f| self.look.on(f)) {
+        let forming = self.forming_on() && self.hearing.voice.active();
+        if s.tail.is_empty() && !forming && !ends.iter().any(|f| self.look.on(f)) {
             return None;
         }
         let committed = self.files.preview.trim();
@@ -553,7 +579,9 @@ impl Popup {
         for (i, w) in words.iter().enumerate() {
             let range = start..start + w.text.len();
             start = range.end + 1;
-            let Some(d) = self.word_detail(i) else { continue };
+            let Some(d) = self.word_detail(i) else {
+                continue;
+            };
             let k = ((d.entropy - DOUBT_FROM) / (DOUBT_FULL - DOUBT_FROM)).clamp(0.0, 1.0);
             if d.entropy < DOUBT_FROM {
                 continue;
@@ -616,7 +644,9 @@ impl Popup {
             let range = start..start + w.text.len();
             start = range.end + 1;
             let Some(age) = born(w.id) else { continue };
-            let Some(d) = self.word_detail(i) else { continue };
+            let Some(d) = self.word_detail(i) else {
+                continue;
+            };
             let Some(twin) = d.runner_up.as_deref().map(str::trim) else {
                 continue;
             };
@@ -701,7 +731,11 @@ impl Popup {
                     continue;
                 }
                 let age = ((now - at) / CHANGE_SECS) as f32;
-                let (fade, rise) = if reduced { (0.7, 0.0) } else { (1.0 - age, 4.0 * age) };
+                let (fade, rise) = if reduced {
+                    (0.7, 0.0)
+                } else {
+                    (1.0 - age, 4.0 * age)
+                };
                 let e = Element::label(format!("change-{p}-{old}"), old.clone())
                     .text_style(style)
                     .color(ink)
@@ -709,7 +743,11 @@ impl Popup {
                 out.push(kit::at(e, origin.0 + g.pos.x, origin.1 + top - rise));
             }
         }
-        let n = st.flickers.iter().filter(|&&f| now - f < FLICKER_SECS).count();
+        let n = st
+            .flickers
+            .iter()
+            .filter(|&&f| now - f < FLICKER_SECS)
+            .count();
         if n > 0 && !words.is_empty() {
             let tint = (FLICKER_INK * n as f32).min(FLICKER_MAX);
             let h = self.lines as f32 * style.line_height;
@@ -795,7 +833,10 @@ impl Popup {
             let top = first.pos.y - style.size * 0.8;
             let h = style.size * 1.0;
             let ring = Element::shape(format!("burst-{}", w.id), ShapeKind::RRect)
-                .size(last.pos.x + last.advance - first.pos.x + 2.0 * grow, h + 2.0 * grow)
+                .size(
+                    last.pos.x + last.advance - first.pos.x + 2.0 * grow,
+                    h + 2.0 * grow,
+                )
                 .radius(h * 0.5 + grow)
                 .stroke(l.accent.fade(ink), 1.5);
             out.push(kit::at(
@@ -887,7 +928,11 @@ impl Popup {
                 .motion(Prop::Position, spring)
                 .motion(Prop::Size, spring)
                 .presence(Transition::fade(), Transition::fade());
-            out.push(kit::at(e, origin.0 + x0 + CURSOR_GAP, origin.1 + t0 + inset + h));
+            out.push(kit::at(
+                e,
+                origin.0 + x0 + CURSOR_GAP,
+                origin.1 + t0 + inset + h,
+            ));
         }
         out
     }
@@ -1042,7 +1087,10 @@ mod tests {
         let w = |t: &str| place_words(t);
         let old = w("This is a longer test on");
         // "on" was a guess (place 5, after 5 committed words).
-        assert_eq!(changed_places(&old, 5, &w("This is a longer test of voice")), vec![5]);
+        assert_eq!(
+            changed_places(&old, 5, &w("This is a longer test of voice")),
+            vec![5]
+        );
         assert!(changed_places(&old, 5, &w("This is a longer test on voice")).is_empty());
         assert!(changed_places(&old, 5, &w("This is a longer test")).is_empty());
         // A full stop that comes and goes changes no word.

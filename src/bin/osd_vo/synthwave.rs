@@ -959,6 +959,18 @@ impl Popup {
             }
             column = column.child(row);
         }
+        if lines.is_empty() {
+            // No line yet: the forming cue where the first one goes, from
+            // the middle of the row.
+            let tail = model_signals::TailText {
+                style,
+                width: width / 2.0,
+                rows: 1,
+            };
+            let slot = Element::layer("forming-slot")
+                .size(l.width, style.line_height);
+            column = column.child(self.signal_marks_in(slot, &[], &tail, (l.width / 2.0, 0.0), hex(WHITE)));
+        }
         column
     }
 

@@ -350,6 +350,37 @@ look_chord = false  # Ctrl+Ctrl+Up/Down never switches the popup's look
 
 **Note:** This only applies when using evdev hotkey detection (`enabled = true`).
 
+### correction_key
+
+**Type:** String (evdev key name)
+**Default:** unset (corrections off)
+**Required:** No
+**CLI:** `--correction-key KEY` · **Env:** `VOXTYPE_CORRECTION_KEY`
+
+Lets you fix a misheard word while you dictate. Hold the key, say the right words, and let go. Voxtype replaces the words on screen that sound most like what you said, among the words you said before the hold. "franken term" said again as "FrankenTerm" replaces the two words with one. The popup dims the live words while you hold the key, and its status row shows the words it hears. When you let go, it shows `old → new`, or "Not changed" with the reason: no match, two places fit, or too short to place. The pasted text gets the same change.
+
+Taps and double taps of the key keep their meaning, so the key can be your `double_tap_alt_key`. Only a hold counts: at least `correction_hold_ms` with no other key pressed. Pressing any other key during the hold (Shift for a capital, a shortcut) drops the correction, and the words you said stay part of the dictation. A stop or discard double tap during the hold applies the correction first.
+
+Corrections need `live_preview_model`, because they work on its timed words. They do not work with `live_typing`, which has already typed the words. Holds outside a recording do nothing.
+
+**Example:**
+```toml
+[hotkey]
+double_tap = true
+key = "RIGHTCTRL"
+double_tap_alt_key = "RIGHTSHIFT"
+correction_key = "RIGHTSHIFT"   # tap twice: paste only; hold: correct
+```
+
+### correction_hold_ms
+
+**Type:** Integer (milliseconds)
+**Default:** `450`
+**Required:** No
+**CLI:** `--correction-hold-ms MS` · **Env:** `VOXTYPE_CORRECTION_HOLD_MS`
+
+How long `correction_key` must be held before a correction starts. The correction itself starts at key-down, so words you say during the wait count. With `double_tap = true` the value is raised to at least `double_tap_ms` + 150, so a slow tap never starts a correction.
+
 ---
 
 ## [audio]
@@ -1445,6 +1476,38 @@ the word error rate rose to 2.41 % and it dropped 18 words, once a run of 12.
 streaming_left_context_secs = 5.6
 streaming_chunk_secs = 0.56
 streaming_right_context_secs = 0.56
+```
+
+### streaming_tail_secs
+
+**Type:** Float (seconds)
+**Default:** `0.24`
+**Required:** No
+
+How often the live preview decodes a new lookahead tail between two streaming
+steps, in seconds of audio. The tail is the dim guess the popup shows after the
+committed words (`ghost-tail`). Without ticks it changes once a step, every
+`streaming_chunk_secs`. Each tick runs the encoder once more on the audio heard
+so far and decodes everything after the committed words. The committed words
+and the final text do not change.
+
+- `0` turns the ticks off: one tail per step, as before.
+- Each tick costs about as much CPU as a step. On 7 test clips with the default
+  window, the live worker used 0.63 s of CPU per second of audio with no ticks,
+  1.23 s at `0.24` and 1.45 s at `0.16`.
+- When a tick takes more than 60 % of its interval twice in a row, the worker
+  stops the ticks for that recording and logs
+  `Tail ticks take ... ms of ... ms; one tail per step from now on`. On a slow
+  CPU this keeps the preview at the step cadence.
+- No tick runs when the next step is less than half an interval away.
+
+The worker logs the ticks of each recording, for example
+`Tail ticks: 14 in 4.75s of audio, 81.4 ms each`.
+
+**Example:**
+```toml
+[parakeet]
+streaming_tail_secs = 0     # one tail per step
 ```
 
 ### Complete Example
@@ -3048,6 +3111,40 @@ A separate TOML file of `"from" = "to"` lines, added to `replacements`. Use it t
 ```toml
 [text]
 replacements_file = "~/private/voxtype-words.toml"
+```
+
+### learn_corrections
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+Learn words from spoken corrections (see `correction_key`). Each correction that changes the pasted text is written to `corrections_log`. When the same fix is made a second time, it becomes a rule in `learned_words_file` and applies from then on, like a `replacements` entry. A fix whose right words look like a name (an inner capital such as "GlimBot", a digit, all capitals, or a letter outside ASCII) is learned the first time, and so is a spelled word (a hold that starts with "spell", then NATO alphabet words or plain letters, with "capital" before a letter for upper case). The popup says "Learned" instead of "Corrected" when a correction will be learned.
+
+A fix that only adds words ("test" corrected to "quiet test") is never learned, since the rule would rewrite every "test". `replacements` and `replacements_file` win over a learned rule with the same words. Learned words only change the output text: they are not sent to a transcription engine or a post-processing command as a word list.
+
+List the learned words with `voxtype glossary learned`, and remove one with `voxtype glossary forget <words>`. A removed word stops at the next recording.
+
+### corrections_log
+
+**Type:** String (path)
+**Default:** `~/.local/share/voxtype/corrections.jsonl`
+**Required:** No
+
+Where spoken corrections are logged, one JSON line each: the time, the wrong and right words, the live text, the final engine's text, the pasted text, and the hold's start and end in seconds. No audio is kept. A leading `~/` is expanded.
+
+### learned_words_file
+
+**Type:** String (path)
+**Default:** `~/.local/share/voxtype/words-learned.toml`
+**Required:** No
+
+Where learned words are kept, as `"from" = "to"` lines in the same form as `replacements_file`. You can edit it by hand. A leading `~/` is expanded.
+
+```toml
+[text]
+corrections_log = "~/private/voxtype/corrections.jsonl"
+learned_words_file = "~/private/voxtype/words-learned.toml"
 ```
 
 ### smart_auto_submit

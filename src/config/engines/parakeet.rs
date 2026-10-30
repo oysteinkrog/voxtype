@@ -58,7 +58,20 @@ pub struct ParakeetConfig {
     /// Rounded to whole 0.08 s steps. Absent: parakeet-rs's default (0.56 s).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub streaming_right_context_secs: Option<f32>,
+
+    /// How often the live preview's lookahead tail (the dim guess after the
+    /// committed words) is decoded again between two streaming steps, in
+    /// seconds of audio. Each tick is one extra encoder run; committed text
+    /// does not change. 0 turns the ticks off: the tail then changes once a
+    /// step. Absent: [`DEFAULT_STREAMING_TAIL_SECS`]. A tick that takes
+    /// more than 60 % of its interval twice in a row stops the ticks for
+    /// that recording.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub streaming_tail_secs: Option<f32>,
 }
+
+/// `streaming_tail_secs` when the key is absent.
+pub const DEFAULT_STREAMING_TAIL_SECS: f32 = 0.24;
 
 /// Seconds per encoder output frame of the cache-aware Parakeet models:
 /// 8 mel frames of 10 ms. Every streaming window size must be a whole
@@ -163,6 +176,17 @@ impl ParakeetConfig {
         Ok(window)
     }
 
+    /// `streaming_tail_secs`, or its default; 0 for off. Out of range (not
+    /// 0 to 60 s) is off, with a note in the worker's log.
+    pub fn streaming_tail_secs(&self) -> f32 {
+        let secs = self.streaming_tail_secs.unwrap_or(DEFAULT_STREAMING_TAIL_SECS);
+        if secs.is_finite() && (0.0..=MAX_STREAMING_SECS).contains(&secs) {
+            secs
+        } else {
+            0.0
+        }
+    }
+
     /// The `streaming_*` keys whose value is not a whole number of steps, with
     /// the value it was rounded to, for a warning in the log.
     pub fn streaming_rounding_notes(&self) -> Vec<String> {
@@ -199,6 +223,7 @@ impl Default for ParakeetConfig {
             streaming_chunk_secs: None,
             streaming_left_context_secs: None,
             streaming_right_context_secs: None,
+            streaming_tail_secs: None,
         }
     }
 }
@@ -313,6 +338,27 @@ mod tests {
             "model = \"parakeet-unified-en-0.6b-int8\"\n{keys}"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn streaming_tail_secs_defaults_reads_and_turns_off() {
+        assert_eq!(
+            parakeet_section("").streaming_tail_secs(),
+            DEFAULT_STREAMING_TAIL_SECS
+        );
+        assert_eq!(
+            parakeet_section("streaming_tail_secs = 0.16").streaming_tail_secs(),
+            0.16
+        );
+        assert_eq!(
+            parakeet_section("streaming_tail_secs = 0").streaming_tail_secs(),
+            0.0
+        );
+        // Out of range is off rather than an error: the ticks are optional.
+        assert_eq!(
+            parakeet_section("streaming_tail_secs = -1").streaming_tail_secs(),
+            0.0
+        );
     }
 
     #[test]

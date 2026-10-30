@@ -456,7 +456,9 @@ impl Scene {
         if k <= 0.0 {
             return;
         }
-        p.layer(Affine::translate(o.x, o.y), k, |p| self.draw_content(t, g, p));
+        p.layer(Affine::translate(o.x, o.y), k, |p| {
+            self.draw_content(t, g, p)
+        });
     }
 
     fn draw_content(&self, t: f64, g: Geo, p: &mut Painter) {
@@ -568,10 +570,7 @@ impl Scene {
 
     fn draw_loading(&self, t: f64, g: Geo, p: &mut Painter) {
         let c = Point::new(23.0, g.h / 2.0);
-        p.stroke(
-            &make::ring(c, 8.0),
-            &StrokeStyle::solid(2.0, hex(TRACK)),
-        );
+        p.stroke(&make::ring(c, 8.0), &StrokeStyle::solid(2.0, hex(TRACK)));
         p.stroke(
             &make::spinner(c, 8.0, t - self.shown_at),
             &StrokeStyle::solid(2.0, hex(BLUE)),
@@ -593,7 +592,11 @@ impl Scene {
             let u = i as f32 / (n - 1) as f32;
             let d = (i as f32 - mid).abs();
             // The right side tapers faster, as in the mock-up.
-            let span = if (i as f32) < mid { mid } else { n as f32 - 1.0 - mid };
+            let span = if (i as f32) < mid {
+                mid
+            } else {
+                n as f32 - 1.0 - mid
+            };
             let reach = (d / span.max(1.0)).min(1.0);
             let s = t_eff - d as f64 * BAR_SECS;
             let level = self.level_at(s);
@@ -614,7 +617,10 @@ impl Scene {
                 c = mix(c, hex(DIM), 0.8).fade(0.6);
             }
             let r = Rect::new(x - 1.5, cy - half, 3.0, 2.0 * half);
-            p.shape(ShapeInstance::capsule(r, Paint::glow(c.fade(0.4), 3.0, 0.3)));
+            p.shape(ShapeInstance::capsule(
+                r,
+                Paint::glow(c.fade(0.4), 3.0, 0.3),
+            ));
             p.shape(ShapeInstance::capsule(r, Paint::solid(c)));
         }
     }
@@ -641,18 +647,25 @@ impl Scene {
             ));
         }
         p.shape(ShapeInstance::circle(c, r, Paint::solid(bg)));
-        let icon = |path: kurbo_path::BezPath, scale: f32, alpha: f32, colour: Color, p: &mut Painter| {
-            let o = Outline::new(&path, 0.05).transform(
-                &Affine::translate(-12.0, -12.0)
-                    .then(&Affine::scale(scale))
-                    .then(&Affine::translate(c.x, c.y)),
-            );
-            p.outline(&o, &StrokeStyle::solid(1.7 * scale, colour.fade(alpha)));
-        };
+        let icon =
+            |path: kurbo_path::BezPath, scale: f32, alpha: f32, colour: Color, p: &mut Painter| {
+                let o = Outline::new(&path, 0.05).transform(
+                    &Affine::translate(-12.0, -12.0)
+                        .then(&Affine::scale(scale))
+                        .then(&Affine::translate(c.x, c.y)),
+                );
+                p.outline(&o, &StrokeStyle::solid(1.7 * scale, colour.fade(alpha)));
+            };
         let unit = r / 24.0 * 0.95;
         if k < 1.0 {
             let mic = icons::mic();
-            icon(mic, unit * (1.0 - 0.4 * k.min(1.0)), 1.0 - k.min(1.0), hex(ICON), p);
+            icon(
+                mic,
+                unit * (1.0 - 0.4 * k.min(1.0)),
+                1.0 - k.min(1.0),
+                hex(ICON),
+                p,
+            );
         }
         if k > 0.0 {
             // The check draws on as the circle turns green.
@@ -678,7 +691,11 @@ impl Scene {
             Mode::Done => {
                 let c = dot;
                 let a = self.status_alpha;
-                p.shape(ShapeInstance::circle(c, 5.0, Paint::solid(hex(GREEN).fade(a))));
+                p.shape(ShapeInstance::circle(
+                    c,
+                    5.0,
+                    Paint::solid(hex(GREEN).fade(a)),
+                ));
                 let o = Outline::new(&icons::check(), 0.05).transform(
                     &Affine::translate(-12.0, -12.0)
                         .then(&Affine::scale(0.3))
@@ -843,9 +860,11 @@ impl Popup {
                     .and_then(|d| d.target.as_ref())
                     .map(|t| t.app.clone());
                 match app {
-                    Some(app) if !app.is_empty() => {
-                        (self.delivery_word().to_string(), format!("  ·  into {app}"), hex(GREEN))
-                    }
+                    Some(app) if !app.is_empty() => (
+                        self.delivery_word().to_string(),
+                        format!("  ·  into {app}"),
+                        hex(GREEN),
+                    ),
                     _ => (self.delivery_word().to_string(), String::new(), hex(GREEN)),
                 }
             }
@@ -921,7 +940,12 @@ impl Popup {
 
         // Where the text and the status go, relative to the capsule.
         let (text_x, text_y, text_w, line_h) = if card {
-            (CARD_PAD_X, CARD_HEADER + 15.0, WIDTH - 2.0 * CARD_PAD_X, CARD_LINE)
+            (
+                CARD_PAD_X,
+                CARD_HEADER + 15.0,
+                WIDTH - 2.0 * CARD_PAD_X,
+                CARD_LINE,
+            )
         } else {
             (PILL_TEXT_X, PILL_PAD_TOP, pill_text_w(WIDTH), PILL_LINE)
         };
@@ -968,7 +992,12 @@ impl Popup {
             let style = card_style(l);
             let room = self.island_room(text_w, &style);
             self.island_last_line(&self.shown[..room], text_w, &style)
-                .map(|(ly, right)| (Point::new(text_x + right + 4.0, text_y + ly + 4.0), s.word_at))
+                .map(|(ly, right)| {
+                    (
+                        Point::new(text_x + right + 4.0, text_y + ly + 4.0),
+                        s.word_at,
+                    )
+                })
         } else {
             None
         };
@@ -1092,7 +1121,8 @@ impl Popup {
                 )
             };
         }
-        panel = panel.child(self.island_words(card, ox + text_x, oy + text_y, text_w, lines, opacity));
+        panel =
+            panel.child(self.island_words(card, ox + text_x, oy + text_y, text_w, lines, opacity));
         // While finishing the status is larger and has no dot, as in 03-finish.
         let row = |st: &StatusText, a: f32| {
             let (status_px, state_colour, lead) = if st.finishing {
@@ -1113,7 +1143,11 @@ impl Popup {
                 .child(
                     Element::label("detail", st.detail.replace("  ·  ", "   ·   "))
                         .text_style(style)
-                        .color(if st.done { hex(GREEN).fade(0.85) } else { hex(HINT) }),
+                        .color(if st.done {
+                            hex(GREEN).fade(0.85)
+                        } else {
+                            hex(HINT)
+                        }),
                 );
             at(row, ox + status_x + lead, oy + status_y + drop)
                 .opacity(opacity * a)
@@ -1142,9 +1176,22 @@ impl Popup {
         let label = if status.detail.trim().is_empty() {
             "Loading model".to_string()
         } else {
-            format!("{} {}", status.state, status.detail.trim_start_matches("  ·  "))
+            format!(
+                "{} {}",
+                status.state,
+                status.detail.trim_start_matches("  ·  ")
+            )
         };
-        Element::layer("loading")
+        // The forming cue after the label, as far as the percentage or the
+        // pill's end.
+        let from = ox + 42.0 + self.measure.layout(&label, &style, None).size.w + 4.0;
+        let to = ox + LOAD_W - if pct.is_empty() { 18.0 } else { 58.0 };
+        let tail = model_signals::TailText {
+            style,
+            width: (to - from).max(0.0),
+            rows: 1,
+        };
+        let layer = Element::layer("loading")
             .child(at(
                 Element::label("load", label)
                     .text_style(style)
@@ -1156,8 +1203,18 @@ impl Popup {
                 digit_roll("pct", &pct, style, hex(STATE), Spring::critical_to_98(0.25)),
                 ox + LOAD_W - 54.0,
                 oy + LOAD_H / 2.0 - 9.0,
-            ))
-            .opacity(k)
+            ));
+        // The cue shows from the voice onset on, ahead of the label's fade in.
+        let cue = self.signal_marks_in(
+            Element::layer("loading-cue"),
+            &[],
+            &tail,
+            (from, oy + LOAD_H / 2.0 - 9.0),
+            hex(WHITE),
+        );
+        Element::layer("loading-pill")
+            .child(layer.opacity(k))
+            .child(cue)
     }
 
     /// How many shown words have room in the capsule now. While it grows
@@ -1221,12 +1278,20 @@ impl Popup {
                     &style,
                     w,
                 ));
-            let tail = model_signals::TailText { style, width: w, rows: lines };
+            let tail = model_signals::TailText {
+                style,
+                width: w,
+                rows: lines,
+            };
             let text = self.signal_marks_in(text, shown, &tail, (0.0, 0.0), hex(WHITE));
-            return at(self.with_hearing(text, &style, w, hex(WHITE), hex(BLUE)), x, y)
-                .opacity(opacity)
-                .presence(Transition::NONE, Transition::fade())
-                .motion(Prop::Opacity, Motion::Snap);
+            return at(
+                self.with_hearing(text, &style, w, hex(WHITE), hex(BLUE)),
+                x,
+                y,
+            )
+            .opacity(opacity)
+            .presence(Transition::NONE, Transition::fade())
+            .motion(Prop::Opacity, Motion::Snap);
         }
         let style = card_style(l);
         let words = &self.shown[..self.island_room(w, &style)];
@@ -1257,13 +1322,21 @@ impl Popup {
                     0.0,
                     new_y,
                 ));
-            let tail = model_signals::TailText { style, width: w, rows: lines };
+            let tail = model_signals::TailText {
+                style,
+                width: w,
+                rows: lines,
+            };
             text = self.signal_marks_in(text, words, &tail, (0.0, 0.0), hex(WHITE));
         }
-        at(self.with_hearing(text, &style, w, hex(WHITE), hex(BLUE)), x, y)
-            .opacity(opacity)
-            .presence(Transition::NONE, Transition::fade())
-            .motion(Prop::Opacity, Motion::Snap)
+        at(
+            self.with_hearing(text, &style, w, hex(WHITE), hex(BLUE)),
+            x,
+            y,
+        )
+        .opacity(opacity)
+        .presence(Transition::NONE, Transition::fade())
+        .motion(Prop::Opacity, Motion::Snap)
     }
 
     /// The words, or while a delivery shows the text leaving for the app and
@@ -1333,5 +1406,10 @@ fn pill_h(lines: u32, bar: bool) -> f32 {
 
 /// The card's height with `lines` lines of words.
 fn card_h(lines: u32, bar: bool) -> f32 {
-    CARD_HEADER + 15.0 + lines as f32 * CARD_LINE + 13.0 + CARD_STATUS + if bar { 14.0 } else { 0.0 }
+    CARD_HEADER
+        + 15.0
+        + lines as f32 * CARD_LINE
+        + 13.0
+        + CARD_STATUS
+        + if bar { 14.0 } else { 0.0 }
 }

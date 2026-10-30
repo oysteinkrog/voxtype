@@ -308,6 +308,12 @@ on_transcription = true
 # Custom word replacements (case-insensitive)
 # replacements = { "vox type" = "voxtype" }
 #
+# Learn words from spoken corrections: a fix made twice (or a name, once)
+# becomes a rule in learned_words_file. List them with `voxtype glossary learned`.
+# learn_corrections = true
+# corrections_log = "~/.local/share/voxtype/corrections.jsonl"
+# learned_words_file = "~/.local/share/voxtype/words-learned.toml"
+#
 # Smart auto-submit: say "submit" at the end of dictation to press Enter.
 # The word "submit" is stripped from the output text and Enter is pressed.
 # smart_auto_submit = false

@@ -1075,9 +1075,20 @@ impl Popup {
             -pad_x,
             0.0,
         );
-        Element::column("stack-box")
+        let stack_box = Element::column("stack-box")
             .size(l.text_width(), rows * line_h)
-            .child(stack)
+            .child(stack);
+        if !keyed.is_empty() {
+            return stack_box;
+        }
+        // No line yet: the forming cue where the first line lands, on the
+        // bottom sheet.
+        let tail = model_signals::TailText {
+            style: l.text_style(),
+            width: l.text_width(),
+            rows: 1,
+        };
+        self.signal_marks_in(stack_box, &[], &tail, (0.0, (rows - 1.0) * line_h), c(ICE))
     }
 
     fn sc_status(&self, phase: Phase) -> Element<Msg> {
