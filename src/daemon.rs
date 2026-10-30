@@ -2441,6 +2441,57 @@ impl Daemon {
         }
     }
 
+    /// Deliver an edited dictation with [`Self::deliver_edited`], and tell
+    /// the user when it was only copied or the output hook was skipped.
+    async fn deliver_edit(
+        &mut self,
+        session: &mut StreamingSession,
+        chain: &[Box<dyn TextOutput>],
+        edited: &str,
+    ) -> std::result::Result<(), crate::error::OutputError> {
+        let clipboard: Vec<Box<dyn TextOutput>> = vec![Box::new(
+            output::clipboard::ClipboardOutput::new(self.config.output.append_text.clone()),
+        )];
+        let started = Instant::now();
+        let d = self
+            .deliver_edited(session, chain, &clipboard, edited)
+            .await;
+        if !d.paste.confirmed() && d.result.is_ok() {
+            self.report_not_pasted(edited, d.paste, started).await;
+        }
+        if let Some(v) = d.before_hook.filter(|v| !v.confirmed()) {
+            send_notification(
+                "Pasted, Enter not sent",
+                &format!("The output hook did not run: {}.", v.reason()),
+                self.config.output.notification.show_engine_icon,
+                self.config.engine,
+                "normal",
+            )
+            .await;
+        }
+        d.result
+    }
+
+    /// A live stream failed after a keyboard edit. Transcribing its audio
+    /// again would drop the edits, and that paste would skip the window
+    /// check, so the edited text goes out as an edited dictation does.
+    /// False when there was no edit, or nothing to deliver it with.
+    async fn deliver_after_failure(
+        &mut self,
+        edited: Option<&str>,
+        session: Option<&mut StreamingSession>,
+        chain: Option<&Vec<Box<dyn TextOutput>>>,
+    ) -> bool {
+        let (Some(edited), Some(session), Some(chain)) = (edited, session, chain) else {
+            return false;
+        };
+        tracing::warn!("Live stream failed after a keyboard edit; delivering the edited text");
+        if let Err(e) = self.deliver_edit(session, chain, edited).await {
+            tracing::error!("Edited text delivery failed: {}", e);
+        }
+        true
+    }
+
     /// Tell the popup and the desktop that an edited dictation is on the
     /// clipboard and was not pasted.
     async fn report_not_pasted(
@@ -2577,9 +2628,6 @@ impl Daemon {
             let _ = h.task.await;
         }
         self.stop_streaming_drain_pump();
-        clear_live_preview();
-
-        // The stream failed: transcribe its audio again rather than lose it.
         let file_output = matches!(
             &state,
             State::Streaming {
@@ -2587,8 +2635,24 @@ impl Daemon {
                 ..
             }
         );
+        // A failed dictation with a keyboard edit keeps the edited text,
+        // taken before the preview it reads is cleared.
+        let edited =
+            (self.streaming_failure.is_some() && !file_output && self.config.live_preview_active())
+                .then(|| self.edit_final_text(state.phase()))
+                .flatten();
+        clear_live_preview();
+
+        // The stream failed: transcribe its audio again rather than lose it.
         if let Some(failure) = self.streaming_failure.take() {
-            if !file_output && self.rescue_stream(state, failure.clone()).await {
+            let delivered = self
+                .deliver_after_failure(
+                    edited.as_deref(),
+                    streaming_session.as_mut(),
+                    streaming_chain.as_ref(),
+                )
+                .await;
+            if !delivered && !file_output && self.rescue_stream(state, failure.clone()).await {
                 *streaming_session = None;
                 *streaming_chain = None;
                 return;
@@ -5873,27 +5937,7 @@ impl Daemon {
                                         &text
                                     };
                                     let committed = match &edited {
-                                        Some(edited) => {
-                                            let clipboard: Vec<Box<dyn TextOutput>> =
-                                                vec![Box::new(output::clipboard::ClipboardOutput::new(
-                                                    self.config.output.append_text.clone(),
-                                                ))];
-                                            let started = Instant::now();
-                                            let d = self.deliver_edited(s, chain, &clipboard, edited).await;
-                                            if !d.paste.confirmed() && d.result.is_ok() {
-                                                self.report_not_pasted(edited, d.paste, started).await;
-                                            }
-                                            if let Some(v) = d.before_hook.filter(|v| !v.confirmed()) {
-                                                send_notification(
-                                                    "Pasted, Enter not sent",
-                                                    &format!("The output hook did not run: {}.", v.reason()),
-                                                    self.config.output.notification.show_engine_icon,
-                                                    self.config.engine,
-                                                    "normal",
-                                                ).await;
-                                            }
-                                            d.result
-                                        }
+                                        Some(edited) => self.deliver_edit(s, chain, edited).await,
                                         None => {
                                             if self.config.live_preview_active()
                                                 && !modifiers_released(LIVE_TYPING_FINAL_WAIT).await
@@ -7102,6 +7146,43 @@ mod tests {
         let frozen = link.last().unwrap().frozen;
         assert!(frozen.ends_with("and more words"), "{frozen}");
         assert_eq!(daemon.edit_final_text(state.phase()), Some(frozen));
+    }
+
+    /// A stream that fails after a keyboard edit delivers the edited text,
+    /// through the window check, and does not transcribe the audio again.
+    #[tokio::test]
+    async fn a_failed_stream_after_an_edit_delivers_the_edited_text() {
+        let (mut daemon, _rx, _state, _link) = edit_daemon_linked();
+        daemon.edit_link.windows = Arc::new(std::sync::Mutex::new(Box::new(FakeWindows {
+            windows: vec![("a", "term")],
+            actives: [Some("a")].into_iter().collect(),
+            ..Default::default()
+        })));
+        daemon.edit_window = Some(crate::osd::target::Window {
+            id: "a".into(),
+            class: "term".into(),
+        });
+        daemon.transcriber_preloaded = Some(Arc::new(FixedTranscriber("raw words")));
+        daemon.streaming_samples = Some(vec![0.0; 16000]);
+        let pasted = Arc::new(std::sync::Mutex::new(None));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: pasted.clone(),
+            succeed: true,
+        })];
+        let mut session = StreamingSession::new();
+        assert!(
+            daemon
+                .deliver_after_failure(Some("edited text"), Some(&mut session), Some(&chain))
+                .await
+        );
+        assert_eq!(pasted.lock().unwrap().as_deref(), Some("edited text"));
+        assert!(daemon.transcription_task.is_none());
+        // Without an edit the audio is transcribed again, as before.
+        assert!(
+            !daemon
+                .deliver_after_failure(None, Some(&mut session), Some(&chain))
+                .await
+        );
     }
 
     #[tokio::test]
