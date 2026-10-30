@@ -67,6 +67,9 @@ pub struct StreamingSession {
     typed_chars: usize,
     /// Most recent partial text (for status only; never typed).
     partial: String,
+    /// An output call ran the post-output hook, which it does whether or
+    /// not the text got through, so the end of the stream need not.
+    post_hook_ran: bool,
 }
 
 impl StreamingSession {
@@ -76,6 +79,7 @@ impl StreamingSession {
             finalized_text: String::new(),
             typed_chars: 0,
             partial: String::new(),
+            post_hook_ran: false,
         }
     }
 
@@ -120,6 +124,7 @@ impl StreamingSession {
             wait_for_modifier_release: false,
             modifier_release_timeout: std::time::Duration::from_millis(0),
         };
+        self.post_hook_ran |= post_output_command.is_some();
         output_with_fallback(chain, &new_partial, opts).await?;
 
         self.typed_chars += new_partial.chars().count();
@@ -151,6 +156,11 @@ impl StreamingSession {
     /// All finalized text committed so far.
     pub fn finalized_text(&self) -> &str {
         &self.finalized_text
+    }
+
+    /// Whether an output call of this session ran the post-output hook.
+    pub fn post_hook_ran(&self) -> bool {
+        self.post_hook_ran
     }
 
     /// Number of Unicode scalar values typed to the output. Used by the
@@ -213,6 +223,7 @@ impl StreamingSession {
             wait_for_modifier_release: false,
             modifier_release_timeout: std::time::Duration::from_millis(0),
         };
+        self.post_hook_ran |= post_output_command.is_some();
         output_with_fallback(chain, text, opts).await?;
 
         self.typed_chars += text.chars().count();
@@ -316,6 +327,7 @@ impl StreamingSession {
                 wait_for_modifier_release: false,
                 modifier_release_timeout: std::time::Duration::from_millis(0),
             };
+            self.post_hook_ran |= post_output_command.is_some();
             output_with_fallback(chain, text, opts).await?;
             self.typed_chars += text.chars().count();
             // Treat the (now-truncated) partial + new text as committed,

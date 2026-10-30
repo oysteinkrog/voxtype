@@ -1045,6 +1045,20 @@ async fn deliver_to_file(
     delivery
 }
 
+/// The post-output hook at the end of a streaming dictation, ended or
+/// cancelled, which resets a compositor submap entered for it. Skipped when
+/// an output call of the session already ran it, so it runs once (R31).
+async fn end_streaming_hook(cfg: &crate::config::OutputConfig, session: Option<&StreamingSession>) {
+    if session.is_some_and(StreamingSession::post_hook_ran) {
+        return;
+    }
+    if let Some(cmd) = &cfg.post_output_command {
+        if let Err(e) = output::run_hook(cmd, "post_output").await {
+            tracing::warn!("{}", e);
+        }
+    }
+}
+
 /// Read and consume the model override file
 /// Returns the model name if the file exists, None otherwise
 fn read_model_override() -> Option<String> {
@@ -2041,16 +2055,12 @@ impl Daemon {
             return;
         }
 
-        *streaming_session = None;
+        let session = streaming_session.take();
         *streaming_chain = None;
 
         self.play_feedback(SoundEvent::TranscriptionComplete);
 
-        if let Some(cmd) = &self.config.output.post_output_command {
-            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                tracing::warn!("{}", e);
-            }
-        }
+        end_streaming_hook(&self.config.output, session.as_ref()).await;
 
         *state = State::Idle;
         self.update_state("idle");
@@ -2208,7 +2218,7 @@ impl Daemon {
             }
         }
         self.stop_streaming_drain_pump();
-        *streaming_session = None;
+        let session = streaming_session.take();
         *streaming_chain = None;
 
         discard_recording_overrides();
@@ -2216,11 +2226,7 @@ impl Daemon {
         self.update_state("idle");
         self.play_feedback(SoundEvent::Cancelled);
 
-        if let Some(cmd) = &self.config.output.post_output_command {
-            if let Err(e) = output::run_hook(cmd, "post_output").await {
-                tracing::warn!("{}", e);
-            }
-        }
+        end_streaming_hook(&self.config.output, session.as_ref()).await;
 
         if self.config.output.notification.on_recording_stop {
             send_notification(
@@ -5618,6 +5624,83 @@ mod tests {
         assert_eq!(fs::read_to_string(&target).unwrap(), "hello\n");
         // pre ran before the file existed, post after it was written.
         assert_eq!(fs::read_to_string(&log).unwrap(), "pre:nofile\npost:file\n");
+    }
+
+    /// Lines the hooks of `hooked_output_config` wrote.
+    fn hook_lines(log: &Path) -> Vec<String> {
+        fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.split(':').next().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// R31: a live preview dictation sends its text as one Final, which runs
+    /// the output hooks once; ending the stream must not run the post hook
+    /// a second time.
+    #[tokio::test]
+    async fn streaming_dictation_runs_each_output_hook_once() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &dir.path().join("none"));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: Arc::new(std::sync::Mutex::new(None)),
+            succeed: true,
+        })];
+        let mut session = StreamingSession::new();
+        session
+            .commit_segment(
+                &chain,
+                "hello world",
+                None,
+                cfg.pre_output_command.as_deref(),
+                cfg.post_output_command.as_deref(),
+            )
+            .await
+            .unwrap();
+        end_streaming_hook(&cfg, Some(&session)).await;
+        assert_eq!(hook_lines(&log), ["pre", "post"]);
+    }
+
+    /// R31: when the text could not be typed and nothing took it, the post
+    /// hook ran inside the output call; the end of the stream adds none.
+    #[tokio::test]
+    async fn failed_streaming_output_still_runs_the_post_hook_once() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &dir.path().join("none"));
+        let chain: Vec<Box<dyn TextOutput>> = vec![Box::new(RecordingOutput {
+            got: Arc::new(std::sync::Mutex::new(None)),
+            succeed: false,
+        })];
+        let mut session = StreamingSession::new();
+        assert!(session
+            .commit_segment(
+                &chain,
+                "hello",
+                None,
+                cfg.pre_output_command.as_deref(),
+                cfg.post_output_command.as_deref(),
+            )
+            .await
+            .is_err());
+        end_streaming_hook(&cfg, Some(&session)).await;
+        assert_eq!(hook_lines(&log), ["pre", "post"]);
+    }
+
+    /// R31: a stream that typed nothing (no speech, a cancel, an error)
+    /// still resets the submap at its end, once.
+    #[tokio::test]
+    async fn streaming_dictation_without_output_runs_the_post_hook_once() {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("hooks.log");
+        let cfg = hooked_output_config(&log, &dir.path().join("none"));
+        let session = StreamingSession::new();
+        end_streaming_hook(&cfg, Some(&session)).await;
+        assert_eq!(hook_lines(&log), ["post"]);
+        fs::remove_file(&log).unwrap();
+        end_streaming_hook(&cfg, None).await;
+        assert_eq!(hook_lines(&log), ["post"]);
     }
 
     #[tokio::test]
