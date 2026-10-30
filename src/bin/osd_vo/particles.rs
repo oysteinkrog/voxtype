@@ -651,7 +651,10 @@ impl Popup {
         }
         let phase = self.particles_phase();
         let (x0, y0) = (ROOM_SIDE * s, ROOM_TOP * s);
-        let card_h = card_h(self.lines, phase) * s;
+        // The progress bar pushes the status row down while a model loads
+        // too, not only while finishing, so the card makes room for it then.
+        let bar = phase != Phase::Done && self.shows_progress(&self.status());
+        let card_h = card_h(self.lines, if bar { Phase::Finishing } else { phase }) * s;
         // The swirl keeps to a band round the button, so its layer is no bigger than it needs.
         let band = Size::new(surface.w, 2.0 * SWIRL_HALF * s);
         let onsets: Arc<[f64]> = if l.on(showcase::PARTICLE_SOURCE) && !self.still() {
@@ -675,7 +678,7 @@ impl Popup {
             onsets,
             scrub: self.scrub(),
         };
-        root.child(at(self.particles_card(card_h), x0, y0))
+        root.child(at(self.particles_card(card_h, bar), x0, y0))
             .child(at(
                 self.particles_swirl(&swirl, band),
                 0.0,
@@ -692,8 +695,10 @@ impl Popup {
             .child(self.particles_bottom(phase, x0, y0))
     }
 
-    /// The navy glass card with its thin blue-violet edge.
-    fn particles_card(&self, h: f32) -> Element<Msg> {
+    /// The navy glass card with its thin blue-violet edge. With the progress
+    /// bar shown its height snaps: the bar and the row below it land at once,
+    /// and a card growing after them left the row across its bottom edge.
+    fn particles_card(&self, h: f32, bar: bool) -> Element<Msg> {
         let l = &self.look;
         let s = scale(l);
         let cancelled = self.extra.final_at.is_none();
@@ -703,14 +708,19 @@ impl Popup {
             Transition::fade().offset(0.0, -6.0)
         };
         let a = l.background.a.max(0.86);
-        Element::panel("card")
+        let card = Element::panel("card")
             .size(l.width, h)
             .radius(CARD_RADIUS * s)
             .fill_gradient(Color::hex(CARD_TOP, a), Color::hex(CARD_BOTTOM, a))
             .border(Color::hex(EDGE, 0.55), self.exhale_width(1.0))
             .motion(Prop::StrokeWidth, self.exhale_snap())
             .rim(Color::hex(VIOLET, 0.35), 1.0, 0.18, -0.4, 0.0)
-            .presence(Transition::fade().offset(0.0, 8.0), exit)
+            .presence(Transition::fade().offset(0.0, 8.0), exit);
+        if bar {
+            card.motion(Prop::Size, Motion::Snap)
+        } else {
+            card
+        }
     }
 
     /// The swirl as light: strands, rings and dust, in a band `surface`.
@@ -1045,26 +1055,51 @@ impl Popup {
         let col = Element::column("bottom").size(l.width, 0.0);
         match phase {
             Phase::Done => {
+                // The column stays where it was while finishing and the chip
+                // goes down inside it. Moving the column down slid the
+                // leaving progress bar out below the card, and the chip in
+                // from the top of the card.
                 let y = words_bottom + CHIP_GAP - CHIP_H / 2.0;
+                // The bar stays, hidden at once: fading out where it was, it
+                // drew its line through the chip.
+                let bar = self
+                    .particles_bar()
+                    .opacity(0.0)
+                    .motion(Prop::Opacity, Motion::Snap);
                 at(
-                    col.child(at(self.particles_chip(), (l.width - CHIP_W * s) / 2.0, 0.0)),
+                    col.child(at(
+                        bar,
+                        (l.width - BAR_W * s) / 2.0,
+                        (words_bottom + BAR_GAP - BAR_H / 2.0) * s,
+                    ))
+                    .child(at(
+                        self.particles_chip(),
+                        (l.width - CHIP_W * s) / 2.0,
+                        y * s,
+                    )),
                     x0,
-                    y0 + y * s,
+                    y0,
                 )
             }
             _ => {
                 let mut col = col;
                 let status = self.status();
                 let mut status_y = words_bottom + STATUS_GAP;
-                if self.shows_progress(&status) {
-                    let bar_y = words_bottom + BAR_GAP;
+                let bar_y = words_bottom + BAR_GAP;
+                let bar = self.particles_bar();
+                let bar = if self.shows_progress(&status) {
                     status_y = bar_y + 22.0;
-                    col = col.child(at(
-                        self.particles_bar(),
-                        (l.width - BAR_W * s) / 2.0,
-                        (bar_y - BAR_H / 2.0) * s,
-                    ));
-                }
+                    bar
+                } else {
+                    // Hidden at once when loading ends: fading out where it
+                    // was, it drew its line through the status row.
+                    bar.opacity(0.0).motion(Prop::Opacity, Motion::Snap)
+                };
+                col = col.child(at(
+                    bar,
+                    (l.width - BAR_W * s) / 2.0,
+                    (bar_y - BAR_H / 2.0) * s,
+                ));
                 // A new row replaces the old one at once and settles up into place, so the
                 // two never sit over each other, even when the progress bar moves the row.
                 let step = if self.still() { 0.0 } else { 8.0 * s };
@@ -1147,6 +1182,7 @@ impl Popup {
                 )
                 .size(side, side)
                 .light_head(0.7, 1.1, hex(CYAN), 0.0)
+                .motion(Prop::Position, Motion::Snap)
                 .presence(Transition::fade().scale(0.6), Transition::fade()),
             );
         } else {
@@ -1157,6 +1193,7 @@ impl Popup {
                     .radius(d / 2.0)
                     .fill(hex(0x5fd0ff))
                     .glow(hex(CYAN), 5.0 * s, 0.6)
+                    .motion(Prop::Position, Motion::Snap)
                     .presence(Transition::fade().scale(0.6), Transition::fade()),
             );
         }
@@ -1166,10 +1203,14 @@ impl Popup {
             Element::label("state", status.state.clone())
                 .text_style(style)
                 .color(hex(LABEL))
-                .presence(
-                    Transition::fade().offset(0.0, 5.0),
-                    Transition::fade().offset(0.0, -5.0),
-                ),
+                // A fade only, like the hint: the row already rises into
+                // place, and the word's own 5 px drop settled so slowly that
+                // it sat below the hint's baseline while the panel grew.
+                .presence(Transition::fade(), Transition::fade())
+                // The row is centred, so a hint that comes in later moves
+                // the word left. Sliding there, it ran into the hint
+                // ("Finishing" over "4 s of audio left"), which snaps.
+                .motion(Prop::Position, Motion::Snap),
         );
         let detail = status.detail.trim().trim_start_matches('·').trim();
         if !detail.is_empty() {

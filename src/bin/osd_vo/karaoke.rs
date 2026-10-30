@@ -660,8 +660,10 @@ impl Popup {
                     .presence(Transition::fade(), Transition::fade()),
             );
         panel.child(
+            // It snaps to a new centre, as the canvas's ring does: on a
+            // spring it slid under the ring ("Finishing" through it).
             at(status_row, ox + row_x + ring_w, oy + STATUS_Y - 10.0)
-                .motion(Prop::Position, Spring::critical_to_98(0.25)),
+                .motion(Prop::Position, Motion::Snap),
         )
     }
 

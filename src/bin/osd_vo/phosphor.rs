@@ -654,7 +654,9 @@ impl Popup {
             .fill_gradient(hex(SCREEN, 0.94), hex(DEEP, 0.96))
             .border(hex(GREEN, 0.95), 1.8 * k)
             .glow(hex(GREEN, 0.8), 8.0 * k, 0.35)
-            .motion(Prop::Size, Spring::critical_to_98(0.25))
+            // The screen snaps to a new line count, as its canvas rule and the
+            // status row do: on a spring it left the status row over its edge.
+            .motion(Prop::Size, Motion::Snap)
             .scanlines(0.28, 3.0 * k)
             .crt(0.05)
             .vignette(0.35)
@@ -1057,7 +1059,9 @@ impl Popup {
             })
             .collect();
         let text = at(
-            Element::live_text(format!("status-{state}"), &words)
+            // Keyed once, not by state: a new key per state faded the old row
+            // out under the new one ("Loading" over the hint).
+            Element::live_text("status", &words)
                 .text_style(style)
                 .color(hex(GREEN, 1.0))
                 .width(g.w - (2.0 * PAD_X + 50.0) * k)
@@ -1069,7 +1073,10 @@ impl Popup {
                 .presence(Transition::NONE.wipe(1.0), Transition::fade()),
             (PAD_X + 50.0) * k,
             h - (BOTTOM_PAD + 4.0 + 13.0) * k,
-        );
+        )
+        // The row snaps to a new line count, as the canvas's rule and level
+        // icon do: on a spring it slid down across the rule above it.
+        .motion(Prop::Position, Motion::Snap);
         static CHECK: OnceLock<Arc<Outline>> = OnceLock::new();
         static CROSS: OnceLock<Arc<Outline>> = OnceLock::new();
         let mark = if done {
@@ -1090,19 +1097,22 @@ impl Popup {
             .child(text);
         if let Some((key, outline)) = mark {
             let side = 30.0 * k;
-            layer = layer.child(at(
-                Element::stroke_path(
-                    key,
-                    outline.clone(),
-                    Rect::new(0.0, 0.0, 24.0, 24.0),
-                    StrokeStyle::solid(3.0 * k, hex(GREEN, 1.0)),
+            layer = layer.child(
+                at(
+                    Element::stroke_path(
+                        key,
+                        outline.clone(),
+                        Rect::new(0.0, 0.0, 24.0, 24.0),
+                        StrokeStyle::solid(3.0 * k, hex(GREEN, 1.0)),
+                    )
+                    .size(side, side)
+                    .motion(Prop::Trim, Spring::critical_to_98(0.3))
+                    .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade()),
+                    PAD_X * k,
+                    h - (BOTTOM_PAD + 4.0) * k - side / 2.0,
                 )
-                .size(side, side)
-                .motion(Prop::Trim, Spring::critical_to_98(0.3))
-                .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade()),
-                PAD_X * k,
-                h - (BOTTOM_PAD + 4.0) * k - side / 2.0,
-            ));
+                .motion(Prop::Position, Motion::Snap),
+            );
         }
         layer
     }

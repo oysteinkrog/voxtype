@@ -388,6 +388,10 @@ impl Popup {
             .border(hex(EDGE), 1.0)
             .shadow(Color::rgba(0.0, 0.0, 0.0, 0.5), 0.0, 6.0, 10.0)
             .presence(Transition::fade().offset(0.0, 8.0).scale(0.98), exit)
+            // The panel, the rule and the status snap to a new line count:
+            // sliding down on a spring, they left the new line drawn over
+            // the status row.
+            .motion(Prop::Size, Motion::Snap)
             .child(self.palette_chips(mode))
             .child(wave)
             .child(self.palette_text(mode))
@@ -395,7 +399,8 @@ impl Popup {
                 Element::shape("rule", ShapeKind::RRect)
                     .size(rule_w, 1.0)
                     .fill(hex(RULE))
-                    .margin_edges(0.0, 0.0, 0.0, RULE_X),
+                    .margin_edges(0.0, 0.0, 0.0, RULE_X)
+                    .motion(Prop::Position, Motion::Snap),
             )
             .child(self.palette_progress(mode, rule_w))
             .child(self.palette_status(mode, mode_at))
@@ -659,7 +664,8 @@ impl Popup {
     fn palette_progress(&self, mode: Mode, w: f32) -> Element<Msg> {
         let row = Element::row("progress-row")
             .height(2.0)
-            .margin_edges(0.0, 0.0, 0.0, RULE_X);
+            .margin_edges(0.0, 0.0, 0.0, RULE_X)
+            .motion(Prop::Position, Motion::Snap);
         match self
             .kit_progress()
             .filter(|_| matches!(mode, Mode::Loading | Mode::Finishing))
@@ -697,6 +703,7 @@ impl Popup {
         };
         let mut row = Element::row("status")
             .height(STATUS_H)
+            .motion(Prop::Position, Motion::Snap)
             .align_items(AlignItems::CENTER)
             .margin_edges(STATUS_TOP - 2.0, 0.0, 0.0, 24.0)
             .child(

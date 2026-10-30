@@ -352,6 +352,10 @@ impl Popup {
             .radius(RADIUS)
             .fill(hex(BODY).fade(0.97))
             .presence(Transition::fade().offset(0.0, 6.0), exit)
+            // The panel, the rule and the status snap to a new line count, as
+            // the frame does: sliding down on a spring, they left the new
+            // line drawn over the status row.
+            .motion(Prop::Size, Motion::Snap)
             .child(self.swissfi_frame(h, cancelled))
             .child(self.swissfi_cast(h))
             .children(self.limit_line(
@@ -571,6 +575,7 @@ impl Popup {
         )
         .size(w, 1.0)
         .motion(Prop::Trim, Spring::critical_to_98(RULE_SECS))
+        .motion(Prop::Position, Motion::Snap)
         .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade())
     }
 
@@ -641,6 +646,7 @@ impl Popup {
             .word_change(Transition::fade().opacity(0.2).offset(0.0, -LABEL_SLIDE));
         let mut row = Element::row("status")
             .height(STATUS_H)
+            .motion(Prop::Position, Motion::Snap)
             .align_items(AlignItems::CENTER)
             .margin_edges(STATUS_TOP, 0.0, 0.0, 0.0)
             .child(icon.margin_edges(0.0, 0.0, 0.0, 1.0))

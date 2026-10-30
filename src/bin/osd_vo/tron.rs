@@ -762,7 +762,9 @@ impl Popup {
         at(Element::shape("rule", ShapeKind::RRect), TEXT_X * k, y)
             .size(g.w - 2.0 * TEXT_X * k, 1.2 * k)
             .fill(hex(DIM, 0.95))
-            .motion(Prop::Position, Spring::critical_to_98(0.25))
+            // It snaps to a new line count, as the frame and the new line do:
+            // on a spring it ran through the new line.
+            .motion(Prop::Position, Motion::Snap)
             .presence(Transition::fade().scale(0.0), Transition::fade())
     }
 
@@ -875,6 +877,7 @@ impl Popup {
             );
         let y = (bottom - BOTTOM_GAP - STEP) * k - 12.0 * k;
         at(Element::column("status-box"), 0.0, y)
+            .motion(Prop::Position, Motion::Snap)
             .width(g.w)
             .align_items(AlignItems::CENTER)
             .child(row)
