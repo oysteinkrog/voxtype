@@ -75,8 +75,6 @@ pub(crate) struct Voice {
     /// space of the next cue drawn: a look that writes one where the words
     /// go sets it just before, and the cue stands after it.
     pub(crate) hint: std::cell::Cell<Option<f32>>,
-    /// How wide a look's loading line was, for the hand-over to the words.
-    pub(crate) hint_w: std::cell::Cell<Option<f32>>,
 }
 
 impl Voice {
@@ -225,6 +223,10 @@ impl Popup {
         };
         let hint = if hand || words.is_empty() { hint } else { None };
         if hinted && hint.is_none() && words.is_empty() && self.kit_mode() == kit::Mode::Loading {
+            return None;
+        }
+        // A hand-over with no end given: the first line is still moving in.
+        if hand && hint.is_none() && !words.is_empty() {
             return None;
         }
         // Looks whose words land with a move (letters flying in, a word
