@@ -536,7 +536,7 @@ pactl list sources short    # second column is the node name
 ```toml
 [audio]
 # The microphone itself, whatever the system default source is
-device = "pipewire:alsa_input.usb-046d_Logitech_StreamCam_1EEAC645-02.analog-stereo"
+device = "pipewire:alsa_input.usb-046d_Logitech_StreamCam_0123ABCD-02.analog-stereo"
 ```
 
 Use this when the default source is not the raw microphone, for example a

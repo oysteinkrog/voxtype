@@ -262,7 +262,7 @@ device = "default"  # Or an ALSA name from `voxtype info devices`
 
 To record from one PipeWire source, use its name from `pactl list sources short`
 with a `pipewire:` prefix, for example
-`device = "pipewire:alsa_input.usb-046d_Logitech_StreamCam_1EEAC645-02.analog-stereo"`.
+`device = "pipewire:alsa_input.usb-046d_Logitech_StreamCam_0123ABCD-02.analog-stereo"`.
 
 #### 2. Start of speech cut off, or quiet speech missing
 
