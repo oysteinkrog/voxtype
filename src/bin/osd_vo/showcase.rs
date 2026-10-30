@@ -962,7 +962,8 @@ impl Popup {
         // scatters and re-forms only the glyphs that changed. Not in the
         // theme wall: word ids repeat from cell to cell, and the wall keeps
         // word particles for the look built on them.
-        if phase.ambient() && !self.in_wall {
+        // Not while editing either: the glyphs stay solid at their places.
+        if phase.ambient() && !self.in_wall && self.edit_view.is_none() {
             words = words.word_particles(WordParticles {
                 color: c(mix(TEAL, ICE, 0.5)).fade(0.7),
                 size: 0.6,
@@ -978,6 +979,8 @@ impl Popup {
         // text lands.
         let pulse = self.final_pulse();
         let (halo, radius) = match phase {
+            // While editing the halo holds still, so it never pulses.
+            _ if self.edit_view.is_some() => (c(TEAL).fade(0.22), 4.0),
             _ if self.extra.final_at.is_some() => {
                 (c(ICE).fade(0.12 + 0.35 * pulse), 4.0 + 8.0 * pulse)
             }
@@ -1429,5 +1432,28 @@ impl Popup {
             )
             .size(l.text_width() + 2.0 * STRIP_PAD_X, h),
         )
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::scope::edit_tests::check_edit_envelope;
+    use super::super::swiss_look::edit_check::Rig;
+    use super::*;
+
+    /// M7.L10: Showcase edits in its own flat strip. With the caret on the
+    /// newest, a middle and the top line, at both widths: the caret on its
+    /// glyph within 1 px in every frame, the popup's size unchanged, and
+    /// the golden `tests/fixtures/osd-vo/edit-showcase.txt`.
+    #[test]
+    fn showcase_edits_in_its_own_layout() {
+        Rig::run(OsdTheme::Showcase, "showcase");
+    }
+
+    /// R35: the edit moment with the caret on each line stays inside the
+    /// reading-line envelope, at both widths.
+    #[test]
+    fn showcase_edit_moment_keeps_the_envelope() {
+        check_edit_envelope(OsdTheme::Showcase, &[0, 1, 2]);
     }
 }
