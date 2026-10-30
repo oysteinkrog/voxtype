@@ -59,8 +59,10 @@ pub(crate) enum Via {
 }
 
 impl Via {
+    /// From the daemon's method, an output's name such as "paste (clipboard
+    /// + keystroke)" or "clipboard (wl-copy)": the word before the brackets.
     pub(crate) fn of(method: &str) -> Via {
-        match method {
+        match method.split(" (").next().unwrap_or(method) {
             "paste" => Via::Pasted,
             "clipboard" | "wl-copy" | "xclip" => Via::Copied,
             _ => Via::Typed,
@@ -688,6 +690,11 @@ mod tests {
         assert_eq!(Via::of("dotool"), Via::Typed);
         assert_eq!(Via::of("paste"), Via::Pasted);
         assert_eq!(Via::of("clipboard"), Via::Copied);
+        // The names the daemon's outputs give.
+        assert_eq!(Via::of("paste (clipboard + keystroke)"), Via::Pasted);
+        assert_eq!(Via::of("clipboard (wl-copy)"), Via::Copied);
+        assert_eq!(Via::of("clipboard (xclip/xsel)"), Via::Copied);
+        assert_eq!(Via::of("cgevent (macOS native)"), Via::Typed);
     }
 
     #[test]
