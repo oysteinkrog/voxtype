@@ -54,6 +54,21 @@ fn resolve_keystroke_driver_order(configured: Option<&[OutputDriver]>) -> Vec<Ou
     }
 }
 
+/// The first driver in `order` that `available` says yes to, asking in
+/// order and no further.
+async fn first_available<F, Fut>(order: &[OutputDriver], mut available: F) -> Option<OutputDriver>
+where
+    F: FnMut(OutputDriver) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for &driver in order {
+        if available(driver).await {
+            return Some(driver);
+        }
+    }
+    None
+}
+
 /// Parsed paste keystroke (modifiers + key)
 #[derive(Debug, Clone)]
 struct ParsedKeystroke {
@@ -645,6 +660,17 @@ impl PasteOutput {
         Ok(())
     }
 
+    /// Whether `driver` can send the paste keystroke here.
+    async fn keystroke_driver_available(&self, driver: OutputDriver) -> bool {
+        match driver {
+            OutputDriver::Wtype => self.is_wtype_available().await,
+            OutputDriver::Eitype => self.is_eitype_available().await,
+            OutputDriver::Ydotool => self.is_ydotool_available().await,
+            OutputDriver::Dotool => self.is_dotool_available().await,
+            _ => false,
+        }
+    }
+
     /// Check if wtype is available
     async fn is_wtype_available(&self) -> bool {
         // Check if wtype exists
@@ -1118,28 +1144,22 @@ impl TextOutput for PasteOutput {
             return false;
         }
 
-        // Check if wtype, eitype, ydotool or dotool is available for keystroke simulation
-        let wtype_available = self.is_wtype_available().await;
-        let eitype_available = self.is_eitype_available().await;
-        let ydotool_available = self.is_ydotool_available().await;
-        let dotool_available = self.is_dotool_available().await;
-
-        if !wtype_available && !eitype_available && !ydotool_available && !dotool_available {
+        // Only the drivers the paste may use: checking one that
+        // driver_order leaves out would run it (ydotool's check types an
+        // empty string).
+        let usable =
+            first_available(&self.driver_order, |d| self.keystroke_driver_available(d)).await;
+        let Some(driver) = usable else {
             tracing::debug!(
-                "paste mode unavailable: no keystroke tool available \
+                "paste mode unavailable: none of {:?} can send the keystroke \
                 (wtype needs WAYLAND_DISPLAY, eitype needs libei, ydotool needs daemon running, \
-                dotool needs uinput access)"
+                dotool needs uinput access)",
+                self.driver_order
             );
             return false;
-        }
+        };
 
-        tracing::debug!(
-            "paste mode available (wtype: {}, eitype: {}, ydotool: {}, dotool: {})",
-            wtype_available,
-            eitype_available,
-            ydotool_available,
-            dotool_available
-        );
+        tracing::debug!("paste mode available (keystroke via {:?})", driver);
         true
     }
 
@@ -1151,6 +1171,34 @@ impl TextOutput for PasteOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn only_the_drivers_in_driver_order_are_checked() {
+        let order = resolve_keystroke_driver_order(Some(&[OutputDriver::Wtype]));
+        let mut asked = Vec::new();
+        let found = first_available(&order, |d| {
+            asked.push(d);
+            async { false }
+        })
+        .await;
+        assert_eq!(found, None);
+        assert_eq!(asked, vec![OutputDriver::Wtype]);
+
+        // The first usable one stops the search.
+        let order = [
+            OutputDriver::Wtype,
+            OutputDriver::Ydotool,
+            OutputDriver::Dotool,
+        ];
+        let mut asked = Vec::new();
+        let found = first_available(&order, |d| {
+            asked.push(d);
+            async move { d == OutputDriver::Ydotool }
+        })
+        .await;
+        assert_eq!(found, Some(OutputDriver::Ydotool));
+        assert_eq!(asked, vec![OutputDriver::Wtype, OutputDriver::Ydotool]);
+    }
 
     #[test]
     fn test_new_stores_restore_clipboard_fields() {

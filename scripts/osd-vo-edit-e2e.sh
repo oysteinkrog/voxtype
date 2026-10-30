@@ -122,12 +122,7 @@ mkdir -p "$work/path"
 for t in dotool dotoolc ydotool eitype xdotool; do
     cat > "$work/path/$t" <<'EOF'
 #!/bin/sh
-# `ydotool type ""` is the daemon's check that ydotoold runs; it types nothing.
-if [ "$(basename "$0")" = ydotool ] && [ "$#" = 2 ] && [ "$1" = type ] && [ -z "$2" ]; then
-    echo "$(date +%s%3N) probe ydotool" >> "$VOXTYPE_E2E_KEYS_LOG"
-else
-    echo "$(date +%s%3N) blocked $(basename "$0") $*" >> "$VOXTYPE_E2E_KEYS_LOG"
-fi
+echo "$(date +%s%3N) blocked $(basename "$0") $*" >> "$VOXTYPE_E2E_KEYS_LOG"
 exit 1
 EOF
     chmod +x "$work/path/$t"
