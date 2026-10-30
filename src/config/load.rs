@@ -1,4 +1,4 @@
-use super::parse::parse_config_salvaging;
+use super::parse::{merge_toml_values, parse_config_salvaging};
 use super::{
     Config, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine,
 };
@@ -30,14 +30,20 @@ fn misplaced_sections(contents: &str) -> Vec<(String, String)> {
 /// Add the `"from" = "to"` pairs in `file` to `replacements`, keeping any
 /// entry already there. A missing or bad file is logged and skipped, so a
 /// word list that is not synced to this machine never stops the daemon.
-fn merge_replacements_file(replacements: &mut std::collections::HashMap<String, String>, file: &str) {
+fn merge_replacements_file(
+    replacements: &mut std::collections::HashMap<String, String>,
+    file: &str,
+) {
     let path = match (file.strip_prefix("~/"), std::env::var_os("HOME")) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => PathBuf::from(file),
     };
     let parsed = std::fs::read_to_string(&path)
         .map_err(|e| e.to_string())
-        .and_then(|s| toml::from_str::<std::collections::HashMap<String, String>>(&s).map_err(|e| e.to_string()));
+        .and_then(|s| {
+            toml::from_str::<std::collections::HashMap<String, String>>(&s)
+                .map_err(|e| e.to_string())
+        });
     match parsed {
         Ok(extra) => {
             let n = extra.len();
@@ -48,6 +54,49 @@ fn merge_replacements_file(replacements: &mut std::collections::HashMap<String, 
         }
         Err(e) => tracing::warn!("Skipping text.replacements_file {:?}: {}", path, e),
     }
+}
+
+/// The overlay files for the config file at `config_path`: the `*.toml`
+/// files in the `config.d` directory next to it, in name order. None when
+/// there is no such directory.
+fn overlay_paths(config_path: &Path) -> Vec<PathBuf> {
+    let Some(dir) = config_path.parent().map(|d| d.join("config.d")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "toml") && p.is_file())
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// `contents` with each overlay merged over it in order: tables merge key by
+/// key, any other value replaces the one before it. Lets one config file be
+/// shared between machines, with a small file per machine for what differs.
+/// An overlay that cannot be read or parsed is named in the log and skipped.
+/// When `contents` itself does not parse it is returned unchanged, so its
+/// own error is the one reported.
+fn apply_overlays(contents: &str, overlays: &[PathBuf]) -> String {
+    let Ok(mut merged) = contents.parse::<toml::Table>().map(toml::Value::Table) else {
+        return contents.to_string();
+    };
+    for path in overlays {
+        let overlay = std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|s| s.parse::<toml::Table>().map_err(|e| e.to_string()));
+        match overlay {
+            Ok(table) => {
+                tracing::debug!("Applying config overlay {:?}", path);
+                merge_toml_values(&mut merged, toml::Value::Table(table));
+            }
+            Err(e) => tracing::warn!("Skipping config overlay {:?}: {}", path, e),
+        }
+    }
+    toml::to_string(&merged).unwrap_or_else(|_| contents.to_string())
 }
 
 pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
@@ -67,11 +116,32 @@ pub fn load_config(path: Option<&Path>) -> Result<Config, VoxtypeError> {
     // would fail with "missing field 'audio'" / "missing field 'device'", because
     // serde's per-field defaults only fill in what the user omitted at the *field*
     // level, not what they omitted at a parent-section level (#421).
+    //
+    // Overlays in config.d/ next to the file (or next to where the user
+    // config would be) are merged over it first.
+    let overlays = config_path
+        .clone()
+        .or_else(Config::default_path)
+        .map(|p| overlay_paths(&p))
+        .unwrap_or_default();
+    let config_path = match config_path {
+        None if !overlays.is_empty() => Config::default_path(),
+        found => found,
+    };
     if let Some(ref path) = config_path {
-        if path.exists() {
+        if path.exists() || !overlays.is_empty() {
             tracing::debug!("Loading config from {:?}", path);
-            let contents = std::fs::read_to_string(path)
-                .map_err(|e| VoxtypeError::Config(format!("Failed to read config: {}", e)))?;
+            let contents = if path.exists() {
+                std::fs::read_to_string(path)
+                    .map_err(|e| VoxtypeError::Config(format!("Failed to read config: {}", e)))?
+            } else {
+                String::new()
+            };
+            let contents = if overlays.is_empty() {
+                contents
+            } else {
+                apply_overlays(&contents, &overlays)
+            };
 
             // Salvage per section rather than refusing to start: one bad
             // value used to cost the user every other setting they had
@@ -426,5 +496,65 @@ mod tests {
             Config::default().audio.max_duration_secs,
             "the bad section falls back to its default"
         );
+    }
+
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    const BASE: &str = r#"
+        engine = "parakeet"
+
+        [hotkey]
+        key = "F12"
+
+        [osd]
+        theme = "swiss"
+        width_px = 600
+    "#;
+
+    #[test]
+    fn without_config_d_the_config_is_the_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write(&path, BASE);
+        let loaded = load_config(Some(&path)).unwrap();
+        let (parsed, _) = parse_config_salvaging(BASE).unwrap();
+        assert_eq!(
+            toml::Value::try_from(&loaded).unwrap(),
+            toml::Value::try_from(&parsed).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_overlay_changes_only_its_own_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write(&path, BASE);
+        write(
+            &dir.path().join("config.d/50-host.toml"),
+            "[osd]\ntheme = \"showcase\"\n",
+        );
+        let config = load_config(Some(&path)).unwrap();
+        assert_eq!(config.osd.theme, crate::osd::config::OsdTheme::Showcase);
+        assert_eq!(config.osd.width_px, 600);
+        assert_eq!(config.hotkey.key, "F12");
+        assert_eq!(config.engine, TranscriptionEngine::Parakeet);
+    }
+
+    #[test]
+    fn overlays_apply_in_name_order_and_a_bad_one_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write(&path, BASE);
+        let d = dir.path().join("config.d");
+        write(&d.join("20-a.toml"), "[hotkey]\nkey = \"F13\"\n");
+        write(&d.join("50-b.toml"), "[hotkey]\nkey = \"F14\"\n");
+        write(&d.join("60-broken.toml"), "[hotkey\nkey = ");
+        write(&d.join("70-notes.txt"), "[hotkey]\nkey = \"F15\"\n");
+        let config = load_config(Some(&path)).unwrap();
+        assert_eq!(config.hotkey.key, "F14");
+        assert_eq!(config.osd.theme, crate::osd::config::OsdTheme::Swiss);
     }
 }

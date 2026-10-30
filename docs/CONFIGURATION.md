@@ -25,6 +25,27 @@ A macOS install that predates this and stored files under
 `~/Library/Application Support/voxtype` keeps working until you move them into
 `~/.config/voxtype` and `~/.local/share/voxtype`.
 
+### Overlays in config.d
+
+Files named `*.toml` in a `config.d` directory next to the config file are
+read after it, in name order, and each one overrides what came before. Tables
+merge key by key; any other value, lists included, replaces the earlier one.
+Without a `config.d` directory nothing changes.
+
+This lets several machines share one config file (for example from a dotfiles
+repo) and keep what differs in a small file per machine:
+
+```toml
+# ~/.config/voxtype/config.d/50-host.toml
+[osd]
+theme = "showcase"
+```
+
+An overlay that cannot be read or parsed is named in the log and skipped; the
+rest of the config still loads. Settings written by `voxtype setup` go to the
+main file, so a key that an overlay also sets keeps the overlay's value.
+Environment variables and CLI flags still override both.
+
 ## What Happens When the Config Has an Error
 
 Since 1.1.0 the config parses section by section. One unreadable value no
