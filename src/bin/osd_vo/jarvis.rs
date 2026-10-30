@@ -1213,11 +1213,25 @@ impl Popup {
         .size(g.w, h)
         .motion(Prop::Size, Spring::SNAP);
         let style = self.look.text_style();
+        let stacking = self.look.on(wild_space::DEPTH_STACK);
+        // An edit quiets the depth stack from the pending tap on. The plain
+        // lines then take the places the stack gave them: from the bottom,
+        // with the text the stack's 4 px sheet padding higher, so the
+        // reading line does not jump when the stack goes.
+        let unstacked = !stacking && self.look.quiet.contains(&wild_space::DEPTH_STACK) && {
+            let mut look = self.look.clone();
+            look.quiet = Arc::from([]);
+            look.on(wild_space::DEPTH_STACK)
+        };
+        let lift = if unstacked { 4.0 * k } else { 0.0 };
         let mut column = Element::column("lines")
             .align_items(AlignItems::CENTER)
             .width(g.w)
             .height(rows as f32 * style.line_height)
-            .margin_edges(FRAME_PAD_TOP * k, 0.0, 0.0, 0.0);
+            .margin_edges(FRAME_PAD_TOP * k - lift, 0.0, 0.0, 0.0);
+        if unstacked {
+            column = column.justify(taffy::JustifyContent::FLEX_END);
+        }
         // While editing: the window's lines as the edit layer breaks them,
         // each with its sticky centring width.
         let editing = self.edit_view.is_some();
@@ -1236,7 +1250,7 @@ impl Popup {
         // the others keep their nodes and move up.
         // The popup counts the lines it has room for; show that many.
         let skip = lines.len().saturating_sub(rows as usize);
-        if self.look.on(wild_space::DEPTH_STACK) {
+        if stacking {
             column = column.child(self.depth_stack_lines(
                 &lines[skip..],
                 g.w,
@@ -1257,11 +1271,7 @@ impl Popup {
                 self.jarvis.hold.as_ref(),
             ));
         }
-        let stacked = if self.look.on(wild_space::DEPTH_STACK) {
-            lines.len()
-        } else {
-            skip
-        };
+        let stacked = if stacking { lines.len() } else { skip };
         let newest = lines.len().saturating_sub(1);
         for (i, (words, width)) in lines.iter().enumerate().skip(stacked) {
             let key = words
@@ -1653,5 +1663,40 @@ mod edit_tests {
     #[test]
     fn jarvis_edit_moment_keeps_the_envelope() {
         check_edit_envelope(OsdTheme::Jarvis, &[0, 1, 2]);
+    }
+
+    /// The pending tap quiets the depth stack, and the newest line keeps its
+    /// place as the plain lines take over: the wide edit moment stays inside
+    /// the envelope from its first frame, dictation included.
+    #[test]
+    fn jarvis_reading_line_stays_put_when_the_stack_goes_quiet() {
+        use super::super::moments::{edit_scenario, popup_for, Moment};
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Jarvis,
+            width_px: 600,
+            preview_font_pt: Some(17.0),
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        look.set_motion(&cfg.motion);
+        assert!(look.on(wild_space::DEPTH_STACK));
+        let options = Options {
+            fonts: fonts.clone(),
+            default_motion: default_motion(&look),
+            ..Options::default()
+        };
+        let report = vo::envelope::check_scenario(
+            popup_for(Moment::Edit, Popup::new(look.clone(), &fonts)),
+            &edit_scenario(&look, 0),
+            30.0,
+            options,
+            &vo::envelope::Envelope {
+                transcript: 0..1 << 20,
+                ..vo::envelope::Envelope::default()
+            },
+        );
+        assert!(report.violations.is_empty(), "{report}");
     }
 }

@@ -1,6 +1,6 @@
-default Newest: 5 lines, caret on line 4 at 285.7,412.5, words w133 to w159; typed: 5 lines, caret on line 4 at 336.1,412.5, words w133 to w159abcdefghij
-default Middle: 5 lines, caret on line 2 at 209.1,365.2, words w133 to w159; typed: 5 lines, caret on line 2 at 309.3,365.2, words w133 to w159
-default Top: 5 lines, caret on line 0 at 211.2,317.9, words w133 to w159; typed: 5 lines, caret on line 0 at 312.2,317.9, words w133 to w159
-wide Newest: 5 lines, caret on line 4 at 422.4,611.7, words w133 to w159; typed: 5 lines, caret on line 4 at 498.1,611.7, words w133 to w159abcdefghij
-wide Middle: 5 lines, caret on line 2 at 307.1,540.8, words w133 to w159; typed: 5 lines, caret on line 2 at 457.4,540.8, words w133 to w159
-wide Top: 5 lines, caret on line 0 at 310.0,469.9, words w133 to w159; typed: 5 lines, caret on line 0 at 461.5,469.9, words w133 to w159
+default Newest: 5 lines, caret on line 4 at 285.7,410.1, words w133 to w159; typed: 5 lines, caret on line 4 at 336.1,410.1, words w133 to w159abcdefghij
+default Middle: 5 lines, caret on line 2 at 209.1,362.8, words w133 to w159; typed: 5 lines, caret on line 2 at 309.3,362.8, words w133 to w159
+default Top: 5 lines, caret on line 0 at 211.2,315.6, words w133 to w159; typed: 5 lines, caret on line 0 at 312.2,315.6, words w133 to w159
+wide Newest: 5 lines, caret on line 4 at 422.4,608.2, words w133 to w159; typed: 5 lines, caret on line 4 at 498.1,608.2, words w133 to w159abcdefghij
+wide Middle: 5 lines, caret on line 2 at 307.1,537.2, words w133 to w159; typed: 5 lines, caret on line 2 at 457.4,537.2, words w133 to w159
+wide Top: 5 lines, caret on line 0 at 310.0,466.3, words w133 to w159; typed: 5 lines, caret on line 0 at 461.5,466.3, words w133 to w159
