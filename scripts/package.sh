@@ -720,6 +720,11 @@ FPM_OPTS=(
 )
 
 # Build deb
+# libxkbcommon: only voxtype-osd-vo (feature osd-vo) links it, for keyboard edits in
+# the popup, and no release binary is built with that feature. When voxtype-osd-vo
+# ships here, add "libxkbcommon0" to the deb depends and "libxkbcommon" to the rpm
+# depends below. `cargo tree -e normal --features <set> -i xkbcommon` shows whether a
+# feature set links it.
 DEB_FILE="${RELEASE_DIR}/voxtype_${VERSION}-${RELEASE}_${DEB_ARCH}.deb"
 if [[ "$BUILD_DEB" == "true" ]]; then
     echo ""
