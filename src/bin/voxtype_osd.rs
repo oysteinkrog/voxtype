@@ -43,7 +43,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use voxtype::config::Config as VoxtypeConfig;
 use voxtype::osd::config::{OsdConfig, OsdFrontend, OsdTheme};
 
 const NATIVE_BIN: &str = "voxtype-osd-native";
@@ -234,22 +233,11 @@ fn build_child_args(frontend: OsdFrontend, supervised: bool, rest: &[String]) ->
     out
 }
 
-/// Load the `[osd]` section from the voxtype config file, falling back to
-/// the defaults when the file is missing, unreadable, or doesn't contain a
-/// usable section.
+/// Load the `[osd]` section the way the daemon does, config.d overlays
+/// included, falling back to the defaults when the config cannot be loaded.
 fn load_osd_config(explicit: Option<&Path>) -> OsdConfig {
-    #[derive(serde::Deserialize, Default)]
-    struct PartialConfig {
-        #[serde(default)]
-        osd: Option<OsdConfig>,
-    }
-
-    explicit
-        .map(Path::to_path_buf)
-        .or_else(VoxtypeConfig::default_path)
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|content| toml::from_str::<PartialConfig>(&content).ok())
-        .and_then(|p| p.osd)
+    voxtype::config::load_config(explicit)
+        .map(|c| c.osd)
         .unwrap_or_default()
 }
 
@@ -366,6 +354,21 @@ mod tests {
             resolve_theme(&args(&["--width-px", "400", "--theme=swiss"]), none),
             OsdTheme::Swiss
         );
+    }
+
+    #[test]
+    fn theme_comes_from_config_d_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "[osd]\nfrontend = \"vo\"\n").unwrap();
+        std::fs::create_dir(dir.path().join("config.d")).unwrap();
+        std::fs::write(
+            dir.path().join("config.d/50-host.toml"),
+            "[osd]\ntheme = \"showcase\"\n",
+        )
+        .unwrap();
+        assert_eq!(resolve_theme(&[], Some(&config)), OsdTheme::Showcase);
+        assert_eq!(load_osd_config(Some(&config)).frontend, OsdFrontend::Vo);
     }
 
     #[test]
