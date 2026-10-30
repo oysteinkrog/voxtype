@@ -360,6 +360,21 @@ impl Default for EditLink {
 }
 
 /// How a keyboard-edited dictation was delivered.
+/// The sound and the outcome file for a stream that ended with `outcome`.
+/// A stream that sent nothing must not read as done: a hook that presses
+/// Enter checks the file.
+fn stream_end_signals(outcome: HookOutcome) -> (SoundEvent, crate::osd::outcome::Outcome) {
+    use crate::osd::outcome::Outcome;
+    match outcome {
+        HookOutcome::Failed => (SoundEvent::Error, Outcome::Failed),
+        HookOutcome::Empty => (SoundEvent::TranscriptionComplete, Outcome::Empty),
+        HookOutcome::Cancelled => (SoundEvent::Cancelled, Outcome::Cancelled),
+        HookOutcome::Done | HookOutcome::NotPasted => {
+            (SoundEvent::TranscriptionComplete, Outcome::Done)
+        }
+    }
+}
+
 /// The delivery record of a live preview dictation.
 fn stream_delivery(
     method: &str,
@@ -1325,6 +1340,8 @@ pub struct Daemon {
     edit_target: Option<tokio::task::JoinHandle<Option<crate::osd::target::Window>>>,
     edit_window: Option<crate::osd::target::Window>,
     streaming_failure: Option<String>,
+    // A stream that ended in an error with no rescue: why no text went out.
+    streaming_error: Option<HookOutcome>,
     // Background tasks for eager chunk transcriptions (chunk_index, task)
     eager_chunk_tasks: Vec<(
         usize,
@@ -1472,6 +1489,7 @@ impl Daemon {
             edit_target: None,
             edit_window: None,
             streaming_failure: None,
+            streaming_error: None,
             eager_chunk_tasks: Vec::new(),
             vad,
             meeting_daemon: None,
@@ -1833,6 +1851,7 @@ impl Daemon {
         discard_stale_cancel(self.start_request);
         // An edit asked for before this recording is not for it.
         let _ = check_edit_requested();
+        self.streaming_error = None;
         self.edit = EditPause::default();
         self.edit_doc = None;
         self.edit_pauses = 0;
@@ -2717,9 +2736,8 @@ impl Daemon {
                 .flatten();
         clear_live_preview();
 
-        // For the post-output hook, when it runs at the end: no text went
-        // out.
-        let mut outcome = HookOutcome::Empty;
+        // Why no text went out, for when none did.
+        let mut outcome = self.streaming_error.take().unwrap_or(HookOutcome::Empty);
         // The stream failed: transcribe its audio again rather than lose it.
         if let Some(failure) = self.streaming_failure.take() {
             let delivered = self
@@ -2805,7 +2823,15 @@ impl Daemon {
         let session = streaming_session.take();
         *streaming_chain = None;
 
-        self.play_feedback(SoundEvent::TranscriptionComplete);
+        let sent = session
+            .as_ref()
+            .is_some_and(|s| s.typed_chars() > 0 || s.delivered().is_some());
+        let outcome = if sent { HookOutcome::Done } else { outcome };
+        // The outcome file before the hook: a hook that presses Enter
+        // reads it.
+        let (sound, ended) = stream_end_signals(outcome);
+        self.play_feedback(sound);
+        crate::osd::outcome::write(ended);
 
         end_streaming_hook(&self.config.output, session.as_ref(), outcome).await;
 
@@ -6091,7 +6117,7 @@ impl Daemon {
                                 // A dictation started and stopped again without
                                 // speaking: the popup says so, nothing else.
                                 tracing::info!("Streaming session ended with no speech");
-                                crate::osd::outcome::write(crate::osd::outcome::Outcome::Empty);
+                                self.streaming_error = Some(HookOutcome::Empty);
                             } else if self.config.live_preview_active() {
                                 // end_streaming transcribes the audio again
                                 // and reports the outcome.
@@ -6099,6 +6125,7 @@ impl Daemon {
                                 self.streaming_failure = Some(err.to_string());
                             } else {
                                 tracing::error!("Streaming backend error: {}", err);
+                                self.streaming_error = Some(HookOutcome::Failed);
                                 // Not "critical": KDE and GNOME keep critical
                                 // notifications up until they are closed.
                                 send_notification(
@@ -6372,6 +6399,19 @@ mod tests {
     use crate::config::{TranscriptionEngine, WhisperMode};
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_stream_that_sent_nothing_does_not_read_as_done() {
+        use crate::osd::outcome::Outcome;
+        let (sound, file) = stream_end_signals(HookOutcome::Empty);
+        assert!(matches!(sound, SoundEvent::TranscriptionComplete));
+        assert_eq!(file, Outcome::Empty);
+        let (sound, file) = stream_end_signals(HookOutcome::Failed);
+        assert!(matches!(sound, SoundEvent::Error));
+        assert_eq!(file, Outcome::Failed);
+        let (_, file) = stream_end_signals(HookOutcome::Done);
+        assert_eq!(file, Outcome::Done);
+    }
 
     #[test]
     fn a_live_preview_delivery_tells_the_popup_what_went_out() {

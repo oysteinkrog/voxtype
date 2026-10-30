@@ -398,7 +398,8 @@ def feed_mic():
                 start = time.monotonic()
                 n = 0
                 while True:
-                    data = speech[n:n + chunk] or bytes(chunk)
+                    silent = os.path.exists(os.path.join(work, "mic-silent"))
+                    data = (not silent and speech[n:n + chunk]) or bytes(chunk)
                     w.write(data.ljust(chunk, b"\0"))
                     n += chunk
                     lag = start + n / 32000 - time.monotonic()
@@ -565,6 +566,24 @@ check("the popup is told what an early Enter pasted", receipt.get("text") == ear
 check("the popup does not take focus again after an early Enter",
       not target("leave", t_early), f"leaves={target('leave', t_early)}")
 check("the daemon is idle after an early Enter", (read("state") or "").strip() == "idle", f"state={read('state')!r}")
+
+# --- A dictation with no speech: no paste and no Enter. ---
+wait(lambda: (read("state") or "").strip() == "idle", 10)
+time.sleep(1.5)
+open(os.path.join(work, "mic-silent"), "w").close()
+hooks_before = len(lines(os.path.join(work, "hook.log")))
+t_quiet = ms()
+vt("record", "start")
+time.sleep(4.0)
+vt("record", "stop")
+wait(lambda: (read("state") or "").strip() == "idle", 15)
+time.sleep(1.5)
+os.remove(os.path.join(work, "mic-silent"))
+new_hooks = lines(os.path.join(work, "hook.log"))[hooks_before:]
+check("a dictation with no speech ends as empty", (read("outcome") or "").strip() == "empty",
+      f"outcome={read('outcome')!r} hook={new_hooks}")
+check("a dictation with no speech sends no keys and no Enter",
+      not keys_after(t_quiet) and not hook_enters(new_hooks), f"keys={keys_after(t_quiet)} hook={new_hooks}")
 
 # --- Fourth dictation: the target window closes during the edit. ---
 wait(lambda: (read("state") or "").strip() == "idle", 10)
