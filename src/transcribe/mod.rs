@@ -20,6 +20,7 @@ pub mod remote;
 pub mod revisions;
 pub mod sliding_window;
 pub mod soniox;
+pub mod sound_probe;
 pub mod streaming;
 pub mod subprocess;
 pub mod whisper;

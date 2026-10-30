@@ -628,9 +628,26 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     };
     // None = CPU: the GPU is left to the engine model.
     let model_path = super::parakeet::resolve_model_path(live_model).map_err(|e| e.to_string());
-    let handle = model_path
-        .clone()
-        .and_then(|path| ParakeetUnifiedHandle::load(&path, None).map_err(|e| e.to_string()));
+    // The sound strip runs an encoder with one more output and a probe on
+    // it; without it the worker loads the plain encoder as before.
+    let probe = model_path
+        .as_ref()
+        .ok()
+        .and_then(|path| sound_probe(config, path));
+    let handle = model_path.clone().and_then(|path| {
+        match &probe {
+            Some(p) => ParakeetUnifiedHandle::load_with_layer(
+                &path,
+                Some((
+                    &path.join(super::sound_probe::ENCODER_FILE),
+                    p.output.as_str(),
+                )),
+                None,
+            ),
+            None => ParakeetUnifiedHandle::load(&path, None),
+        }
+        .map_err(|e| e.to_string())
+    });
     // The model signals (word details, frame levels, the lookahead tail)
     // are for the OSD: without it the worker sends none, and skips the
     // lookahead decode (a few ms per step).
@@ -682,6 +699,7 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             &handle,
             &streaming_config,
             vocab.as_ref(),
+            probe.as_ref(),
         )? {
             return Ok(());
         }
@@ -692,6 +710,7 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
 /// EOF, then the response. Returns whether another recording may follow
 /// (false after EOF).
 #[cfg(feature = "parakeet")]
+#[allow(clippy::too_many_arguments)]
 fn live_session(
     config: &crate::config::Config,
     out: &mut io::StdoutLock<'_>,
@@ -700,6 +719,7 @@ fn live_session(
     handle: &Result<parakeet_rs::ParakeetUnifiedHandle, String>,
     streaming_config: &parakeet_rs::UnifiedStreamingConfig,
     vocab: Option<&parakeet_rs::SentencePieceVocab>,
+    probe: Option<&super::sound_probe::SoundProbe>,
 ) -> anyhow::Result<bool> {
     use super::revisions::RevisionLog;
     use parakeet_rs::ParakeetUnified;
@@ -801,12 +821,14 @@ fn live_session(
     // Off unless live_preview_revisions_dir is set; the clock starts with
     // the first audio block.
     let mut revlog: Option<RevisionLog> = None;
-    let mut signals = SignalsSent::default();
+    let mut signals = SignalsSent::new(probe);
     let mut ticks = TailTicks::new(
         config
             .parakeet
             .as_ref()
-            .map_or(crate::config::DEFAULT_STREAMING_TAIL_SECS, |p| p.streaming_tail_secs()),
+            .map_or(crate::config::DEFAULT_STREAMING_TAIL_SECS, |p| {
+                p.streaming_tail_secs()
+            }),
     );
     let mut more = false;
     for msg in blocks_rx.iter() {
@@ -850,6 +872,7 @@ fn live_session(
                     last_partial.push_str(&delta);
                     let shown = last_partial.trim_start();
                     let words = preview_words(u, vocab);
+                    signals.note_words(&words, samples.len());
                     writeln!(out, "{}{}", WORDS_PREFIX, serde_json::to_string(&words)?)?;
                     writeln!(out, "{}{}", PARTIAL_PREFIX, serde_json::to_string(shown)?)?;
                     if let Some(log) = revlog.as_mut() {
@@ -906,12 +929,9 @@ fn live_session(
             last_partial.push_str(&tail);
             // Show the last words too; the OSD stays up while finishing.
             if let Some(u) = unified.as_ref() {
-                writeln!(
-                    out,
-                    "{}{}",
-                    WORDS_PREFIX,
-                    serde_json::to_string(&preview_words(u, vocab))?
-                )?;
+                let words = preview_words(u, vocab);
+                signals.note_words(&words, samples.len());
+                writeln!(out, "{}{}", WORDS_PREFIX, serde_json::to_string(&words)?)?;
             }
             writeln!(
                 out,
@@ -929,10 +949,11 @@ fn live_session(
             }
         }
     }
-    if let (Some(u), Some(vocab)) = (unified.as_ref(), vocab) {
+    if let (Some(u), Some(vocab)) = (unified.as_mut(), vocab) {
         signals.send(out, u, vocab, samples.len())?;
         out.flush()?;
     }
+    signals.log_sounds();
     let mut preview_final = last_partial.trim().to_string();
     any_speech |= splitter.tail(samples.len()).is_some();
     // The streaming model has returned nothing for a whole clip with speech
@@ -1130,7 +1151,13 @@ fn preview_words(
     let details = u.token_details();
     super::revisions::words_with_details(timed.tokens.iter().enumerate().map(|(i, t)| {
         let detail = vocab.zip(details.get(i)).map(|(v, d)| word_detail(d, v));
-        (t.text.as_str(), t.start, t.end, conf.get(i).copied(), detail)
+        (
+            t.text.as_str(),
+            t.start,
+            t.end,
+            conf.get(i).copied(),
+            detail,
+        )
     }))
 }
 
@@ -1224,22 +1251,198 @@ impl TailTicks {
     }
 }
 
+/// The sound strip's probe, when the OSD is on and `sound-strip` is among
+/// its motion features (`[osd] motion`, or `VOXTYPE_OSD_VO_MOTION` over it)
+/// and both of its files are next to the live model
+/// (`scripts/sound-probe-export.py` writes them).
+#[cfg(feature = "parakeet")]
+fn sound_probe(
+    config: &crate::config::Config,
+    model_dir: &std::path::Path,
+) -> Option<super::sound_probe::SoundProbe> {
+    use crate::osd::config::OsdMotion;
+    if !config.osd.enabled {
+        return None;
+    }
+    let env: Vec<String> = std::env::var("VOXTYPE_OSD_VO_MOTION")
+        .ok()
+        .into_iter()
+        .collect();
+    let motion = OsdMotion::layered(&env, &config.osd.motion);
+    if !matches!(&motion, OsdMotion::Names(n) if n.iter().any(|n| n == "sound-strip")) {
+        return None;
+    }
+    if !model_dir.join(super::sound_probe::ENCODER_FILE).exists() {
+        eprintln!(
+            "[worker] No sound strip: {} is not in {} (scripts/sound-probe-export.py makes it)",
+            super::sound_probe::ENCODER_FILE,
+            model_dir.display()
+        );
+        return None;
+    }
+    super::sound_probe::SoundProbe::load(&model_dir.join(super::sound_probe::PROBE_FILE))
+        .map_err(|e| eprintln!("[worker] No sound strip: {}", e))
+        .ok()
+}
+
+/// Sounds kept per frame of the sound strip.
+#[cfg(feature = "parakeet")]
+const SOUND_TOP_K: usize = 3;
+
 /// What the worker has sent of the live model's signals this recording.
 #[cfg(feature = "parakeet")]
 #[derive(Default)]
-struct SignalsSent {
+struct SignalsSent<'a> {
     steps: u32,
     frames: usize,
+    probe: Option<&'a super::sound_probe::SoundProbe>,
+    sounds: SoundsSent,
+}
+
+/// What the sound strip has sent this recording, to log what it cost and
+/// how far it ran ahead of the words.
+#[cfg(feature = "parakeet")]
+#[derive(Default)]
+struct SoundsSent {
+    runs: u32,
+    took: std::time::Duration,
+    /// Encoder frame -> samples heard when the strip first showed a speech
+    /// sound there.
+    heard: std::collections::BTreeMap<usize, usize>,
+    /// Each word's start frame and the samples heard when it first showed.
+    words: Vec<(usize, usize)>,
 }
 
 #[cfg(feature = "parakeet")]
-impl SignalsSent {
+impl SoundsSent {
+    /// How far ahead of each word the strip showed a speech sound in the
+    /// word's frames: those after the word before it, up to its own
+    /// first frame (where the model emits it). Seconds, per word that had
+    /// one.
+    fn leads(&self) -> Vec<f32> {
+        let mut from = 0usize;
+        let mut leads = Vec::new();
+        for &(frame, shown) in &self.words {
+            // Two words can start on one frame: the second has none of its
+            // own.
+            if frame < from {
+                continue;
+            }
+            let first = self.heard.range(from..=frame).map(|(_, &at)| at).min();
+            if let Some(at) = first {
+                leads.push(shown.saturating_sub(at) as f32 / 16000.0);
+            }
+            from = frame + 1;
+        }
+        leads
+    }
+}
+
+#[cfg(feature = "parakeet")]
+impl<'a> SignalsSent<'a> {
+    fn new(probe: Option<&'a super::sound_probe::SoundProbe>) -> Self {
+        Self {
+            probe,
+            ..Self::default()
+        }
+    }
+
+    /// Notes when each word first showed, for the sound strip's lead.
+    fn note_words(&mut self, words: &[super::revisions::Word], samples: usize) {
+        if self.probe.is_none() {
+            return;
+        }
+        for w in words.iter().skip(self.sounds.words.len()) {
+            let frame = (w.start / LIVE_FRAME_SECS).round() as usize;
+            self.sounds.words.push((frame, samples));
+        }
+    }
+
+    /// The sounds of the frames committed since the last call and of the
+    /// newest encoder run's lookahead frames.
+    fn sounds(
+        &mut self,
+        u: &mut parakeet_rs::ParakeetUnified,
+        samples: usize,
+    ) -> (
+        Vec<crate::osd::live::SoundFrame>,
+        Vec<crate::osd::live::SoundFrame>,
+    ) {
+        use crate::osd::live::{Guess, SoundFrame};
+        let Some(probe) = self.probe else {
+            return Default::default();
+        };
+        let Some(layer) = u.take_layer_frames() else {
+            return Default::default();
+        };
+        if layer.frames.ncols() != probe.dim() {
+            return Default::default();
+        }
+        let start = std::time::Instant::now();
+        let mut frames: Vec<SoundFrame> = Vec::with_capacity(layer.frames.nrows());
+        for (i, row) in layer.frames.rows().into_iter().enumerate() {
+            let abs = layer.first_frame + i;
+            let row = row
+                .to_slice()
+                .map(<[f32]>::to_vec)
+                .unwrap_or_else(|| row.to_vec());
+            let top = probe.top(&row, SOUND_TOP_K);
+            if top
+                .first()
+                .is_some_and(|&(c, _)| probe.labels[c] != super::sound_probe::SILENCE)
+            {
+                self.sounds.heard.entry(abs).or_insert(samples);
+            }
+            frames.push(SoundFrame {
+                t: abs as f32 * LIVE_FRAME_SECS,
+                top: top
+                    .into_iter()
+                    .map(|(c, logp)| Guess {
+                        text: probe.labels[c].clone(),
+                        logp,
+                    })
+                    .collect(),
+            });
+        }
+        self.sounds.took += start.elapsed();
+        self.sounds.runs += 1;
+        let tail = frames.split_off(layer.committed.min(frames.len()));
+        (frames, tail)
+    }
+
+    /// One stderr line per recording with the sound strip on: the probe's
+    /// time per encoder run and how far the strip ran ahead of the words.
+    fn log_sounds(&self) {
+        let s = &self.sounds;
+        if self.probe.is_none() || s.runs == 0 {
+            return;
+        }
+        let mut leads = s.leads();
+        leads.sort_by(f32::total_cmp);
+        let ms = s.took.as_secs_f32() * 1000.0 / s.runs as f32;
+        match (leads.first(), leads.last()) {
+            (Some(min), Some(max)) => eprintln!(
+                "[worker] Sound strip: probe {:.2} ms per step ({} steps); ahead of {} words \
+                 by median {:.2}s (min {:.2}s, max {:.2}s)",
+                ms,
+                s.runs,
+                leads.len(),
+                leads[leads.len() / 2],
+                min,
+                max
+            ),
+            _ => eprintln!(
+                "[worker] Sound strip: probe {:.2} ms per step ({} steps); no words",
+                ms, s.runs
+            ),
+        }
+    }
     /// Writes a `G` line when the model took a step since the last one:
     /// the frames new since then and the current lookahead tail.
     fn send(
         &mut self,
         out: &mut impl Write,
-        u: &parakeet_rs::ParakeetUnified,
+        u: &mut parakeet_rs::ParakeetUnified,
         vocab: &parakeet_rs::SentencePieceVocab,
         samples: usize,
     ) -> io::Result<()> {
@@ -1254,7 +1457,7 @@ impl SignalsSent {
     fn send_tail(
         &mut self,
         out: &mut impl Write,
-        u: &parakeet_rs::ParakeetUnified,
+        u: &mut parakeet_rs::ParakeetUnified,
         vocab: &parakeet_rs::SentencePieceVocab,
         samples: usize,
     ) -> io::Result<()> {
@@ -1264,7 +1467,7 @@ impl SignalsSent {
     fn write(
         &mut self,
         out: &mut impl Write,
-        u: &parakeet_rs::ParakeetUnified,
+        u: &mut parakeet_rs::ParakeetUnified,
         vocab: &parakeet_rs::SentencePieceVocab,
         samples: usize,
     ) -> io::Result<()> {
@@ -1299,12 +1502,15 @@ impl SignalsSent {
                 detail: Some(word_detail(&t.detail, vocab)),
             })
             .collect();
+        let (sounds, sound_tail) = self.sounds(u, samples);
         let step = SignalsStep {
             step: self.steps,
             audio_s: samples as f32 / 16000.0,
             frames,
             tail,
             with_tail: u.transcript_with_tentative().trim().to_string(),
+            sounds,
+            sound_tail,
         };
         writeln!(out, "{}{}", SIGNALS_PREFIX, serde_json::to_string(&step)?)
     }
@@ -1418,7 +1624,8 @@ fn read_block<R: Read>(reader: &mut R) -> io::Result<Option<Vec<f32>>> {
     reader.read_exact(&mut bytes)?;
     Ok(Some(
         bytes
-            .as_chunks::<4>().0
+            .as_chunks::<4>()
+            .0
             .iter()
             .map(|b| f32::from_le_bytes(*b))
             .collect(),
@@ -1564,6 +1771,78 @@ mod tests {
         std::fs::create_dir_all(out.parent().unwrap()).unwrap();
         std::fs::write(&out, serde_json::to_string_pretty(&steps).unwrap()).unwrap();
         eprintln!("{} steps to {}", steps.len(), out.display());
+    }
+
+    /// What the sound strip costs per streaming step on a public fixture:
+    /// the encoder with and without the extra layer output, and the probe.
+    /// Needs the live model with the files scripts/sound-probe-export.py
+    /// writes: `cargo test --features parakeet -- --ignored sound_strip_cost
+    /// --nocapture`, in an optimised profile for real numbers.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    #[ignore]
+    fn sound_strip_cost() {
+        use super::super::sound_probe::{SoundProbe, ENCODER_FILE, PROBE_FILE};
+        use parakeet_rs::{ParakeetUnified, ParakeetUnifiedHandle, UnifiedStreamingConfig};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let reader = hound::WavReader::open(root.join("tests/fixtures/vad/speech_long.wav"))
+            .expect("fixture opens");
+        let max = (1 << (reader.spec().bits_per_sample - 1)) as f32;
+        let samples: Vec<f32> = reader
+            .into_samples::<i32>()
+            .filter_map(Result::ok)
+            .map(|s| s as f32 / max)
+            .collect();
+        let path = super::super::parakeet::resolve_model_path("parakeet-unified-en-0.6b-int8")
+            .expect("model path");
+        let probe = SoundProbe::load(&path.join(PROBE_FILE)).expect("probe loads");
+        let encoder = path.join(ENCODER_FILE);
+        let mut texts = Vec::new();
+        for with_layer in [false, true, false, true] {
+            let handle = if with_layer {
+                ParakeetUnifiedHandle::load_with_layer(&path, Some((&encoder, &probe.output)), None)
+            } else {
+                ParakeetUnifiedHandle::load(&path, None)
+            }
+            .expect("model loads");
+            let (mut enc, mut prb, mut steps) = (0.0f64, 0.0f64, 0u32);
+            // Several passes, so the first runs' warm-up counts little.
+            for _ in 0..5 {
+                let mut u = ParakeetUnified::from_shared_with_streaming_config(
+                    &handle,
+                    UnifiedStreamingConfig::default(),
+                )
+                .expect("live model");
+                for chunk in samples.chunks(1600) {
+                    let before = u.committed_samples();
+                    u.transcribe_chunk(chunk).expect("chunk");
+                    if u.committed_samples() == before {
+                        continue;
+                    }
+                    steps += 1;
+                    enc += u.last_step_stats().encoder.as_secs_f64();
+                    if let Some(l) = u.take_layer_frames() {
+                        let start = std::time::Instant::now();
+                        for row in l.frames.rows() {
+                            let row = row.to_vec();
+                            std::hint::black_box(probe.top(&row, SOUND_TOP_K));
+                        }
+                        prb += start.elapsed().as_secs_f64();
+                    }
+                }
+                u.flush().expect("flush");
+                texts.push((with_layer, u.get_transcript()));
+            }
+            eprintln!(
+                "layer output {}: encoder {:.2} ms per step, probe {:.3} ms per step ({} steps)",
+                with_layer,
+                enc * 1000.0 / steps as f64,
+                prb * 1000.0 / steps as f64,
+                steps
+            );
+        }
+        // The extra output leaves the text as it was.
+        assert!(texts.windows(2).all(|w| w[0].1 == w[1].1), "{texts:?}");
     }
 
     #[cfg(feature = "parakeet")]
