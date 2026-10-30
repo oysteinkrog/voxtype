@@ -675,8 +675,11 @@ impl Popup {
         }
         // The recording stopped and nothing is being finished. That is a
         // cancel, or the moment before the final pass writes its status, so
-        // it is forgotten as soon as the final pass shows up.
-        if self.extra.finish_at.is_some() || self.extra.final_at.is_some() {
+        // it is forgotten as soon as the final pass shows up. A cancel, no
+        // speech or a failure stays, even after a final pass.
+        if self.kit_nothing_typed() {
+            self.jarvis.ended_at.get_or_insert(t);
+        } else if self.extra.finish_at.is_some() || self.extra.final_at.is_some() {
             self.jarvis.ended_at = None;
         } else if self.ended() && self.jarvis.ended_at.is_none() {
             self.jarvis.ended_at = Some(t);
@@ -1698,5 +1701,30 @@ mod edit_tests {
             },
         );
         assert!(report.violations.is_empty(), "{report}");
+    }
+
+    /// A dictation that was finishing and then failed or found no speech
+    /// ends dimmed, as a cancel does, rather than as a finished one.
+    #[test]
+    fn jarvis_ends_dimmed_after_a_failure_while_finishing() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Jarvis,
+            ..OsdConfig::default()
+        };
+        let look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        for (outcome, dimmed) in [
+            (Outcome::Failed, true),
+            (Outcome::Empty, true),
+            (Outcome::Done, false),
+        ] {
+            let mut popup = Popup::new(look.clone(), &fonts);
+            popup.was_recording = true;
+            popup.extra.finish_at = Some(1.0);
+            popup.files.outcome = Some(outcome);
+            popup.sync_jarvis(2.0);
+            assert_eq!(popup.jarvis.ended_at.is_some(), dimmed, "{outcome:?}");
+        }
     }
 }

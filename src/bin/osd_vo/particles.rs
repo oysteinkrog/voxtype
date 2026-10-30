@@ -616,7 +616,7 @@ impl Popup {
     }
 
     fn particles_phase(&self) -> Phase {
-        if self.extra.final_at.is_some() {
+        if self.extra.final_at.is_some() && !self.particles_cancelled() {
             Phase::Done
         } else if self.extra.finish_at.is_some() || self.status().finishing {
             Phase::Finishing
@@ -625,8 +625,9 @@ impl Popup {
         }
     }
 
+    /// Nothing was typed: a cancel, no speech or a failure.
     fn particles_cancelled(&self) -> bool {
-        self.ending() == Some(Ending::Cancelled)
+        self.kit_nothing_typed()
     }
 
     pub(crate) fn particles_view(&self) -> Element<Msg> {
@@ -1317,5 +1318,35 @@ mod edit_tests {
     #[test]
     fn particles_edit_moment_keeps_the_envelope() {
         check_edit_envelope(OsdTheme::Particles, &[0, 1, 2]);
+    }
+
+    /// A failure or no speech after finishing keeps the mic and no chip:
+    /// nothing was typed.
+    #[test]
+    fn particles_shows_no_check_after_a_failure_while_finishing() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Particles,
+            ..OsdConfig::default()
+        };
+        let look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        for (outcome, cancelled) in [
+            (Outcome::Failed, true),
+            (Outcome::Empty, true),
+            (Outcome::Done, false),
+        ] {
+            let mut popup = Popup::new(look.clone(), &fonts);
+            popup.was_recording = true;
+            popup.extra.finish_at = Some(1.0);
+            popup.extra.final_at = Some(2.0);
+            popup.files.outcome = Some(outcome);
+            assert_eq!(popup.particles_cancelled(), cancelled, "{outcome:?}");
+            assert_eq!(
+                popup.particles_phase() == Phase::Done,
+                !cancelled,
+                "{outcome:?}"
+            );
+        }
     }
 }
