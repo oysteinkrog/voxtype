@@ -1998,6 +1998,7 @@ impl App for Popup {
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
         self.arm_cyber_tick(cx);
+        self.arm_dotmatrix_tick(cx);
     }
 
     fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
@@ -2158,6 +2159,7 @@ impl App for Popup {
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
         self.arm_cyber_tick(cx);
+        self.arm_dotmatrix_tick(cx);
         self.pace = self.room_tone_pace(t);
         if !tick && self.idle(t) {
             tracing::info!(
