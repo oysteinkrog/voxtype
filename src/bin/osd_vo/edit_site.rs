@@ -16,10 +16,12 @@
 //! need live audio, move glyphs from their laid-out places, treat a change
 //! as a model revision, or follow confidence.
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use vo::scene::element::{Element, TextStyle};
 use vo::scene::flow::{Caret, EditDecor};
+use vo_core::words::WordId;
 use voxtype::osd::config::OsdTheme;
 
 use super::edit::EditView;
@@ -189,6 +191,39 @@ fn line_decor(decor: &EditDecor, bytes: Range<usize>, has_caret: bool) -> EditDe
             .collect(),
         ..decor.clone()
     }
+}
+
+/// After an edit until delivery (plan 4.1): every live text underlines its
+/// `marked` words, in the look's mark colour, with no caret. A live text
+/// with no marked word is left as it is.
+pub(crate) fn place_marks(
+    site: &dyn EditSite,
+    look: &Look,
+    el: Element<Msg>,
+    marked: &HashSet<WordId>,
+) -> Element<Msg> {
+    let style = site.caret(look);
+    el.map_live_texts(&mut |e| {
+        // Without a live source a live text joins its words by one space.
+        let mut at = 0;
+        let mut marks = Vec::new();
+        for w in e.live_words().unwrap_or_default() {
+            if marked.contains(&w.id) {
+                marks.push(at..at + w.text.len());
+            }
+            at += w.text.len() + 1;
+        }
+        if marks.is_empty() {
+            return e;
+        }
+        e.edit(styled(
+            EditDecor {
+                marks,
+                ..EditDecor::default()
+            },
+            style,
+        ))
+    })
 }
 
 /// The adapter of a look with nothing special.

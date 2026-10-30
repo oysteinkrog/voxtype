@@ -101,6 +101,9 @@ pub(crate) struct Delivered {
     pub at: f64,
     /// Reduced motion: the text fades and the marks stand still.
     pub reduced: bool,
+    /// Only copied because the target window was not confirmed (R28, R29):
+    /// the daemon's `not-pasted` file was there.
+    pub not_pasted: bool,
 }
 
 impl Delivered {
@@ -114,6 +117,17 @@ impl Delivered {
             app,
             at,
             reduced: kit::reduced(),
+            not_pasted: false,
+        }
+    }
+
+    /// The status line's word for it: [`Via::label`], or "Copied, not
+    /// pasted" when the paste was held back.
+    pub(crate) fn label(&self) -> &'static str {
+        if self.not_pasted {
+            "Copied, not pasted"
+        } else {
+            self.via.label()
         }
     }
 
@@ -128,6 +142,9 @@ impl Delivered {
                 " into "
             });
             s.push_str(short);
+        }
+        if self.not_pasted {
+            s.push_str(", not pasted");
         }
         if self.enter {
             s.push_str(", Enter");
@@ -203,15 +220,16 @@ impl Popup {
     /// The word a look's status shows for a finished dictation: what the daemon
     /// reported (Typed, Pasted or Copied), or Done before or without a report.
     pub(crate) fn delivery_word(&self) -> &'static str {
-        self.delivered().map_or("Done", |d| d.via.label())
+        self.delivered().map_or("Done", Delivered::label)
     }
 
     /// [`Popup::delivery_word`] in capitals.
     pub(crate) fn delivery_word_caps(&self) -> &'static str {
-        match self.delivered().map(|d| d.via) {
-            Some(Via::Typed) => "TYPED",
-            Some(Via::Pasted) => "PASTED",
-            Some(Via::Copied) => "COPIED",
+        match self.delivered().map(|d| (d.via, d.not_pasted)) {
+            Some((_, true)) => "COPIED, NOT PASTED",
+            Some((Via::Typed, _)) => "TYPED",
+            Some((Via::Pasted, _)) => "PASTED",
+            Some((Via::Copied, _)) => "COPIED",
             None => "DONE",
         }
     }
@@ -261,6 +279,7 @@ impl Popup {
             if let Some(d) = &self.files.delivery {
                 let mut d = Delivered::new(d, self.life.app.clone(), t);
                 d.reduced |= self.look.on("reduced-motion");
+                d.not_pasted = d.via == Via::Copied && self.files.not_pasted.is_some();
                 tracing::info!(via = ?d.via, enter = d.enter, chars = d.chars, "delivered");
                 self.life.delivered = Some(d);
             }
@@ -684,6 +703,22 @@ mod tests {
         let mut d = delivery("wtype", 10, 50, false);
         d.app = None;
         assert_eq!(d.receipt(), "typed");
+    }
+
+    /// R28, R29: a paste held back because the window was not confirmed
+    /// says so in the receipt and the status word.
+    #[test]
+    fn a_held_back_paste_says_copied_not_pasted() {
+        let mut d = delivery("clipboard", 10, 5, false);
+        assert_eq!(
+            (d.label(), d.receipt().as_str()),
+            ("Copied", "copied for konsole")
+        );
+        d.not_pasted = true;
+        assert_eq!(d.label(), "Copied, not pasted");
+        assert_eq!(d.receipt(), "copied for konsole, not pasted");
+        d.app = None;
+        assert_eq!(d.receipt(), "copied, not pasted");
     }
 
     #[test]

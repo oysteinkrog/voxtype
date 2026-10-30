@@ -17,13 +17,14 @@
 //! [`EditView::centre`]: a line's left edge holds still while you type and
 //! re-centres [`RECENTRE_SECS`] after the last key (plan 4.2 item 5).
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use vo::scene::element::TextStyle;
 use vo::scene::flow::{Caret, EditDecor};
 use vo::scene::text::{ShapedText, TextLayout};
 use vo_core::edit::{EditBuffer, Selection};
-use vo_core::words::Word;
+use vo_core::words::{Word, WordId};
 
 /// What the look draws while editing.
 #[derive(Clone, Debug, PartialEq)]
@@ -274,6 +275,22 @@ impl crate::Popup {
             None => self.stable_lines(style, wrap),
         }
     }
+}
+
+/// The bytes of the marked words of `text` that lie in `window`, in the
+/// window's bytes. `words` are the model's words of `text`, in order.
+pub(crate) fn mark_ranges(
+    words: &[Word],
+    text: &str,
+    window: Range<usize>,
+    marked: &HashSet<WordId>,
+) -> Vec<Range<usize>> {
+    words
+        .iter()
+        .zip(word_ranges(text))
+        .filter(|(w, r)| marked.contains(&w.id) && r.start >= window.start && r.end <= window.end)
+        .map(|(_, r)| r.start - window.start..r.end - window.start)
+        .collect()
 }
 
 /// The model's words that lie in `window` of `text`, whose words they are.

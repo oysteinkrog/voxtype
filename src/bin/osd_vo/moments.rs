@@ -1545,4 +1545,203 @@ mod tests {
         );
         assert!(report.is_ok(), "{report}");
     }
+
+    /// What [`EditSpy`] saw after each message, key and focus change.
+    #[derive(Clone, Debug, Default)]
+    struct EditSeen {
+        t: f64,
+        badge: Option<(&'static str, bool)>,
+        drawn: bool,
+        hint: Option<f32>,
+        /// The marked words' text in the edit view, or in the shown words
+        /// once the view is gone.
+        marked: Vec<String>,
+    }
+
+    /// The popup, recording its edit badge, hint and marks.
+    struct EditSpy(Popup, std::rc::Rc<std::cell::RefCell<Vec<EditSeen>>>);
+
+    impl EditSpy {
+        fn seen(&self, t: f64) {
+            let p = &self.0;
+            let marked = match &p.edit_view {
+                Some(v) => v
+                    .decor
+                    .marks
+                    .iter()
+                    .map(|r| v.text[r.clone()].to_string())
+                    .collect(),
+                None => p
+                    .shown
+                    .iter()
+                    .filter(|w| p.edit_marks.contains(&w.id))
+                    .map(|w| w.text.clone())
+                    .collect(),
+            };
+            self.1.borrow_mut().push(EditSeen {
+                t,
+                badge: p.edit_badge(),
+                drawn: p.look_badge().is_some(),
+                hint: p.edit_hint(),
+                marked,
+            });
+        }
+    }
+
+    impl vo::App for EditSpy {
+        type Msg = Msg;
+
+        fn init(&mut self, cx: &mut Cx<Msg>) {
+            self.0.init(cx);
+        }
+
+        fn update(&mut self, msg: Msg, cx: &mut Cx<Msg>) {
+            self.0.update(msg, cx);
+            self.seen(cx.t());
+        }
+
+        fn key(&mut self, ev: &vo::scene::input::KeyEvent, cx: &mut Cx<Msg>) -> bool {
+            let used = self.0.key(ev, cx);
+            self.seen(ev.t);
+            used
+        }
+
+        fn keyboard_focus(&mut self, gained: bool, requested: bool, cx: &mut Cx<Msg>) {
+            self.0.keyboard_focus(gained, requested, cx);
+            self.seen(cx.t());
+        }
+
+        fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
+            self.0.view(tokens)
+        }
+
+        fn surfaces(&self, tokens: &vo::Tokens) -> Vec<vo::SurfaceView<Msg>> {
+            self.0.surfaces(tokens)
+        }
+
+        fn main_surface(&self) -> Option<(Size, vo::Placement)> {
+            self.0.main_surface()
+        }
+    }
+
+    fn spy_run(look: &Look, s: &vo::Scenario<Msg>) -> Vec<EditSeen> {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut p = popup_for(Moment::Edit, Popup::scripted(look.clone(), &fonts));
+        p.live_surface = true;
+        let spy = EditSpy(p, seen.clone());
+        let options = Options {
+            fonts: fonts.clone(),
+            default_motion: default_motion(look),
+            ..Options::default()
+        };
+        vo::envelope::sample_scenario(spy, s, 30.0, options, &mut |_, _, _| {});
+        let out = seen.borrow().clone();
+        out
+    }
+
+    fn edit_look() -> Look {
+        let cfg = OsdConfig {
+            keyboard_edit: true,
+            ..OsdConfig::default()
+        };
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        Look::new(&cfg, &plasma, String::new(), &fonts)
+    }
+
+    /// M7.7: the dimmed "EDIT" shows while a tap is pending and goes away
+    /// when the tap is cancelled; with `keyboard_edit` off there is no
+    /// badge strip at all.
+    #[test]
+    fn the_dimmed_edit_badge_shows_while_a_tap_is_pending() {
+        let look = edit_look();
+        let mut k = Take::new(0.2);
+        k.record(0.2);
+        let t = k.speak(0.2, &sentence_words(0, 6), 0.32);
+        k.edit(t + 0.1, Some("pending"));
+        // The daemon drops the block: a key came within 300 ms.
+        k.edit(t + 0.4, None);
+        let s = k.scenario(&look, t + 1.0);
+        let seen = spy_run(&look, &s);
+        let at = |t: f64| seen.iter().rev().find(|e| e.t <= t + 1e-9).unwrap();
+        assert_eq!(
+            (at(t).badge, at(t).drawn),
+            (None, false),
+            "no badge before the tap"
+        );
+        assert_eq!(
+            at(t + 0.2).badge,
+            Some(("EDIT", true)),
+            "dimmed while pending"
+        );
+        assert!(at(t + 0.2).drawn);
+        assert_eq!(
+            (at(t + 0.6).badge, at(t + 0.6).drawn),
+            (None, false),
+            "gone on cancel"
+        );
+        assert!(look.live_surface().h > look.surface().h);
+        let plain = test_look();
+        assert_eq!(plain.live_surface().h, plain.surface().h, "off: no strip");
+    }
+
+    /// M7.7: the badge follows the edit, the hint shows while editing, and
+    /// the typed word is marked, in the edit view and after Enter until the
+    /// next recording.
+    #[test]
+    fn the_edit_badge_hint_and_marks_follow_the_edit() {
+        let look = edit_look();
+        let s = edit_scenario(&look, 2);
+        let keys: Vec<f64> = s
+            .inputs
+            .iter()
+            .filter_map(|(t, i)| matches!(i, Input::Key(_)).then_some(*t))
+            .collect();
+        let seen = spy_run(&look, &s);
+        let at = |t: f64| seen.iter().rev().find(|e| e.t <= t + 1e-9).unwrap();
+        let first = keys[0];
+        let enter = *keys.last().unwrap() - 0.05;
+        assert_eq!(at(first - 0.05).badge, Some(("EDIT \u{b7} paused", false)));
+        let hint = at(first - 0.05).hint.expect("the hint on the first edit");
+        assert!(hint > 0.6, "{hint}");
+        assert_eq!(at(enter).marked, ["quickly"], "the typed word is marked");
+        let released = seen
+            .iter()
+            .find(|e| e.t > enter + 0.05 && e.badge.is_some())
+            .unwrap();
+        assert_eq!(released.badge, Some(("sending", false)), "{released:?}");
+        assert_eq!(seen.last().unwrap().badge, None);
+    }
+
+    /// Plan 4.1: after the edit the marked words stay underlined, also when
+    /// more speech arrives, until the next recording.
+    #[test]
+    fn edit_marks_stay_after_the_edit() {
+        use vo::scene::scene::Scene;
+        use vo::scene::text::ShapedLayout;
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let mut look = edit_look();
+        look.theme = OsdTheme::Swiss;
+        let mut p = Popup::scripted(look, &fonts);
+        p.text("alpha beta gamma");
+        let beta = p.shown[1].id;
+        let shapes = |p: &Popup| {
+            let mut scene: Scene<Msg> =
+                Scene::new().with_text(Box::new(ShapedLayout::new(fonts.clone())));
+            scene.set_viewport(0.0, p.look.live_surface(), 1.0);
+            scene.apply(p.view(&vo::Tokens::default()), 1.0);
+            scene.sample(2.0).shapes.len()
+        };
+        let plain = shapes(&p);
+        p.edit_marks.insert(beta);
+        p.text("alpha beta gamma delta");
+        assert_eq!(
+            p.shown[1].id, beta,
+            "the word keeps its id as speech goes on"
+        );
+        assert!(shapes(&p) > plain, "the marked word is underlined");
+    }
 }

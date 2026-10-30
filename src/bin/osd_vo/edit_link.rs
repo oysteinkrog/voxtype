@@ -97,6 +97,9 @@ pub(crate) struct EditLink {
     /// finish, focus lost). The popup's phase stands until the daemon
     /// publishes another.
     ahead_of: Option<Phase>,
+    /// The popup last handed the text back to be delivered, not to listen
+    /// again: the badge says "sending" while releasing.
+    sending: bool,
 }
 
 impl EditLink {
@@ -119,6 +122,11 @@ impl EditLink {
 
     pub(crate) fn buffer(&self) -> Option<&EditBuffer> {
         self.buffer.as_ref()
+    }
+
+    /// The text was handed back to be delivered (Enter), not to listen.
+    pub(crate) fn sending(&self) -> bool {
+        self.sending
     }
 
     pub(crate) fn tail(&self) -> &str {
@@ -307,6 +315,7 @@ impl EditLink {
         if self.buffer.is_some() {
             self.write();
             self.send(EditCmd::Resume { rev: self.rev });
+            self.sending = false;
             self.move_on(Phase::Releasing);
         }
     }
@@ -319,6 +328,7 @@ impl EditLink {
                 mode,
                 rev: self.rev,
             });
+            self.sending = true;
             self.move_on(Phase::Releasing);
         }
     }
