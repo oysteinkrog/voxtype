@@ -1060,6 +1060,9 @@ fn keep_warm(
     }
 }
 
+/// The error a live stream ends with when its worker gave no answer.
+pub const LIVE_WORKER_DIED: &str = "The live worker ended without a final text";
+
 /// What happens to a live worker after its recording.
 enum Refill {
     /// Stop it.
@@ -1170,8 +1173,11 @@ impl StreamingTranscriber for SubprocessTranscriber {
         });
 
         // Cancel kills the worker; the reader below then sees EOF.
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_flag = Arc::clone(&cancelled);
         tokio::spawn(async move {
             if cancel_rx.await.is_ok() {
+                cancel_flag.store(true, Ordering::SeqCst);
                 let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
             }
         });
@@ -1252,6 +1258,13 @@ impl StreamingTranscriber for SubprocessTranscriber {
                     ))),
                 }
                 break;
+            }
+            if !answered && !cancelled.load(Ordering::SeqCst) {
+                // Crashed or killed: say so, so the daemon can rescue the
+                // audio instead of ending quietly with nothing typed.
+                send(StreamingEvent::Error(TranscribeError::InferenceFailed(
+                    LIVE_WORKER_DIED.to_string(),
+                )));
             }
             loading.ready();
             // The pump hands stdin back right after the end marker, which
@@ -1602,6 +1615,32 @@ mod tests {
         // Killed and reaped by the drop, so the pid is gone.
         let pid = nix::unistd::Pid::from_raw(pid as i32);
         assert!(nix::sys::signal::kill(pid, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_live_worker_that_dies_ends_the_stream_with_an_error() {
+        let mut t = SubprocessTranscriber::new(&WhisperConfig::default(), None).unwrap();
+        t.live_model = Some("stand-in".into());
+        // A stand-in worker: says READY, then dies without an answer.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo READY; exit 3")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let (child, stdin, stdout) = WarmWorker::spawn(cmd).unwrap();
+        t.warm
+            .park(child, stdin, stdout, Instant::now(), HOUR, None);
+        let (tx, rx) = mpsc::channel(4);
+        let mut handle = t.start_stream(rx).unwrap();
+        drop(tx);
+        let mut error = None;
+        while let Some(event) = handle.events.recv().await {
+            if let StreamingEvent::Error(e) = event {
+                error = Some(e.to_string());
+            }
+        }
+        assert!(error.is_some_and(|e| e.contains(LIVE_WORKER_DIED)));
     }
 
     /// Env var that makes [`self_command_survives_a_deleted_binary`] the

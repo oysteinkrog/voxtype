@@ -376,6 +376,18 @@ sudo cp build/bin/whisper-cli /usr/local/bin/
 
 See [CLI Backend](USER_MANUAL.md#cli-backend-whisper-cli) in the User Manual for details.
 
+### "Dictation failed": where is my audio?
+
+When a transcription fails (the worker process could not start, or it died before the final text), voxtype does not drop the recording. It saves the audio as a 16 kHz WAV file and transcribes it once more with a fresh worker. If the retry works, the text is typed as usual. If it fails too, a short notification says "Dictation failed" and names the file.
+
+The file goes to `<live_preview_corpus_dir>/failed/` when that option is set, and otherwise to `~/.local/state/voxtype/failed/` (`$XDG_STATE_HOME/voxtype/failed/`). Transcribe it again with:
+
+```bash
+voxtype transcribe ~/.local/state/voxtype/failed/20261030-101500.123.wav
+```
+
+Workers are started through `/proc/self/exe`, so a package upgrade that replaces the voxtype binary under a running daemon no longer stops them from starting. Restart the daemon after an upgrade to run the new version.
+
 ### Poor transcription accuracy
 
 **Possible causes:**
