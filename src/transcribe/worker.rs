@@ -1883,4 +1883,248 @@ mod tests {
         // A part sent before the hold was known kept its audio.
         assert!(!cuts.cut((8000, 12000)));
     }
+
+    // M0.2: pausing the live model for a keyboard edit by sending silence
+    // instead of audio. Needs the parakeet-unified-en-0.6b-int8 model:
+    // `cargo test --features parakeet --lib -- --ignored silence_pad`.
+    //
+    // Progress past the pause point is `ParakeetUnified::committed_samples()`
+    // reaching the pause sample: every word before it has been decoded. The
+    // worker shows it today only as the newest `G` line frame
+    // (`FrameLevel.t` + LIVE_FRAME_SECS), sent when the OSD is on.
+
+    #[cfg(feature = "parakeet")]
+    fn fixture_samples(name: &str) -> Vec<f32> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let reader = hound::WavReader::open(root.join("tests/fixtures/vad").join(name))
+            .expect("fixture opens");
+        let max = (1 << (reader.spec().bits_per_sample - 1)) as f32;
+        reader
+            .into_samples::<i32>()
+            .filter_map(Result::ok)
+            .map(|s| s as f32 / max)
+            .collect()
+    }
+
+    #[cfg(feature = "parakeet")]
+    fn live_model() -> (
+        parakeet_rs::ParakeetUnifiedHandle,
+        parakeet_rs::UnifiedStreamingConfig,
+    ) {
+        let path = super::super::parakeet::resolve_model_path("parakeet-unified-en-0.6b-int8")
+            .expect("model path");
+        let handle = parakeet_rs::ParakeetUnifiedHandle::load(&path, None).expect("model loads");
+        (handle, parakeet_rs::UnifiedStreamingConfig::default())
+    }
+
+    #[cfg(feature = "parakeet")]
+    fn fresh(
+        handle: &parakeet_rs::ParakeetUnifiedHandle,
+        cfg: parakeet_rs::UnifiedStreamingConfig,
+    ) -> parakeet_rs::ParakeetUnified {
+        parakeet_rs::ParakeetUnified::from_shared_with_streaming_config(handle, cfg)
+            .expect("live model")
+    }
+
+    /// Feeds `samples` in 0.1 s blocks, as the daemon sends them.
+    #[cfg(feature = "parakeet")]
+    fn feed(u: &mut parakeet_rs::ParakeetUnified, samples: &[f32]) {
+        for block in samples.chunks(1600) {
+            u.transcribe_chunk(block).expect("chunk");
+        }
+    }
+
+    #[cfg(feature = "parakeet")]
+    fn plain(text: &str) -> String {
+        text.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+
+    #[cfg(feature = "parakeet")]
+    fn reference(
+        handle: &parakeet_rs::ParakeetUnifiedHandle,
+        cfg: parakeet_rs::UnifiedStreamingConfig,
+        samples: &[f32],
+    ) -> Vec<super::super::revisions::Word> {
+        let mut u = fresh(handle, cfg);
+        feed(&mut u, samples);
+        u.flush().expect("flush");
+        preview_words(&u, None)
+    }
+
+    /// Pause after word N with a silence pad of chunk + right context, then
+    /// resume: the N words are all decoded before resume, and the words
+    /// after it are neither skipped nor repeated, at their own times once
+    /// the pad is taken off.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    #[ignore]
+    fn silence_pad_pause_keeps_every_word() {
+        let samples = fixture_samples("speech_long.wav");
+        let (handle, cfg) = live_model();
+        let all = reference(&handle, cfg, &samples);
+        let pad_len = cfg.chunk_samples() + cfg.right_context_samples();
+        assert_eq!(pad_len, 17920, "1.12 s at the default window");
+        let mut paused_any = 0;
+        for n in 1..all.len() {
+            // A tap in the gap between word n-1 and word n.
+            let gap = (all[n - 1].end, all[n].start);
+            // A tap comes after the speaker stops. Token times lead the
+            // audio, so a shorter gap is often inside a word; see
+            // silence_pad_mid_word_pause_leaves_a_fragment.
+            if gap.1 - gap.0 < 0.3 {
+                continue;
+            }
+            paused_any += 1;
+            let pause = ((gap.0 + gap.1) / 2.0 * 16000.0) as usize;
+            let mut u = fresh(&handle, cfg);
+            feed(&mut u, &samples[..pause]);
+            assert!(u.committed_samples() < pause);
+            let mut padded = 0;
+            let mut progress_at = None;
+            for block in vec![0.0f32; pad_len].chunks(1600) {
+                u.transcribe_chunk(block).expect("pad");
+                padded += block.len();
+                if progress_at.is_none() && u.committed_samples() >= pause {
+                    progress_at = Some(padded);
+                }
+            }
+            let progress_at = progress_at.expect("the pad commits past the pause point");
+            // The marker as the G line shows it.
+            let newest = u.frame_signals().last().expect("frames").abs_frame;
+            assert_eq!((newest + 1) * 1280, u.committed_samples());
+            // Every word before the tap is decoded. Word times lead the
+            // audio a little, so the word just after the gap can be there
+            // too when its onset fell before the pause point.
+            let before: Vec<_> = preview_words(&u, None)
+                .iter()
+                .map(|w| plain(&w.text))
+                .collect();
+            let want: Vec<_> = all.iter().map(|w| plain(&w.text)).collect();
+            assert!(
+                before.len() >= n && before[..] == want[..before.len()],
+                "pause after word {n}: {before:?} is not the first {n} or more of {want:?}"
+            );
+            // Resume.
+            feed(&mut u, &samples[pause..]);
+            u.flush().expect("flush");
+            let words = preview_words(&u, None);
+            // Stream time to speech time. Words decoded before resume keep
+            // their time (at most the pause point); later words move back
+            // by the pad. Token times lead the audio by up to about 0.2 s,
+            // so a word after resume can carry a time inside the pad: which
+            // side of the pause a word is on comes from when it arrived,
+            // not from its time. The first word after resume can even be
+            // timed near the start of the pad ("with" at 2.96 s stream time
+            // for a pause at 2.72 s), so it maps to the pause point, early
+            // by up to the length of the gap.
+            let (pause_s, pad_s) = (pause as f32 / 16000.0, pad_len as f32 / 16000.0);
+            let shifted: Vec<(String, f32)> = words
+                .iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    let t = if i < before.len() {
+                        w.start.min(pause_s)
+                    } else {
+                        (w.start - pad_s).max(pause_s)
+                    };
+                    (plain(&w.text), t)
+                })
+                .collect();
+            assert_eq!(
+                shifted.iter().map(|w| w.0.as_str()).collect::<Vec<_>>(),
+                all.iter().map(|w| plain(&w.text)).collect::<Vec<_>>(),
+                "pause after word {n}: no word skipped or repeated"
+            );
+            for (i, (w, r)) in shifted.iter().zip(&all).enumerate() {
+                // The first word after resume is timed early, down to the
+                // pause point, but never late.
+                let ok = if i == before.len() {
+                    w.1 >= pause_s && w.1 <= r.start + 0.08
+                } else {
+                    (w.1 - r.start).abs() <= 0.08
+                };
+                assert!(
+                    ok,
+                    "pause after word {n}: {:?} at {} not {}",
+                    w.0, w.1, r.start
+                );
+            }
+            eprintln!(
+                "pause after word {n} at {:.2}s: committed past it after {:.2}s of pad",
+                pause as f32 / 16000.0,
+                progress_at as f32 / 16000.0
+            );
+        }
+        assert!(paused_any >= 3, "the fixture has gaps to pause in");
+    }
+
+    /// Frames held while a tap is pending and then sent at once give the
+    /// same words and times as frames sent as they came.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    #[ignore]
+    fn silence_pad_held_frames_decode_as_unheld() {
+        let samples = fixture_samples("speech_long.wav");
+        let (handle, cfg) = live_model();
+        let all = reference(&handle, cfg, &samples);
+        for (at, held) in [(8000, 4800), (25000, 4800), (40000, 6400)] {
+            let mut u = fresh(&handle, cfg);
+            feed(&mut u, &samples[..at]);
+            u.transcribe_chunk(&samples[at..at + held]).expect("held");
+            feed(&mut u, &samples[at + held..]);
+            u.flush().expect("flush");
+            let words = preview_words(&u, None);
+            let got: Vec<_> = words.iter().map(|w| (&w.text, w.start, w.end)).collect();
+            let want: Vec<_> = all.iter().map(|w| (&w.text, w.start, w.end)).collect();
+            assert_eq!(got, want, "held {held} samples at {at}");
+        }
+    }
+
+    /// A pause inside a word (between "voice" and "activity", where the
+    /// token gap is 0.16 s but the audio is not silent) decodes the start
+    /// of the word before the pause and the whole word again after it.
+    /// Pinned so a change in this behaviour is noticed.
+    #[cfg(feature = "parakeet")]
+    #[test]
+    #[ignore]
+    fn silence_pad_mid_word_pause_leaves_a_fragment() {
+        let samples = fixture_samples("speech_long.wav");
+        let (handle, cfg) = live_model();
+        let pause = (1.60 * 16000.0) as usize;
+        let mut u = fresh(&handle, cfg);
+        feed(&mut u, &samples[..pause]);
+        feed(
+            &mut u,
+            &vec![0.0f32; cfg.chunk_samples() + cfg.right_context_samples()],
+        );
+        feed(&mut u, &samples[pause..]);
+        u.flush().expect("flush");
+        let text: Vec<_> = preview_words(&u, None)
+            .iter()
+            .map(|w| plain(&w.text))
+            .collect();
+        assert_eq!(
+            text,
+            [
+                "this",
+                "is",
+                "a",
+                "longer",
+                "test",
+                "of",
+                "voice",
+                "act",
+                "activity",
+                "detection",
+                "with",
+                "multiple",
+                "words",
+                "and",
+                "phrases"
+            ]
+        );
+    }
 }
