@@ -139,13 +139,12 @@ const SCAN_PX_PER_S: f64 = 4.0;
 /// The scanlines step every third idle step (0.8 px): each step redraws the
 /// panel, and a faint pattern needs no more.
 const SCAN_FPS: f64 = 5.0;
-/// R2-11-a: a smoke stream from the left behind the newest word, with a
-/// ghost of the word in it, both gone after `INK_SECS`.
+/// R2-11-a: a smoke stream from the left behind the newest word, gone
+/// after `INK_SECS`.
 pub(crate) const LUMINOUS_INK_FLOW: &str = "luminous-ink-flow";
 const INK_SECS: f64 = 0.6;
 const INK_BLOBS: u32 = 34;
 const INK_ALPHA: f32 = 0.3;
-const GHOST_ALPHA: f32 = 0.25;
 /// R2-11-b: contour lines behind the text drift outward at a pace the
 /// voice sets, and the field's corner brackets breathe in by up to
 /// `FIELD_INSET` px.
@@ -2007,9 +2006,8 @@ impl Popup {
         }
     }
 
-    /// R2-11-a: smoke flowing in from the left behind the newest word and
-    /// a ghost of the word in it that drifts left and dissolves. The word
-    /// itself enters as before. None under reduced motion.
+    /// R2-11-a: smoke flowing in from the left behind the newest word. The
+    /// word itself enters as before. None under reduced motion.
     fn cyber_ink_flow(&self, mode: Mode, ox: f32, oy: f32) -> Option<Element<Msg>> {
         let l = &self.look;
         if !l.on(LUMINOUS_INK_FLOW)
@@ -2031,23 +2029,9 @@ impl Popup {
             return None;
         }
         let style = l.text_style();
-        let word = self.shown.last()?;
-        let shaped = self.measure.layout(&word.text, &style, None);
-        let own = shaped.lines.first().map_or(style.size, |l| l.baseline);
-        let outline = vo::scene::glyph_morph::WordOutline::new(
-            self.measure.fonts(),
-            &shaped,
-            style.size,
-            Point::ZERO,
-        );
-        let ghost: Arc<[Contour]> = outline
-            .glyphs
-            .iter()
-            .flat_map(|g| g.outline.contours.clone())
-            .collect();
         let levels = self.cyber_levels();
         let (size, line) = (style.size, style.line_height);
-        let (gx, gy) = (ox + TEXT_X + x0, oy + TEXT_TOP + baseline - own);
+        let gx = ox + TEXT_X + x0;
         let mid = oy + TEXT_TOP + baseline - 0.35 * size;
         let canvas = Element::canvas("ink-flow", born + INK_SECS, move |t, r, p| {
             let age = t - born;
@@ -2075,13 +2059,6 @@ impl Popup {
                     Paint::glow(c.fade(a), rad, 0.4),
                 ));
             }
-            // The ghost drifts left out of the word and thins out.
-            let m = Affine::translate(r.x + gx - 4.0 - 20.0 * ease_out(age / INK_SECS), r.y + gy);
-            let moved: Vec<Contour> = ghost.iter().map(|c| c.transform(&m)).collect();
-            p.fill(
-                &moved,
-                &StrokeStyle::solid(1.0, hex(YELLOW).fade(GHOST_ALPHA * (1.0 - u) * (1.0 - u))),
-            );
         });
         Some(at(canvas, 0.0, 0.0).size(
             ox + TEXT_X + x1 + 8.0,
