@@ -17,7 +17,7 @@ use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point};
 use vo::scene::levels::{Levels as LevelTrack, Stops};
-use vo::scene::path::{icons, make, Outline, StrokeStyle};
+use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::ribbon::Ribbon;
 use vo::scene::{MarkShape, WordMark};
 
@@ -69,6 +69,72 @@ const ARROW: f32 = 7.0;
 const SPECKS: u32 = 14;
 const SPECK_SPEED: f32 = 30.0;
 const SPECK_ALPHA: f32 = 0.4;
+
+/// R2-24-a: the stroke-write pen writes the newest word from 70 % ink to
+/// full (`Look::on` turns `stroke-write` on with it), over a soft ink bleed
+/// under the word that fades in `BLEED_SECS`.
+pub(crate) const INK_REVEAL: &str = "typewriter-ink-reveal";
+const BLEED_SECS: f64 = 0.45;
+const BLEED_ALPHA: f32 = 0.14;
+/// R2-24-b: an inner rim that breathes out towards the edge with the voice,
+/// `BREATH_PX` at most, and rings that spread from the microphone and fade
+/// before the words, one started every `RIPPLE_EVERY` seconds while there
+/// is voice.
+pub(crate) const GLASS_PANEL: &str = "breathing-glass-panel";
+const BREATH_PX: f32 = 3.0;
+const RIM_ALPHA: f32 = 0.2;
+const RIPPLE_EVERY: f64 = 0.45;
+const RIPPLE_LIFE: f64 = 1.6;
+const RIPPLE_REACH: f32 = 150.0;
+const RIPPLE_ALPHA: f32 = 0.16;
+/// R2-24-c: a ribbon of light behind the words that swings with the voice
+/// and flattens into a thin still line over `FLAT_SECS` once you stop.
+pub(crate) const AUDIO_RIBBON: &str = "audio-ribbon";
+const RIBBON_ALPHA: f32 = 0.2;
+const FLAT_SECS: f32 = 0.6;
+/// How far under the last line's box the ribbon's line rests, in design
+/// pixels: under the descenders, clear of the status row.
+const RIBBON_DROP: f32 = 2.0;
+// A new word starts at 70 % ink or more, and the ribbon stays at 25 % or less.
+const _: () = assert!(
+    glyph_paths::ARRIVAL_INK >= 0.7 && glyph_paths::PEN_FLOOR >= 0.7 && RIBBON_ALPHA <= 0.25
+);
+
+/// The voice's share of full swing at `level`, 0 to 1.
+fn voice(level: f32) -> f32 {
+    (level * 2.6).clamp(0.0, 1.0)
+}
+
+/// R2-24-a: the bleed's alpha `age` seconds after the word came.
+fn bleed_alpha(age: f64) -> f32 {
+    if !(0.0..BLEED_SECS).contains(&age) {
+        return 0.0;
+    }
+    let u = (age / BLEED_SECS) as f32;
+    BLEED_ALPHA * (1.0 - u) * (1.0 - u)
+}
+
+/// R2-24-b: how far in from the strip's edge the inner rim sits at voice
+/// level `level`, in pixels before scaling: `BREATH_PX` quiet, 0 at full
+/// voice.
+fn rim_inset(level: f32) -> f32 {
+    BREATH_PX * (1.0 - voice(level))
+}
+
+/// R2-24-b: the rings at `t`, each its radius past the microphone's ring
+/// (design pixels) and alpha, for a voice level `at(s)` at time `s`.
+fn ripples(t: f64, at: impl Fn(f64) -> f32) -> Vec<(f32, f32)> {
+    let last = (t / RIPPLE_EVERY).floor() as i64;
+    let first = ((t - RIPPLE_LIFE) / RIPPLE_EVERY).ceil() as i64;
+    (first.max(0)..=last)
+        .filter_map(|j| {
+            let born = j as f64 * RIPPLE_EVERY;
+            let u = ((t - born) / RIPPLE_LIFE) as f32;
+            let a = RIPPLE_ALPHA * voice(at(born)) * (1.0 - u).powf(1.5);
+            (a > 0.003).then_some((u * RIPPLE_REACH, a))
+        })
+        .collect()
+}
 
 /// How much the strip is scaled from the redesign.
 fn scale(look: &Look) -> f32 {
@@ -291,6 +357,7 @@ impl Popup {
             .presence(Transition::fade().offset(0.0, 6.0), exit)
             .motion(Prop::Size, Motion::Snap)
             .child(self.river_ribbon(mode, mode_at, k))
+            .children(self.river_panel(mode, Size::new(w, h), k))
             .children(self.river_specks(mode, k))
             .child(
                 at(
@@ -308,6 +375,8 @@ impl Popup {
                 hex(INK).fade(0.55),
                 hex(CYAN),
             ))
+            .children(self.river_audio_ribbon(mode, lines, k))
+            .children(self.river_bleed(mode, lines, k))
             .child(self.river_text_clip(mode, lines, k))
             .child(at(
                 self.river_status(mode, mode_at, k, w),
@@ -477,6 +546,174 @@ impl Popup {
         self.with_hearing(text, &l.text_style(), l.text_width(), hex(INK), hex(CYAN))
     }
 
+    /// R2-24-b: the glass panel's inner rim, breathing with the voice, and
+    /// the rings from the microphone, inside the strip. Still under reduced
+    /// motion: the rim at rest and no rings.
+    fn river_panel(&self, mode: Mode, size: Size, k: f32) -> Option<Element<Msg>> {
+        if !self.look.on(GLASS_PANEL) || mode == Mode::Cancelled || self.edit_view.is_some() {
+            return None;
+        }
+        let still = self.still();
+        let levels = self.kit_levels();
+        let mic = Point::new(MIC_X * k, MIC_Y * k);
+        let fade = (TEXT_X * k, (TEXT_X + 110.0) * k);
+        let until = if still {
+            self.shown_at
+        } else {
+            self.newest_at + RIPPLE_LIFE
+        };
+        let canvas = Element::canvas("panel", until, move |t, r, p| {
+            let level = if still {
+                0.0
+            } else {
+                (levels.at(t) + levels.at(t - 0.05) + levels.at(t - 0.1)) / 3.0
+            };
+            let i = (rim_inset(level) + 1.0) * k;
+            let rim = Rect::new(r.x + i, r.y + i, r.w - 2.0 * i, r.h - 2.0 * i);
+            let c = Color::hex(RIM, RIM_ALPHA);
+            p.stroke(
+                &make::panel(rim.x, rim.y, rim.w, rim.h, (RADIUS * k - i).max(0.0)),
+                &StrokeStyle::solid(1.0 * k, c).glow(3.0 * k),
+            );
+            if still {
+                return;
+            }
+            let centre = Point::new(r.x + mic.x, r.y + mic.y);
+            for (reach, a) in ripples(t, |s| levels.at(s)) {
+                let rx = (MIC_R + 4.0 + reach) * k;
+                let ry = 0.55 * rx;
+                let pts: Vec<Point> = (0..72)
+                    .map(|j| {
+                        let ang = j as f32 / 72.0 * std::f32::consts::TAU;
+                        Point::new(centre.x + rx * ang.cos(), centre.y + ry * ang.sin())
+                    })
+                    .collect();
+                let c = Color::hex(CYAN, a);
+                p.stroke(
+                    &Contour::polyline(&pts, true),
+                    &StrokeStyle::solid(1.2 * k, c)
+                        .linear(
+                            Point::new(r.x + fade.0, 0.0),
+                            c,
+                            Point::new(r.x + fade.1, 0.0),
+                            c.fade(0.0),
+                        )
+                        .glow(3.0 * k),
+                );
+            }
+        });
+        let layer = Element::layer("panel-fx")
+            .size(size.w, size.h)
+            .radius(RADIUS * k)
+            .clip()
+            .presence(Transition::fade(), Transition::fade())
+            .child(at(canvas.size(size.w, size.h), 0.0, 0.0));
+        Some(at(layer, 0.0, 0.0))
+    }
+
+    /// R2-24-c: the ribbon behind the words. It swings with the voice and
+    /// flattens into a thin still line over `FLAT_SECS` from the stop; under
+    /// reduced motion it is that line, as bright as the voice.
+    fn river_audio_ribbon(&self, mode: Mode, lines: u32, k: f32) -> Option<Element<Msg>> {
+        if !self.look.on(AUDIO_RIBBON) || self.edit_view.is_some() {
+            return None;
+        }
+        let still = self.still();
+        // The ribbon rests on a line just under the words' descenders and
+        // rises behind them; the half that would swing below is clipped, so
+        // it never reaches the status row.
+        let rest = (TEXT_TOP + lines as f32 * TEXT_LINE + RIBBON_DROP) * k;
+        let half = 0.6 * lines as f32 * TEXT_LINE * k;
+        let w = (RIVER_X1 - TEXT_X) * k;
+        let stop = match mode {
+            Mode::Listening | Mode::Loading => None,
+            _ => Some(self.kit_mode_at(Mode::Finishing).min(self.extra.now)),
+        };
+        let level = self.kit_levels().at(self.extra.now);
+        let mut ribbon = Ribbon {
+            levels: LevelTrack {
+                levels: self.exhale_levels(&self.kit_levels().levels),
+                newest_at: self.newest_at,
+                rate: FRAME_HZ as f32,
+                ..LevelTrack::default()
+            },
+            left: Stops::new(&[(0.0, hex(CYAN)), (1.0, hex(BLUE))]),
+            right: Stops::new(&[(0.0, hex(VIOLET)), (0.5, hex(BLUE)), (1.0, hex(CYAN))]),
+            core: None,
+            strands: 3,
+            cycles: 1.4,
+            gain: 1.0,
+            floor: 0.45,
+            belly: 0.45,
+            width: 1.2 * k,
+            alpha: RIBBON_ALPHA,
+            glow: 4.0 * k,
+            settle: stop,
+            settle_secs: FLAT_SECS,
+            run: 1024,
+            ..Ribbon::default()
+        };
+        if mode == Mode::Cancelled {
+            ribbon.alpha = 0.5 * RIBBON_ALPHA;
+        }
+        if still {
+            ribbon.speed = 0.0;
+            ribbon.levels = LevelTrack {
+                newest_at: self.shown_at,
+                ..LevelTrack::default()
+            };
+            ribbon.settle = Some(self.shown_at);
+            ribbon.settle_secs = 0.001;
+            ribbon.alpha = RIBBON_ALPHA * (0.35 + 0.65 * voice(level));
+        }
+        let clip = Element::layer("audio-ribbon-clip")
+            .size(w, half + 2.0 * k)
+            .clip()
+            .presence(Transition::fade(), Transition::fade())
+            .child(at(Element::ribbon("audio-ribbon", ribbon), 0.0, 0.0).size(w, 2.0 * half));
+        Some(at(clip, TEXT_X * k, rest - half))
+    }
+
+    /// R2-24-a: a soft ink bleed under the newest word, fading as the pen
+    /// writes it. None under reduced motion.
+    fn river_bleed(&self, mode: Mode, lines: u32, k: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(INK_REVEAL) || mode != Mode::Listening || self.still() || self.edit_view.is_some()
+        {
+            return None;
+        }
+        let style = l.text_style();
+        let rows = self.wrap_lines(&self.shown, &style, l.text_width());
+        let last = rows.last()?;
+        let newest = last.last()?;
+        let born = self.heard.word(newest.id)?.born;
+        if self.extra.now - born >= BLEED_SECS {
+            return None;
+        }
+        let (boxes, _) = sounding::word_boxes(&self.measure, last, &style, None);
+        let b = boxes.iter().find(|b| b.id == newest.id)?;
+        let y = (TEXT_TOP + (lines as f32 - 0.5) * TEXT_LINE) * k + 0.15 * style.size;
+        let (x, w) = (TEXT_X * k + b.rect.x, b.rect.w);
+        let rad = 0.42 * style.size;
+        let canvas = Element::canvas("bleed", born + BLEED_SECS, move |t, r, p| {
+            let a = bleed_alpha(t - born);
+            if a <= 0.002 {
+                return;
+            }
+            let n = ((w / rad).ceil() as usize).max(1);
+            for i in 0..=n {
+                let cx = x + w * i as f32 / n as f32;
+                p.shape(ShapeInstance::circle(
+                    Point::new(r.x + cx, r.y + y),
+                    rad,
+                    Paint::glow(hex(BLUE).fade(a), rad, 0.5),
+                ));
+            }
+        });
+        let size = surface(l);
+        Some(at(canvas.size(size.w, size.h), 0.0, 0.0))
+    }
+
     /// Idle: light specks flow along the river at 30 px a second while the
     /// popup listens, under the words. None under reduced motion.
     fn river_specks(&self, mode: Mode, k: f32) -> Option<Element<Msg>> {
@@ -633,5 +870,72 @@ impl Popup {
             );
         }
         row
+    }
+}
+
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+
+    fn look(theme: OsdTheme, feature: &str) -> Look {
+        let cfg = OsdConfig::default();
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let mut l = Look::new(&cfg, &plasma, String::new(), &fonts);
+        l.theme = theme;
+        l.features = [feature.to_string()].into();
+        l
+    }
+
+    /// R2-24-a: the ink reveal writes with the stroke-write pen in River
+    /// only, so a new word starts at 70 % ink or more and fills from there.
+    #[test]
+    fn the_ink_reveal_writes_with_the_pen() {
+        assert!(look(OsdTheme::River, INK_REVEAL).on(glyph_paths::WRITE));
+        assert!(!look(OsdTheme::Swiss, INK_REVEAL).on(glyph_paths::WRITE));
+        assert_eq!(bleed_alpha(0.0), BLEED_ALPHA);
+        assert_eq!(bleed_alpha(BLEED_SECS), 0.0);
+        assert!((0..100).all(|i| bleed_alpha(i as f64 * 0.005) <= 0.15));
+    }
+
+    /// R2-24-b: the rim moves 3 px at most and the rings only come with
+    /// the voice.
+    #[test]
+    fn the_panel_breathes_within_three_pixels() {
+        for level in [0.0, 0.2, 0.5, 1.0, 3.0] {
+            let i = rim_inset(level);
+            assert!((0.0..=3.0).contains(&i), "{level} {i}");
+        }
+        assert!(ripples(3.0, |_| 0.0).is_empty());
+        let rings = ripples(3.0, |_| 0.5);
+        assert!(!rings.is_empty());
+        assert!(rings
+            .iter()
+            .all(|&(r, a)| r <= RIPPLE_REACH && a <= RIPPLE_ALPHA));
+    }
+
+    /// R2-24-c: the ribbon is a still line `FLAT_SECS` after the stop.
+    #[test]
+    fn the_ribbon_is_a_line_600_ms_after_the_stop() {
+        let ribbon = Ribbon {
+            levels: LevelTrack {
+                levels: Arc::from(vec![0.8f32; 200]),
+                newest_at: 4.0,
+                rate: FRAME_HZ as f32,
+                ..LevelTrack::default()
+            },
+            settle: Some(3.0),
+            settle_secs: FLAT_SECS,
+            ..Ribbon::default()
+        };
+        let rect = vo::scene::geom::Rect::new(0.0, 0.0, 400.0, 60.0);
+        let swing = |t: f64| {
+            (0..ribbon.strands)
+                .flat_map(|i| ribbon.strand(rect, t, i).0)
+                .map(|p| (p.y - 30.0).abs())
+                .fold(0.0f32, f32::max)
+        };
+        assert!(swing(3.0) > 3.0);
+        assert!(swing(3.0 + FLAT_SECS as f64) < 1e-3);
     }
 }
