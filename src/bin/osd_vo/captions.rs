@@ -14,6 +14,13 @@
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
 //!
+//! While the popup is open it keeps a little idle life (pcn, RD-02): the
+//! backdrop's flat top and bottom strips, above and below the newest line,
+//! act as the letterbox bars. They carry a faint film grain (specks at 3 %
+//! alpha) and a projector flicker that dims them by at most 2 %, stepped 12
+//! times a second. Neither runs once the popup closes or under reduced
+//! motion.
+//!
 //! While editing ([`CaptionsSite`]) both lines are full size and flat, the
 //! newest word is part of its line, and a line keeps its left edge while
 //! you type (the sticky centring of `EditView::centre`).
@@ -165,6 +172,66 @@ struct Scene {
     /// The progress line: box and eased fraction.
     prog: Option<(Rect, (f32, f32, f64))>,
     check: Option<Point>,
+    /// pcn: the idle grain and flicker run (open, listening, not reduced).
+    idle: bool,
+}
+
+/// pcn: the idle motion's frame rate; the grain's alpha (3 % white as an
+/// sRGB blend would show it: the GPU blends in linear light, where a 3 %
+/// speck lifts this dark backdrop about 40 levels instead of 8), specks per
+/// bar and speck radius; the flicker's deepest dip, as the alpha of a black
+/// veil (a white one blends in linear light and lifts the dark backdrop far
+/// more than its alpha).
+const IDLE_FPS: f64 = 12.0;
+const GRAIN_ALPHA: f32 = 0.006;
+const GRAIN_SPECKS: u32 = 24;
+const GRAIN_R: f32 = 0.8;
+const FLICKER: f32 = 0.02;
+
+/// A number from 0 to 1 that depends only on `n`.
+fn noise(n: u32) -> f32 {
+    let mut x = n.wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x2C1B_3C6D);
+    x ^= x >> 12;
+    (x & 0xFFFF) as f32 / 65535.0
+}
+
+/// pcn: the letterbox bars inside backdrop `b`: its flat stretch (between
+/// the round ends) above and below the newest line's box, a pixel clear of
+/// it.
+fn bars(b: Rect) -> [Rect; 2] {
+    let (top, bottom) = (SLOTS[0].0 - LINE / 2.0 - 1.0, SLOTS[0].0 + LINE / 2.0 + 1.0);
+    let (x, w) = (b.x + b.h / 2.0, (b.w - b.h).max(0.0));
+    [
+        Rect::new(x, b.y, w, (top - b.y).max(0.0)),
+        Rect::new(x, bottom, w, (b.y + b.h - bottom).max(0.0)),
+    ]
+}
+
+/// pcn: one idle step `n` of grain and flicker on the letterbox bars.
+fn draw_film(b: Rect, n: u32, p: &mut Painter) {
+    let dip = FLICKER * noise(n.wrapping_mul(31));
+    for (i, bar) in bars(b).into_iter().enumerate() {
+        if bar.w < 1.0 || bar.h < 2.0 * GRAIN_R {
+            continue;
+        }
+        p.shape(ShapeInstance::rrect(
+            RRect::new(bar, 0.0),
+            Paint::solid(Color::BLACK.fade(dip)),
+        ));
+        let seed = n.wrapping_mul(7919) ^ (i as u32).wrapping_mul(0x51ED_270B);
+        for k in 0..GRAIN_SPECKS {
+            let x = bar.x + noise(seed ^ k.wrapping_mul(0x2545_F491)) * bar.w;
+            let v = noise(seed.wrapping_add(k).wrapping_mul(0x6C8E_9CF5));
+            let y = bar.y + GRAIN_R + v * (bar.h - 2.0 * GRAIN_R);
+            p.shape(ShapeInstance::circle(
+                Point::new(x, y),
+                GRAIN_R,
+                Paint::solid(Color::WHITE.fade(GRAIN_ALPHA)),
+            ));
+        }
+    }
 }
 
 fn lerp_rect(a: Rect, b: Rect, k: f32) -> Rect {
@@ -199,6 +266,9 @@ impl Scene {
             rr,
             Paint::solid(hex(BACKDROP).fade(0.22)),
         ));
+        if self.idle {
+            draw_film(b, (t * IDLE_FPS).floor() as i64 as u32, p);
+        }
         if let Some(c) = self.dot {
             let pulse = if reduced() {
                 0.5
@@ -602,6 +672,10 @@ impl Popup {
             doubts,
             prog,
             check,
+            idle: !self.closing
+                && matches!(mode, Mode::Loading | Mode::Listening)
+                && !reduced()
+                && !l.on("reduced-motion"),
         };
         let until = scene.until(self.extra.now);
         let canvas = at(
@@ -804,5 +878,36 @@ mod edit_tests {
             );
             assert!(report.is_ok(), "wide {wide}: {report}");
         }
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn the_bars_stay_out_of_the_newest_line_and_inside_the_backdrop() {
+        let b = Rect::new(100.0, 19.0, 900.0, 126.0);
+        let [top, bottom] = bars(b);
+        assert!(top.y + top.h <= SLOTS[0].0 - LINE / 2.0);
+        assert!(bottom.y >= SLOTS[0].0 + LINE / 2.0);
+        for r in [top, bottom] {
+            assert!(r.x >= b.x + b.h / 2.0 && r.x + r.w <= b.x + b.w - b.h / 2.0 + 0.01);
+            assert!(r.y >= b.y && r.y + r.h <= b.y + b.h + 0.01);
+        }
+    }
+
+    // The grain and the flicker stay faint and at most 12 steps a second.
+    const _: () = assert!(GRAIN_ALPHA <= 0.03 && FLICKER <= 0.02 && IDLE_FPS <= 12.0);
+
+    #[test]
+    fn the_flicker_changes_from_step_to_step() {
+        let mut seen = std::collections::HashSet::new();
+        for n in 0..24u32 {
+            let v = noise(n.wrapping_mul(31));
+            assert!((0.0..=1.0).contains(&v));
+            seen.insert((v * 100.0) as u32);
+        }
+        assert!(seen.len() > 8);
     }
 }
