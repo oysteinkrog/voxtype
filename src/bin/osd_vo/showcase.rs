@@ -10,6 +10,11 @@
 //! The particles and the light head run on the GPU from the frame time. A
 //! 30 Hz tick only runs while the popup opens and for the glow pulse after
 //! the final text. From the stop on the ambient motion calms and stops.
+//!
+//! The idle life (lq9, RD-02) is the look's own: the out-of-focus orbs
+//! drift round the card like a nebula, and the ring's particles orbit
+//! above the ribbon. Under reduced motion the ring, the orbs and the rim's
+//! light head are left out, so the look stands still.
 
 use super::*;
 
@@ -711,8 +716,13 @@ impl Popup {
             final_at: self.extra.final_at,
         };
         let head = (live && l.on(PARTICLE_SOURCE)).then(|| self.source_head());
-        at(Element::layer("back"), 0.0, 0.0)
-            .size(surface.w, surface.h)
+        let back = at(Element::layer("back"), 0.0, 0.0);
+        // lq9: the particles move from the frame time, so reduced motion
+        // leaves them out rather than holding them.
+        if self.still() {
+            return back.size(surface.w, surface.h);
+        }
+        back.size(surface.w, surface.h)
             .blend(BlendMode::Add)
             .children(head)
             .bloom(if live { 0.2 + 0.2 * level } else { 0.1 }, 6.0)
@@ -1288,7 +1298,7 @@ impl Popup {
         .size(surface.w, surface.h)
         .motion(Prop::Trim, Spring::critical_to_98(sc::OPEN_SECS))
         .presence(Transition::NONE.trim(0.0, 0.0), Transition::fade());
-        if phase.ambient() {
+        if phase.ambient() && !self.still() {
             let bright = if phase == Phase::Paused {
                 0.45
             } else {
