@@ -66,6 +66,15 @@ const TICKS_DELAY: f64 = 0.15;
 const TICKS_SECS: f64 = 0.3;
 /// Seconds for the ticks to change colour or height at a change of mode.
 const SETTLE_SECS: f64 = 0.3;
+/// Idle motion while listening: the tick row drifts 1 px every 4 s, out to
+/// 4 px and back over 32 s, and a 40 px highlight runs along the baseline
+/// once every 7 s. Both draw in the ticks canvas, which redraws while
+/// listening anyway, so they add no frames.
+const DRIFT_PX: f32 = 4.0;
+const DRIFT_SECS: f64 = 32.0;
+const SHIMMER_PX: f32 = 40.0;
+const SHIMMER_SECS: f64 = 7.0;
+const SHIMMER_RUN: f64 = 3.0;
 /// The word count's column at its narrowest, and the room left of it for
 /// the notch its casts land in.
 const COUNT_MIN_W: f32 = 32.0;
@@ -141,6 +150,8 @@ struct Ticks {
     mode: Mode,
     mode_at: f64,
     finish_at: Option<f64>,
+    /// Reduced motion: no idle drift or shimmer.
+    still: bool,
 }
 
 impl Ticks {
@@ -168,8 +179,38 @@ impl Ticks {
                 Paint::solid(hex(RULE)),
             ));
         }
-        let x0 = r.x + TICK_X0 * k;
-        let x1 = r.x + TICK_X1 * k;
+        let idle = self.mode == Mode::Listening && !self.still;
+        if idle {
+            let u = ((since / SHIMMER_SECS).fract() * SHIMMER_SECS / SHIMMER_RUN) as f32;
+            if u < 1.0 {
+                // Two halves, clear to orange to clear.
+                let half = SHIMMER_PX * k / 2.0;
+                let mid = bx0 - half + (bx1 - bx0 + 2.0 * half) * u;
+                let lit = hex(ORANGE).fade(0.5);
+                for (from, to) in [(mid - half, mid), (mid, mid + half)] {
+                    let (a, b) = (from.max(bx0), to.min(bx1));
+                    if b > a {
+                        let (c0, c1) = if to == mid {
+                            (lit.fade(0.0), lit)
+                        } else {
+                            (lit, lit.fade(0.0))
+                        };
+                        p.shape(ShapeInstance::rrect(
+                            RRect::new(Rect::new(a, cy - 0.5, b - a, 1.0), 0.0),
+                            Paint::linear(Point::new(from, cy), c0, Point::new(to, cy), c1),
+                        ));
+                    }
+                }
+            }
+        }
+        let drift = if idle {
+            let u = (since / DRIFT_SECS).fract() as f32;
+            DRIFT_PX * (1.0 - (2.0 * u - 1.0).abs()) * k
+        } else {
+            0.0
+        };
+        let x0 = r.x + TICK_X0 * k + drift;
+        let x1 = r.x + TICK_X1 * k + drift;
         let mid = (x0 + x1) / 2.0;
         let n = ((x1 - x0) / (TICK_PITCH * k)).floor() as i32 / 2;
         if self.mode == Mode::Loading {
@@ -391,7 +432,12 @@ impl Popup {
             Transition::fade()
         };
         at(
-            Element::stroke_path("frame", border, view, StrokeStyle::solid(self.exhale_width(1.0), hex(EDGE))),
+            Element::stroke_path(
+                "frame",
+                border,
+                view,
+                StrokeStyle::solid(self.exhale_width(1.0), hex(EDGE)),
+            ),
             0.0,
             0.0,
         )
@@ -514,6 +560,7 @@ impl Popup {
             mode,
             mode_at,
             finish_at: self.extra.finish_at,
+            still: self.still(),
         };
         let until = ticks.until(self.extra.now);
         let w = ticks.w;
