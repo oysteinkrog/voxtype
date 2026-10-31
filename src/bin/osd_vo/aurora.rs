@@ -90,7 +90,7 @@ const SWELL: f32 = 0.6;
 /// blobs keep their places in it, so the drift never jumps.
 const DRIFT_PX: f64 = 20.0;
 const DRIFT_SECS: f64 = 40.0;
-const DRIFT_FPS: f64 = 8.0;
+const DRIFT_FPS: f64 = 6.0;
 const OVERHANG: f32 = 24.0;
 const SETTLE_SECS: f64 = 0.35;
 
@@ -549,7 +549,7 @@ impl Popup {
         // MO-81 and MO-89: the type breathes and the magnetic caret stands
         // at the end of the text only while it is spoken.
         let words = if mode == Mode::Listening {
-            words.wild_motion(self)
+            self.aurora_magnet(words.wild_motion(self))
         } else {
             words
         };
@@ -575,6 +575,34 @@ impl Popup {
         let text = self.letter_fx_layers(text, tw);
         let text = self.signal_marks(text, &self.shown, tw, (0.0, 0.0), hex(INK));
         self.with_hearing(text, &l.text_style(), tw, hex(INK), hex(CYAN))
+    }
+
+    /// MO-89 in Aurora's cyan: the caret stands a clear gap after the last
+    /// word and its field lines run only on the far side, so no ring is
+    /// drawn over or against a letter.
+    fn aurora_magnet(&self, words: Element<Msg>) -> Element<Msg> {
+        use vo::scene::flow::magnet::Magnet;
+        use vo::scene::flow::Caret;
+        let l = &self.look;
+        if !l.on(wild_motion::MAGNETIC_CARET) || !l.quiet.is_empty() {
+            return words;
+        }
+        let cyan = hex(CYAN);
+        let gap = l.text_style().size * 0.22;
+        let still = l.on("reduced-motion") || kit::reduced();
+        words
+            .caret(Caret {
+                width: 2.0,
+                gap,
+                color: Some(cyan),
+                gradient: None,
+            })
+            .magnetic_caret(Magnet {
+                still,
+                reach: 1.4,
+                text_side: 0.0,
+                ..Magnet::default().color(cyan)
+            })
     }
 
     /// MO-88: with `sound-sculpture`, letter bodies behind the words, as

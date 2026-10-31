@@ -1201,6 +1201,8 @@ impl Look {
 
     /// Whether the "…" before cut text hangs in the left margin, so it never
     /// changes where the lines break. The other looks put it on the word.
+    /// Aurora's centred lines draw no "…": its text clip shows the cut line
+    /// leaving, and a cut is a one-line scroll with no rewrap.
     fn margin_ellipsis(&self) -> bool {
         matches!(
             self.theme,
@@ -1209,6 +1211,7 @@ impl Look {
                 | OsdTheme::Type
                 | OsdTheme::Dotmatrix
                 | OsdTheme::Palette
+                | OsdTheme::Aurora
         )
     }
 
