@@ -4,9 +4,14 @@
 
 use super::*;
 
+use vo::scene::canvas::Painter;
+use vo::scene::display::{Paint, ShapeInstance};
+use vo::scene::geom::{Point, RRect};
 use vo::scene::glass::GlassShape;
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
+use vo_3d::env::{SCREEN_U, SCREEN_V};
+use vo_3d::{Desktop, Env};
 
 /// What the popup shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,6 +313,117 @@ pub(crate) fn detail_words(state: &str, detail: &str) -> Vec<Word> {
 #[allow(dead_code)]
 pub(crate) fn frosted<M>(panel: Element<M>, shape: GlassShape) -> Element<M> {
     panel.blur_behind(shape)
+}
+
+/// A made-up desktop (EG-21, `vo_3d::Desktop`) for a chrome hero to reflect:
+/// a sky in `tint` with a few dim windows at places `seed` picks. The windows
+/// drift 1 texel a second, none under reduced motion. Each look passes its
+/// own designed colour; nothing is read from the desktop.
+// No look calls it yet: each chrome look adopts it in its own R2 bead.
+#[allow(dead_code)]
+pub(crate) fn desktop_env(tint: Color, seed: u64) -> Env {
+    let drift = if reduced() { 0.0 } else { 1.0 };
+    Env {
+        desktop: Some(Desktop {
+            drift,
+            ..Desktop::new(tint, seed)
+        }),
+        ..Env::default()
+    }
+}
+
+/// The windows of `desktop` as a faint reflection on a glass panel, in the
+/// order they are drawn: the desktop's screen mapped onto `rect`, each window
+/// in `colour` at 4 to 8 % opacity (lighter windows stronger), corners
+/// rounded by `radius`. Still: the windows stand where they are at time 0.
+pub(crate) fn reflection_shapes(
+    rect: Rect,
+    desktop: &Desktop,
+    colour: Color,
+    radius: f32,
+) -> Vec<(RRect, Color)> {
+    let (sx, sy) = (
+        rect.w / (SCREEN_U[1] - SCREEN_U[0]),
+        rect.h / (SCREEN_V[1] - SCREEN_V[0]),
+    );
+    desktop
+        .windows(0.0)
+        .iter()
+        .filter_map(|win| {
+            let (x0, x1) = (win.x.max(SCREEN_U[0]), (win.x + win.w).min(SCREEN_U[1]));
+            if x1 <= x0 {
+                return None;
+            }
+            let r = Rect::new(
+                rect.x + (x0 - SCREEN_U[0]) * sx,
+                rect.y + (win.y - SCREEN_V[0]) * sy,
+                (x1 - x0) * sx,
+                win.h * sy,
+            );
+            let a = 0.04 + 0.04 * ((win.light - 0.4) / 0.15).clamp(0.0, 1.0);
+            Some((RRect::new(r, radius.min(r.h / 4.0)), colour.fade(a)))
+        })
+        .collect()
+}
+
+/// Paints [`reflection_shapes`], each window fading out toward its foot as a
+/// reflection on glass does: draw it on the panel before its content, so the
+/// words and the rim stay on top.
+pub(crate) fn glass_reflection(
+    p: &mut Painter,
+    rect: Rect,
+    desktop: &Desktop,
+    colour: Color,
+    radius: f32,
+) {
+    for (r, c) in reflection_shapes(rect, desktop, colour, radius) {
+        let (top, foot) = (r.rect.y, r.rect.y + r.rect.h);
+        let fill = Paint::linear(
+            Point::new(r.rect.x, top),
+            c,
+            Point::new(r.rect.x, foot),
+            c.fade(0.0),
+        );
+        p.shape(ShapeInstance::rrect(r, fill));
+    }
+}
+
+#[cfg(test)]
+mod reflection_tests {
+    use super::*;
+
+    #[test]
+    fn the_reflection_keeps_inside_its_box_at_four_to_eight_percent() {
+        let rect = Rect::new(20.0, 30.0, 400.0, 300.0);
+        for seed in 0..100 {
+            let desktop = Desktop::new(hex(0x3d74ff), seed);
+            let shapes = reflection_shapes(rect, &desktop, hex(0xa9bff0), 6.0);
+            assert!(
+                (3..=6).contains(&shapes.len()),
+                "seed {seed}: {}",
+                shapes.len()
+            );
+            for (r, c) in shapes {
+                let b = r.rect;
+                assert!(
+                    b.x >= rect.x - 1e-3
+                        && b.y >= rect.y - 1e-3
+                        && b.x + b.w <= rect.x + rect.w + 1e-3
+                        && b.y + b.h <= rect.y + rect.h + 1e-3,
+                    "seed {seed}: {b:?} leaves {rect:?}"
+                );
+                assert!((0.04..=0.08).contains(&c.a), "seed {seed}: alpha {}", c.a);
+            }
+        }
+    }
+
+    #[test]
+    fn the_same_seed_gives_the_same_reflection() {
+        let rect = Rect::new(0.0, 0.0, 300.0, 200.0);
+        let a = reflection_shapes(rect, &Desktop::new(hex(0x3d74ff), 7), hex(0xffffff), 4.0);
+        let b = reflection_shapes(rect, &Desktop::new(hex(0x3d74ff), 7), hex(0xffffff), 4.0);
+        assert_eq!(a, b);
+    }
 }
 
 #[cfg(test)]
