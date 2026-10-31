@@ -441,15 +441,18 @@ impl Panel {
         let k = self.k;
         if let Some(Some(w)) = self.r2.ink.filter(|_| !self.still) {
             if let Some((pull, a)) = gather(t - w.born) {
+                // They gather in a row just under the word's box, and come
+                // from below it, so none ever crosses a letter.
                 for i in 0..GATHER_DOTS {
                     let (u, v) = (seed(i + 300), seed(i + 700));
                     let home = Point::new(
                         w.rect.x + u * w.rect.w,
-                        w.rect.y + (0.25 + 0.6 * v) * w.rect.h,
+                        w.rect.y + w.rect.h + (2.0 + 3.0 * v) * k,
                     );
                     let ang = TAU * seed(i + 900);
                     let r = (18.0 + 22.0 * seed(i + 1100)) * k;
-                    let from = Point::new(home.x + r * ang.cos(), home.y + 0.5 * r * ang.sin());
+                    let from =
+                        Point::new(home.x + r * ang.cos(), home.y + 0.4 * r * ang.sin().abs());
                     let at = Point::new(
                         from.x + (home.x - from.x) * pull,
                         from.y + (home.y - from.y) * pull,
@@ -790,10 +793,12 @@ pub(crate) fn text_style(look: &Look) -> TextStyle {
     TextStyle::new(fonts(look).text, TEXT_PX * k, LINE * k).tracking(TRACKING * k)
 }
 
-/// Width the transcript wraps at.
+/// Width the transcript wraps at: it ends 30 concept pixels short of the
+/// scroll mark on the right, so a long last word and its glow stay clear
+/// of it (at 585 "waveform" ran into the mark).
 pub(crate) fn text_width(look: &Look) -> f32 {
     let k = look.width / CONCEPT_W;
-    585.0 * k
+    565.0 * k
 }
 
 impl Popup {
