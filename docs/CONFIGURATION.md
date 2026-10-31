@@ -4616,10 +4616,21 @@ follow the Plasma scheme:
   memory comes from the amdgpu driver or `nvidia-smi`, read at most every
   3 s while the popup shows; without either the tile reads "n/a".
 
-Seven more names are already in the look chord for looks in progress:
-`orb`, `chrome`, `glass`, `biolume`, `aurora`, `hologram` and `river`. Until
-each look is finished, it draws the swiss panel and has no default motion
-set.
+- `theme = "river"`: a wide, short strip of dark navy glass. A ribbon of
+  glowing strands runs from the microphone across the top and swings with
+  your voice; the words sit under it with the newest word lit blue to
+  violet. When the text lands the ribbon flattens into one bright line that
+  ends in an arrow.
+
+- `theme = "hologram"`: no panel, only light. A glass microphone orb
+  hangs over a faint column of projected light with fine scan lines; the
+  words float centred in it in translucent blue, a bar wave stands below
+  them and a glowing ring pedestal at the base carries the status. The
+  projection grows down as lines come. Reduced motion stops the scan lines.
+
+Five more names are already in the look chord for looks in progress:
+`orb`, `chrome`, `glass`, `biolume` and `aurora`. Until each look is
+finished, it draws the swiss panel and has no default motion set.
 
 ```toml
 [osd]
@@ -4658,6 +4669,8 @@ default:
 | `synthwave` | `onset-grid`, `light-line`, `pitch-baseline`, `particle-source` |
 | `mecha` | `hydraulic-chain`, `onset-joint`, `look-choice`, `broken-frame` |
 | `cyberpunk` | `look-choice`, `broken-frame`, `rewind` |
+| `river` | `kinetic-lattice`, `sound-sculpture`, `stroke-write` |
+| `hologram` | `depth-stack`, `letter-physics`, `liquid-morph`, `glyph-morph` |
 
 Some looks also have effects built in that no setting turns off. When you
 switch looks with the look chord, the new look's set applies at once.

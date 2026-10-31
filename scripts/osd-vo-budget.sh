@@ -52,6 +52,11 @@
 #   VOXTYPE_BUDGET_GPU_P99_MS    default 0    GPU p99 limit; 0 reports it without gating
 #
 # Other settings: LOOKS="swiss type" measures only those looks.
+# VOXTYPE_BUDGET_SCENARIO picks the recording moment: dictation (the default),
+# cadence (a word every 0.3 s) or word-burst (four words every 0.6 s); each is
+# measured over scene time 1.5 to 6.5 s. VOXTYPE_BUDGET_MOTION=NAMES runs every
+# state with `--motion NAMES`, for example `no-stroke-write` to measure a look
+# without one feature (SW-09).
 # VOXTYPE_BUDGET_CONFIG=FILE runs with that config file instead of an empty
 # one, for example one with only `[osd] width_px = 600` for the wide popup.
 # The policy behind the limits is rule 8 of docs/MOTION-PLAN.md in the vo
@@ -84,6 +89,13 @@ rec_cpu=${VOXTYPE_BUDGET_REC_CPU_PCT:-10}
 showcase_rec_cpu=${VOXTYPE_BUDGET_SHOWCASE_REC_CPU_PCT:-12}
 gpu_ms=${VOXTYPE_BUDGET_GPU_MS:-1}
 gpu_p99=${VOXTYPE_BUDGET_GPU_P99_MS:-0}
+scenario=${VOXTYPE_BUDGET_SCENARIO:-dictation}
+case $scenario in
+    dictation | cadence | word-burst) ;;
+    *) echo "osd-vo-budget: VOXTYPE_BUDGET_SCENARIO must be dictation, cadence or word-burst" >&2; exit 2 ;;
+esac
+motion=()
+[[ -n ${VOXTYPE_BUDGET_MOTION:-} ]] && motion=(--motion "$VOXTYPE_BUDGET_MOTION")
 
 if [[ ! -x $bin ]]; then
     echo "osd-vo-budget: no binary at $bin; build it with" >&2
@@ -154,7 +166,7 @@ live() {
         timeout 60 systemd-run --user --scope --quiet --collect --slice=builds.slice --unit="$unit" \
         -p CPUQuota=400% -- dbus-run-session -- kwin_wayland --virtual --no-lockscreen --no-global-shortcuts \
         --socket "vo-look-budget-$$" --width 1920 --height 1080 \
-        --exit-with-session "$work/inner.sh $log $ticks $from $to $bin --config $config --theme $look --live-moment $moment" \
+        --exit-with-session "$work/inner.sh $log $ticks $from $to $bin --config $config --theme $look ${motion[*]} --live-moment $moment" \
         >"$work/kwin-$look-$state.log" 2>&1
     systemctl --user stop "$unit.scope" 2>/dev/null
     if [[ ! -s $ticks ]] || ! grep -q 'popup exit 0' "$log" 2>/dev/null; then
@@ -184,7 +196,7 @@ gpu_once() {
     rm -rf "$dir"
     local out
     out=$(RUST_LOG=warn systemd-run --user --slice=builds.slice --scope -q -p CPUQuota=400% nice -n 10 \
-        "$bin" --config "$config" --theme "$look" --offline "$dir" --fps 10 --gpu-times \
+        "$bin" --config "$config" --theme "$look" "${motion[@]}" --offline "$dir" --fps 10 --gpu-times \
         --moment "$moment" 2>&1)
     rm -rf "$dir"
     awk '/GPU .* frames,/ {
@@ -201,7 +213,7 @@ gpu_once() {
 for look in "${looks[@]}"; do
     for state in recording idle-open; do
         if [[ $state == recording ]]; then
-            moment=dictation from=1.5 to=6.5 cpu_max=$rec_cpu fps_max=
+            moment=$scenario from=1.5 to=6.5 cpu_max=$rec_cpu fps_max=
             [[ ${look,,} == showcase ]] && cpu_max=$showcase_rec_cpu
         else
             moment=long-silence from=1.8 to=5.9 cpu_max=$idle_cpu fps_max=$idle_fps

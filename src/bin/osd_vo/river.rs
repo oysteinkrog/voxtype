@@ -12,6 +12,7 @@
 use super::kit::{at, hex, mix, Mode};
 use super::*;
 
+use super::glyph_paths::PathsText;
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point};
@@ -64,6 +65,10 @@ const PAD_BOTTOM: f32 = 16.0;
 /// to flatten into it.
 const SETTLE_SECS: f32 = 0.5;
 const ARROW: f32 = 7.0;
+/// Idle: specks of light that drift along the river, at most this bright.
+const SPECKS: u32 = 14;
+const SPECK_SPEED: f32 = 30.0;
+const SPECK_ALPHA: f32 = 0.4;
 
 /// How much the strip is scaled from the redesign.
 fn scale(look: &Look) -> f32 {
@@ -190,6 +195,62 @@ impl Hairline {
     }
 }
 
+/// The look's transcript for the outline features: its own text style and
+/// line pitch, inked in the look's colours.
+fn river_paths(look: &Look) -> PathsText {
+    PathsText {
+        style: look.text_style(),
+        width: look.text_width(),
+        line: TEXT_LINE * scale(look),
+        ink: hex(INK),
+        nib: hex(CYAN),
+    }
+}
+
+/// Idle specks of light drifting along the river.
+#[derive(Clone, Copy)]
+struct Specks {
+    k: f32,
+    shown_at: f64,
+}
+
+impl Specks {
+    fn draw(&self, t: f64, r: vo::scene::geom::Rect, p: &mut Painter) {
+        let k = self.k;
+        let run = (t - self.shown_at) as f32 * SPECK_SPEED * k;
+        let hash = |i: u32, s: u32| {
+            let x = (i.wrapping_mul(0x9E37_79B9) ^ s).wrapping_mul(0x85EB_CA6B);
+            ((x >> 16) & 0xFFFF) as f32 / 65535.0
+        };
+        let cy = r.y + r.h / 2.0;
+        for i in 0..SPECKS {
+            let x = (run + r.w * hash(i, 1)).rem_euclid(r.w);
+            let u = x / r.w;
+            // Faded in from the microphone and out at the far end.
+            let ends = (u / 0.1).min((1.0 - u) / 0.1).clamp(0.0, 1.0);
+            let y = cy
+                + (hash(i, 2) - 0.5) * 0.5 * r.h
+                + 4.0 * k * (x / (90.0 * k) + 6.0 * hash(i, 3)).sin();
+            let a = SPECK_ALPHA * (0.4 + 0.6 * hash(i, 4)) * ends;
+            if a <= 0.0 {
+                continue;
+            }
+            let c = Point::new(r.x + x, y);
+            let col = mix(hex(CYAN), hex(VIOLET), u);
+            p.shape(ShapeInstance::circle(
+                c,
+                1.1 * k,
+                Paint::glow(col.fade(a), 3.0 * k, 0.5),
+            ));
+            p.shape(ShapeInstance::circle(
+                c,
+                0.9 * k,
+                Paint::solid(hex(ICE).fade(a)),
+            ));
+        }
+    }
+}
+
 impl Popup {
     pub(crate) fn river_view(&self) -> Element<Msg> {
         let root = Element::column("root").align_items(AlignItems::CENTER);
@@ -230,6 +291,7 @@ impl Popup {
             .presence(Transition::fade().offset(0.0, 6.0), exit)
             .motion(Prop::Size, Motion::Snap)
             .child(self.river_ribbon(mode, mode_at, k))
+            .children(self.river_specks(mode, k))
             .child(
                 at(
                     Element::canvas("mic", self.shown_at, move |_, r, p| mic.draw(r, p)),
@@ -238,13 +300,15 @@ impl Popup {
                 )
                 .size(side, side),
             )
+            .children(self.river_sculpture(mode, Size::new(w, h), k))
+            .children(self.river_lattice(mode, k))
             .children(self.limit_line(
                 Point::new(TEXT_X * k, TEXT_TOP * k),
                 Size::new(w, h),
                 hex(INK).fade(0.55),
                 hex(CYAN),
             ))
-            .child(at(self.river_text(mode), TEXT_X * k, TEXT_TOP * k))
+            .child(self.river_text_clip(mode, lines, k))
             .child(at(
                 self.river_status(mode, mode_at, k, w),
                 STATUS_X * k,
@@ -337,6 +401,22 @@ impl Popup {
             .presence(Transition::fade(), Transition::fade())
     }
 
+    /// The words, clipped to their box: a line that leaves on an overflow
+    /// stays out of the ribbon above. The margin keeps the pen and the word
+    /// entry whole at the sides and below.
+    fn river_text_clip(&self, mode: Mode, lines: u32, k: f32) -> Element<Msg> {
+        let m = 8.0 * k;
+        let size = Size::new(
+            self.look.text_width() + 2.0 * m,
+            lines as f32 * TEXT_LINE * k + m,
+        );
+        let clip = Element::layer("text-clip")
+            .size(size.w, size.h)
+            .clip()
+            .child(at(self.river_text(mode), m, 0.0));
+        at(clip, TEXT_X * k - m, TEXT_TOP * k)
+    }
+
     fn river_text(&self, mode: Mode) -> Element<Msg> {
         let l = &self.look;
         let dim = if mode == Mode::Cancelled { 0.45 } else { 1.0 };
@@ -365,7 +445,10 @@ impl Popup {
                 ),
             )
             .wild_motion(self);
-        let words = self.typo_words(words);
+        // MO-24 and the pen's letter fills (stroke-write) follow this look's
+        // own text style and line pitch.
+        let paths = river_paths(l);
+        let words = self.typo_words_in(words, &paths);
         let words = self.handoff_or(
             words,
             &l.text_style(),
@@ -373,10 +456,13 @@ impl Popup {
             hex(INK),
             hex(CYAN),
         );
+        let editing = self.edit_view.is_some();
         let text = Element::column("text")
             .width(l.text_width())
             .height(self.lines.clamp(1, MAX_LINES) as f32 * l.text_style().line_height)
             .child(words)
+            // MO-80: the pen over the words while they are being written.
+            .children(self.paths_overlays(&paths).into_iter().filter(|_| !editing))
             .children(self.line_marks(
                 l.text_style(),
                 l.text_width(),
@@ -389,6 +475,75 @@ impl Popup {
             ));
         let text = self.signal_marks(text, &self.shown, l.text_width(), (0.0, 0.0), hex(INK));
         self.with_hearing(text, &l.text_style(), l.text_width(), hex(INK), hex(CYAN))
+    }
+
+    /// Idle: light specks flow along the river at 30 px a second while the
+    /// popup listens, under the words. None under reduced motion.
+    fn river_specks(&self, mode: Mode, k: f32) -> Option<Element<Msg>> {
+        if mode != Mode::Listening || self.still() || self.closing {
+            return None;
+        }
+        let specks = Specks {
+            k,
+            shown_at: self.shown_at,
+        };
+        let (x, y) = (RIVER_X0 * k, (MIC_Y - RIVER_H / 2.0) * k);
+        let size = Size::new((RIVER_X1 - RIVER_X0) * k, RIVER_H * k);
+        Some(
+            at(
+                Element::canvas("specks", f64::INFINITY, move |t, r, p| specks.draw(t, r, p)),
+                x,
+                y,
+            )
+            .size(size.w, size.h)
+            .presence(Transition::fade(), Transition::fade()),
+        )
+    }
+
+    /// MO-88: with `sound-sculpture`, letter bodies behind the words, as
+    /// deep as each word was loud; they lie flat once the dictation stops.
+    fn river_sculpture(&self, mode: Mode, size: Size, k: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(wild_space::SOUND_SCULPTURE) || self.edit_view.is_some() {
+            return None;
+        }
+        let style = l.text_style();
+        let lines = self.wrap_lines(&self.shown, &style, l.text_width());
+        let skip = lines.len().saturating_sub(MAX_LINES as usize);
+        let rows: Vec<(Vec<Word>, Point)> = lines
+            .into_iter()
+            .skip(skip)
+            .enumerate()
+            .map(|(i, ws)| {
+                (
+                    ws,
+                    Point::new(TEXT_X * k, (TEXT_TOP + i as f32 * TEXT_LINE) * k),
+                )
+            })
+            .collect();
+        let done = mode != Mode::Listening || self.still();
+        self.sculpture_element(&rows, &style, size, Spring::POP, done)
+    }
+
+    /// MO-85: with `kinetic-lattice`, the lattice under the words, its
+    /// newest gutter the gap down to the status row.
+    fn river_lattice(&self, mode: Mode, k: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(wild_space::KINETIC_LATTICE) || self.edit_view.is_some() {
+            return None;
+        }
+        let set = wild_space::LatticeSet {
+            preset: vo::scene::lattice::LatticeStyle::Light,
+            color: hex(HINT).fade(0.5),
+            accent: hex(CYAN),
+            scale: 0.9 * k,
+            label: Some(TextStyle::new(sans(l), 9.0 * k, 11.0 * k)),
+            gutter: (STATUS_GAP - 3.0) * k,
+            opacity: if mode == Mode::Cancelled { 0.35 } else { 1.0 },
+        };
+        let style = l.text_style();
+        let e = self.lattice_lines("river", &self.shown, &style, l.text_width(), &set)?;
+        Some(at(e, TEXT_X * k, TEXT_TOP * k))
     }
 
     /// The status row: a dot, the state word, and the detail or hint.

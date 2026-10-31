@@ -339,7 +339,7 @@ struct Args {
     offline: Option<PathBuf>,
 
     /// Frames per second for `--offline`, `--envelope` and `--exit-check`.
-    /// `--envelope` needs at least 15.
+    /// `--envelope` needs at least 30, the rate its limits are given at.
     #[arg(long, default_value = "30")]
     fps: f64,
 
@@ -987,6 +987,10 @@ impl Look {
             OsdTheme::Jarvis => Some(jarvis::newest_line_centre(self, lines)),
             OsdTheme::Particles => Some(particles::newest_line_centre(self, lines)),
             OsdTheme::River => Some(river::newest_line_centre(self, lines)),
+            OsdTheme::Hologram => Some(hologram::newest_line_centre(self, lines)),
+            OsdTheme::Glass => Some(glass::newest_line_centre(self)),
+            OsdTheme::Chrome => Some(chrome::newest_line_centre(self, lines)),
+            OsdTheme::Orb => Some(orb::newest_line_centre(self, lines)),
             _ => None,
         }
     }
@@ -1057,6 +1061,18 @@ impl Look {
         if self.theme == OsdTheme::River {
             return river::text_width(self);
         }
+        if self.theme == OsdTheme::Hologram {
+            return hologram::text_width(self);
+        }
+        if self.theme == OsdTheme::Glass {
+            return glass::text_width(self);
+        }
+        if self.theme == OsdTheme::Chrome {
+            return chrome::text_width(self);
+        }
+        if self.theme == OsdTheme::Orb {
+            return orb::text_width(self);
+        }
         self.width - swiss::PANEL_INSET_PX as f32
     }
 
@@ -1091,6 +1107,18 @@ impl Look {
         }
         if self.theme == OsdTheme::River {
             return river::max_lines();
+        }
+        if self.theme == OsdTheme::Hologram {
+            return hologram::max_lines();
+        }
+        if self.theme == OsdTheme::Glass {
+            return glass::MAX_LINES;
+        }
+        if self.theme == OsdTheme::Chrome {
+            return chrome::MAX_LINES;
+        }
+        if self.theme == OsdTheme::Orb {
+            return orb::MAX_LINES;
         }
         swiss::MAX_LINES as u32
     }
@@ -1171,6 +1199,18 @@ impl Look {
         }
         if self.theme == OsdTheme::River {
             return river::text_style(self);
+        }
+        if self.theme == OsdTheme::Hologram {
+            return hologram::text_style(self);
+        }
+        if self.theme == OsdTheme::Glass {
+            return glass::text_style(self);
+        }
+        if self.theme == OsdTheme::Chrome {
+            return chrome::text_style(self);
+        }
+        if self.theme == OsdTheme::Orb {
+            return orb::text_style(self);
         }
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
@@ -1267,6 +1307,9 @@ impl Look {
             OsdTheme::Particles => particles::panel_top(self),
             OsdTheme::Showcase => voxtype::osd::showcase::MARGIN_PX,
             OsdTheme::Jarvis => jarvis::panel_top(),
+            OsdTheme::Glass => glass::panel_top(self),
+            OsdTheme::Chrome => chrome::panel_top(self),
+            OsdTheme::Orb => orb::panel_top(self),
             _ => 0.0,
         }
     }
@@ -1356,6 +1399,18 @@ impl Look {
         }
         if self.theme == OsdTheme::River {
             return river::surface(self);
+        }
+        if self.theme == OsdTheme::Hologram {
+            return hologram::surface(self);
+        }
+        if self.theme == OsdTheme::Glass {
+            return glass::surface(self);
+        }
+        if self.theme == OsdTheme::Chrome {
+            return chrome::surface(self);
+        }
+        if self.theme == OsdTheme::Orb {
+            return orb::surface(self);
         }
         Size::new(
             self.width.ceil(),
@@ -1582,6 +1637,8 @@ struct Popup {
     island: island::State,
     /// What only the jarvis look keeps.
     jarvis: jarvis::Extra,
+    /// What only the glass look keeps.
+    glass: glass::State,
     /// The final pass that sets the type (MO-40).
     set_type: set_type::State,
     /// Ink, light and liquid letter effects (`osd_vo/letter_fx.rs`).
@@ -1710,6 +1767,7 @@ impl Popup {
             karaoke: karaoke::State::default(),
             island: island::State::default(),
             jarvis: jarvis::Extra::default(),
+            glass: glass::State::default(),
             set_type: set_type::State::default(),
             letter_fx: letter_fx::State::default(),
             cyber: cyberpunk::State::default(),
@@ -1820,7 +1878,14 @@ impl Popup {
             && !self.closing
             && t - self.loud_at >= ROOM_TONE_AFTER_LOUD_SECS
             && t - self.event_at >= ROOM_TONE_AFTER_EVENT_SECS;
-        quiet.then_some(ROOM_TONE_FPS)
+        // The raymarched blob and orb cost more a frame; their slow idle
+        // motion reads the same at a lower pace.
+        let fps = match self.look.theme {
+            OsdTheme::Chrome => chrome::ROOM_TONE_FPS,
+            OsdTheme::Orb => orb::ROOM_TONE_FPS,
+            _ => ROOM_TONE_FPS,
+        };
+        quiet.then_some(fps)
     }
 
     /// The daemon records or makes the final text.
@@ -2151,6 +2216,7 @@ impl App for Popup {
         self.arm_captions_tick(cx);
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
+        self.arm_hologram_tick(cx);
         self.arm_cyber_tick(cx);
         self.arm_dotmatrix_tick(cx);
     }
@@ -2301,6 +2367,7 @@ impl App for Popup {
         self.sync_karaoke(t);
         self.sync_island(t);
         self.sync_jarvis(t);
+        self.sync_glass(t);
         self.sync_cyber(t);
         self.sync_synthwave(t);
         self.sync_endings(t);
@@ -2312,7 +2379,9 @@ impl App for Popup {
         self.arm_captions_tick(cx);
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
+        self.arm_hologram_tick(cx);
         self.arm_jarvis_wake(cx);
+        self.arm_glass_wake(cx);
         self.arm_cyber_tick(cx);
         self.arm_dotmatrix_tick(cx);
         self.pace = self.room_tone_pace(t);
@@ -2682,6 +2751,10 @@ fn default_motion(look: &Look) -> Motion {
             | OsdTheme::Mecha
             | OsdTheme::Cyberpunk
             | OsdTheme::River
+            | OsdTheme::Hologram
+            | OsdTheme::Glass
+            | OsdTheme::Chrome
+            | OsdTheme::Orb
     ) {
         Motion::Spring(Spring::SOFT)
     } else {

@@ -62,14 +62,14 @@ pub(crate) fn run(
         transcript: 0..TRANSCRIPT_IDS,
         ..Envelope::default()
     };
-    // Slower, a word that holds still for less than two frames before it
-    // moves on never shows its rest there, and reads as a breach it is not
-    // (y50p: jarvis at 10 fps).
+    // Slower, a word that holds still for about 100 ms before it moves on
+    // never shows its rest there, and reads as a breach it is not (y50p:
+    // jarvis at 10 fps; m3qn: jarvis's depth stack at 15 to 24 fps).
     let slowest = envelope.slowest_fps();
     if fps < slowest {
         anyhow::bail!(
             "--envelope needs --fps {slowest} or more: at {fps} fps a word that \
-             holds still for less than two frames is not seen at rest"
+             holds still for about 100 ms is not seen at rest"
         );
     }
     let report = check_scenario(popup(), &scenario, fps, options(), &envelope);

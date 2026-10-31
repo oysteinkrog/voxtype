@@ -11,11 +11,21 @@
 //!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
+//!
+//! While listening it keeps a little idle life (09b, RD-02): the status
+//! row's square breathes from 100 % to 60 % on a 2 s cycle (the look has no
+//! caret, so the square takes the caret's breath), the hairline under the
+//! text lightens a little with the smoothed level (it stands in for a
+//! baseline grid), and once every 12 s a 1 s sheen crosses the status word.
+//! The loops step 15 times a second, keep off the transcript, leave the
+//! view once the recording stops and hold still under reduced motion.
 
 use super::*;
 
 use super::glyph_paths::PathsText;
-use vo::scene::geom::Point;
+use vo::scene::ambient::{Loop, LoopProp, Wave as LoopWave};
+use vo::scene::display::{Paint, ShapeInstance};
+use vo::scene::geom::{Point, RRect};
 use vo::scene::path::{make, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
 use vo::scene::status_icon::{IconStyle, StatusIcon};
@@ -46,6 +56,49 @@ const WAVE_WIDTH: f32 = 1.2;
 const WAVE_DROP: f32 = 2.0;
 /// The underline's colour: amber, apart from the theme's accent.
 const DOUBT_COLOR: u32 = 0xf5a524;
+/// 09b: the idle loops' pace (RD-02's slow-loop cap); the square's lowest
+/// opacity and seconds per breath; how far the hairline moves toward the
+/// text colour at full level and the level samples it smooths over; the
+/// sheen's width, period, pass, first pass after the popup opens and
+/// strength.
+const IDLE_FPS: f64 = 15.0;
+const DOT_LOW: f64 = 0.6;
+const DOT_PERIOD: f64 = 2.0;
+const RULE_LIFT: f32 = 0.2;
+const RULE_SMOOTH: usize = 30;
+const SHEEN_W: f32 = 26.0;
+const SHEEN_EVERY: f64 = 12.0;
+const SHEEN_PASS: f64 = 1.0;
+const SHEEN_FIRST: f64 = 3.0;
+const SHEEN_ALPHA: f32 = 0.05;
+
+/// 09b: the square's breath on opacity, 1.0 down to `DOT_LOW` and back.
+fn dot_loop() -> Loop {
+    Loop::pulse(DOT_LOW - 1.0, DOT_PERIOD)
+        .fps(IDLE_FPS)
+        .settle(Spring::SNAP)
+}
+
+/// 09b: the sheen's loop over a word `span` wide: it starts just left of
+/// the word, crosses it in `SHEEN_PASS` and waits out of sight for the rest
+/// of `SHEEN_EVERY`.
+fn sheen_loop(span: f32) -> Loop {
+    let travel = (span + SHEEN_W) as f64;
+    Loop::new(
+        LoopWave::Ramp,
+        travel * SHEEN_EVERY / SHEEN_PASS,
+        SHEEN_EVERY,
+    )
+    .phase(1.0 - SHEEN_FIRST / SHEEN_EVERY)
+    .fps(IDLE_FPS)
+    .settle(Spring::SNAP)
+}
+
+/// `a` moved toward `b` by `f`, 0 to 1.
+fn mix(a: Color, b: Color, f: f32) -> Color {
+    let m = |x: f32, y: f32| x + (y - x) * f;
+    Color::rgba(m(a.r, b.r), m(a.g, b.g), m(a.b, b.b), m(a.a, b.a))
+}
 
 /// The y of the newest text line's centre from the surface top, with
 /// `lines` text lines, for the reading-line placement. The panel grows
@@ -200,8 +253,12 @@ impl Popup {
             .child(self.waveform(&status))
             .child(self.type_text())
             .child(
-                self.type_rule("rule", l.width - 2.0 * (PAD_X + BORDER))
-                    .margin_edges(RULE_MARGIN_TOP, 0.0, 0.0, 0.0),
+                self.type_rule(
+                    "rule",
+                    l.width - 2.0 * (PAD_X + BORDER),
+                    self.type_rule_color(),
+                )
+                .margin_edges(RULE_MARGIN_TOP, 0.0, 0.0, 0.0),
             )
             .child(self.type_status(&status))
     }
@@ -244,9 +301,37 @@ impl Popup {
         .presence(Transition::NONE.trim(0.0, 0.0), exit)
     }
 
-    /// A hairline `w` wide that opens from its middle when it appears.
-    fn type_rule(&self, key: &'static str, w: f32) -> Element<Msg> {
+    /// 09b: the idle loops run: listening, open and not reduced.
+    fn type_idle(&self) -> bool {
+        !self.closing
+            && !self.still()
+            && !self.busy_ending()
+            && self.extra.finish_at.is_none()
+            && self.extra.final_at.is_none()
+    }
+
+    /// Whether the dictation has stopped or ended, by the status line.
+    fn busy_ending(&self) -> bool {
+        let status = self.status();
+        status.finishing || status.loading || self.ending().is_some()
+    }
+
+    /// 09b: the hairline under the text, lightened toward the text colour
+    /// with the level smoothed over the newest `RULE_SMOOTH` samples.
+    fn type_rule_color(&self) -> Color {
         let l = &self.look;
+        if !self.type_idle() {
+            return l.border;
+        }
+        let n = self.wave.len();
+        let take = n.clamp(1, RULE_SMOOTH);
+        let level = self.wave[n.saturating_sub(take)..].iter().sum::<f32>() / take as f32;
+        mix(l.border, l.foreground, RULE_LIFT * (level * 4.0).min(1.0))
+    }
+
+    /// A hairline `w` wide in `ink` that opens from its middle when it
+    /// appears.
+    fn type_rule(&self, key: &'static str, w: f32, ink: Color) -> Element<Msg> {
         let half = |side: &'static str, to: f32| {
             let line = Arc::new(Outline {
                 contours: vec![make::underline(w / 2.0, to, 0.5)],
@@ -256,7 +341,7 @@ impl Popup {
                     side,
                     line,
                     Rect::new(0.0, 0.0, w, 1.0),
-                    StrokeStyle::solid(1.0, l.border),
+                    StrokeStyle::solid(1.0, ink),
                 ),
                 0.0,
                 0.0,
@@ -556,7 +641,8 @@ impl Popup {
         // snaps on a state change rather than sliding the hint along.
         let state = status.state.as_str();
         let label_w = self.measure.layout(state, &style, None).size.w.ceil() + 2.0;
-        let label = Element::layer("state")
+        let idle = self.type_idle();
+        let mut label = Element::layer("state")
             .clip()
             .size(label_w, line)
             .motion(Prop::Size, Motion::Snap)
@@ -574,7 +660,24 @@ impl Popup {
                     Transition::fade().offset(0.0, -LABEL_SLIDE),
                 ),
             );
-        let dot = Element::shape("dot", ShapeKind::RRect)
+        if idle {
+            // 09b: the sheen, in the label's clip.
+            let hi = Color::WHITE.fade(SHEEN_ALPHA);
+            let clear = Color::WHITE.fade(0.0);
+            let glint = Element::canvas("sheen", 0.0, move |_, b, p| {
+                let mid = Point::new(b.x + b.w / 2.0, b.y + b.h / 2.0);
+                p.shape(ShapeInstance::rrect(
+                    RRect::new(b, 0.0),
+                    Paint::sheen(mid, Point::new(b.w / 2.0, 0.0), hi, clear),
+                ));
+            });
+            label = label.child(
+                at(glint, -SHEEN_W, 0.0)
+                    .size(SHEEN_W, line)
+                    .ambient(LoopProp::OffsetX, sheen_loop(label_w)),
+            );
+        }
+        let mut dot = Element::shape("dot", ShapeKind::RRect)
             .size(DOT, DOT)
             .fill(if status.finishing {
                 Color::TRANSPARENT
@@ -582,6 +685,9 @@ impl Popup {
                 l.accent
             })
             .border(l.accent, 1.0);
+        if idle {
+            dot = dot.ambient(LoopProp::Opacity, dot_loop());
+        }
         let mut row = Element::row("status")
             .align_items(AlignItems::CENTER)
             .margin_edges(STATUS_MARGIN_TOP, 0.0, 0.0, 0.0)
@@ -700,5 +806,40 @@ pub(super) mod edit_tests {
     #[test]
     fn type_draws_every_word_while_editing() {
         every_word_draws(OsdTheme::Type);
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn the_sheen_crosses_the_status_word_once_every_12_s() {
+        let span = 80.0;
+        let l = sheen_loop(span);
+        let x = |t: f64| -SHEEN_W as f64 + l.value(0.0, t);
+        let shows = |t: f64| x(t) > -SHEEN_W as f64 && x(t) < span as f64;
+        for k in 0..3 {
+            let t0 = SHEEN_FIRST + k as f64 * SHEEN_EVERY;
+            assert!(shows(t0 + SHEEN_PASS / 2.0), "mid pass {k}");
+            assert!(!shows(t0 - 0.1), "before pass {k}");
+            assert!(!shows(t0 + SHEEN_PASS + 0.1), "after pass {k}");
+        }
+        assert!(l.fps <= IDLE_FPS);
+    }
+
+    #[test]
+    fn the_square_breathes_between_60_and_100_percent() {
+        let l = dot_loop();
+        let (mut lo, mut hi) = (0.0f64, f64::MIN);
+        for i in 0..200 {
+            let v = l.value(0.0, i as f64 * 0.01);
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        assert!(
+            (lo - (DOT_LOW - 1.0)).abs() < 0.02 && hi.abs() < 0.02,
+            "{lo} {hi}"
+        );
     }
 }

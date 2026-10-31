@@ -33,7 +33,7 @@ use vo::scene::geom::{Affine, Point};
 use vo::scene::glyph_morph::{GlyphMorph, MorphFrom, MorphStyle, WordOutline};
 use vo::scene::path::{Contour, StrokeStyle};
 use vo::scene::snap::{snapped, Snap};
-use vo::scene::stroke_write::{PenParams, PenSchedule, PenSlot, StrokeSource, WetInk, Writing};
+use vo::scene::stroke_write::{Pen, PenParams, PenSchedule, PenSlot, StrokeSource, Writing};
 use vo::scene::text::ShapedText;
 
 pub(crate) const MORPH: &str = "glyph-morph";
@@ -185,7 +185,9 @@ impl Popup {
             starts.push(joined.len() as u32);
             joined.push_str(&w.text);
         }
-        let shaped = self.measure.layout(&joined, &style, Some(text.width));
+        let mut shaped = self.measure.layout(&joined, &style, Some(text.width));
+        // Centred lines sit across the wrap width, as the live text puts them.
+        shaped.align_in(style.align, text.width);
         let mut out: Vec<Laid> = Vec::new();
         for line in &shaped.lines {
             for g in &shaped.glyphs[line.glyphs.clone()] {
@@ -660,8 +662,9 @@ impl Popup {
     }
 }
 
-/// Pen writings by word id, text and place, shared like the morphs.
-type WriteKey = (u32, String, i32, i32, u32, u32);
+/// Pen writings by script or not, word id, text and place, shared like
+/// the morphs.
+type WriteKey = (bool, u32, String, i32, i32, u32, u32);
 
 fn write_cache() -> &'static Mutex<HashMap<WriteKey, Arc<Writing>>> {
     static C: std::sync::OnceLock<Mutex<HashMap<WriteKey, Arc<Writing>>>> =
@@ -751,7 +754,7 @@ impl Popup {
         }
         let style = &text.style;
         let now = self.extra.now;
-        let wet = WetInk::new(text.ink, text.nib);
+        let wet = self.paths_pen().wet(text.ink, text.nib);
         self.pen_prefetch(style);
         // A word whose line has moved since the pen took it (a scroll, a
         // rewrap) glides there with the live text, while the overlay draws
@@ -932,6 +935,16 @@ impl Popup {
             && self.linger_secs() - self.ended_for(at).unwrap_or(0.0) < REWRITE_MIN_SECS
     }
 
+    /// The look's pen (SW-08): a light for Tron, the beam for Phosphor, wet
+    /// ink for the rest.
+    fn paths_pen(&self) -> Pen {
+        match self.look.theme {
+            OsdTheme::Tron => Pen::Light,
+            OsdTheme::Phosphor => Pen::Phosphor,
+            _ => Pen::Ink,
+        }
+    }
+
     /// The voice a word joins the pen with: the level as it arrives, the
     /// loudest of the last six frames, 0 to 1.
     fn pen_voice(&self) -> f32 {
@@ -967,7 +980,9 @@ impl Popup {
     /// exactly.
     fn writing(&self, word: &Laid, style: &TextStyle) -> Arc<Writing> {
         let size = style.size;
+        let script = self.paths_pen().script();
         let key: WriteKey = (
+            script,
             word.id,
             word.text.clone(),
             (word.x.0 * 4.0) as i32,
@@ -989,7 +1004,9 @@ impl Popup {
         for g in &mut outline.glyphs {
             g.cluster -= base;
         }
-        let source = if self.scripted {
+        let source = if script {
+            StrokeSource::Hershey
+        } else if self.scripted {
             StrokeSource::FontNow
         } else {
             StrokeSource::Font
@@ -1364,7 +1381,7 @@ mod tests {
     #[test]
     fn a_word_that_moved_draws_no_wet_ink_away_from_itself() {
         let plasma = PlasmaTheme::default();
-        let fonts = load_fonts(&plasma).unwrap();
+        let fonts = super::super::swiss_look::edit_check::fonts();
         let cfg = OsdConfig {
             theme: OsdTheme::Type,
             ..OsdConfig::default()
@@ -1373,6 +1390,8 @@ mod tests {
         look.features = [WRITE, MORPH].iter().map(|f| f.to_string()).collect();
         let mut popup = Popup::new(look.clone(), &fonts);
         popup.scripted = true;
+        // The pen books are shared by popup key: one no other test uses.
+        popup.shown_at = 9092.5;
         let text = PathsText::of(&look);
         let words: Vec<Word> = ["one", "two", "three", "four"]
             .iter()
@@ -1401,6 +1420,47 @@ mod tests {
         popup.shown = words[1..].to_vec();
         let after = drawn(&mut popup, 1.06);
         assert!(after.is_empty(), "{after:?} where the words were");
+    }
+
+    /// SW-09: once every word is written and dry the pen leaves no canvas,
+    /// so it costs nothing while the popup idles.
+    #[test]
+    fn no_pen_canvas_is_left_once_the_ink_is_dry() {
+        let plasma = PlasmaTheme::default();
+        // The edit checks' registry: a look keeps the font ids of the first
+        // registry it sees, process-wide.
+        let fonts = super::super::swiss_look::edit_check::fonts();
+        for theme in [OsdTheme::Type, OsdTheme::Tron, OsdTheme::Phosphor] {
+            let cfg = OsdConfig {
+                theme,
+                ..OsdConfig::default()
+            };
+            let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+            look.features = [WRITE].iter().map(|f| f.to_string()).collect();
+            let mut popup = Popup::new(look.clone(), &fonts);
+            popup.scripted = true;
+            // The pen books are shared by popup key: one no other test uses.
+            popup.shown_at = 9091.5;
+            let text = PathsText::of(&look);
+            popup.shown = ["one", "two", "three"]
+                .iter()
+                .enumerate()
+                .map(|(i, w)| Word {
+                    id: i as u32 + 1,
+                    text: w.to_string(),
+                })
+                .collect();
+            let pen = |p: &mut Popup, t: f64| {
+                p.extra.now = t;
+                p.paths_overlays(&text)
+                    .iter()
+                    .filter(|e| e.key().to_string() == "stroke-write")
+                    .count()
+            };
+            assert_eq!(pen(&mut popup, 1.0), 1, "{theme:?} writes");
+            // Three words at most 0.26 s each, then the longest drying (0.6 s).
+            assert_eq!(pen(&mut popup, 3.0), 0, "{theme:?} after the ink dried");
+        }
     }
 
     #[test]
