@@ -1609,6 +1609,8 @@ struct Popup {
     island: island::State,
     /// What only the jarvis look keeps.
     jarvis: jarvis::Extra,
+    /// What only the glass look keeps.
+    glass: glass::State,
     /// The final pass that sets the type (MO-40).
     set_type: set_type::State,
     /// Ink, light and liquid letter effects (`osd_vo/letter_fx.rs`).
@@ -1737,6 +1739,7 @@ impl Popup {
             karaoke: karaoke::State::default(),
             island: island::State::default(),
             jarvis: jarvis::Extra::default(),
+            glass: glass::State::default(),
             set_type: set_type::State::default(),
             letter_fx: letter_fx::State::default(),
             cyber: cyberpunk::State::default(),
@@ -2329,6 +2332,7 @@ impl App for Popup {
         self.sync_karaoke(t);
         self.sync_island(t);
         self.sync_jarvis(t);
+        self.sync_glass(t);
         self.sync_cyber(t);
         self.sync_synthwave(t);
         self.sync_endings(t);
@@ -2342,6 +2346,7 @@ impl App for Popup {
         self.arm_island_tick(cx);
         self.arm_hologram_tick(cx);
         self.arm_jarvis_wake(cx);
+        self.arm_glass_wake(cx);
         self.arm_cyber_tick(cx);
         self.arm_dotmatrix_tick(cx);
         self.pace = self.room_tone_pace(t);

@@ -183,9 +183,15 @@ impl Popup {
             width.to_bits(),
             fonts,
         );
+        // Laid as the live text sets it in its box: a centred look's lines
+        // sit across the whole width, not just across the widest line.
+        let placed = |mut laid: ShapedText| {
+            laid.align_in(style.align, width);
+            laid
+        };
         let mut s = self.letter_fx.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, laid)) = s.laid.iter().find(|(k, _)| *k == key) {
-            return laid.clone();
+            return placed(laid.clone());
         }
         let ranges: Vec<_> = key.4.iter().map(|&(a, b, f)| (a..b, f)).collect();
         let mut laid = self
@@ -202,7 +208,7 @@ impl Popup {
             s.laid.remove(0);
         }
         s.laid.push((key, laid.clone()));
-        laid
+        placed(laid)
     }
 
     /// `text`, the column the live text is the first child of, with the
@@ -267,8 +273,16 @@ impl Popup {
                 // Under a depth stack only the reading line lies on the
                 // panel, in the box's last row; the older lines sit on
                 // sheets in front of it.
-                let line = self.stack_reading_line();
-                let dy = self.lines.saturating_sub(1) as f32 * l.text_line;
+                let stable;
+                let line = if l.theme == OsdTheme::Showcase {
+                    self.stack_reading_line()
+                } else {
+                    // Looks without showcase's stack state: the newest of
+                    // their stable lines.
+                    stable = self.stable_lines(&style, width);
+                    stable.last().map_or(&[][..], |(w, _)| w.as_slice())
+                };
+                let dy = self.lines.saturating_sub(1) as f32 * style.line_height;
                 self.letter_fx_laid(line, &style, width, breath.as_ref())
                     .glyphs
                     .iter()
@@ -280,9 +294,12 @@ impl Popup {
             } else {
                 laid.glyphs.iter().map(|g| glyph(g, 0.0)).collect()
             };
-            let light = Light {
-                accent: l.accent,
-                ..Light::default()
+            let light = match l.theme {
+                OsdTheme::Glass => super::glass::letter_light(),
+                _ => Light {
+                    accent: l.accent,
+                    ..Light::default()
+                },
             };
             // The light dims away with the text it shone through.
             let dim = Spring::critical_to_98(0.45);

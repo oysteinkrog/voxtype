@@ -49,6 +49,7 @@ pub(crate) fn defaults(theme: OsdTheme) -> &'static [&'static str] {
         Cyberpunk => &["look-choice", "broken-frame", "rewind"],
         River => &["kinetic-lattice", "sound-sculpture", "stroke-write"],
         Hologram => &["depth-stack", "letter-physics", "liquid-morph", "glyph-morph"],
+        Glass => &["depth-stack", "light-letters", "magnetic-caret"],
         // New looks (RD-03) start with no set; each look's FX bead adds its row.
         #[allow(unreachable_patterns)]
         _ => &[],
@@ -269,10 +270,9 @@ mod tests {
     fn every_vo_look_has_a_set() {
         // The new looks' slots (RD-03) get their sets from their effects
         // beads; each one leaves this list when its row lands.
-        const SLOTS: [OsdTheme; 5] = [
+        const SLOTS: [OsdTheme; 4] = [
             OsdTheme::Orb,
             OsdTheme::Chrome,
-            OsdTheme::Glass,
             OsdTheme::Biolume,
             OsdTheme::Aurora,
         ];
