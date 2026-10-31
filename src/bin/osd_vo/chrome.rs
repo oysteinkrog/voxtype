@@ -23,6 +23,7 @@ use vo::scene::display::{BackdropRes, Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::glass::Glass;
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
+use vo_3d::sdf::HeroInside;
 use vo_3d::sdf::{HeroPart, HeroParts, PartKind, PartLayer};
 use vo_3d::{Env, HeroFrame, HeroLook, HeroShape, HeroSource};
 
@@ -93,6 +94,71 @@ pub(crate) const ROOM_TONE_FPS: f64 = 8.0;
 /// How long the send arrow flies once the text lands.
 const SEND_SECS: f64 = 0.7;
 
+/// R2-05-a: an aurora inside the chrome, seen through a see-through skin
+/// (EG-19). The voice brightens it; in a pause it drifts at its idle
+/// brightness. Under reduced motion it stands still and only its
+/// brightness follows the voice.
+pub(crate) const BREATHING_AURORA: &str = "breathing-aurora";
+const AURORA_SKIN: f32 = 0.6;
+const AURORA_IDLE: f32 = 0.5;
+const AURORA_VOICE: f32 = 1.4;
+const AURORA_STEPS: u32 = 10;
+/// R2-05-b: fine letter dust rises to the newest word from just under it
+/// and fades as it arrives, in `DUST_SECS`; the word keeps a faint halo
+/// for `HALO_SECS`. Under reduced motion only the halo.
+pub(crate) const TYPEWRITER_WHISPER: &str = "typewriter-whisper";
+const DUST_SECS: f64 = 0.4;
+const DUST_ALPHA: f32 = 0.35;
+const DUST_SCALE: f32 = 0.35;
+/// How far under the baseline the dust starts and where it fades out, in
+/// design pixels.
+const DUST_FROM: f32 = 30.0;
+const DUST_TO: f32 = 8.0;
+const HALO_SECS: f64 = 0.5;
+const HALO_ALPHA: f32 = 0.07;
+/// How long a word that opens a new line waits before its whisper.
+const LINE_WAIT: f64 = 0.45;
+/// R2-05-c: rings on the chrome's dome, one per syllable onset, and one
+/// ring per word on a strip of water under the words. At most
+/// `MAX_RIPPLES` of each at once. Under reduced motion the dome brightens
+/// per onset instead.
+pub(crate) const RIPPLE_LENS: &str = "ripple-lens";
+const RIPPLE_SECS: f64 = 0.8;
+const MAX_RIPPLES: usize = 4;
+const RIPPLE_ALPHA: f32 = 0.3;
+const POOL_SECS: f64 = 1.0;
+const POOL_REACH: f32 = 70.0;
+const POOL_ALPHA: f32 = 0.22;
+/// The water strip's middle under the last line's box, in design pixels.
+const POOL_GAP: f32 = 9.0;
+/// Where the dome's rings sit, how far they run and how flat they look,
+/// in the blob's radii.
+const DOME_UP: f32 = 0.32;
+const DOME_REACH: f32 = 0.22;
+const DOME_TILT: f32 = 0.3;
+
+/// R2-05-c: the rings alive at `t` for events at `times` (oldest first),
+/// each how far it has run (0 to 1) over `life` seconds. At most
+/// `MAX_RIPPLES`, the newest.
+fn rings(t: f64, times: &[f64], life: f64) -> Vec<(usize, f32)> {
+    let alive: Vec<(usize, f32)> = times
+        .iter()
+        .enumerate()
+        .filter(|(_, &at)| t >= at && t - at < life)
+        .map(|(i, &at)| (i, ((t - at) / life) as f32))
+        .collect();
+    let skip = alive.len().saturating_sub(MAX_RIPPLES);
+    alive[skip..].to_vec()
+}
+
+/// R2-05-b: letter dust `u` of the way (0 to 1): how far under the
+/// baseline it is (design pixels) and its alpha.
+fn dust(u: f32) -> (f32, f32) {
+    let u = u.clamp(0.0, 1.0);
+    let rise = DUST_FROM + (DUST_TO - DUST_FROM) * ease_out(u as f64);
+    (rise, DUST_ALPHA * (4.0 * u).min(1.0) * (1.0 - u))
+}
+
 // The blob's foot ends above the waveform, the words sit between the
 // waveform and the status row, and the status row inside the card.
 const _: () = assert!(BLOB_Y + 0.18 * BLOB_W / 2.0 < WAVE_Y - WAVE_HALF_H);
@@ -152,6 +218,8 @@ struct Blob {
     mode: Mode,
     mode_at: f64,
     still: bool,
+    /// R2-05-a: the aurora inside.
+    aurora: bool,
 }
 
 impl fmt::Debug for Blob {
@@ -246,12 +314,34 @@ impl HeroSource for Blob {
             // A slow sway, never a full turn: the blob keeps its outline.
             spin: SWAY_RAD * (TAU * SWAY_HZ * phase).sin() * calm,
             steps: BLOB_STEPS,
-            inside: None,
+            inside: self.aurora.then(|| {
+                let level = if self.mode == Mode::Listening {
+                    (self.levels.at(t) * 1.6).min(1.0)
+                } else {
+                    0.0
+                };
+                HeroInside {
+                    skin: AURORA_SKIN,
+                    core: Color::WHITE,
+                    core_glow: 0.0,
+                    fog_a: hex(CYAN),
+                    fog_b: hex(VIOLET),
+                    fog: if self.mode == Mode::Cancelled {
+                        0.3
+                    } else {
+                        AURORA_IDLE + AURORA_VOICE * level
+                    },
+                    fog_scale: 1.6,
+                    fog_steps: AURORA_STEPS,
+                }
+            }),
         }
     }
 
     fn until(&self) -> f64 {
-        if self.moving() {
+        // Reduced motion with the aurora: a still shape whose aurora still
+        // brightens with the voice.
+        if self.moving() || (self.aurora && self.still && self.mode == Mode::Listening) {
             f64::INFINITY
         } else {
             self.mode_at + Self::SETTLE_SECS + 0.05
@@ -436,6 +526,7 @@ impl Popup {
             mode,
             mode_at,
             still: self.still(),
+            aurora: l.on(BREATHING_AURORA),
         };
         let blob = Element::layer("blob-layer")
             .size(s.w, s.h)
@@ -448,7 +539,8 @@ impl Popup {
                 Element::gpu("blob", vo_3d::hero(blob)).size(d, d),
                 (s.w - d) / 2.0,
                 (BLOB_ROOM + BLOB_Y) * k - d / 2.0,
-            ));
+            ))
+            .children(self.chrome_dome_rings(mode, s, k));
         root.child(card).child(at(blob, 0.0, 0.0))
     }
 
@@ -512,6 +604,8 @@ impl Popup {
                 hex(CYAN),
             ))
             .children(self.chrome_sculpture(mode, Size::new(w, h), k))
+            .children(self.chrome_pool(mode, Size::new(w, h), k))
+            .children(self.chrome_whisper(mode, Size::new(w, h), k))
             .child(self.chrome_text(mode, k))
             .children(self.chrome_progress(mode, k, w))
             .child(at(
@@ -519,6 +613,200 @@ impl Popup {
                 0.0,
                 (STATUS_Y - STATUS_H / 2.0) * k,
             ))
+    }
+
+    /// The newest word's box in the card, its baseline, and when its
+    /// whisper starts.
+    fn chrome_newest(&self, k: f32) -> Option<(Rect, f32, f64)> {
+        let l = &self.look;
+        let style = l.text_style();
+        let rows = self.wrap_lines(&self.shown, &style, text_width(l));
+        let row = rows.len().min(MAX_LINES as usize).checked_sub(1)?;
+        let last = rows.last()?;
+        let newest = last.last()?;
+        let mut born = self.heard.word(newest.id)?.born;
+        // A word that opens a line waits for the line to scroll or grow in.
+        if rows.len() > 1 && last.len() == 1 {
+            born += LINE_WAIT;
+        }
+        let (boxes, _) = sounding::word_boxes(&self.measure, last, &style, None);
+        let b = boxes.iter().find(|b| b.id == newest.id)?;
+        let top = (TEXT_TOP + row as f32 * TEXT_LINE) * k;
+        let rect = Rect::new(TEXT_X * k + b.rect.x, top + b.rect.y, b.rect.w, b.rect.h);
+        Some((rect, top + b.baseline, born))
+    }
+
+    /// R2-05-b: letter dust rising to the newest word from just under it,
+    /// and the word's faint halo. Behind the words; under reduced motion
+    /// the halo only.
+    fn chrome_whisper(&self, mode: Mode, size: Size, k: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(TYPEWRITER_WHISPER) || mode != Mode::Listening || self.edit_view.is_some() {
+            return None;
+        }
+        let (rect, baseline, born) = self.chrome_newest(k)?;
+        if self.extra.now - born >= HALO_SECS {
+            return None;
+        }
+        let still = self.still();
+        let word = self.shown.last()?;
+        let style = l.text_style();
+        let shaped = self.measure.layout(&word.text, &style, None);
+        let outline = vo::scene::glyph_morph::WordOutline::new(
+            self.measure.fonts(),
+            &shaped,
+            style.size,
+            Point::ZERO,
+        );
+        // Each letter's ink, centred on its own middle, and that middle's
+        // place across the word.
+        let letters: Arc<[(f32, Arc<[Contour]>)]> = outline
+            .glyphs
+            .iter()
+            .filter(|g| g.ink.h > 0.0)
+            .map(|g| {
+                let (cx, cy) = (g.ink.x + g.ink.w / 2.0, g.ink.y + g.ink.h / 2.0);
+                let m = Affine::translate(-cx, -cy).then(&Affine::scale(DUST_SCALE));
+                let ink: Arc<[Contour]> =
+                    g.outline.contours.iter().map(|c| c.transform(&m)).collect();
+                (cx, ink)
+            })
+            .collect();
+        let rad = 0.5 * style.size;
+        let canvas = Element::canvas("whisper", born + HALO_SECS, move |t, r, p| {
+            let age = t - born;
+            if age < 0.0 {
+                return;
+            }
+            let halo = HALO_ALPHA * (1.0 - (age / HALO_SECS) as f32).clamp(0.0, 1.0);
+            if halo > 0.002 {
+                let n = ((rect.w / rad).ceil() as usize).max(1);
+                for i in 0..=n {
+                    let c = Point::new(
+                        r.x + rect.x + rect.w * i as f32 / n as f32,
+                        r.y + baseline - 0.3 * style.size,
+                    );
+                    p.shape(ShapeInstance::circle(
+                        c,
+                        rad,
+                        Paint::glow(hex(CHROME_TINT).fade(halo), rad, 0.5),
+                    ));
+                }
+            }
+            if still {
+                return;
+            }
+            for (i, (x, ink)) in letters.iter().enumerate() {
+                // Each letter's dust leaves a little after the one before.
+                let u = ((age - 0.02 * i as f64) / (DUST_SECS - 0.1)) as f32;
+                if !(0.0..1.0).contains(&u) {
+                    continue;
+                }
+                let (below, a) = dust(u);
+                let sway = 3.0 * k * ((i as f32 * 2.3).sin());
+                let m = Affine::translate(r.x + rect.x + x + sway, r.y + baseline + below * k);
+                let moved: Vec<Contour> = ink.iter().map(|c| c.transform(&m)).collect();
+                p.fill(&moved, &StrokeStyle::solid(1.0, hex(CHROME_TINT).fade(a)));
+            }
+        });
+        Some(at(canvas.size(size.w, size.h), 0.0, 0.0))
+    }
+
+    /// R2-05-c: a ring on the strip of water under the words for each new
+    /// word, under its middle. None under reduced motion.
+    fn chrome_pool(&self, mode: Mode, size: Size, k: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(RIPPLE_LENS) || mode != Mode::Listening || self.still() || self.edit_view.is_some()
+        {
+            return None;
+        }
+        let style = l.text_style();
+        let rows = self.wrap_lines(&self.shown, &style, text_width(l));
+        let lines = rows.len().clamp(1, MAX_LINES as usize) as f32;
+        let last = rows.last()?;
+        let (boxes, _) = sounding::word_boxes(&self.measure, last, &style, None);
+        let words: Arc<[(f64, f32)]> = boxes
+            .iter()
+            .filter_map(|b| {
+                let born = self.heard.word(b.id)?.born;
+                Some((born, TEXT_X * k + b.rect.x + b.rect.w / 2.0))
+            })
+            .collect();
+        let newest = words.iter().map(|w| w.0).fold(f64::NEG_INFINITY, f64::max);
+        if self.extra.now - newest >= POOL_SECS {
+            return None;
+        }
+        let y = (TEXT_TOP + lines * TEXT_LINE + POOL_GAP) * k;
+        let times: Vec<f64> = words.iter().map(|w| w.0).collect();
+        let canvas = Element::canvas("pool", newest + POOL_SECS, move |t, r, p| {
+            for (i, u) in rings(t, &times, POOL_SECS) {
+                let rx = (6.0 + POOL_REACH * ease_out(u as f64)) * k;
+                let a = POOL_ALPHA * (1.0 - u) * (1.0 - u);
+                let c = Point::new(r.x + words[i].1, r.y + y);
+                let pts: Vec<Point> = (0..48)
+                    .map(|j| {
+                        let ang = j as f32 / 48.0 * TAU;
+                        Point::new(c.x + rx * ang.cos(), c.y + 0.16 * rx * ang.sin())
+                    })
+                    .collect();
+                p.stroke(
+                    &Contour::polyline(&pts, true),
+                    &StrokeStyle::solid(1.0 * k, hex(CYAN).fade(a)).glow(2.0 * k),
+                );
+            }
+        });
+        Some(at(canvas.size(size.w, size.h), 0.0, 0.0))
+    }
+
+    /// R2-05-c: rings on the chrome's dome, one per syllable onset; under
+    /// reduced motion the dome brightens per onset instead.
+    fn chrome_dome_rings(&self, mode: Mode, s: Size, k: f32) -> Option<Element<Msg>> {
+        if !self.look.on(RIPPLE_LENS) || mode != Mode::Listening {
+            return None;
+        }
+        let onsets: Vec<f64> = self
+            .heard
+            .onsets()
+            .iter()
+            .rev()
+            .take(8)
+            .rev()
+            .copied()
+            .collect();
+        let newest = *onsets.last()?;
+        if self.extra.now - newest >= RIPPLE_SECS {
+            return None;
+        }
+        let still = self.still();
+        let r = BLOB_W * k / 2.0;
+        let dome = Point::new(s.w / 2.0 - 0.02 * r, (BLOB_ROOM + BLOB_Y) * k - DOME_UP * r);
+        let canvas = Element::canvas("dome-rings", newest + RIPPLE_SECS, move |t, rect, p| {
+            let c = Point::new(rect.x + dome.x, rect.y + dome.y);
+            for (_, u) in rings(t, &onsets, RIPPLE_SECS) {
+                let a = RIPPLE_ALPHA * (1.0 - u).powf(1.5);
+                if still {
+                    let g = 0.12 * r;
+                    p.shape(ShapeInstance::circle(
+                        c,
+                        g,
+                        Paint::glow(Color::WHITE.fade(0.6 * a), g, 0.5),
+                    ));
+                    continue;
+                }
+                let rx = (0.04 + DOME_REACH * ease_out(u as f64)) * r;
+                let pts: Vec<Point> = (0..56)
+                    .map(|j| {
+                        let ang = j as f32 / 56.0 * TAU;
+                        Point::new(c.x + rx * ang.cos(), c.y + DOME_TILT * rx * ang.sin())
+                    })
+                    .collect();
+                p.stroke(
+                    &Contour::polyline(&pts, true),
+                    &StrokeStyle::solid(0.02 * r * (1.0 - u), Color::WHITE.fade(a)).glow(2.0 * k),
+                );
+            }
+        });
+        Some(at(canvas.size(s.w, s.h), 0.0, 0.0))
     }
 
     /// The words, left-aligned, growing downward from the top of the box.
@@ -723,5 +1011,44 @@ impl Popup {
             .height(STATUS_H * k)
             .justify(vo::scene::taffy::JustifyContent::CENTER)
             .child(row)
+    }
+}
+
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+
+    #[test]
+    fn at_most_four_rings_and_the_newest() {
+        let times: Vec<f64> = (0..10).map(|i| i as f64 * 0.05).collect();
+        let alive = rings(0.5, &times, RIPPLE_SECS);
+        assert_eq!(alive.len(), MAX_RIPPLES);
+        assert_eq!(alive.last().map(|r| r.0), Some(9));
+        assert!(alive.iter().all(|&(_, u)| (0.0..1.0).contains(&u)));
+    }
+
+    #[test]
+    fn rings_follow_the_onsets_only() {
+        let times = [1.0, 1.3];
+        assert!(rings(0.9, &times, RIPPLE_SECS).is_empty());
+        assert_eq!(
+            rings(1.2, &times, RIPPLE_SECS),
+            rings(1.2, &times, RIPPLE_SECS)
+        );
+        assert_eq!(rings(1.2, &times, RIPPLE_SECS), vec![(0, 0.25)]);
+        assert!(rings(1.3 + RIPPLE_SECS, &times, RIPPLE_SECS).is_empty());
+    }
+
+    #[test]
+    fn dust_rises_to_just_under_the_word_and_fades() {
+        let (start, a0) = dust(0.0);
+        let (end, a1) = dust(1.0);
+        assert_eq!(start, DUST_FROM);
+        assert!((end - DUST_TO).abs() < 1e-3);
+        assert_eq!((a0, a1), (0.0, 0.0));
+        for i in 0..=20 {
+            let (below, a) = dust(i as f32 / 20.0);
+            assert!(below >= DUST_TO - 1e-3 && a <= DUST_ALPHA);
+        }
     }
 }
