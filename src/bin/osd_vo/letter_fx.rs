@@ -233,6 +233,7 @@ impl Popup {
         // The letters' colour: the look's own text colour where it has one.
         let letter_ink = match l.theme {
             OsdTheme::Hologram => super::hologram::text_color(),
+            OsdTheme::Chrome => super::chrome::text_color(),
             _ => l.foreground,
         };
         let reduced = self.letter_fx_reduced();

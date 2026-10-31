@@ -12,6 +12,7 @@
 //! count. A cancel dulls the chrome and dims the words. Under reduced motion
 //! the blob rests in one shape, the bars hold still and nothing flies.
 
+use std::f32::consts::TAU;
 use std::fmt;
 
 use super::kit::{at, ease_out, hex, mix, Levels, Mode};
@@ -79,6 +80,16 @@ const STATUS_Y: f32 = 318.0;
 const STATUS_H: f32 = 20.0;
 const PROGRESS_W: f32 = 220.0;
 const PROGRESS_GAP: f32 = 22.0;
+/// Idle (RD-02): the blob's top bobs `BOB_PX` at `BOB_HZ`, and it sways
+/// `SWAY_RAD` either way at `SWAY_HZ`, so its reflections turn at most
+/// 5 degrees a second (0.139 rad x 2 pi x 0.1 Hz).
+const BOB_PX: f32 = 2.0;
+const BOB_HZ: f32 = 0.3;
+const SWAY_RAD: f32 = 0.139;
+const SWAY_HZ: f32 = 0.1;
+/// The frame pace while the popup records room tone (RD-11): the blob's
+/// idle bob and sway move under 0.5 px a frame at this pace.
+pub(crate) const ROOM_TONE_FPS: f64 = 8.0;
 /// How long the send arrow flies once the text lands.
 const SEND_SECS: f64 = 0.7;
 
@@ -90,6 +101,11 @@ const _: () = assert!(TEXT_TOP > WAVE_Y + WAVE_HALF_H + 10.0);
 const _: () = assert!(TEXT_TOP + MAX_LINES as f32 * TEXT_LINE < STATUS_Y - PROGRESS_GAP - 8.0);
 const _: () = assert!(STATUS_Y + STATUS_H / 2.0 < CARD_H - 20.0);
 const _: () = assert!(TEXT_X + TEXT_W <= CARD_W - TEXT_X);
+
+/// The words' colour, for the letter effects drawn over them.
+pub(crate) fn text_color() -> Color {
+    hex(INK)
+}
 
 fn scale(look: &Look) -> f32 {
     look.width / DESIGN_W
@@ -185,7 +201,7 @@ impl Blob {
 }
 
 impl HeroSource for Blob {
-    fn frame(&self, t: f64, _size: Size) -> HeroFrame {
+    fn frame(&self, t: f64, size: Size) -> HeroFrame {
         // Reduced motion: one resting shape. Once the words end the ripples
         // ease out and the shape holds where it settled.
         let (phase, calm) = if self.still {
@@ -202,6 +218,10 @@ impl HeroSource for Blob {
         } else {
             0.0
         };
+        // Idle (RD-02): the dome rises and falls 2 px at 0.3 Hz; its top
+        // stands about 0.55 radii above the middle.
+        let reach = 0.55 * size.w / 2.0;
+        let bob = BOB_PX * (TAU * BOB_HZ * phase).sin() / reach.max(1.0) * calm;
         let tint = if self.mode == Mode::Cancelled {
             hex(CHROME_DULL)
         } else {
@@ -220,11 +240,11 @@ impl HeroSource for Blob {
                     key: None,
                 }),
             },
-            stretch: [1.0, 1.0 + 0.06 * voice, 1.0],
+            stretch: [1.0, 1.0 + 0.06 * voice + bob, 1.0],
             wobble: (0.12 + 0.5 * voice) * calm,
             phase,
             // A slow sway, never a full turn: the blob keeps its outline.
-            spin: 0.12 * (0.35 * phase).sin() * calm,
+            spin: SWAY_RAD * (TAU * SWAY_HZ * phase).sin() * calm,
             steps: BLOB_STEPS,
             inside: None,
         }
@@ -491,6 +511,7 @@ impl Popup {
                 hex(INK).fade(0.55),
                 hex(CYAN),
             ))
+            .children(self.chrome_sculpture(mode, Size::new(w, h), k))
             .child(self.chrome_text(mode, k))
             .children(self.chrome_progress(mode, k, w))
             .child(at(
@@ -517,7 +538,7 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0)));
-        let words = self.typo_words(words);
+        let words = self.letter_fx_words(self.typo_words(words));
         let words = self.handoff_or(words, &l.text_style(), Some(tw), hex(INK), hex(CYAN));
         let text = Element::column("text")
             .width(tw)
@@ -534,12 +555,38 @@ impl Popup {
                 endings::Cancel::Unthread,
             ));
         let text = self.typo_marks(text, tw);
+        let text = self.letter_fx_layers(text, tw);
         let text = self.signal_marks(text, &self.shown, tw, (0.0, 0.0), hex(INK));
         at(
             self.with_hearing(text, &l.text_style(), tw, hex(INK), hex(CYAN)),
             TEXT_X * k,
             TEXT_TOP * k,
         )
+    }
+
+    /// MO-88: with `sound-sculpture`, letter bodies behind the words, as
+    /// deep as each word was loud; they lie flat once the dictation stops.
+    fn chrome_sculpture(&self, mode: Mode, size: Size, k: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(wild_space::SOUND_SCULPTURE) || self.edit_view.is_some() {
+            return None;
+        }
+        let style = l.text_style();
+        let lines = self.wrap_lines(&self.shown, &style, l.text_width());
+        let skip = lines.len().saturating_sub(MAX_LINES as usize);
+        let rows: Vec<(Vec<Word>, Point)> = lines
+            .into_iter()
+            .skip(skip)
+            .enumerate()
+            .map(|(i, ws)| {
+                (
+                    ws,
+                    Point::new(TEXT_X * k, (TEXT_TOP + i as f32 * TEXT_LINE) * k),
+                )
+            })
+            .collect();
+        let done = mode != Mode::Listening || self.still();
+        self.sculpture_element(&rows, &style, size, Spring::POP, done)
     }
 
     /// A thin line over the status while a model loads or the final text
