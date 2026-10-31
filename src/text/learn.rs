@@ -12,9 +12,10 @@
 //! `replacements_file` win over it.
 //!
 //! Keyboard edits of spoken words in the popup ([`Source::Keyboard`]) are
-//! logged too, at delivery. Only 1 to 3 words changed for 1 to 3 words, or
-//! a change of case, can make a rule, and a change of case only when the
-//! right words look like a name; a pure insertion is logged without a rule.
+//! logged too, at delivery, and learned the first time. Only 1 to 3 words
+//! changed for 1 to 3 words, or a change of case, can make a rule, and a
+//! change of case only when the right words look like a name; a pure
+//! insertion is logged without a rule.
 //!
 //! Learned words stay on this machine: they only replace words in the
 //! output text and are never sent to an engine or a post-processing
@@ -209,19 +210,21 @@ impl Learning {
             })
     }
 
-    /// Whether logging `entry` learns it: a spoken correction as
-    /// [`Learning::would_learn`] says; a keyboard edit with a
-    /// [`keyboard_rule`] at once when the right words look like a name, else
-    /// the second time, and a change of case only when they look like one.
+    /// Whether a keyboard edit of spoken `wrong` words to `right` is
+    /// learned: at once when it makes a [`keyboard_rule`], and a change of
+    /// case only when the right words look like a name.
+    pub fn would_learn_keyboard(&self, wrong: &str, right: &str) -> bool {
+        self.enabled
+            && keyboard_rule(wrong, right)
+                .is_some_and(|(from, to)| key(&to) != from || looks_like_a_name(&to))
+    }
+
+    /// Whether logging `entry` learns it, as [`Learning::would_learn`] or
+    /// [`Learning::would_learn_keyboard`] says.
     fn learns(&self, entry: &Entry) -> bool {
         match entry.source {
             Source::Spoken => self.would_learn(&entry.wrong, &entry.right, entry.spelled),
-            Source::Keyboard => {
-                self.enabled
-                    && keyboard_rule(&entry.wrong, &entry.right).is_some_and(|(from, to)| {
-                        looks_like_a_name(&to) || (key(&to) != from && self.seen(&from, &to) >= 1)
-                    })
-            }
+            Source::Keyboard => self.would_learn_keyboard(&entry.wrong, &entry.right),
         }
     }
 
@@ -383,18 +386,21 @@ mod tests {
     fn keyboard_edits_follow_table_2_7() {
         let dir = tempfile::tempdir().unwrap();
         let l = learning(dir.path());
-        // 1 to 3 words for 1 to 3 words: the second time, or at once for a
-        // name.
-        assert_eq!(l.record(&typed("blue barrel", "blueberry")).unwrap(), None);
+        // 1 to 3 words for 1 to 3 words: the first time.
+        assert!(l.would_learn_keyboard("blue barrel", "blueberry"));
         assert_eq!(
             l.record(&typed("blue barrel", "blueberry")).unwrap(),
             Some(("blue barrel".into(), "blueberry".into()))
         );
+        // Already a rule: logged, nothing new written.
+        assert_eq!(l.record(&typed("blue barrel", "blueberry")).unwrap(), None);
         assert!(l.record(&typed("glim bot", "GlimBot")).unwrap().is_some());
         // Case only: a name at once, a plain capital never.
         assert!(l.record(&typed("nfs", "NFS")).unwrap().is_some());
+        assert!(!l.would_learn_keyboard("paris", "Paris"));
         assert_eq!(l.record(&typed("paris", "Paris")).unwrap(), None);
         assert_eq!(l.record(&typed("paris", "Paris")).unwrap(), None);
+        assert!(!l.would_learn_keyboard("", "very"));
         // A pure insertion and a long rewording: logged, no rule.
         assert_eq!(l.record(&typed("", "very")).unwrap(), None);
         let long = typed("this is not what I", "it is what we said");

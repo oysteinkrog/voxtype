@@ -701,6 +701,21 @@ pub fn apply_final_after(text: &str, from: f32) -> String {
     with(|c| c.apply_final_from(text, Some(from)))
 }
 
+/// A keyboard edit session ended with `from` changed to `to`, which will be
+/// learned once pasted: the popup says "Learned" as for a spoken one.
+pub fn learned(from: &str, to: &str) {
+    with(|c| {
+        c.notes += 1;
+        c.note = Some(CorrectionNote {
+            id: c.notes,
+            from: from.to_string(),
+            to: to.to_string(),
+            dropped: None,
+            learned: true,
+        });
+    });
+}
+
 /// The corrections the last [`apply_final`] made, for the corrections log.
 pub fn applied() -> Vec<learn::Entry> {
     with(|c| c.applied.clone())

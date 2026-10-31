@@ -339,9 +339,13 @@ struct EditLink {
     /// Waits up to the given time for the modifiers and Enter to be up;
     /// false when one is still held.
     keys_up: KeysUp,
+    /// Tells the popup that a keyboard change (from, to) will be learned.
+    learned: LearnedNote,
 }
 
 type CorrectAfter = Box<dyn Fn(&str, f32) -> String + Send + Sync>;
+
+type LearnedNote = Box<dyn Fn(&str, &str) + Send + Sync>;
 
 type KeysUp = Box<dyn Fn(Duration) -> futures_util::future::BoxFuture<'static, bool> + Send + Sync>;
 
@@ -366,6 +370,10 @@ impl Default for EditLink {
             reader: Default::default(),
             windows: Arc::new(std::sync::Mutex::new(Box::new(crate::osd::target::Kdotool))),
             keys_up: Box::new(|t| Box::pin(modifiers_released(t))),
+            learned: Box::new(|from, to| {
+                crate::osd::correction::learned(from, to);
+                refresh_live_correction();
+            }),
         }
     }
 }
@@ -2204,6 +2212,20 @@ impl Daemon {
         Some(tp)
     }
 
+    /// An edit session ended (a resume or a finish): the popup says
+    /// "Learned" for the newest kept change it has not named yet that will
+    /// be learned once pasted. A change put back before this is not named.
+    fn edit_note_learned(&mut self) {
+        let learning = &self.learning;
+        let Some(doc) = self.edit_doc.as_mut() else {
+            return;
+        };
+        let new = doc.take_unnoted(|e| learning.would_learn_keyboard(&e.wrong, &e.right));
+        if let Some(e) = new.last() {
+            (self.edit_link.learned)(&e.wrong, &e.right);
+        }
+    }
+
     /// Log the delivered dictation's keyboard edits of spoken words, and
     /// learn the rules they make (table 2.7). A discarded dictation learns
     /// nothing, and an edit undone or put back was never kept.
@@ -2394,6 +2416,7 @@ impl Daemon {
         if let Some(doc) = self.edit_doc.as_mut() {
             doc.resumed(at);
         }
+        self.edit_note_learned();
         let mark = crate::osd::edit_ipc::ResumeMark { at };
         if let Err(e) = crate::osd::edit_ipc::write_resume_to(&self.edit_link.resume, mark) {
             tracing::warn!("Could not write the edit resume mark: {}", e);
@@ -2629,6 +2652,7 @@ impl Daemon {
         let clipboard: Vec<Box<dyn TextOutput>> = vec![Box::new(
             output::clipboard::ClipboardOutput::new(self.config.output.append_text.clone()),
         )];
+        self.edit_note_learned();
         let started = Instant::now();
         let d = self
             .deliver_edited(session, chain, &clipboard, edited)
@@ -6920,6 +6944,8 @@ mod tests {
         frozen_at: Arc<std::sync::Mutex<Vec<f32>>>,
         /// What the worker said of the audio after the last resume.
         engine: Arc<std::sync::Mutex<Option<String>>>,
+        /// The changes the popup was told will be learned.
+        learned: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     }
 
     impl TestLink {
@@ -6940,6 +6966,8 @@ mod tests {
         let engine = Arc::new(std::sync::Mutex::new(None));
         let (s, p, f) = (shown.clone(), published.clone(), frozen_at.clone());
         let e = engine.clone();
+        let learned = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let l = learned.clone();
         // Keyboard edits are logged at delivery: never in the real log.
         daemon.learning = crate::text::learn::Learning {
             log: dir.path().join("corrections.jsonl"),
@@ -6961,6 +6989,7 @@ mod tests {
             reader: Default::default(),
             windows: Arc::new(std::sync::Mutex::new(Box::new(FakeWindows::default()))),
             keys_up: Box::new(|_| Box::pin(async { true })),
+            learned: Box::new(move |from, to| l.lock().unwrap().push((from.into(), to.into()))),
         };
         TestLink {
             dir,
@@ -6968,6 +6997,7 @@ mod tests {
             published,
             frozen_at,
             engine,
+            learned,
         }
     }
 
@@ -7240,6 +7270,80 @@ mod tests {
         );
         assert_eq!(entries[0].source, Source::Keyboard);
         assert_eq!(entries[0].pasted, "the cat saw the dog");
+    }
+
+    /// An edit session with `live` shown, ended by a resume with the frozen
+    /// text changed to `edited`.
+    async fn edit_and_resume(
+        daemon: &mut Daemon,
+        state: &mut State,
+        link: &TestLink,
+        live: &str,
+        edited: &str,
+    ) {
+        use crate::osd::edit_ipc::{append_cmd_to, write_buffer_to, EditBuffer, EditCmd};
+        link.show(live);
+        daemon.edit_toggle(state).await;
+        daemon
+            .edit_tick(state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let doc = daemon.edit_doc.as_ref().unwrap();
+        let (session, base) = (doc.session(), doc.frozen());
+        let pause = daemon.edit_pauses;
+        let rev = u64::from(pause);
+        let buffer = EditBuffer {
+            session,
+            rev,
+            text: edited.into(),
+            sel: (edited.len(), edited.len()),
+            pause,
+            base: Some(base),
+        };
+        write_buffer_to(&daemon.edit_link.buffer, &buffer).unwrap();
+        append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev }).unwrap();
+        daemon.edit_handle_commands(state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+    }
+
+    /// The user's choice "at once, with a note": a kept swap of spoken
+    /// words is learned the first time, and the popup says so when the
+    /// edit session ends, once per change. A change of case that is not a
+    /// name, a deletion and a change put back are not named.
+    #[tokio::test]
+    async fn a_kept_swap_is_named_learned_when_the_session_ends() {
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        let learned = |l: &TestLink| l.learned.lock().unwrap().clone();
+        let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+        edit_and_resume(&mut daemon, &mut state, &link, "teh cat", "the cat").await;
+        assert_eq!(learned(&link), [pair("teh", "the")]);
+        // The next session: a plain capital, a deletion and a swap.
+        edit_and_resume(
+            &mut daemon,
+            &mut state,
+            &link,
+            "teh cat in paris saw a dog",
+            "the cat in Paris saw dog",
+        )
+        .await;
+        assert_eq!(learned(&link), [pair("teh", "the")]);
+        // Put back: the change is gone and nothing new is named.
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        edit_and_resume(&mut daemon, &mut state, &link, "a dog", "a frog").await;
+        // The model still says "dog"; the frozen text shows "frog".
+        edit_and_resume(&mut daemon, &mut state, &link, "a dog ran", "a dog ran").await;
+        assert_eq!(learned(&link), [pair("dog", "frog")]);
+        assert!(daemon.edit_doc.as_ref().unwrap().edits().is_empty());
+        // A finish (delivery starting) names only what no resume named.
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        edit_and_resume(&mut daemon, &mut state, &link, "one too", "one two").await;
+        assert_eq!(learned(&link), [pair("too", "two")]);
+        daemon.edit_note_learned();
+        assert_eq!(learned(&link), [pair("too", "two")], "named once");
+        // Typed words teach nothing; a spoken one changed at the finish does.
+        let doc = daemon.edit_doc.as_mut().unwrap();
+        doc.replace_frozen("won two");
+        daemon.edit_note_learned();
+        assert_eq!(learned(&link), [pair("too", "two"), pair("one", "won")]);
     }
 
     /// M9.2: in engine mode, the final engine's text of the audio after the

@@ -57,6 +57,8 @@ pub struct EditDoc {
     spoken: Vec<bool>,
     /// The keyboard changes of spoken words so far, oldest first.
     edits: Vec<KeyboardEdit>,
+    /// The changes the popup has said will be learned.
+    noted: Vec<KeyboardEdit>,
 }
 
 impl EditDoc {
@@ -198,6 +200,19 @@ impl EditDoc {
     /// The keyboard changes of spoken words to learn from at delivery.
     pub fn edits(&self) -> &[KeyboardEdit] {
         &self.edits
+    }
+
+    /// The kept changes for which `learns` holds that the popup has not
+    /// yet said will be learned; they count as said from now on.
+    pub fn take_unnoted(&mut self, learns: impl Fn(&KeyboardEdit) -> bool) -> Vec<KeyboardEdit> {
+        let new: Vec<KeyboardEdit> = self
+            .edits
+            .iter()
+            .filter(|e| !self.noted.contains(e) && learns(e))
+            .cloned()
+            .collect();
+        self.noted.extend(new.iter().cloned());
+        new
     }
 
     /// The rules this dictation's edits make for the words frozen after
