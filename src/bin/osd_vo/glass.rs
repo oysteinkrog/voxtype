@@ -649,9 +649,31 @@ impl Popup {
         ))
     }
 
+    /// Where the depth stack draws its reading line, for the effects under
+    /// the letters: its words, its style, and the top left of its live text
+    /// in the stack's text column (as `depth_stack_lines` places it on the
+    /// newest sheet). `None` while the stack is not drawn.
+    pub(crate) fn glass_reading_line(&self) -> Option<(Vec<Word>, TextStyle, Point)> {
+        if !self.glass_stacking(self.kit_mode()) {
+            return None;
+        }
+        let l = &self.look;
+        let (style, tw, k) = (left_style(l), text_width(l), scale(l));
+        let span = stack_span(l);
+        let rows = self.lines.clamp(1, MAX_LINES) as f32;
+        let (words, width) = self.text_lines(&style, tw).pop()?;
+        let sheet_w = (span * 0.84).min(span - 24.0 * k);
+        let lw = width.ceil() + 2.0;
+        let x = (tw - sheet_w) / 2.0 + ((sheet_w - lw) / 2.0).max(0.0);
+        // The newest sheet, line height plus 8 px, sits at the stack's
+        // foot; its line is 4 px into it.
+        let y = (rows - 1.0) * style.line_height - 4.0 * k;
+        Some((words, style, Point::new(x, y)))
+    }
+
     /// MO-86: the depth stack draws the words while they are spoken and
     /// made final; the hand-off, a cancel and an edit take the flat text.
-    fn glass_stacking(&self, mode: Mode) -> bool {
+    pub(crate) fn glass_stacking(&self, mode: Mode) -> bool {
         self.look.on(wild_space::DEPTH_STACK)
             && matches!(mode, Mode::Listening | Mode::Finishing)
             && self.delivered().is_none()
