@@ -265,8 +265,19 @@ mod tests {
 
     #[test]
     fn every_vo_look_has_a_set() {
+        // The new looks' slots (RD-03) get their sets from their effects
+        // beads; each one leaves this list when its row lands.
+        const SLOTS: [OsdTheme; 7] = [
+            OsdTheme::Orb,
+            OsdTheme::Chrome,
+            OsdTheme::Glass,
+            OsdTheme::Biolume,
+            OsdTheme::Aurora,
+            OsdTheme::Hologram,
+            OsdTheme::River,
+        ];
         for t in OsdTheme::VO_LOOKS {
-            assert!(!defaults(t).is_empty(), "{t:?}");
+            assert!(SLOTS.contains(&t) || !defaults(t).is_empty(), "{t:?}");
         }
     }
 }

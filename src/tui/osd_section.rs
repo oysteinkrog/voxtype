@@ -933,7 +933,7 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(
                 "Show the active look's place in the look chord's list and its \
-                 name, such as \"3/20 Type\", above the vo popup's top-left \
+                 name, such as \"3/27 Type\", above the vo popup's top-left \
                  corner.",
             ),
             Line::from(""),

@@ -1548,7 +1548,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Bool,
         "OSD",
         "Look badge",
-        "Show the active look's number and name, such as \"3/20 Type\", above the vo popup.",
+        "Show the active look's number and name, such as \"3/27 Type\", above the vo popup.",
     ),
     spec(
         "osd.motion",

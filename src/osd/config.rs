@@ -202,12 +202,33 @@ pub enum OsdTheme {
     /// a revised word or a change of state. Drawn by the vo frontend only;
     /// the gtk4 frontend draws `swiss` for it.
     Cyberpunk,
+    /// Concept 01, a glass aurora orb. Drawn by the vo frontend only; the
+    /// gtk4 frontend draws `swiss` for it.
+    Orb,
+    /// Concept 05, liquid chrome. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Chrome,
+    /// Concept 08, spatial glass. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Glass,
+    /// Concept 15, bioluminescent. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Biolume,
+    /// Concept 19, an aurora mesh. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    Aurora,
+    /// Concept 20, floating hologram text. Drawn by the vo frontend only;
+    /// the gtk4 frontend draws `swiss` for it.
+    Hologram,
+    /// Concept 24, a river of light. Drawn by the vo frontend only; the gtk4
+    /// frontend draws `swiss` for it.
+    River,
 }
 
 impl OsdTheme {
     /// Every look the vo frontend draws, in declaration order. `Default`
     /// is left out: vo draws it as `Swiss`.
-    pub const VO_LOOKS: [OsdTheme; 20] = [
+    pub const VO_LOOKS: [OsdTheme; 27] = [
         OsdTheme::Swiss,
         OsdTheme::Showcase,
         OsdTheme::Type,
@@ -228,6 +249,13 @@ impl OsdTheme {
         OsdTheme::Synthwave,
         OsdTheme::Mecha,
         OsdTheme::Cyberpunk,
+        OsdTheme::Orb,
+        OsdTheme::Chrome,
+        OsdTheme::Glass,
+        OsdTheme::Biolume,
+        OsdTheme::Aurora,
+        OsdTheme::Hologram,
+        OsdTheme::River,
     ];
 
     pub fn parse_str(s: &str) -> Option<Self> {
@@ -253,6 +281,13 @@ impl OsdTheme {
             "cyberpunk" => Some(OsdTheme::Cyberpunk),
             "synthwave" => Some(OsdTheme::Synthwave),
             "mecha" => Some(OsdTheme::Mecha),
+            "orb" => Some(OsdTheme::Orb),
+            "chrome" => Some(OsdTheme::Chrome),
+            "glass" => Some(OsdTheme::Glass),
+            "biolume" => Some(OsdTheme::Biolume),
+            "aurora" => Some(OsdTheme::Aurora),
+            "hologram" => Some(OsdTheme::Hologram),
+            "river" => Some(OsdTheme::River),
             _ => None,
         }
     }
@@ -625,7 +660,7 @@ pub struct OsdConfig {
     /// at once, as in the gtk4 OSD.
     pub word_fade: bool,
     /// Show the active look's place in the look chord's list and its name,
-    /// such as "3/20 Type", above the vo popup's top-left corner. Off by
+    /// such as "3/27 Type", above the vo popup's top-left corner. Off by
     /// default.
     pub look_badge: bool,
     /// Run the vo popup's threads at real-time priority (`SCHED_RR` 1)
@@ -819,7 +854,25 @@ mod tests {
         assert_eq!(c.theme, OsdTheme::Swiss);
         assert_eq!(OsdTheme::parse_str(" Swiss "), Some(OsdTheme::Swiss));
         assert_eq!(OsdTheme::parse_str("default"), Some(OsdTheme::Default));
-        assert_eq!(OsdTheme::parse_str("glass"), None);
+        assert_eq!(OsdTheme::parse_str("velvet"), None);
+    }
+
+    #[test]
+    fn the_seven_new_looks_parse_from_toml_and_str() {
+        for (name, theme) in [
+            ("orb", OsdTheme::Orb),
+            ("chrome", OsdTheme::Chrome),
+            ("glass", OsdTheme::Glass),
+            ("biolume", OsdTheme::Biolume),
+            ("aurora", OsdTheme::Aurora),
+            ("hologram", OsdTheme::Hologram),
+            ("river", OsdTheme::River),
+        ] {
+            let c: OsdConfig = toml::from_str(&format!("theme = \"{name}\"\n")).unwrap();
+            assert_eq!(c.theme, theme);
+            assert_eq!(OsdTheme::parse_str(name), Some(theme));
+            assert!(OsdTheme::VO_LOOKS.contains(&theme));
+        }
     }
 
     #[test]
