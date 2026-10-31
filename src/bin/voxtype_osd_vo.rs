@@ -1684,6 +1684,9 @@ struct Popup {
     shown: Vec<Word>,
     /// The first word on screen. It only moves forward, a whole line at a time.
     cut: usize,
+    /// When `cut` last moved: the live text re-lays its lines then, and a
+    /// look's marks keyed to the newest word wait for it.
+    cut_at: f64,
     /// Transcript lines the text area has room for. Grows, never shrinks.
     lines: u32,
     check: Option<vo::TimerId>,
@@ -1836,6 +1839,7 @@ impl Popup {
             model: WordModel::new(),
             shown: Vec::new(),
             cut: 0,
+            cut_at: f64::NEG_INFINITY,
             lines: 1,
             check: None,
             closing: false,
@@ -2119,6 +2123,9 @@ impl Popup {
         };
         let inline = !self.look.margin_ellipsis();
         let (cut, shown) = cut_lines(words, self.cut, self.look.max_lines(), inline, lines_of);
+        if cut != self.cut {
+            self.cut_at = self.extra.now;
+        }
         self.cut = cut;
         self.lines = self
             .lines

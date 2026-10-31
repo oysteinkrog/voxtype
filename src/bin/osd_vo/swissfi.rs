@@ -661,6 +661,11 @@ impl Popup {
         let words: Vec<(Rect, f64)> = self
             .tally_arrivals(&style, self.tally_text_width(), DUST_SECS)
             .into_iter()
+            // A word that opens a line, or comes with a cut that re-lays
+            // the lines, shows only once they have rolled: no dust ahead.
+            .filter(|(b, born)| {
+                (b.rect.x >= 1.0 || self.shown.len() < 2) && self.cut_at < born - 0.1
+            })
             .map(|(b, born)| {
                 let top = origin.y + b.baseline - 0.75 * size;
                 (
