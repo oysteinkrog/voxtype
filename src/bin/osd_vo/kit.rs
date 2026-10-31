@@ -274,12 +274,29 @@ pub(crate) fn ease_in_out(k: f64) -> f32 {
     }) as f32
 }
 
-/// Reduced motion, as the framework reads it.
+/// Reduced motion from `VO_REDUCED_MOTION`, as the framework reads it.
+/// Tests never read it: they turn reduced motion on with the look's
+/// `reduced-motion` feature, so the shell they run in cannot change
+/// them.
 pub(crate) fn reduced() -> bool {
+    if cfg!(test) {
+        return false;
+    }
     static R: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *R.get_or_init(|| {
         std::env::var("VO_REDUCED_MOTION").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
     })
+}
+
+/// The framework's options with reduced motion from [`reduced`], so a
+/// test's scene never takes it, or light mode, from the environment.
+pub(crate) fn options<M>() -> vo::Options<M> {
+    let o = vo::Options::default();
+    vo::Options {
+        reduced_motion: reduced(),
+        light: o.light && !cfg!(test),
+        ..o
+    }
 }
 
 /// Live words for a status detail. A word keeps its id while the state

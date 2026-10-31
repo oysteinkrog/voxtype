@@ -809,7 +809,7 @@ pub(crate) fn run(
         default_motion: Motion::Spring(Spring::SOFT),
         // 3D elements (vo-3d) in the exhibits that use them.
         renderer_setup: Some(Arc::new(vo_3d::install)),
-        ..Options::default()
+        ..crate::kit::options()
     };
     if let Some(dir) = &args.offline {
         let scenario = vo::Scenario {

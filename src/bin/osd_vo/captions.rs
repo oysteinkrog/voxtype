@@ -41,8 +41,6 @@
 
 use super::*;
 
-use std::sync::OnceLock;
-
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
@@ -123,10 +121,7 @@ fn fonts(reg: &FontRegistry) -> Fonts {
 }
 
 fn reduced() -> bool {
-    static R: OnceLock<bool> = OnceLock::new();
-    *R.get_or_init(|| {
-        std::env::var("VO_REDUCED_MOTION").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
-    })
+    crate::kit::reduced()
 }
 
 pub(crate) fn text_style(look: &Look) -> TextStyle {
@@ -1159,7 +1154,7 @@ mod edit_tests {
         let options = Options {
             fonts: fonts.clone(),
             default_motion: default_motion(&look),
-            ..Options::default()
+            ..crate::kit::options()
         };
         // Word 2 comes at 1.19 s and moves to the body when word 3 comes at
         // 1.51 s.
@@ -1214,7 +1209,7 @@ mod edit_tests {
             let options = Options {
                 fonts: fonts.clone(),
                 default_motion: default_motion(&look),
-                ..Options::default()
+                ..crate::kit::options()
             };
             let report = vo::envelope::check_scenario(
                 Popup::new(look.clone(), &fonts),

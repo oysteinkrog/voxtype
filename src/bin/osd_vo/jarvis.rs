@@ -2046,7 +2046,7 @@ mod edit_tests {
         let options = Options {
             fonts: fonts.clone(),
             default_motion: default_motion(&look),
-            ..Options::default()
+            ..crate::kit::options()
         };
         let report = vo::envelope::check_scenario(
             popup_for(Moment::Edit, Popup::new(look.clone(), &fonts)),

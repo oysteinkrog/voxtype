@@ -188,10 +188,7 @@ fn fonts(reg: &FontRegistry) -> Fonts {
 /// Reduced motion, as the framework reads it: no slice jitter, no typing,
 /// no drift.
 fn reduced() -> bool {
-    static R: OnceLock<bool> = OnceLock::new();
-    *R.get_or_init(|| {
-        std::env::var("VO_REDUCED_MOTION").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
-    })
+    crate::kit::reduced()
 }
 
 /// RD-02: 1 for one idle step at `at` seconds into each `period`, else 0.
