@@ -857,14 +857,20 @@ impl Popup {
                     .margin_edges(0.0, 0.0, 0.0, 8.0 * k),
             )
             .child(
-                Element::live_text("detail", &words)
+                // Keyed by state: a new state's detail replaces the old one
+                // at once, so the old words never linger beside the new ones
+                // ("Done  ·  19 words left").
+                Element::live_text(format!("detail-{state}"), &words)
+                    .presence(Transition::NONE, Transition::fade())
                     .text_style(hint)
                     .color(detail_c)
                     .height(STATUS_H * k)
                     .margin_edges(0.0, 0.0, 0.0, 3.0 * k)
                     .shrink(1.0)
                     .min_width(0.0)
-                    .motion(Prop::Opacity, Spring::critical_to_98(0.12))
+                    // The old state's detail goes in the frame the new one
+                    // shows; the new words fade in on their own.
+                    .motion(Prop::Opacity, Motion::Snap)
                     .word_enter(Transition::fade())
                     .word_change(Transition::fade().opacity(0.2)),
             );
