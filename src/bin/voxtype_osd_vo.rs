@@ -389,7 +389,8 @@ struct Args {
     /// With `--offline DIR` or `--envelope`: play a dictation recorded with
     /// `--record` instead of the scripted one. A finished dictation's words
     /// are known ahead, so looks that show the sentence ahead (karaoke's
-    /// coming words) do so only here.
+    /// coming words, Tron's word column with `luminous-typewriter`,
+    /// Mission's haze with `spectral-focus`) do so only here.
     #[arg(long, value_name = "FILE")]
     replay: Option<PathBuf>,
 
