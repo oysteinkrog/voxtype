@@ -7,8 +7,9 @@
 //!
 //! While the final text is made the waveform lowers; when the text lands
 //! the bars settle and the status turns green. A cancel greys the bell and
-//! the tendrils and dims the words. The bell and the tendrils hold still;
-//! under reduced motion nothing in them moves.
+//! the tendrils and dims the words. While the popup is open and listening
+//! the bell's glow breathes and the tendrils sway; under reduced motion
+//! nothing in them moves.
 
 use super::glyph_paths::PathsText;
 use super::kit::{at, ease_out, hex, mix, Levels, Mode};
@@ -18,6 +19,7 @@ use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Point, Rect};
 use vo::scene::path::{make, Contour, StrokeStyle};
+use vo::scene::{Loop, LoopProp};
 
 /// Colours sampled from the redesign.
 const DEEP: u32 = 0x040a26;
@@ -74,6 +76,18 @@ const TENDRIL_MAX: f32 = 230.0;
 /// The surface: the bell's top room and the tendrils' room below.
 const SURFACE_H: f32 = 660.0;
 const SETTLE_SECS: f64 = 0.35;
+/// Idle (RD-02): the pace of the idle motion; the glow's lowest opacity and
+/// seconds per breath; how far a tendril's tip sways, how often, and how
+/// far the bend lags from the bell to the tip, in radians.
+const IDLE_FPS: f64 = 8.0;
+/// The frame pace while the popup records room tone (RD-11): the tendrils
+/// redraw at the idle pace, at most 0.8 px a step.
+pub(crate) const ROOM_TONE_FPS: f64 = IDLE_FPS;
+const GLOW_LOW: f64 = 0.8;
+const GLOW_PERIOD: f64 = 4.0;
+const SWAY_PX: f32 = 4.0;
+const SWAY_HZ: f64 = 0.25;
+const SWAY_LAG: f32 = 2.4;
 
 // The waveform, the words and the status sit inside the bell, and the
 // longest tendril inside the surface.
@@ -171,6 +185,16 @@ fn bell_bottom(x: f32) -> f32 {
     BELL_Y + BELL_RY * (1.0 - u.abs().powf(BELL_POWER)).powf(1.0 / BELL_POWER)
 }
 
+/// One layer of the jellyfish, so the idle pulse runs on the glow alone and
+/// the sway redraws only the tendrils.
+#[derive(Clone, Copy, PartialEq)]
+enum Part {
+    Tendrils,
+    Body,
+    Glow,
+    Edge,
+}
+
 /// The bell and its tendrils, in the surface's space.
 #[derive(Clone, Copy)]
 struct Jelly {
@@ -178,11 +202,27 @@ struct Jelly {
     mode: Mode,
     mode_at: f64,
     still: bool,
+    part: Part,
+    /// The tendrils sway: the popup is open and listening or loading.
+    sway: bool,
 }
 
 impl Jelly {
     fn until(&self) -> f64 {
+        if self.part == Part::Tendrils && self.sway {
+            return f64::INFINITY;
+        }
         self.mode_at + SETTLE_SECS + 0.1
+    }
+
+    /// The sway's clock at `t`, in `IDLE_FPS` steps. It stops where it was
+    /// when the listening ends, and stands at 0 under reduced motion.
+    fn sway_t(&self, t: f64) -> f64 {
+        if self.still {
+            return 0.0;
+        }
+        let t = if self.sway { t } else { t.min(self.mode_at) };
+        (t * IDLE_FPS).floor() / IDLE_FPS
     }
 
     fn draw(&self, t: f64, r: Rect, p: &mut Painter) {
@@ -195,7 +235,10 @@ impl Jelly {
         };
         let tint = |h: u32| mix(hex(h), hex(DIM), grey);
         let pt = |q: Point| Point::new(r.x + q.x * k, r.y + q.y * k);
-        self.tendrils(r, p, &tint, power);
+        if self.part == Part::Tendrils {
+            self.tendrils(self.sway_t(t), r, p, &tint, power);
+            return;
+        }
         // The bell: a dark translucent body, lighter towards the rim.
         let rim: Vec<Point> = (0..RIM_POINTS)
             // From the bottom, where the scallops hide the strokes' join.
@@ -205,19 +248,22 @@ impl Jelly {
             })
             .collect();
         let bell = Contour::polyline(&rim, true);
-        let (top, bottom) = (
-            pt(Point::new(BELL_X, BELL_Y - BELL_RY)),
-            pt(Point::new(BELL_X, BELL_Y + BELL_RY)),
-        );
-        p.fill(
-            [&bell],
-            &StrokeStyle::solid(1.0, hex(BODY)).linear(
-                top,
-                mix(hex(BODY), hex(DEEP), grey).fade(0.88),
-                bottom,
-                hex(DEEP).fade(0.92),
-            ),
-        );
+        if self.part == Part::Body {
+            let (top, bottom) = (
+                pt(Point::new(BELL_X, BELL_Y - BELL_RY)),
+                pt(Point::new(BELL_X, BELL_Y + BELL_RY)),
+            );
+            p.fill(
+                [&bell],
+                &StrokeStyle::solid(1.0, hex(BODY)).linear(
+                    top,
+                    mix(hex(BODY), hex(DEEP), grey).fade(0.88),
+                    bottom,
+                    hex(DEEP).fade(0.92),
+                ),
+            );
+            return;
+        }
         // The rim: light inside it, a wide soft glow, a bright edge and a
         // faint inner ring.
         let middle = pt(Point::new(BELL_X, BELL_Y));
@@ -231,14 +277,17 @@ impl Jelly {
                 })
                 .collect()
         };
-        p.stroke(
-            &Contour::polyline(&inside(0.9), true),
-            &StrokeStyle::solid(26.0 * k, tint(BLUE).fade(0.1 * power)).glow(22.0 * k),
-        );
-        p.stroke(
-            &bell,
-            &StrokeStyle::solid(7.0 * k, tint(RIM).fade(0.3 * power)).glow(18.0 * k),
-        );
+        if self.part == Part::Glow {
+            p.stroke(
+                &Contour::polyline(&inside(0.9), true),
+                &StrokeStyle::solid(26.0 * k, tint(BLUE).fade(0.1 * power)).glow(22.0 * k),
+            );
+            p.stroke(
+                &bell,
+                &StrokeStyle::solid(7.0 * k, tint(RIM).fade(0.3 * power)).glow(18.0 * k),
+            );
+            return;
+        }
         p.stroke(
             &bell,
             &StrokeStyle::solid(2.0 * k, tint(CYAN))
@@ -282,7 +331,16 @@ impl Jelly {
 
     /// The tendrils under the bell: thin glowing strands that wave down
     /// from its lower edge, and a few wider, fainter arms in the middle.
-    fn tendrils(&self, r: Rect, p: &mut Painter, tint: &dyn Fn(u32) -> Color, power: f32) {
+    /// At `sway`, the sway's clock, each strand bends `SWAY_PX` at its tip
+    /// at `SWAY_HZ`, the bend running down it from the bell.
+    fn tendrils(
+        &self,
+        sway: f64,
+        r: Rect,
+        p: &mut Painter,
+        tint: &dyn Fn(u32) -> Color,
+        power: f32,
+    ) {
         let k = self.k;
         let strand =
             |i: u32, x0: f32, len: f32, amp: f32, width: f32, alpha: f32, p: &mut Painter| {
@@ -293,10 +351,13 @@ impl Jelly {
                 let out = (x0 - BELL_X) / BELL_RX;
                 let y0 = bell_bottom(x0) - 10.0;
                 let n = 24;
+                let beat = std::f64::consts::TAU * (SWAY_HZ * sway + noise(i + 17) as f64);
                 let pts: Vec<Point> = (0..=n)
                     .map(|j| {
                         let s = j as f32 / n as f32;
+                        let bend = SWAY_PX * s * (beat as f32 - SWAY_LAG * s).sin();
                         let x = x0
+                            + bend
                             + out * 60.0 * s
                             + (3.0 + amp * s) * (std::f32::consts::TAU * f * s + phase).sin()
                             + 0.4
@@ -450,11 +511,34 @@ impl Popup {
         } else {
             Transition::fade().offset(0.0, -8.0)
         };
-        let jelly = Jelly {
+        let idle = matches!(mode, Mode::Listening | Mode::Loading) && !still;
+        let jelly = |part| Jelly {
             k,
             mode,
             mode_at,
             still,
+            part,
+            sway: idle,
+        };
+        let layer = |name: &'static str, part| {
+            let j = jelly(part);
+            at(
+                Element::canvas(name, j.until(), move |t, r, p| j.draw(t, r, p))
+                    .size(size.w, size.h),
+                0.0,
+                0.0,
+            )
+        };
+        // The glow breathes from full to `GLOW_LOW` and back.
+        let glow = if idle {
+            layer("glow", Part::Glow).ambient(
+                LoopProp::Opacity,
+                Loop::pulse(GLOW_LOW - 1.0, GLOW_PERIOD)
+                    .fps(IDLE_FPS)
+                    .settle(Spring::SNAP),
+            )
+        } else {
+            layer("glow", Part::Glow)
         };
         let wave = Wave {
             k,
@@ -473,12 +557,10 @@ impl Popup {
         Element::layer("biolume")
             .size(size.w, size.h)
             .presence(Transition::fade().offset(0.0, 8.0), exit)
-            .child(at(
-                Element::canvas("jelly", jelly.until(), move |t, r, p| jelly.draw(t, r, p))
-                    .size(size.w, size.h),
-                0.0,
-                0.0,
-            ))
+            .child(layer("tendrils", Part::Tendrils))
+            .child(layer("body", Part::Body))
+            .child(glow)
+            .child(layer("edge", Part::Edge))
             .child(at(
                 Element::canvas("wave", wave_until, move |t, r, p| wave.draw(t, r, p))
                     .size((WAVE_X1 - WAVE_X0) * k, 2.0 * WAVE_HALF * k),
@@ -534,7 +616,13 @@ impl Popup {
             .motion(Prop::Offset, Spring::POP)
             .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k)));
         let paths = biolume_paths(l);
-        let words = self.typo_words_in(words, &paths);
+        let words = self.letter_fx_words(self.typo_words_in(words, &paths));
+        // MO-81: the type breathes only while it is spoken.
+        let words = if mode == Mode::Listening {
+            words.wild_motion(self)
+        } else {
+            words
+        };
         let words = self.handoff_or(words, &l.text_style(), Some(tw), hex(TEXT), hex(CYAN));
         let editing = self.edit_view.is_some();
         let text = Element::column("text")
@@ -552,6 +640,8 @@ impl Popup {
                 },
                 endings::Cancel::Unthread,
             ));
+        // MO-82: the ink spreads through the newest line's letters.
+        let text = self.letter_fx_layers(text, tw);
         let text = self.signal_marks(text, &self.shown, tw, (0.0, 0.0), hex(TEXT));
         self.with_hearing(text, &l.text_style(), tw, hex(TEXT), hex(CYAN))
     }

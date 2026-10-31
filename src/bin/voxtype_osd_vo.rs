@@ -1977,6 +1977,7 @@ impl Popup {
             OsdTheme::Orb => orb::ROOM_TONE_FPS,
             OsdTheme::Showcase => showcase::ROOM_TONE_FPS,
             OsdTheme::Scope => scope::ROOM_TONE_FPS,
+            OsdTheme::Biolume => biolume::ROOM_TONE_FPS,
             _ => ROOM_TONE_FPS,
         };
         quiet.then_some(fps)
