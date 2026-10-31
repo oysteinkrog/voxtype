@@ -1044,7 +1044,15 @@ impl Popup {
         // them the window even when a context line has the same words.
         let context = self.karaoke_context();
         let lines = &all[all.len().saturating_sub(SLOTS.len())..];
-        let roll = Spring::critical_to_98(ROLL_SECS);
+        // Under reduced motion the lines cut to their new slots: a spring
+        // would show the old and new lines on top of each other for a few
+        // frames, since the new line's words do not wait for it then.
+        let still = self.still();
+        let roll: Motion = if still {
+            Motion::Snap
+        } else {
+            Spring::critical_to_98(ROLL_SECS).into()
+        };
         let n = lines.len();
         let cancelled = mode == Mode::Cancelled;
         // From a tap until the edit is handed back, a line whose first word
@@ -1146,7 +1154,7 @@ impl Popup {
                 // and a fade or slide of its own would still be running when they show.
                 .presence(
                     Transition::NONE,
-                    if tapped {
+                    if tapped || still {
                         Transition::NONE
                     } else {
                         Transition::fade().offset(0.0, -24.0).scale(0.9)
@@ -1249,6 +1257,107 @@ mod tests {
         // Reduced motion: straight, whatever the pitch.
         assert_eq!(bow_sag(0.0, Some(1.0), true), 0.0);
         assert_eq!(bow_sag(1.0, None, true), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod roll_tests {
+    use super::super::moments::{scenario, Moment};
+    use super::super::swiss_look::edit_check::fonts as test_fonts;
+    use super::*;
+    use std::collections::HashMap;
+    use vo::scene::display::{ItemKind, NO_WORD};
+
+    /// The longest run of frames in a row in which one transcript word
+    /// moves up or down, over the wrap moment at 30 fps, until the card
+    /// starts to close. A word's first half second is left out: it fades in
+    /// with a small rise.
+    fn longest_glide(motion: OsdMotion, width_px: u32) -> (usize, f32) {
+        let reg = test_fonts();
+        let plasma = PlasmaTheme::default();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Karaoke,
+            width_px,
+            motion,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &plasma, String::new(), &reg);
+        look.set_motion(&cfg.motion);
+        let options = Options {
+            fonts: reg.clone(),
+            default_motion: default_motion(&look),
+            ..Options::default()
+        };
+        // Per word: when it first showed, its last y and its current run.
+        let mut words: HashMap<u32, (f64, f32, usize)> = HashMap::new();
+        let (mut longest, mut farthest) = (0usize, 0.0f32);
+        let s = scenario(&look, Moment::Wrap);
+        // The moment ends 0.2 s after the final text shows and runs 1.2 s
+        // past that; from then the whole card moves as it closes.
+        let closes = s.duration - 1.2;
+        vo::envelope::sample_scenario(
+            Popup::new(look.clone(), &reg),
+            &s,
+            30.0,
+            options,
+            &mut |_, t, dl| {
+                if t >= closes {
+                    return;
+                }
+                let mut ys: HashMap<u32, f32> = HashMap::new();
+                for l in &dl.layers {
+                    for item in &dl.items[l.items.start as usize..l.items.end as usize] {
+                        if item.kind != ItemKind::Glyphs {
+                            continue;
+                        }
+                        for gi in item.start..item.start + item.len {
+                            let g = &dl.glyphs[gi as usize];
+                            if g.word == NO_WORD
+                                || g.word >= 1 << 20
+                                || g.color.a * l.opacity < 0.05
+                            {
+                                continue;
+                            }
+                            ys.entry(g.word).or_insert(l.transform.apply(g.pos).y);
+                        }
+                    }
+                }
+                for (id, y) in ys {
+                    let w = words.entry(id).or_insert((t, y, 0));
+                    let moved = (y - w.1).abs();
+                    if t - w.0 > 0.5 && moved > 0.5 {
+                        w.2 += 1;
+                        longest = longest.max(w.2);
+                        farthest = farthest.max(moved);
+                    } else {
+                        w.2 = 0;
+                    }
+                    w.1 = y;
+                }
+            },
+        );
+        (longest, farthest)
+    }
+
+    /// orxv: under the reduced-motion feature a wrap cuts the lines to their
+    /// new slots in one frame, so the old and new lines never overlap. With
+    /// the look's own motion the same lines roll over several frames.
+    #[test]
+    fn under_reduced_motion_the_lines_cut_at_a_wrap() {
+        for width_px in [400, 600] {
+            let reduced = OsdMotion::Names(vec!["reduced-motion".into()]);
+            let (run, far) = longest_glide(reduced, width_px);
+            assert!(far > 10.0, "{width_px} px: no line moved up ({far} px)");
+            assert!(
+                run <= 1,
+                "{width_px} px: a word moved on {run} frames in a row"
+            );
+            let (run, _) = longest_glide(OsdMotion::Look, width_px);
+            assert!(
+                run > 2,
+                "{width_px} px: the roll should spring with motion on ({run})"
+            );
+        }
     }
 }
 
