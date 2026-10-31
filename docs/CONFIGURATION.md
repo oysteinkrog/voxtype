@@ -4622,9 +4622,15 @@ follow the Plasma scheme:
   violet. When the text lands the ribbon flattens into one bright line that
   ends in an arrow.
 
-Six more names are already in the look chord for looks in progress:
-`orb`, `chrome`, `glass`, `biolume`, `aurora` and `hologram`. Until each
-look is finished, it draws the swiss panel and has no default motion set.
+- `theme = "hologram"`: no panel, only light. A glass microphone orb
+  hangs over a faint column of projected light with fine scan lines; the
+  words float centred in it in translucent blue, a bar wave stands below
+  them and a glowing ring pedestal at the base carries the status. The
+  projection grows down as lines come. Reduced motion stops the scan lines.
+
+Five more names are already in the look chord for looks in progress:
+`orb`, `chrome`, `glass`, `biolume` and `aurora`. Until each look is
+finished, it draws the swiss panel and has no default motion set.
 
 ```toml
 [osd]
