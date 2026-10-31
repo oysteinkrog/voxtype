@@ -131,6 +131,8 @@ pub(crate) const LUMINOUS_TYPEWRITER: &str = "luminous-typewriter";
 /// The column's width and the gap to the text, in concept pixels.
 const COLUMN_W: f32 = 118.0;
 const COLUMN_GAP: f32 = 14.0;
+/// Room between the column and the border's inner edge on the right.
+const COLUMN_INSET: f32 = 14.0;
 const COLUMN_SLOTS: usize = 8;
 const SLOT: f32 = 19.0;
 const SLOT_PX: f32 = 16.0;
@@ -671,7 +673,7 @@ pub(crate) fn text_style(look: &Look) -> TextStyle {
 pub(crate) fn text_width(look: &Look) -> f32 {
     let k = look.width / CONCEPT_W;
     if look.on(LUMINOUS_TYPEWRITER) {
-        (634.0 - COLUMN_W - COLUMN_GAP) * k
+        (634.0 - COLUMN_INSET - COLUMN_W - COLUMN_GAP) * k
     } else {
         634.0 * k
     }
@@ -679,7 +681,7 @@ pub(crate) fn text_width(look: &Look) -> f32 {
 
 /// The column's left edge in concept pixels (R2-16-c).
 fn column_x() -> f32 {
-    TEXT_X + 634.0 - COLUMN_W
+    TEXT_X + 634.0 - COLUMN_INSET - COLUMN_W
 }
 
 impl Popup {
