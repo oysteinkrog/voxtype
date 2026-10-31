@@ -27,6 +27,7 @@ use vo::scene::ambient::{Loop, LoopProp, Wave as LoopWave};
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
+use vo::scene::levels::Levels as LevelTrack;
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
 use vo::scene::taffy;
@@ -138,6 +139,28 @@ const SCAN_PX_PER_S: f64 = 4.0;
 /// The scanlines step every third idle step (0.8 px): each step redraws the
 /// panel, and a faint pattern needs no more.
 const SCAN_FPS: f64 = 5.0;
+/// R2-11-a: a smoke stream from the left behind the newest word, with a
+/// ghost of the word in it, both gone after `INK_SECS`.
+pub(crate) const LUMINOUS_INK_FLOW: &str = "luminous-ink-flow";
+const INK_SECS: f64 = 0.6;
+const INK_BLOBS: u32 = 34;
+const INK_ALPHA: f32 = 0.3;
+const GHOST_ALPHA: f32 = 0.25;
+/// R2-11-b: contour lines behind the text drift outward at a pace the
+/// voice sets, and the field's corner brackets breathe in by up to
+/// `FIELD_INSET` px.
+pub(crate) const BREATHING_FOCUS_FIELD: &str = "breathing-focus-field";
+const FIELD_RINGS: u32 = 7;
+const FIELD_ALPHA: f32 = 0.12;
+const FIELD_INSET: f32 = 4.0;
+/// R2-11-c: a platen roller under the newest line turns one notch per
+/// word, and a carriage marker glides to the newest word.
+pub(crate) const TYPEWRITER_HORIZON: &str = "typewriter-horizon";
+const NOTCH_DEG: f32 = 12.0;
+const NOTCH_SECS: f64 = 0.15;
+const ROLLER_H: f32 = 8.0;
+const CARRIAGE_GLIDE: f64 = 0.22;
+const GRAIN_SPECKS: u32 = 180;
 
 /// The fonts the look adds to the registry.
 #[derive(Clone, Copy)]
@@ -1421,13 +1444,17 @@ impl Popup {
                 at(Element::column("textmove"), 0.0, text_dy)
                     .size(size.w, size.h - text_dy)
                     .motion(Prop::Position, Motion::Snap)
+                    .children(self.cyber_ink_flow(mode, ox, oy))
                     .child(self.cyber_text(mode, ox, oy)),
             );
         panel
             .child(deco)
             .children(self.cyber_broken_frame(size))
+            .children(self.cyber_field(mode, w, ox, oy + dy, oy + sy))
+            .children(self.cyber_grain(mode, ox, oy + sy))
             .child(body)
             .child(text)
+            .children(self.cyber_horizon(mode, ox, oy + sy))
             .child(self.cyber_status(mode, &status, ox, oy + sy))
             .child(self.cyber_count(mode, ox + w - 84.0, oy + sy + 17.0))
     }
@@ -1917,6 +1944,363 @@ impl Popup {
     }
 }
 
+/// R2-11-c: the roller's turn after `words` words, the newest of which came
+/// `age` seconds ago: one notch per word, the last eased in over
+/// `NOTCH_SECS`. Under reduced motion it stands still.
+fn roller_deg(words: usize, age: f64, still: bool) -> f32 {
+    if still {
+        return 0.0;
+    }
+    let n = words as f32;
+    if words == 0 {
+        return 0.0;
+    }
+    NOTCH_DEG * (n - 1.0 + ease_out(age / NOTCH_SECS))
+}
+
+/// R2-11-b: how far the field's brackets sit in, 0 to `FIELD_INSET`, at
+/// `level`; fixed under reduced motion.
+fn field_inset(level: f32, still: bool) -> f32 {
+    if still {
+        return FIELD_INSET / 2.0;
+    }
+    FIELD_INSET * level.clamp(0.0, 1.0)
+}
+
+impl Popup {
+    /// The newest word on screen, laid out as the transcript lays it out:
+    /// its id, its left and right ends and its baseline, in the text
+    /// column's space.
+    fn cyber_newest(&self) -> Option<(WordId, f32, f32, f32)> {
+        let l = &self.look;
+        let last = self.shown.last()?;
+        let text = self
+            .shown
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let start = (text.len() - last.text.len()) as u32;
+        let shaped = self
+            .measure
+            .layout(&text, &l.text_style(), Some(l.text_width()));
+        let glyphs: Vec<_> = shaped
+            .glyphs
+            .iter()
+            .filter(|g| g.cluster >= start)
+            .collect();
+        let first = glyphs.first()?;
+        let x1 = glyphs
+            .iter()
+            .map(|g| g.pos.x + g.advance)
+            .fold(first.pos.x, f32::max);
+        Some((last.id, first.pos.x, x1, first.pos.y))
+    }
+
+    /// The smoothed level at `t`.
+    fn cyber_levels(&self) -> LevelTrack {
+        LevelTrack {
+            levels: self.wave.clone(),
+            newest_at: self.newest_at,
+            rate: FRAME_HZ as f32,
+            ..LevelTrack::default()
+        }
+    }
+
+    /// R2-11-a: smoke flowing in from the left behind the newest word and
+    /// a ghost of the word in it that drifts left and dissolves. The word
+    /// itself enters as before. None under reduced motion.
+    fn cyber_ink_flow(&self, mode: Mode, ox: f32, oy: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(LUMINOUS_INK_FLOW)
+            || self.still()
+            || mode != Mode::Listening
+            || self.edit_view.is_some()
+        {
+            return None;
+        }
+        let (id, x0, x1, baseline) = self.cyber_newest()?;
+        // A word that opens a new line, or comes with a cut that re-lays
+        // the lines, shows only once the lines have rolled; ink there
+        // would draw ahead of the text.
+        let born = self.heard.word(id)?.born;
+        if (x0 < 1.0 && self.shown.len() > 1) || self.cut_at >= born - 0.1 {
+            return None;
+        }
+        if self.extra.now - born >= INK_SECS {
+            return None;
+        }
+        let style = l.text_style();
+        let word = self.shown.last()?;
+        let shaped = self.measure.layout(&word.text, &style, None);
+        let own = shaped.lines.first().map_or(style.size, |l| l.baseline);
+        let outline = vo::scene::glyph_morph::WordOutline::new(
+            self.measure.fonts(),
+            &shaped,
+            style.size,
+            Point::ZERO,
+        );
+        let ghost: Arc<[Contour]> = outline
+            .glyphs
+            .iter()
+            .flat_map(|g| g.outline.contours.clone())
+            .collect();
+        let levels = self.cyber_levels();
+        let (size, line) = (style.size, style.line_height);
+        let (gx, gy) = (ox + TEXT_X + x0, oy + TEXT_TOP + baseline - own);
+        let mid = oy + TEXT_TOP + baseline - 0.35 * size;
+        let canvas = Element::canvas("ink-flow", born + INK_SECS, move |t, r, p| {
+            let age = t - born;
+            if !(0.0..INK_SECS).contains(&age) {
+                return;
+            }
+            let u = (age / INK_SECS) as f32;
+            let fade = (1.0 - u) * (u / 0.12).min(1.0);
+            let lift = 0.6 + 0.4 * (levels.at(t) * 2.0).min(1.0);
+            // The stream: soft blobs along a wavering path from the
+            // panel's left to the word's start, flowing right.
+            let from = ox + TEXT_X - 24.0;
+            let to = gx + 0.25 * (x1 - x0);
+            for k in 0..INK_BLOBS {
+                let s = ((k as f32 / INK_BLOBS as f32) + 0.8 * u) % 1.0;
+                let x = from + (to - from) * s;
+                let wave = (s * 9.0 + u * 5.0 + noise(k * 7) * 6.0).sin();
+                let y = mid + wave * 0.18 * line * (1.0 - 0.6 * s) + (noise(k * 7 + 1) - 0.5) * 6.0;
+                let rad = 1.5 + 3.0 * noise(k * 7 + 2) * (1.0 - 0.5 * s);
+                let c = mix(hex(ORANGE), hex(YELLOW), noise(k * 7 + 3));
+                let a = INK_ALPHA * fade * lift * (0.4 + 0.6 * s) * (0.5 + 0.5 * noise(k * 7 + 4));
+                p.shape(ShapeInstance::circle(
+                    Point::new(r.x + x, r.y + y),
+                    rad,
+                    Paint::glow(c.fade(a), rad, 0.4),
+                ));
+            }
+            // The ghost drifts left out of the word and thins out.
+            let m = Affine::translate(r.x + gx - 4.0 - 20.0 * ease_out(age / INK_SECS), r.y + gy);
+            let moved: Vec<Contour> = ghost.iter().map(|c| c.transform(&m)).collect();
+            p.fill(
+                &moved,
+                &StrokeStyle::solid(1.0, hex(YELLOW).fade(GHOST_ALPHA * (1.0 - u) * (1.0 - u))),
+            );
+        });
+        Some(at(canvas, 0.0, 0.0).size(
+            ox + TEXT_X + x1 + 8.0,
+            oy + TEXT_TOP + baseline + 0.5 * line,
+        ))
+    }
+
+    /// R2-11-b: faint contour lines behind the text, drifting outward at a
+    /// pace the voice sets, clipped to the text field, and its four corner
+    /// brackets breathing in with the level. Still under reduced motion.
+    /// `top` is the panel's top and `bottom` the status bar's.
+    fn cyber_field(&self, mode: Mode, w: f32, ox: f32, top: f32, bottom: f32) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(BREATHING_FOCUS_FIELD) || self.edit_view.is_some() {
+            return Vec::new();
+        }
+        let still = self.still();
+        let field = Rect::new(
+            ox + TEXT_X - 30.0,
+            top + WAVE_Y + WAVE_HALF + 6.0,
+            w - TEXT_X + 6.0,
+            0.0,
+        );
+        let field = Rect::new(field.x, field.y, field.w, (bottom - 4.0 - field.y).max(0.0));
+        if field.h < 8.0 {
+            return Vec::new();
+        }
+        let levels = self.cyber_levels();
+        // The drift is the level summed over time, so a loud voice speeds
+        // it up and a pause slows it, and each frame is a function of t.
+        let mut sum = Vec::with_capacity(levels.levels.len() + 1);
+        sum.push(0.0f32);
+        for v in levels.levels.iter() {
+            sum.push(sum.last().unwrap() + v / FRAME_HZ as f32);
+        }
+        let sum: Arc<[f32]> = sum.into();
+        let start = levels.newest_at - levels.levels.len() as f64 / FRAME_HZ as f64;
+        let shown_at = self.shown_at;
+        let live = matches!(mode, Mode::Loading | Mode::Listening);
+        let end = if live {
+            f64::INFINITY
+        } else {
+            self.extra.now + 0.5
+        };
+        let colour = if mode == Mode::Cancelled {
+            hex(RED)
+        } else {
+            hex(CYAN)
+        };
+        let rings = Element::canvas("field", end, move |t, r, p| {
+            let phase = if still {
+                0.5
+            } else {
+                let i = (((t - start) * FRAME_HZ as f64).max(0.0) as usize).min(sum.len() - 1);
+                0.05 * (t - shown_at) as f32 + 0.9 * sum[i]
+            };
+            let (cx, cy) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
+            let reach = r.w * 0.62;
+            for k in 0..FIELD_RINGS {
+                let s = ((k as f32 + phase) / FIELD_RINGS as f32).fract();
+                let (rx, ry) = (reach * s, reach * s * 0.42);
+                let a = FIELD_ALPHA * (std::f32::consts::PI * s).sin();
+                if a < 0.004 || rx < 2.0 {
+                    continue;
+                }
+                let pts: Vec<Point> = (0..56)
+                    .map(|j| {
+                        let q = std::f32::consts::TAU * j as f32 / 56.0;
+                        Point::new(cx + rx * q.cos(), cy + ry * q.sin())
+                    })
+                    .collect();
+                p.stroke(
+                    &Contour::polyline(&pts, true),
+                    &StrokeStyle::solid(1.0, colour.fade(a)),
+                );
+            }
+        });
+        let ring_el = at(Element::layer("field-clip").clip(), field.x, field.y)
+            .size(field.w, field.h)
+            .presence(Transition::fade(), Transition::fade())
+            .child(at(rings.size(field.w, field.h), 0.0, 0.0));
+        let brackets = Element::canvas("field-brackets", end, move |t, r, p| {
+            let d = field_inset(levels.at(t), still);
+            let (x0, y0, x1, y1) = (r.x + d, r.y + d, r.x + r.w - d, r.y + r.h - d);
+            let arm = 12.0;
+            let c = hex(YELLOW).fade(0.3);
+            for (x, y, sx, sy) in [
+                (x0, y0, 1.0, 1.0),
+                (x1, y0, -1.0, 1.0),
+                (x0, y1, 1.0, -1.0),
+                (x1, y1, -1.0, -1.0),
+            ] {
+                let pts = [
+                    Point::new(x + sx * arm, y),
+                    Point::new(x, y),
+                    Point::new(x, y + sy * arm),
+                ];
+                p.stroke(&Contour::polyline(&pts, false), &StrokeStyle::solid(1.0, c));
+            }
+        });
+        vec![
+            ring_el,
+            at(brackets, field.x, field.y)
+                .size(field.w, field.h)
+                .presence(Transition::fade(), Transition::fade()),
+        ]
+    }
+
+    /// R2-11-c: the paper grain, fixed faint specks behind the text's
+    /// column. `status` is the status bar's top.
+    fn cyber_grain(&self, mode: Mode, ox: f32, status: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(TYPEWRITER_HORIZON) || self.edit_view.is_some() || mode == Mode::Cancelled {
+            return None;
+        }
+        let rows = self.lines.max(1) as f32 * TEXT_LINE;
+        let grain = Element::canvas("grain", f64::NEG_INFINITY, move |_, r, p| {
+            for k in 0..GRAIN_SPECKS {
+                let q = Point::new(r.x + noise(k * 3 + 11) * r.w, r.y + noise(k * 3 + 12) * r.h);
+                p.shape(ShapeInstance::circle(
+                    q,
+                    0.6,
+                    Paint::solid(hex(PAPER).fade(0.03 + 0.04 * noise(k * 3 + 13))),
+                ));
+            }
+        });
+        Some(
+            at(grain, ox + TEXT_X - 12.0, status - STATUS_GAP - rows)
+                .size(l.text_width() + 24.0, rows)
+                .presence(Transition::fade(), Transition::fade()),
+        )
+    }
+
+    /// R2-11-c: a platen roller with knobs in the gap under the newest
+    /// line, turning one notch per word; a carriage marker on it glides
+    /// to the newest word; faint paper grain behind the text. The text
+    /// itself stays still. Under reduced motion the roller stands and
+    /// the marker jumps. `status` is the status bar's top.
+    fn cyber_horizon(&self, mode: Mode, ox: f32, status: f32) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(TYPEWRITER_HORIZON) || self.edit_view.is_some() || mode == Mode::Cancelled {
+            return Vec::new();
+        }
+        let still = self.still();
+        let tw = l.text_width();
+        let (x0, x1) = (ox + TEXT_X - 12.0, ox + TEXT_X + tw + 12.0);
+        let y = status - STATUS_GAP + 2.0;
+        let newest = self.cyber_newest();
+        let born = newest
+            .and_then(|n| self.heard.word(n.0))
+            .map_or(f64::NEG_INFINITY, |h| h.born);
+        let words = self.shown.len();
+        let roller = Element::canvas("platen", born + NOTCH_SECS, move |t, r, p| {
+            let deg = roller_deg(words, t - born, still);
+            let body = RRect::new(
+                Rect::new(r.x + 6.0, r.y, r.w - 12.0, ROLLER_H),
+                ROLLER_H / 2.0,
+            );
+            p.shape(ShapeInstance::rrect(
+                body,
+                Paint::linear(
+                    Point::new(0.0, r.y),
+                    hex(GREY).fade(0.35),
+                    Point::new(0.0, r.y + ROLLER_H),
+                    hex(INK).fade(0.9),
+                ),
+            ));
+            // The grooves: lines round the drum, shown on its front half.
+            for k in 0..12 {
+                let a = (deg + 30.0 * k as f32).to_radians();
+                if a.cos() <= 0.05 {
+                    continue;
+                }
+                let gy = r.y + ROLLER_H * 0.5 - a.sin() * ROLLER_H * 0.45;
+                p.shape(ShapeInstance::line(
+                    Point::new(r.x + 10.0, gy),
+                    Point::new(r.x + r.w - 10.0, gy),
+                    0.6,
+                    Paint::solid(hex(PAPER).fade(0.08 * a.cos())),
+                ));
+            }
+            // The knobs, a notch on each turning with the drum.
+            for kx in [r.x + 3.0, r.x + r.w - 3.0] {
+                let kn = RRect::new(Rect::new(kx - 3.0, r.y - 2.0, 6.0, ROLLER_H + 4.0), 2.0);
+                p.shape(ShapeInstance::rrect(kn, Paint::solid(hex(GREY).fade(0.7))));
+                let ny = r.y + ROLLER_H * 0.5 - deg.to_radians().sin() * (ROLLER_H * 0.5);
+                p.shape(ShapeInstance::line(
+                    Point::new(kx - 3.0, ny),
+                    Point::new(kx + 3.0, ny),
+                    1.0,
+                    Paint::solid(hex(YELLOW).fade(0.8)),
+                ));
+            }
+        });
+        let mut out = vec![at(roller, x0 - 6.0, y)
+            .size(x1 - x0 + 12.0, ROLLER_H)
+            .presence(Transition::fade(), Transition::fade())];
+        if let Some((_, a, b, _)) = newest {
+            let glide: Motion = if still {
+                Motion::Snap
+            } else {
+                Spring::critical_to_98(CARRIAGE_GLIDE).into()
+            };
+            let mark = Element::panel("carriage")
+                .size((b - a).max(6.0), 2.0)
+                .radius(1.0)
+                .fill(hex(YELLOW).fade(0.85))
+                .glow(hex(YELLOW).fade(0.5), 4.0, 0.5);
+            out.push(
+                at(mark, ox + TEXT_X + a, y - 1.0)
+                    .motion(Prop::Position, glide)
+                    .motion(Prop::Size, glide)
+                    .presence(Transition::fade(), Transition::fade()),
+            );
+        }
+        out
+    }
+}
+
 /// Cyberpunk's edit adapter (plan section 4.5): the yellow caret of the
 /// joint ticks is the edit caret, and the ticks, which follow the sound,
 /// are off.
@@ -2028,5 +2412,37 @@ mod idle_tests {
             assert!((0.0..SCAN_GAP as f64).contains(&v), "{v}");
         }
         assert!(l.fps <= IDLE_FPS);
+    }
+}
+
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+
+    /// R2-11-c: at rest the roller has turned one notch per word; the
+    /// newest notch eases in; under reduced motion it stands still.
+    #[test]
+    fn the_roller_turns_one_notch_per_word() {
+        for words in [1usize, 2, 7, 30] {
+            let rest = roller_deg(words, NOTCH_SECS, false);
+            assert!(
+                (rest - NOTCH_DEG * words as f32).abs() < 1e-3,
+                "{words}: {rest}"
+            );
+            assert!(roller_deg(words, 0.0, false) < rest);
+            assert_eq!(roller_deg(words, 1.0, true), 0.0);
+        }
+        assert_eq!(roller_deg(0, 1.0, false), 0.0);
+    }
+
+    /// R2-11-b: the brackets breathe in by 4 px at most, at any level, and
+    /// stand at a fixed inset under reduced motion.
+    #[test]
+    fn the_field_inset_stays_within_4_px() {
+        for level in [-1.0, 0.0, 0.3, 1.0, 5.0] {
+            let d = field_inset(level, false);
+            assert!((0.0..=FIELD_INSET).contains(&d), "{level}: {d}");
+            assert_eq!(field_inset(level, true), FIELD_INSET / 2.0);
+        }
     }
 }
