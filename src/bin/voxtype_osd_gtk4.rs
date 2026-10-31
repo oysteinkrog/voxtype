@@ -618,7 +618,14 @@ fn build_window(
         | OsdTheme::Particles
         | OsdTheme::Synthwave
         | OsdTheme::Mecha
-        | OsdTheme::Cyberpunk => {
+        | OsdTheme::Cyberpunk
+        | OsdTheme::Orb
+        | OsdTheme::Chrome
+        | OsdTheme::Glass
+        | OsdTheme::Biolume
+        | OsdTheme::Aurora
+        | OsdTheme::Hologram
+        | OsdTheme::River => {
             let theme = plasma::load();
             install_swiss_css(&theme, cfg.opacity, cfg.preview_font_pt);
             let view = SwissView::build(cfg, &theme, stop_hint, &preview, state.clone());

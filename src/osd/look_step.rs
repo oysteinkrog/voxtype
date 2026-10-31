@@ -140,6 +140,21 @@ mod tests {
     }
 
     #[test]
+    fn the_chord_visits_all_27_looks_once_and_comes_back() {
+        let order = OsdTheme::VO_LOOKS;
+        assert_eq!(order.len(), 27);
+        let mut seen = Vec::new();
+        let mut look = OsdTheme::Swiss;
+        for _ in 0..order.len() {
+            assert!(!seen.contains(&look), "{look:?} twice");
+            seen.push(look);
+            look = step(&order, look, true);
+        }
+        assert_eq!(look, OsdTheme::Swiss);
+        assert!(order.iter().all(|t| seen.contains(t)));
+    }
+
+    #[test]
     fn saved_names_parse_back() {
         for theme in OsdTheme::VO_LOOKS {
             let name = format!("{theme:?}").to_ascii_lowercase();

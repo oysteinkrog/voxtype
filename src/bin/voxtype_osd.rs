@@ -265,6 +265,13 @@ fn vo_draws(theme: OsdTheme) -> bool {
             | OsdTheme::Synthwave
             | OsdTheme::Mecha
             | OsdTheme::Cyberpunk
+            | OsdTheme::Orb
+            | OsdTheme::Chrome
+            | OsdTheme::Glass
+            | OsdTheme::Biolume
+            | OsdTheme::Aurora
+            | OsdTheme::Hologram
+            | OsdTheme::River
     )
 }
 
@@ -377,6 +384,14 @@ mod tests {
         assert!(vo_draws(OsdTheme::Showcase));
         assert!(vo_draws(OsdTheme::Type));
         assert!(!vo_draws(OsdTheme::Default));
+    }
+
+    #[test]
+    fn vo_draws_every_look_in_the_chord() {
+        for theme in OsdTheme::VO_LOOKS {
+            assert!(vo_draws(theme), "{theme:?}");
+        }
+        assert!(vo_draws(OsdTheme::Chrome));
     }
 
     #[test]

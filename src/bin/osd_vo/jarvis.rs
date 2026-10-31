@@ -229,6 +229,9 @@ pub struct Extra {
     /// With `depth-stack`: the line that just left the reading place, held
     /// flat for a moment before it moves back (6ofh).
     pub(crate) hold: Option<vo::scene::depth_stack::Hold>,
+    /// When the new reading line shows behind a gliding held line: the
+    /// view is built again then, even with no message in between.
+    pub(crate) stack_wake: Option<f64>,
 }
 
 /// Words laid out at most, from a start that only moves in steps of half
@@ -690,6 +693,13 @@ impl Popup {
         Geo::new(look).surface()
     }
 
+    /// Builds the view again when the new stack line shows (`stack_wake`).
+    pub(crate) fn arm_jarvis_wake(&mut self, cx: &mut Cx<Msg>) {
+        if let Some(at) = self.jarvis.stack_wake.take() {
+            cx.after((at - cx.t()).max(0.0) + 0.01, Msg::Loop);
+        }
+    }
+
     /// Notes when a dictation ended without a final text, and breaks the
     /// transcript into lines when its words change.
     pub(crate) fn sync_jarvis(&mut self, t: f64) {
@@ -733,7 +743,7 @@ impl Popup {
         if let (Some((was, rows)), Some((id, now_rows))) = (self.jarvis.newest, newest) {
             let behind = n.checked_sub(2).and_then(|i| first(&self.jarvis.lines[i]));
             if id != was && behind == Some(was) {
-                self.jarvis.hold = Some(vo::scene::depth_stack::Hold {
+                let hold = vo::scene::depth_stack::Hold {
                     key: wild_space::depth_stack_key(was),
                     since: t,
                     secs: if now_rows > rows {
@@ -743,7 +753,11 @@ impl Popup {
                     },
                     rise: self.look.text_style().line_height,
                     glide: now_rows <= rows,
-                });
+                };
+                // The stack's spring is the default one (`wild_space`).
+                self.jarvis.stack_wake =
+                    Some(vo::scene::depth_stack::DepthStack::default().newest_shows_at(&hold));
+                self.jarvis.hold = Some(hold);
             }
         }
         if newest.is_some() {
@@ -1804,6 +1818,54 @@ mod edit_tests {
             popup.files.outcome = Some(outcome);
             popup.sync_jarvis(2.0);
             assert_eq!(popup.jarvis.ended_at.is_some(), dimmed, "{outcome:?}");
+        }
+    }
+
+    /// When a line leaves the reading place of the depth stack, the hold
+    /// stores a wake at the moment the new reading line shows
+    /// (`DepthStack::newest_shows_at`), for showcase and jarvis, so the
+    /// view is built again then even with no message in between.
+    #[test]
+    fn a_stack_hold_wakes_the_view_when_the_new_line_shows() {
+        use super::super::swiss_look::edit_check::{dictation, fonts};
+        use vo::scene::depth_stack::DepthStack;
+        let fonts = fonts();
+        for theme in [OsdTheme::Showcase, OsdTheme::Jarvis] {
+            let cfg = OsdConfig {
+                theme,
+                width_px: 600,
+                ..OsdConfig::default()
+            };
+            let mut look = Look::new(&cfg, &PlasmaTheme::default(), String::new(), &fonts);
+            look.set_motion(&cfg.motion);
+            assert!(look.on(wild_space::DEPTH_STACK), "{theme:?}");
+            let mut popup = Popup::new(look, &fonts);
+            let mut woke = None;
+            for n in 1..200 {
+                let t = n as f64 * 0.1;
+                popup.text(&dictation(n));
+                popup.sync_showcase(t);
+                popup.sync_jarvis(t);
+                let (wake, hold) = if theme == OsdTheme::Showcase {
+                    (
+                        popup.extra.stack_wake.take(),
+                        popup.extra.stack_hold.clone(),
+                    )
+                } else {
+                    (popup.jarvis.stack_wake.take(), popup.jarvis.hold.clone())
+                };
+                if let (Some(at), Some(hold)) = (wake, hold) {
+                    woke = Some((at, hold));
+                    break;
+                }
+            }
+            let (at, hold) = woke.unwrap_or_else(|| panic!("{theme:?}: no line left"));
+            assert_eq!(
+                at,
+                DepthStack::default().newest_shows_at(&hold),
+                "{theme:?}"
+            );
+            assert!(at >= hold.since, "{theme:?}");
         }
     }
 }

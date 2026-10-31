@@ -50,6 +50,13 @@ pub(crate) fn source(theme: OsdTheme) -> &'static str {
         OsdTheme::Amber => "concept 07",
         OsdTheme::Radial => "concept 10",
         OsdTheme::Tron => "concept 16",
+        OsdTheme::Orb => "concept 01",
+        OsdTheme::Chrome => "concept 05",
+        OsdTheme::Glass => "concept 08",
+        OsdTheme::Biolume => "concept 15",
+        OsdTheme::Aurora => "concept 19",
+        OsdTheme::Hologram => "concept 20",
+        OsdTheme::River => "concept 24",
         // A look added later shows no source until it gets a row here.
         #[allow(unreachable_patterns)]
         _ => "",

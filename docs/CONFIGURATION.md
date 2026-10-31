@@ -4559,7 +4559,7 @@ fonts, and draws the `swiss` look. Differences from the GTK4 popup:
   once, as in the GTK4 popup.
 - `look_badge = true` in `[osd]` (or `--look-badge`, or
   `VOXTYPE_OSD_LOOK_BADGE=1`) shows the active look's place in the look
-  chord's list and its name, such as "3/20 Type", in white on a dark
+  chord's list and its name, such as "3/27 Type", in white on a dark
   pill above the popup's top-left corner. With a centred position it stays
   on the same screen spot for every look: with `anchor = "center"` just
   above the tallest look's panel, lined up with the left edge of a
@@ -4615,6 +4615,11 @@ follow the Plasma scheme:
   wider than the other looks: 760 px at the default `width_px = 600`. GPU
   memory comes from the amdgpu driver or `nvidia-smi`, read at most every
   3 s while the popup shows; without either the tile reads "n/a".
+
+Seven more names are already in the look chord for looks in progress:
+`orb`, `chrome`, `glass`, `biolume`, `aurora`, `hologram` and `river`. Until
+each look is finished, it draws the swiss panel and has no default motion
+set.
 
 ```toml
 [osd]

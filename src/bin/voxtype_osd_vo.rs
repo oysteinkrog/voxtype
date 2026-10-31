@@ -108,6 +108,20 @@ mod particles;
 mod cyberpunk;
 #[path = "osd_vo/set_type.rs"]
 mod set_type;
+#[path = "osd_vo/orb.rs"]
+mod orb;
+#[path = "osd_vo/chrome.rs"]
+mod chrome;
+#[path = "osd_vo/glass.rs"]
+mod glass;
+#[path = "osd_vo/biolume.rs"]
+mod biolume;
+#[path = "osd_vo/aurora.rs"]
+mod aurora;
+#[path = "osd_vo/hologram.rs"]
+mod hologram;
+#[path = "osd_vo/river.rs"]
+mod river;
 #[path = "osd_vo/wall.rs"]
 mod wall;
 #[path = "osd_vo/replay.rs"]
@@ -267,7 +281,7 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_WORD_FADE")]
     word_fade: bool,
 
-    /// Show the active look's number and name, such as "3/20 Type", above
+    /// Show the active look's number and name, such as "3/27 Type", above
     /// the live popup's top-left corner. Also `[osd] look_badge = true`.
     #[arg(long, env = "VOXTYPE_OSD_LOOK_BADGE")]
     look_badge: bool,
@@ -283,9 +297,12 @@ struct Args {
     #[arg(long, env = "VOXTYPE_OSD_DOUBT_BELOW")]
     doubt_below: Option<f32>,
 
-    /// Look to draw: `swiss` (default here), `showcase`, a rich look that
-    /// shows off the GPU renderer, or `type`, led by type and line. Also
-    /// `[osd] theme`. Other themes draw swiss.
+    /// Look to draw: `swiss` (default here), `showcase`, `type`, `amber`,
+    /// `radial`, `tron`, `phosphor`, `mission`, `palette`, `dotmatrix`,
+    /// `swissfi`, `scope`, `captions`, `karaoke`, `island`, `jarvis`,
+    /// `particles`, `synthwave`, `mecha`, `cyberpunk`, `orb`, `chrome`,
+    /// `glass`, `biolume`, `aurora`, `hologram` or `river`. Also `[osd]
+    /// theme`. Other themes draw swiss.
     #[arg(long, env = "VOXTYPE_OSD_THEME")]
     theme: Option<String>,
 
@@ -969,6 +986,7 @@ impl Look {
             OsdTheme::Type => type_look::newest_line_centre(self, lines),
             OsdTheme::Jarvis => Some(jarvis::newest_line_centre(self, lines)),
             OsdTheme::Particles => Some(particles::newest_line_centre(self, lines)),
+            OsdTheme::River => Some(river::newest_line_centre(self, lines)),
             _ => None,
         }
     }
@@ -1036,6 +1054,9 @@ impl Look {
         if self.theme == OsdTheme::Mission {
             return mission::text_width(self);
         }
+        if self.theme == OsdTheme::River {
+            return river::text_width(self);
+        }
         self.width - swiss::PANEL_INSET_PX as f32
     }
 
@@ -1067,6 +1088,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Mission {
             return mission::max_lines();
+        }
+        if self.theme == OsdTheme::River {
+            return river::max_lines();
         }
         swiss::MAX_LINES as u32
     }
@@ -1144,6 +1168,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Mission {
             return mission::text_style(self);
+        }
+        if self.theme == OsdTheme::River {
+            return river::text_style(self);
         }
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
@@ -1326,6 +1353,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Mecha {
             return mecha::surface(self);
+        }
+        if self.theme == OsdTheme::River {
+            return river::surface(self);
         }
         Size::new(
             self.width.ceil(),
@@ -2282,6 +2312,7 @@ impl App for Popup {
         self.arm_captions_tick(cx);
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
+        self.arm_jarvis_wake(cx);
         self.arm_cyber_tick(cx);
         self.arm_dotmatrix_tick(cx);
         self.pace = self.room_tone_pace(t);
@@ -2430,7 +2461,7 @@ impl App for Popup {
 const BADGE_H: f32 = 30.0;
 
 impl Popup {
-    /// "3/20 Type": the look's place in the look chord's list and its
+    /// "3/27 Type": the look's place in the look chord's list and its
     /// name, in bright text on a dark pill at the strip's left, so a chord press shows
     /// where it landed. With a keyboard edit, the edit's state after it,
     /// and while editing the keys' hint. None when it has nothing to say.
@@ -2537,7 +2568,6 @@ impl Popup {
     }
 
     fn look_view(&self, _: &vo::Tokens) -> Element<Msg> {
-        let root = Element::column("root").align_items(AlignItems::CENTER);
         if self.look.theme == OsdTheme::Amber {
             return self.amber_view();
         }
@@ -2595,6 +2625,22 @@ impl Popup {
         if self.look.theme == OsdTheme::Mecha {
             return self.mecha_view();
         }
+        match self.look.theme {
+            OsdTheme::Orb => self.orb_view(),
+            OsdTheme::Chrome => self.chrome_view(),
+            OsdTheme::Glass => self.glass_view(),
+            OsdTheme::Biolume => self.biolume_view(),
+            OsdTheme::Aurora => self.aurora_view(),
+            OsdTheme::Hologram => self.hologram_view(),
+            OsdTheme::River => self.river_view(),
+            _ => self.swiss_view(),
+        }
+    }
+
+    /// The swiss panel: the swiss looks, and a new look's slot until its
+    /// look bead lands (RD-03).
+    pub(crate) fn swiss_view(&self) -> Element<Msg> {
+        let root = Element::column("root").align_items(AlignItems::CENTER);
         if self.closing {
             return root;
         }
@@ -2635,6 +2681,7 @@ fn default_motion(look: &Look) -> Motion {
             | OsdTheme::Synthwave
             | OsdTheme::Mecha
             | OsdTheme::Cyberpunk
+            | OsdTheme::River
     ) {
         Motion::Spring(Spring::SOFT)
     } else {
@@ -3515,16 +3562,7 @@ fn print_gpu_times(times: &[(String, f64)]) {
 }
 
 /// The looks the vo frontend draws itself.
-const WALL_THEMES: &[OsdTheme] = &[
-    OsdTheme::Swiss,
-    OsdTheme::Showcase,
-    OsdTheme::Type,
-    OsdTheme::Jarvis,
-    OsdTheme::Particles,
-    OsdTheme::Cyberpunk,
-    OsdTheme::Synthwave,
-    OsdTheme::Mecha,
-];
+const WALL_THEMES: &[OsdTheme] = &OsdTheme::VO_LOOKS;
 
 /// `voxtype-osd-vo --wall`: see `osd_vo/wall.rs`.
 fn run_wall(
@@ -3727,6 +3765,7 @@ mod tests {
         };
         let first = spot(&look);
         assert_eq!(first.0.fract(), 0.0, "{first:?}");
+        assert_eq!(OsdTheme::VO_LOOKS.len(), 27);
         for &theme in OsdTheme::VO_LOOKS.iter() {
             look.theme = theme;
             let f = look.live_frame();
