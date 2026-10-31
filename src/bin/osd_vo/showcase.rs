@@ -118,6 +118,9 @@ pub struct Extra {
     stack_newest: Option<(vo_core::words::WordId, u32)>,
     /// The line that just left the reading place, held flat for a moment.
     stack_hold: Option<Hold>,
+    /// When the new reading line shows behind a gliding held line: the
+    /// view is built again then, even with no message in between.
+    stack_wake: Option<f64>,
     /// The shown words and their boxes in the strip at a width (MO-69).
     boxes: std::sync::Mutex<Option<ShownBoxes>>,
 }
@@ -497,7 +500,7 @@ impl Popup {
         if let (Some((was, rows)), Some((id, now_rows))) = (self.extra.stack_newest, newest) {
             let behind = lines.len().checked_sub(2).and_then(|i| first(&lines[i]));
             if id != was && behind == Some(was) {
-                self.extra.stack_hold = Some(Hold {
+                let hold = Hold {
                     key: wild_space::depth_stack_key(was),
                     since: t,
                     secs: if now_rows > rows {
@@ -507,7 +510,10 @@ impl Popup {
                     },
                     rise: self.look.text_line,
                     glide: now_rows <= rows,
-                });
+                };
+                // The stack's spring is the default one (see `stack`).
+                self.extra.stack_wake = Some(DepthStack::default().newest_shows_at(&hold));
+                self.extra.stack_hold = Some(hold);
             }
         }
         if newest.is_some() {
@@ -577,6 +583,9 @@ impl Popup {
 
     /// Keeps the ambient tick armed while it is needed.
     pub(crate) fn arm_tick(&mut self, cx: &mut Cx<Msg>) {
+        if let Some(at) = self.extra.stack_wake.take() {
+            cx.after((at - cx.t()).max(0.0) + 0.01, Msg::Loop);
+        }
         if self.extra.tick.is_none() && self.showcase_ticks(cx.t()) {
             self.extra.tick = Some(cx.after(1.0 / sc::AMBIENT_HZ, Msg::Tick));
         }
