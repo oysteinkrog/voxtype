@@ -24,6 +24,14 @@
 //! break. Under reduced motion there is no beam and no pen, the seam stays
 //! and the broken frame is a still mark.
 //!
+//! While the popup is open and listening it keeps a little idle life (5ti,
+//! RD-02): a 2 px scanline a little brighter than the screen rolls down it
+//! once every 5 s, the block caret blinks 530 ms on and 530 ms off, and a
+//! faint static flickers on the screen's background 12 times a second.
+//! Neither the scanline nor the static enters the newest line's box. All
+//! stop once the popup closes, and under reduced motion the caret stays
+//! solid and nothing rolls or flickers.
+//!
 //! Geometry is laid out in the pixels of the concept image and scaled so the
 //! screen is as wide as the popup.
 
@@ -72,11 +80,24 @@ const HISTORY_SECS: f32 = 2.2;
 /// Seconds for the meter to sink to dots once the recording stops.
 const SINK_SECS: f64 = 0.4;
 
-/// The caret: solid this long after the last new word, then blinking at
-/// about 1 Hz.
+/// The caret: solid this long after the last new word, then blinking
+/// 530 ms on and 530 ms off (5ti).
 const CARET_HOLD: f64 = 0.4;
-const CARET_HZ: f64 = 1.06;
+const CARET_BLINK: f64 = 0.53;
 const CARET_GLIDE: f64 = 0.12;
+/// 5ti: the idle motion's pace (RD-02's slow-loop cap); the scanline's
+/// period, pass, first pass after the popup opens, height and alpha; the
+/// static's rate, specks and alpha (in linear light, like every blend here:
+/// a few percent of green lights the dark screen far more than it says).
+const IDLE_FPS: f64 = 15.0;
+const ROLL_EVERY: f64 = 5.0;
+const ROLL_PASS: f64 = 1.6;
+const ROLL_FIRST: f64 = 2.0;
+const ROLL_H: f32 = 2.0;
+const ROLL_ALPHA: f32 = 0.06;
+const NOISE_FPS: f64 = 12.0;
+const NOISE_SPECKS: u32 = 40;
+const NOISE_ALPHA: f32 = 0.02;
 /// Seconds a revised word stays in reverse video.
 const FLASH_SECS: f64 = 0.35;
 /// The beam: seconds to write a whole word, the head's width in logical
@@ -212,9 +233,73 @@ struct Screen {
     icon: Icon,
     status_y: f32,
     rule2_y: f32,
+    /// 5ti: the idle scanline and static run (open, listening, not
+    /// reduced), and the newest line's box (top and bottom), which both
+    /// keep out of.
+    idle: bool,
+    newest: (f32, f32),
+    /// The screen's height, and reduced motion (the caret stays solid).
+    h: f32,
+    still: bool,
+}
+
+/// A number from 0 to 1 that depends only on `n`.
+fn noise(n: u32) -> f32 {
+    let mut x = n.wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x2C1B_3C6D);
+    x ^= x >> 12;
+    (x & 0xFFFF) as f32 / 65535.0
+}
+
+/// 5ti: the rolling scanline's top as a share of the screen's height `s`
+/// seconds after the popup opened, or `None` between passes.
+fn roll_at(s: f64) -> Option<f32> {
+    let u = (s - ROLL_FIRST).rem_euclid(ROLL_EVERY) / ROLL_PASS;
+    (s >= ROLL_FIRST && u < 1.0).then_some(u as f32)
+}
+
+/// 5ti: the block caret shows `idle` seconds after it settled: on for the
+/// first `CARET_BLINK` of each pair, off for the second.
+fn caret_on(idle: f64) -> bool {
+    idle < 0.0 || (idle / CARET_BLINK).floor() as i64 % 2 == 0
 }
 
 impl Screen {
+    /// 5ti: the static and the rolling scanline, under everything else and
+    /// clear of the newest line's box.
+    fn draw_idle(&self, t: f64, p: &mut Painter) {
+        let k = self.k;
+        let (top, bottom) = self.newest;
+        let clear = |y0: f32, y1: f32| y1 < top || y0 > bottom;
+        let (x0, x1) = (PAD_X * k * 0.5, self.w - PAD_X * k * 0.5);
+        let (y_min, y_max) = (8.0 * k, self.h - 8.0 * k);
+        let n = ((t - self.shown_at) * NOISE_FPS).floor() as i64 as u32;
+        let r = 0.9 * k;
+        for i in 0..NOISE_SPECKS {
+            let seed = n.wrapping_mul(7919) ^ i.wrapping_mul(0x2545_F491);
+            let x = x0 + noise(seed) * (x1 - x0);
+            let y = y_min + noise(seed.wrapping_mul(0x6C8E_9CF5) ^ 0x1234_5679) * (y_max - y_min);
+            if clear(y - r, y + r) {
+                p.shape(ShapeInstance::circle(
+                    Point::new(x, y),
+                    r,
+                    Paint::solid(hex(GREEN, NOISE_ALPHA)),
+                ));
+            }
+        }
+        let s = (t * IDLE_FPS).floor() / IDLE_FPS - self.shown_at;
+        if let Some(u) = roll_at(s) {
+            let y = y_min + u * (y_max - y_min - ROLL_H * k);
+            if clear(y, y + ROLL_H * k) {
+                p.shape(ShapeInstance::rrect(
+                    RRect::new(Rect::new(x0, y, x1 - x0, ROLL_H * k), 0.0),
+                    Paint::solid(hex(GREEN, ROLL_ALPHA)),
+                ));
+            }
+        }
+    }
+
     /// The level shown at `age` seconds before now, 0 to 1.
     fn level_at(&self, t: f64, age: f32) -> f32 {
         let t = self.scrub.map(t);
@@ -253,6 +338,10 @@ impl Screen {
         let rect = |x: f32, y: f32, w: f32, h: f32, paint: Paint| {
             ShapeInstance::rrect(RRect::new(Rect::new(x, y, w, h), 0.6 * k), paint)
         };
+
+        if self.idle {
+            self.draw_idle(t, p);
+        }
 
         // The rules under the header and over the status line.
         for y in [RULE_Y * k, self.rule2_y] {
@@ -346,9 +435,9 @@ impl Screen {
         if let Some((to, from, moved)) = self.caret {
             let g = ease_out((t - moved) / CARET_GLIDE);
             let pos = Point::new(from.x + (to.x - from.x) * g, from.y + (to.y - from.y) * g);
-            let idle = t - moved - CARET_HOLD;
-            let on = idle < 0.0 || (idle * CARET_HZ).fract() < 0.6;
-            if on {
+            // Solid under reduced motion; the blink steps with the idle pace.
+            let idle = (t * IDLE_FPS).floor() / IDLE_FPS - moved - CARET_HOLD;
+            if self.still || caret_on(idle) {
                 p.shape(rect(pos.x, pos.y, 15.0 * k, 37.0 * k, solid(GREEN, 1.0)));
             }
         }
@@ -796,6 +885,13 @@ impl Popup {
             },
             status_y: h - (BOTTOM_PAD + 4.0) * k,
             rule2_y,
+            idle: !self.closing && !status.finishing && !done_or_ended(self) && !self.still(),
+            newest: (
+                (TEXT_TOP + (self.lines.max(1) - 1) as f32 * LINE) * k,
+                (TEXT_TOP + self.lines.max(1) as f32 * LINE) * k,
+            ),
+            h,
+            still: self.still(),
         };
         at(
             Element::canvas("screen", f64::INFINITY, move |t, r, p| {
@@ -1276,6 +1372,10 @@ mod tests {
             icon: Icon::Bars,
             status_y: 0.0,
             rule2_y: 0.0,
+            idle: false,
+            newest: (0.0, 0.0),
+            h: 300.0,
+            still: false,
         }
     }
 
@@ -1344,4 +1444,31 @@ mod edit_tests {
         assert!(r.buffer_text().ends_with(" w9"), "{}", r.buffer_text());
         assert!(r.p.phos.flash.is_none(), "no reverse-video flash");
     }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn the_caret_blinks_530_ms_on_and_530_ms_off() {
+        assert!(caret_on(-0.1));
+        assert!(caret_on(0.0) && caret_on(0.52));
+        assert!(!caret_on(0.54) && !caret_on(1.05));
+        assert!(caret_on(1.07));
+    }
+
+    #[test]
+    fn the_scanline_rolls_once_every_5_s() {
+        assert!(roll_at(0.0).is_none());
+        for k in 0..3 {
+            let t0 = ROLL_FIRST + k as f64 * ROLL_EVERY;
+            assert!(roll_at(t0 - 0.05).is_none());
+            assert!((roll_at(t0 + ROLL_PASS / 2.0).unwrap() - 0.5).abs() < 1e-3);
+            assert!(roll_at(t0 + ROLL_PASS + 0.05).is_none());
+        }
+    }
+
+    // The static stays faint and at most 12 steps a second.
+    const _: () = assert!(NOISE_ALPHA <= 0.02 && NOISE_FPS <= 12.0 && ROLL_H == 2.0);
 }
