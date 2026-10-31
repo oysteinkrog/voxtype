@@ -15,20 +15,40 @@
 //! While editing ([`SynthwaveSite`]) the rows hold the edit window's lines,
 //! still bottom-anchored, and a line keeps its left edge while you type
 //! (the sticky centring of `EditView::centre`).
+//!
+//! Round 2 (R2-04), each an opt-in motion feature:
+//!
+//! - `liquid-echo`: a water line under the newest line holds its faint
+//!   mirror image, which wobbles a little, and each new word sends one flat
+//!   ring out from under it, gone in 1 s. Reduced motion: a still mirror
+//!   and no rings.
+//! - `prism-focus`: the waveform runs into a small glass prism near the
+//!   right end and leaves it as five spectrum ribbons, longer and brighter
+//!   with the voice. Reduced motion: a still fan whose brightness follows
+//!   the voice.
+//! - `typewriter-spotlight`: the words are set in a typewriter face; a new
+//!   word lands 2 px low at 85 % ink and settles in 120 ms, and a soft cone
+//!   of light from above glides to it. Reduced motion: no dip and a still
+//!   cone.
+//!
+//! The mirror and the rings are drawn on a canvas: the EG-09 and EG-10
+//! water pool needs `vo-sim`, which the popup does not link.
 
 use super::*;
 
 use std::sync::OnceLock;
 
 use vo::scene::canvas::Painter;
-use vo::scene::display::{BlendMode, Paint, ShapeInstance};
+use vo::scene::display::{BlendMode, GlyphInstance, GlyphXform, Paint, ShapeInstance, NO_WORD};
 use vo::scene::emitter::{WordParticles, WordSource};
-use vo::scene::geom::{Point, RRect};
+use vo::scene::geom::{Affine, Point, RRect};
+use vo::scene::glass::{Glass, GlassKind};
 use vo::scene::material::Material;
 use vo::scene::path::{icons, make, Contour, Morph, Outline, StrokeStyle};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
 use vo::scene::taffy::JustifyContent;
+use vo::scene::text::PlacedGlyph;
 use vo::scene::text::TextLayout;
 use vo::scene::{Loop, LoopProp};
 
@@ -133,6 +153,45 @@ const TITLE_SWAP_SECS: f64 = 0.16;
 /// pending hold covers it).
 const ROW_HOLD_SECS: f64 = 0.16;
 
+/// R2-04-a: the mirror's ink, how far it is squashed, its gap under the
+/// descenders and its wobble (pixels, seconds a cycle); the water line's
+/// alpha; a ring's life, alpha, reach (quiet and loud) and flatness.
+pub(crate) const LIQUID_ECHO: &str = "liquid-echo";
+const ECHO_ALPHA: f32 = 0.16;
+const ECHO_SQUASH: f32 = 0.42;
+const ECHO_GAP: f32 = 2.0;
+const ECHO_WOBBLE: f32 = 0.9;
+const ECHO_WOBBLE_SECS: f64 = 1.8;
+const SURFACE_ALPHA: f32 = 0.14;
+const RING_SECS: f64 = 1.0;
+const RING_ALPHA: f32 = 0.2;
+const RING_REACH: (f32, f32) = (16.0, 40.0);
+const RING_FLAT: f32 = 0.2;
+/// R2-04-b: the prism's centre and size, where the bars stop short of it,
+/// the ribbons' colours, alpha at full voice, length (quiet and loud),
+/// half spread in radians, and how long the voice is averaged over.
+pub(crate) const PRISM_FOCUS: &str = "prism-focus";
+const PRISM_X: f32 = 500.0;
+const PRISM_W: f32 = 34.0;
+const PRISM_H: f32 = 30.0;
+const PRISM_IN: f32 = 478.0;
+const FAN: [u32; 5] = [0xff4d6d, 0xffb340, 0x5cf08a, 0x33c8ff, 0xa66bff];
+const FAN_ALPHA: f32 = 0.3;
+const FAN_LEN: (f32, f32) = (14.0, 76.0);
+const FAN_SPREAD: f32 = 0.3;
+const FAN_SMOOTH: f64 = 0.25;
+/// R2-04-c: a new word's dip and starting ink, the time it takes to
+/// settle, and the cone's alpha, height over the word and glide.
+pub(crate) const TYPEWRITER_SPOTLIGHT: &str = "typewriter-spotlight";
+const DIP_PX: f32 = 2.0;
+const DIP_INK: f32 = 0.85;
+const DIP_SECS: f64 = 0.12;
+const CONE_ALPHA: f32 = 0.12;
+const CONE_RISE: f32 = 70.0;
+const CONE_GLIDE: f64 = 0.18;
+/// Room tone counts as no voice.
+const VOICE_GATE: f32 = 0.04;
+
 const MAGENTA: u32 = 0xff2bd6;
 const VIOLET: u32 = 0x9b5cff;
 const CYAN: u32 = 0x19c8ff;
@@ -221,6 +280,57 @@ fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     k * k * (3.0 - 2.0 * k)
 }
 
+/// R2-04-b: the voice at `t`, averaged over the last `FAN_SMOOTH` seconds.
+fn fan_level(levels: &kit::Levels, t: f64) -> f32 {
+    const N: usize = 5;
+    (0..N)
+        .map(|i| levels.at(t - FAN_SMOOTH * i as f64 / N as f64))
+        .map(|v| if v < VOICE_GATE { 0.0 } else { v })
+        .sum::<f32>()
+        / N as f32
+}
+
+/// R2-04-b: how strong the fan is at voice `rms`, 0.25 quiet to 1 loud.
+fn fan_power(rms: f32) -> f32 {
+    0.25 + 0.75 * (rms * 2.2).clamp(0.0, 1.0)
+}
+
+/// R2-04-b: a ribbon's length at voice `rms`, in design pixels.
+fn fan_len(rms: f32) -> f32 {
+    let k = (rms * 2.2).clamp(0.0, 1.0);
+    FAN_LEN.0 + (FAN_LEN.1 - FAN_LEN.0) * k
+}
+
+/// R2-04-a: the rings alive at `t`, one per word born in the last
+/// `RING_SECS`, as (age in seconds, word's index).
+fn echo_rings(borns: &[f64], t: f64) -> Vec<(f64, usize)> {
+    borns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &b)| (0.0..RING_SECS).contains(&(t - b)).then_some((t - b, i)))
+        .collect()
+}
+
+/// R2-04-a: a ring's radius (design pixels) and alpha at `age`, from a
+/// word heard at voice `level`.
+fn echo_ring(age: f64, level: f32) -> (f32, f32) {
+    let k = (age / RING_SECS).clamp(0.0, 1.0) as f32;
+    let reach = RING_REACH.0 + (RING_REACH.1 - RING_REACH.0) * (level * 2.2).clamp(0.0, 1.0);
+    let grow = 1.0 - (1.0 - k).powi(2);
+    (reach * grow, RING_ALPHA * (1.0 - k).powf(1.5))
+}
+
+/// R2-04-c: a new word's entry: 2 px low at 85 % ink, settling on the
+/// words' 120 ms springs. Reduced motion: no dip.
+fn dip_enter(still: bool) -> Transition {
+    let enter = Transition::fade().opacity(DIP_INK);
+    if still {
+        enter
+    } else {
+        enter.offset(0.0, DIP_PX)
+    }
+}
+
 /// An element placed at `(x, y)` in its parent, out of the flow.
 fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
     e.layout(|s| {
@@ -256,7 +366,12 @@ fn fonts(reg: &FontRegistry) -> Fonts {
 /// The transcript's style, for the line fitting in `Popup::text` too.
 pub(crate) fn text_style(look: &Look) -> TextStyle {
     let s = look.width / DESIGN_W;
-    TextStyle::new(fonts(&look.fonts).text, TEXT_PX * s, TEXT_LINE * s)
+    let mut font = fonts(&look.fonts).text;
+    // R2-04-c: the typewriter face.
+    if look.on(TYPEWRITER_SPOTLIGHT) {
+        font = look.fonts.asset("typewriter").unwrap_or(font);
+    }
+    TextStyle::new(font, TEXT_PX * s, TEXT_LINE * s)
 }
 
 /// The centre of the newest transcript line, from the surface top. The card
@@ -286,6 +401,18 @@ pub struct State {
     /// A hash of the words the rows were last split from, so room tone's
     /// messages do not lay the text out again.
     rows_of: u64,
+}
+
+/// The newest transcript row, in surface pixels: its left edge and top,
+/// its words' boxes and glyphs from there, the font's descent under the
+/// baseline and the text size.
+struct NewestRow {
+    x: f32,
+    top: f32,
+    boxes: Vec<sounding::WordBox>,
+    glyphs: Vec<PlacedGlyph>,
+    descent: f32,
+    size: f32,
 }
 
 /// The card outline as two halves from the bottom middle, left and right
@@ -507,6 +634,7 @@ impl Popup {
         let card = Element::layer("card")
             .size(w, h)
             .child(at(self.sw_grid_and_wave(), 0.0, 0.0))
+            .children(self.sw_prism())
             .child(self.sw_done_mark())
             .child(self.sw_title())
             .child(self.sw_status(h));
@@ -522,7 +650,9 @@ impl Popup {
                 at(card, MARGIN, MARGIN + tall - h)
                     .motion(Prop::Position, Spring::critical_to_98(GROW_SECS)),
             )
+            .children(self.sw_spotlight(text_top))
             .child(at(self.sw_text(), MARGIN, text_top))
+            .children(self.sw_echo(text_top))
             .children(self.sw_light_line(text_top))
             .child(at(self.sw_tube(), 0.0, 0.0))
     }
@@ -824,7 +954,12 @@ impl Popup {
         let levels = self.wave.clone();
         let newest_at = self.newest_at;
         let window = l.window;
-        let (wx0, wx1) = (WAVE_X0 * s, WAVE_X1 * s);
+        // R2-04-b: the bars run into the prism, and the fan leaves it.
+        let prism = l.on(PRISM_FOCUS);
+        let fan_levels = self.kit_levels();
+        let still = self.still();
+        let wx1 = if prism { PRISM_IN } else { WAVE_X1 };
+        let (wx0, wx1) = (WAVE_X0 * s, wx1 * s);
         let half_max = WAVE_HALF * s;
         let pitch = BAR_PITCH * s;
         let bar_w = BAR_W * s;
@@ -909,6 +1044,44 @@ impl Popup {
                         r,
                         Paint::solid(hex(CYAN).fade(gone)),
                     ));
+                }
+            }
+            if prism {
+                let rms = if loading {
+                    0.0
+                } else {
+                    fan_level(&fan_levels, t)
+                };
+                let lit = open * settle * gone * FAN_ALPHA * fan_power(rms);
+                let len = if still {
+                    0.5 * (FAN_LEN.0 + FAN_LEN.1)
+                } else {
+                    fan_len(rms)
+                } * s;
+                let from = Point::new(rect.x + (PRISM_X + 0.3 * PRISM_W) * s, cy);
+                for (i, &c) in FAN.iter().enumerate() {
+                    let turn = FAN_SPREAD * (i as f32 / 2.0 - 1.0);
+                    let (dy, dx) = turn.sin_cos();
+                    // A gentle travelling wave along the ribbon, none at
+                    // the prism and none under reduced motion.
+                    let pts: Vec<Point> = (0..=16)
+                        .map(|j| {
+                            let d = len * j as f32 / 16.0;
+                            let wave = if still {
+                                0.0
+                            } else {
+                                1.4 * s
+                                    * (j as f32 / 16.0)
+                                    * (0.12 * d / s - 5.0 * t as f32 + i as f32).sin()
+                            };
+                            Point::new(from.x + dx * d - dy * wave, from.y + dy * d + dx * wave)
+                        })
+                        .collect();
+                    let end = pts[16];
+                    let style = StrokeStyle::solid(2.2 * s, hex(c))
+                        .linear(from, hex(c).fade(lit), end, hex(c).fade(0.0))
+                        .glow(3.0 * s);
+                    p.stroke(&Contour::polyline(&pts, false), &style);
                 }
             }
         })
@@ -1091,6 +1264,7 @@ impl Popup {
         };
         let held = self.now() < self.synth.row_at + ROW_HOLD_SECS;
         let dim = if self.cancelled() { 0.3 } else { 1.0 };
+        let typewriter = l.on(TYPEWRITER_SPOTLIGHT);
         // The rows sit on the bottom of the tallest card's text box: a new
         // line comes in on the last row and the older ones rise with the
         // card's top, on its spring.
@@ -1126,9 +1300,17 @@ impl Popup {
                 .color(hex(WHITE))
                 .text_halo(Color::hex(0x6a5cff, 0.9), 11.0 * s)
                 .motion(Prop::Opacity, Spring::critical_to_98(0.12))
-                .motion(Prop::Offset, Spring::POP)
-                .motion(Prop::Position, Spring::critical_to_98(0.2))
-                .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 8.0 * s)));
+                .motion(Prop::Position, Spring::critical_to_98(0.2));
+            // R2-04-c: the typewriter's dip settles with no overshoot.
+            let words = if typewriter {
+                words
+                    .motion(Prop::Offset, Spring::critical_to_98(DIP_SECS))
+                    .word_enter(self.ghost_enter(dip_enter(self.still())))
+            } else {
+                words
+                    .motion(Prop::Offset, Spring::POP)
+                    .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 8.0 * s)))
+            };
             // MO-14: the newest word's baseline follows the pitch.
             let words = self.typo_words(words);
             let words = match particles {
@@ -1244,24 +1426,12 @@ impl Popup {
         }
     }
 
-    /// MO-68: the tube's light runs from the left edge to the newest word,
-    /// strokes a line under it, holds and fades. `text_top` is the text
-    /// column's top. Under reduced motion the line sits still under the
-    /// word once it lands.
-    fn sw_light_line(&self, text_top: f32) -> Option<Element<Msg>> {
+    /// The newest row as `sw_text` splits and centres it, in surface
+    /// pixels. `text_top` is the text column's top.
+    fn sw_newest_row(&self, text_top: f32) -> Option<NewestRow> {
         let l = &self.look;
-        if !l.on(tron::LIGHT_LINE)
-            || self.edit_view.is_some()
-            || self.ended()
-            || self.extra.finish_at.is_some()
-        {
-            return None;
-        }
-        let newest = self.shown.last()?;
-        let heard = self.heard.word(newest.id)?;
         let style = text_style(l);
         let width = text_width(l);
-        // The newest row's words, as `sw_text` splits them.
         let joined: Vec<&str> = self.shown.iter().map(|w| w.text.as_str()).collect();
         let shaped = self.measure.layout(&joined.join(" "), &style, Some(width));
         let last_y = shaped.glyphs.last()?.pos.y;
@@ -1280,12 +1450,7 @@ impl Popup {
         }
         let (boxes, _) = sounding::word_boxes(&self.measure, &row, &style, None);
         let row_text: Vec<&str> = row.iter().map(|w| w.text.as_str()).collect();
-        let lw = self
-            .measure
-            .layout(&row_text.join(" "), &style, None)
-            .size
-            .w;
-        let b = boxes.iter().find(|b| b.id == newest.id)?;
+        let laid = self.measure.layout(&row_text.join(" "), &style, None);
         // The font's descent: its own line height less the baseline it sets
         // in that height.
         let own = self
@@ -1306,10 +1471,262 @@ impl Popup {
             .lines
             .first()
             .map_or(0.25 * style.size, |x| own - x.baseline);
-        let x = MARGIN + (l.width - lw) / 2.0;
-        let row_top = text_top + (swiss::MAX_LINES - 1) as f32 * style.line_height;
-        let (x0, x1) = (x + b.rect.x, x + b.rect.x + b.rect.w);
-        let y = row_top + b.baseline + descent + LIGHT_GAP;
+        Some(NewestRow {
+            x: MARGIN + (l.width - laid.size.w) / 2.0,
+            top: text_top + (swiss::MAX_LINES - 1) as f32 * style.line_height,
+            boxes,
+            glyphs: laid.glyphs.clone(),
+            descent,
+            size: style.size,
+        })
+    }
+
+    /// Whether the round 2 marks round the newest line show: while the
+    /// words come in, not while editing or after a cancel.
+    fn sw_live_row(&self) -> bool {
+        self.edit_view.is_none() && !self.cancelled() && self.extra.final_at.is_none()
+    }
+
+    /// R2-04-a: the water line under the newest row, its mirror image and
+    /// a ring from under each new word. `text_top` is the text column's top.
+    fn sw_echo(&self, text_top: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(LIQUID_ECHO)
+            || !self.sw_live_row()
+            || self.synth.row_at + ROW_HOLD_SECS > self.now()
+        {
+            return None;
+        }
+        let row = self.sw_newest_row(text_top)?;
+        let s = self.scale();
+        let still = self.still();
+        let levels = self.kit_levels();
+        // Each word's birth and the voice it was heard at.
+        let words: Vec<(f64, f32, f32)> = row
+            .boxes
+            .iter()
+            .filter_map(|b| {
+                let born = self.heard.word(b.id)?.born;
+                Some((born, row.x + b.rect.x + b.rect.w / 2.0, levels.at(born)))
+            })
+            .collect();
+        let baseline = row.boxes.first()?.baseline;
+        let water = row.top + baseline + row.descent + ECHO_GAP * s;
+        let (x0, x1) = (
+            row.x - 12.0 * s,
+            row.x + row.boxes.last().map_or(0.0, |b| b.rect.x + b.rect.w) + 12.0 * s,
+        );
+        let newest = words.iter().map(|w| w.0).fold(f64::NEG_INFINITY, f64::max);
+        let until = match (still, self.extra.finish_at) {
+            (true, _) => 0.0,
+            (false, Some(f)) => f.max(newest + RING_SECS),
+            (false, None) => f64::INFINITY,
+        };
+        let borns: Vec<f64> = words.iter().map(|w| w.0).collect();
+        let surface = Self::synthwave_surface(l);
+        let ring_y = water + (RING_REACH.1 * RING_FLAT + 1.0) * s;
+        let NewestRow {
+            x,
+            top,
+            glyphs,
+            size,
+            ..
+        } = row;
+        let canvas = Element::canvas("liquid-echo", until, move |t, r, p| {
+            let mid = (x0 + x1) / 2.0;
+            let line = |a: f32, b: f32, ca: Color, cb: Color, p: &mut Painter| {
+                let (a, b) = (
+                    Point::new(r.x + a, r.y + water),
+                    Point::new(r.x + b, r.y + water),
+                );
+                p.stroke(
+                    &Contour::polyline(&[a, b], false),
+                    &StrokeStyle::solid(1.0 * s, cb).linear(a, ca, b, cb),
+                );
+            };
+            line(
+                x0,
+                mid,
+                hex(MAGENTA).fade(0.0),
+                hex(VIOLET).fade(SURFACE_ALPHA),
+                p,
+            );
+            line(
+                mid,
+                x1,
+                hex(VIOLET).fade(SURFACE_ALPHA),
+                hex(CYAN).fade(0.0),
+                p,
+            );
+            // The mirror: the row flipped at the water line and squashed.
+            let w = r.y + water;
+            let flip = Affine {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: -ECHO_SQUASH,
+                e: 0.0,
+                f: w * (1.0 + ECHO_SQUASH),
+            };
+            p.layer(flip, 1.0, |q| {
+                for g in &glyphs {
+                    let wobble = if still {
+                        0.0
+                    } else {
+                        ECHO_WOBBLE
+                            * s
+                            * (std::f64::consts::TAU * t / ECHO_WOBBLE_SECS
+                                + 0.07 * (g.pos.x / s) as f64)
+                                .sin() as f32
+                    };
+                    q.glyph(GlyphInstance {
+                        pos: Point::new(r.x + x + g.pos.x, r.y + top + g.pos.y),
+                        size,
+                        font: g.font,
+                        glyph: g.glyph,
+                        word: NO_WORD,
+                        color: hex(WHITE).fade(ECHO_ALPHA),
+                        xform: GlyphXform {
+                            offset: Point::new(wobble, 0.0),
+                            ..GlyphXform::IDENTITY
+                        },
+                    });
+                }
+            });
+            if still {
+                return;
+            }
+            for (age, i) in echo_rings(&borns, t) {
+                let (_, cx, level) = words[i];
+                let (reach, alpha) = echo_ring(age, level);
+                let (rx, ry) = (reach * s, reach * RING_FLAT * s);
+                let pts: Vec<Point> = (0..48)
+                    .map(|k| {
+                        let u = std::f32::consts::TAU * k as f32 / 48.0;
+                        Point::new(r.x + cx + rx * u.cos(), r.y + ring_y + ry * u.sin())
+                    })
+                    .collect();
+                p.stroke(
+                    &Contour::polyline(&pts, true),
+                    &StrokeStyle::solid(1.2 * s, hex(CYAN).fade(alpha)).glow(2.0 * s),
+                );
+            }
+        })
+        .size(surface.w, surface.h);
+        Some(at(canvas, 0.0, 0.0))
+    }
+
+    /// R2-04-c: a soft cone of light from above onto the newest word,
+    /// gliding from the word before. Drawn behind the text.
+    fn sw_spotlight(&self, text_top: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(TYPEWRITER_SPOTLIGHT) || !self.sw_live_row() {
+            return None;
+        }
+        let row = self.sw_newest_row(text_top)?;
+        let s = self.scale();
+        let still = self.still();
+        let newest = self.shown.last()?;
+        let b = row.boxes.iter().find(|b| b.id == newest.id)?;
+        let born = self.heard.word(newest.id).map_or(0.0, |h| h.born);
+        let to = (row.x + b.rect.x + b.rect.w / 2.0, b.rect.w);
+        // From the word before on this row, or from where it is.
+        let from = row
+            .boxes
+            .iter()
+            .rev()
+            .nth(1)
+            .map_or(to, |p| (row.x + p.rect.x + p.rect.w / 2.0, p.rect.w));
+        let foot = row.top + b.baseline + row.descent;
+        let middle = row.top + b.rect.y + 0.5 * b.rect.h;
+        let head = row.top + b.rect.y - CONE_RISE * s;
+        let until = if still { 0.0 } else { born + CONE_GLIDE + 0.05 };
+        let surface = Self::synthwave_surface(l);
+        let canvas = Element::canvas("spotlight", until, move |t, r, p| {
+            let k = if still {
+                1.0
+            } else {
+                let u = ((t - born) / CONE_GLIDE).clamp(0.0, 1.0) as f32;
+                1.0 - (1.0 - u) * (1.0 - u)
+            };
+            let cx = r.x + from.0 + (to.0 - from.0) * k;
+            let half = 0.5 * (from.1 + (to.1 - from.1) * k) + 14.0 * s;
+            let (top, mid, bottom) = (r.y + head, r.y + middle, r.y + foot);
+            let light = lerp(hex(WHITE), hex(VIOLET), 0.25);
+            // Nested cones soften the sides: the middle gets all four.
+            for layer in 1..=4 {
+                let w = half * (0.4 + 0.15 * layer as f32);
+                let at_mid = 2.0 * s + (w - 2.0 * s) * (mid - top) / (bottom - top);
+                let a = CONE_ALPHA / 4.0;
+                // Brightest at the word's middle, fading up to the apex
+                // and down to under the descenders.
+                let piece =
+                    |y0: f32, w0: f32, y1: f32, w1: f32, a0: f32, a1: f32, p: &mut Painter| {
+                        let quad = Contour::polyline(
+                            &[
+                                Point::new(cx - w0, y0),
+                                Point::new(cx + w0, y0),
+                                Point::new(cx + w1, y1),
+                                Point::new(cx - w1, y1),
+                            ],
+                            true,
+                        );
+                        p.fill(
+                            [&quad],
+                            &StrokeStyle::solid(1.0, light).linear(
+                                Point::new(cx, y0),
+                                light.fade(a0),
+                                Point::new(cx, y1),
+                                light.fade(a1),
+                            ),
+                        );
+                    };
+                piece(top, 2.0 * s, mid, at_mid, 0.0, a, p);
+                piece(mid, at_mid, bottom, w, a, 0.0, p);
+            }
+        })
+        .size(surface.w, surface.h);
+        Some(at(canvas, 0.0, 0.0))
+    }
+
+    /// R2-04-b: the small glass prism the waveform runs into.
+    fn sw_prism(&self) -> Option<Element<Msg>> {
+        if !self.look.on(PRISM_FOCUS) || self.cancelled() || self.extra.final_at.is_some() {
+            return None;
+        }
+        let s = self.scale();
+        let glass = Glass::prism(GlassKind::Dark);
+        let glass = if self.still() { glass.still() } else { glass };
+        let prism = Element::panel("prism")
+            .size(PRISM_W * s, PRISM_H * s)
+            .glass(glass)
+            .presence(Transition::fade(), Transition::fade());
+        Some(at(
+            prism,
+            (PRISM_X - PRISM_W / 2.0) * s,
+            (WAVE_Y - PRISM_H / 2.0) * s,
+        ))
+    }
+
+    /// MO-68: the tube's light runs from the left edge to the newest word,
+    /// strokes a line under it, holds and fades. `text_top` is the text
+    /// column's top. Under reduced motion the line sits still under the
+    /// word once it lands.
+    fn sw_light_line(&self, text_top: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(tron::LIGHT_LINE)
+            || self.edit_view.is_some()
+            || self.ended()
+            || self.extra.finish_at.is_some()
+        {
+            return None;
+        }
+        let newest = self.shown.last()?;
+        let heard = self.heard.word(newest.id)?;
+        let row = self.sw_newest_row(text_top)?;
+        let b = row.boxes.iter().find(|b| b.id == newest.id)?;
+        let (x0, x1) = (row.x + b.rect.x, row.x + b.rect.x + b.rect.w);
+        let y = row.top + b.baseline + row.descent + LIGHT_GAP;
         let edge = MARGIN + 2.0 * self.scale();
         let from = heard.onset.unwrap_or(heard.born);
         let landed = heard.born.max(from + LIGHT_LEAVE);
@@ -1663,5 +2080,62 @@ mod edit_tests {
     #[test]
     fn synthwave_edit_moment_keeps_the_envelope() {
         check_edit_envelope(OsdTheme::Synthwave, &[0, 1, 2]);
+    }
+}
+
+#[cfg(test)]
+mod round2_tests {
+    use super::*;
+
+    #[test]
+    fn the_dip_stays_within_2_px_and_settles_in_120_ms() {
+        let enter = dip_enter(false);
+        let (_, dy) = enter.offset.expect("a dip");
+        assert!(dy > 0.0 && dy <= 2.0);
+        assert_eq!(enter.opacity, Some(DIP_INK));
+        let spring = Spring::critical_to_98(DIP_SECS);
+        // No overshoot on the way back, and back by 120 ms.
+        for i in 0..=60 {
+            let y = spring.eval(dy as f64, 0.0, i as f64 * 0.005).0;
+            assert!((-1e-3..=dy as f64 + 1e-6).contains(&y), "{y} at {i}");
+        }
+        assert!(spring.eval(dy as f64, 0.0, DIP_SECS).0.abs() <= 0.02 * dy as f64 + 1e-6);
+        // Reduced motion: no dip.
+        assert_eq!(dip_enter(true).offset, None);
+    }
+
+    #[test]
+    fn one_ring_per_word() {
+        let borns = [1.0, 1.3, 2.5];
+        assert_eq!(echo_rings(&borns, 0.9).len(), 0);
+        assert_eq!(echo_rings(&borns, 1.06), vec![(1.06 - 1.0, 0)]);
+        assert_eq!(echo_rings(&borns, 1.5).len(), 2);
+        // Each ring is gone a second after its word.
+        assert_eq!(echo_rings(&borns, 2.31).len(), 0);
+        assert_eq!(echo_rings(&borns, 3.6).len(), 0);
+        for age in [0.0, 0.3, 0.7, 0.999] {
+            let (reach, alpha) = echo_ring(age, 1.0);
+            assert!(reach <= RING_REACH.1 && alpha <= RING_ALPHA);
+        }
+    }
+
+    #[test]
+    fn the_fan_follows_the_voice_alone() {
+        assert_eq!(fan_len(0.0), FAN_LEN.0);
+        assert_eq!(fan_len(1.0), FAN_LEN.1);
+        let mut last = 0.0;
+        for i in 0..=20 {
+            let rms = i as f32 / 20.0;
+            assert_eq!(fan_len(rms), fan_len(rms));
+            assert!(fan_len(rms) >= last);
+            last = fan_len(rms);
+            assert!(FAN_ALPHA * fan_power(rms) <= 0.3 + 1e-6);
+        }
+        // Room tone is no voice.
+        let levels = kit::Levels {
+            levels: vec![0.02; 30].into(),
+            newest_at: 1.0,
+        };
+        assert_eq!(fan_level(&levels, 1.0), 0.0);
     }
 }
