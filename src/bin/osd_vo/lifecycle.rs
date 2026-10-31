@@ -597,6 +597,9 @@ impl Handoff {
             .fold(1.0f32, f32::max);
         let row = 2.0f32;
         let top = o.y + base - n.min(6) as f32 * row * 1.5;
+        // The right end of the bars on the receipt's row: its words wait
+        // until the bars have folded past them, so no bar strikes a word.
+        let mut reach = f32::MIN;
         for (i, line) in self.shaped.lines.iter().rev().take(6).enumerate() {
             // From the line's own place and length to its miniature in the notch.
             // A paste has already pressed every line into the reading line.
@@ -617,6 +620,11 @@ impl Handoff {
                 lerp(full.2, mini.2),
             );
             let h = lerp(1.0, row);
+            // The receipt's letters stand from about 0.5 em above its
+            // baseline down to it.
+            if (base - self.size * 0.6..base + 2.0).contains(&y) {
+                reach = reach.max(o.x + x + w);
+            }
             p.shape(ShapeInstance::rrect(
                 RRect::new(Rect::new(o.x + x, o.y + y, w.max(1.0), h), 0.0),
                 Paint::solid(self.accent.fade(0.35 + 0.45 * k)),
@@ -626,7 +634,8 @@ impl Handoff {
         if self.icon {
             lx += self.receipt_size() * ICON_ROOM;
         }
-        let a = k * k;
+        let clear = ((lx - reach) / (self.size * 0.3)).clamp(0.0, 1.0);
+        let a = k * k * clear;
         let own = self.receipt.lines.first().map_or(0.0, |l| l.baseline);
         for g in &self.receipt.glyphs {
             p.glyph(GlyphInstance {
