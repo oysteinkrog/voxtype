@@ -531,12 +531,16 @@ const PAPER: u32 = 0xE9DDC6;
 const PAPER_ALPHA: f32 = 0.85;
 const PAPER_INK: u32 = 0x1B1712;
 /// R2-22-c: spectral dust behind the ghost tail, which stands at 70 % ink;
-/// a word's dust fades over `DUST_SECS` once it commits.
+/// a word's dust fades over `DUST_SECS` once it commits. In a replay
+/// (EG-35) a thicker haze stands where the coming words will be, and
+/// clears from each as it comes.
 pub(crate) const SPECTRAL_FOCUS: &str = "spectral-focus";
 const DUST_SECS: f64 = 0.4;
 const DUST_ALPHA: f32 = 0.3;
 /// Grains per pixel of word width.
 const DUST_DENSITY: f32 = 0.35;
+/// EG-35: grains per pixel of a coming word's width, enough to hide it.
+const HAZE_DENSITY: f32 = 0.8;
 
 /// R2-22-b: the paper patch's alpha and the dark ink's over the word,
 /// `age` seconds after the word arrived. Both hold for the first half, so
@@ -1499,7 +1503,8 @@ impl Popup {
     }
 
     /// R2-22-c: fine glowing dust behind the ghost tail, and behind each
-    /// word that committed in the last `DUST_SECS`, fading as it does.
+    /// word that committed in the last `DUST_SECS`, fading as it does. In
+    /// a replay, a haze over the coming words on the lines that show.
     /// None under reduced motion.
     fn mission_dust(&self, mode: Mode, w: f32, h: f32, accent: Color) -> Option<Element<Msg>> {
         let l = &self.look;
@@ -1516,11 +1521,16 @@ impl Popup {
             width: text_width(l),
             rows: self.lines,
         };
-        let mut spots: Vec<(Rect, Option<f64>)> = self
+        let mut spots: Vec<(Rect, Option<f64>, f32)> = self
             .ghost_tail_boxes(words, &tail)
             .into_iter()
-            .map(|r| (r, None))
+            .map(|r| (r, None, DUST_DENSITY))
             .collect();
+        spots.extend(
+            self.mission_haze(words)
+                .into_iter()
+                .map(|r| (r, None, HAZE_DENSITY)),
+        );
         let ghosts = !spots.is_empty();
         let now = self.extra.now;
         let fresh: Vec<(WordId, f64)> = words
@@ -1533,7 +1543,12 @@ impl Popup {
                 sounding::word_boxes(&self.measure, words, &l.text_style(), Some(text_width(l)));
             for b in boxes {
                 if let Some(&(_, born)) = fresh.iter().find(|f| f.0 == b.id) {
-                    spots.push((b.rect, Some(born)));
+                    let density = if self.lookahead.is_some() {
+                        HAZE_DENSITY
+                    } else {
+                        DUST_DENSITY
+                    };
+                    spots.push((b.rect, Some(born), density));
                 }
             }
         }
@@ -1550,14 +1565,14 @@ impl Popup {
                 + DUST_SECS
         };
         let canvas = Element::canvas("dust", until, move |t, r, p| {
-            for &(rect, born) in &spots {
+            for &(rect, born, density) in &spots {
                 let fade = dust_fade(born.map(|b| t - b));
                 if fade <= 0.0 {
                     continue;
                 }
                 let seed = (rect.x.round() as u32).wrapping_mul(131)
                     ^ (rect.y.round() as u32).wrapping_mul(7919);
-                let n = (rect.w * DUST_DENSITY).ceil() as u32;
+                let n = (rect.w * density).ceil() as u32;
                 for g in 0..n {
                     let k = seed.wrapping_add(g * 5);
                     let (hx, hy, ph, sp) = (
@@ -1584,6 +1599,37 @@ impl Popup {
             }
         });
         Some(at(canvas.size(w, h), 0.0, 0.0))
+    }
+
+    /// EG-35: where the coming words after `words` would stand, on the
+    /// transcript's lines that show now. Empty live, where nothing knows them.
+    fn mission_haze(&self, words: &[Word]) -> Vec<Rect> {
+        let Some(l) = &self.lookahead else {
+            return Vec::new();
+        };
+        let ahead = l.ahead(words.len(), self.extra.now);
+        if ahead.is_empty() {
+            return Vec::new();
+        }
+        // Ids past any real word's, so a coming word's box is told apart.
+        let first = WordId::MAX - ahead.len() as WordId;
+        let all: Vec<Word> = words
+            .iter()
+            .cloned()
+            .chain(ahead.iter().enumerate().map(|(j, w)| Word {
+                id: first + j as WordId,
+                text: w.0.clone(),
+            }))
+            .collect();
+        let style = self.look.text_style();
+        let (boxes, _) =
+            sounding::word_boxes(&self.measure, &all, &style, Some(text_width(&self.look)));
+        let rows = self.lines.min(MAX_LINES) as f32;
+        boxes
+            .into_iter()
+            .filter(|b| b.id >= first && b.rect.y + 0.5 * b.rect.h < rows * TEXT_LINE)
+            .map(|b| b.rect)
+            .collect()
     }
 }
 
@@ -1618,6 +1664,65 @@ mod tests {
         let long = popup.fitted("cohere-transcribe-q4f1-long", &style, room);
         assert!(long.ends_with('\u{2026}') && w(&long) <= room, "{long}");
         assert_eq!(popup.fitted("Cohere", &style, room), "Cohere");
+    }
+
+    /// EG-35: the haze stands only where coming words will be, after the
+    /// shown words and on the lines that show, and never live.
+    #[test]
+    fn the_haze_covers_only_the_coming_words_in_a_replay() {
+        let cfg = OsdConfig {
+            theme: OsdTheme::Mission,
+            ..OsdConfig::default()
+        };
+        let plasma = PlasmaTheme::default();
+        let reg = load_fonts(&plasma).unwrap();
+        let look = Look::new(&cfg, &plasma, String::new(), &reg);
+        let text = "open the configuration file and set the popup theme to swiss \
+                    then make the text larger and keep the lines short for reading";
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let lookahead = replay::Lookahead {
+            words: words
+                .iter()
+                .enumerate()
+                .map(|(i, w)| (w.to_string(), 1.0 + i as f64))
+                .collect(),
+        };
+        let shown: Vec<Word> = words[..3]
+            .iter()
+            .enumerate()
+            .map(|(i, w)| Word {
+                id: i as WordId + 1,
+                text: w.to_string(),
+            })
+            .collect();
+        let mut live = Popup::new(look.clone(), &reg);
+        live.shown = shown.clone();
+        live.lines = 1;
+        live.extra.now = 3.5;
+        assert!(live.mission_haze(&shown).is_empty());
+        let mut replayed = Popup::replayed(look, &reg, Some(lookahead));
+        replayed.shown = shown.clone();
+        replayed.lines = 1;
+        replayed.extra.now = 3.5;
+        let (boxes, _) = sounding::word_boxes(
+            &replayed.measure,
+            &shown,
+            &replayed.look.text_style(),
+            Some(text_width(&replayed.look)),
+        );
+        let end = boxes.last().unwrap().rect;
+        let haze = replayed.mission_haze(&shown);
+        // "configuration" came at 3.0 s, so the haze starts after it, on
+        // its line, and no box reaches a second line.
+        assert!(!haze.is_empty());
+        for r in &haze {
+            assert!(r.x > end.x + end.w, "{r:?} after {end:?}");
+            assert!(r.y + 0.5 * r.h < TEXT_LINE, "{r:?} on the first line");
+        }
+        replayed.lines = 3;
+        assert!(replayed.mission_haze(&shown).len() > haze.len());
+        replayed.extra.now = 99.0;
+        assert!(replayed.mission_haze(&shown).is_empty());
     }
 }
 

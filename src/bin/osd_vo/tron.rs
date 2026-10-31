@@ -34,7 +34,8 @@
 //!   words, the newest in a bright slot level with the first line, the
 //!   older ones stepping up one slot per word. The text wraps narrower to
 //!   make room and the waveform ends before the column. Live it shows only
-//!   words that came; the replay preview (EG-35) is not built yet.
+//!   words that came. In a replay (EG-35) the bright slot sits higher and
+//!   the next 3 words wait faintly below it, each gliding up as it comes.
 //!   Reduced motion: the words swap slots without gliding.
 //!
 //! Geometry is laid out in the pixels of the concept image and scaled so the
@@ -134,6 +135,10 @@ const COLUMN_GAP: f32 = 14.0;
 /// Room between the column and the border's inner edge on the right.
 const COLUMN_INSET: f32 = 14.0;
 const COLUMN_SLOTS: usize = 8;
+/// EG-35: slots under the bright one that hold the coming words in a replay.
+const AHEAD_SLOTS: usize = 3;
+/// EG-35: a coming word's ink, a little under the faintest older word.
+const AHEAD_INK: f32 = 0.3;
 const SLOT: f32 = 19.0;
 const SLOT_PX: f32 = 16.0;
 
@@ -304,11 +309,10 @@ fn splash(born: f64, t: f64) -> Option<Splash> {
     }
 }
 
-/// R2-16-c: the words the column shows, oldest first: the last
-/// `COLUMN_SLOTS` on screen, which are words that came, never the ghost
-/// tail's guesses.
-fn column_words(shown: &[Word]) -> &[Word] {
-    &shown[shown.len().saturating_sub(COLUMN_SLOTS)..]
+/// R2-16-c: the words the column shows, oldest first: the last `slots`
+/// on screen, which are words that came, never the ghost tail's guesses.
+fn column_words(shown: &[Word], slots: usize) -> &[Word] {
+    &shown[shown.len().saturating_sub(slots)..]
 }
 
 /// R2-16-a: a ring's alpha at `age`, 0 to 1 of its life: full at the
@@ -855,7 +859,9 @@ impl Popup {
 
     /// R2-16-c: the last words in a column right of the text, the newest in
     /// a bright slot level with the first line and each older one a slot
-    /// higher and fainter. A new word glides them all up one slot.
+    /// higher and fainter. A new word glides them all up one slot. In a
+    /// replay (EG-35) the bright slot is `AHEAD_SLOTS` higher and the
+    /// coming words fill the slots under it.
     fn tron_column(&self, g: &Geo) -> Option<Element<Msg>> {
         if !self.look.on(LUMINOUS_TYPEWRITER) {
             return None;
@@ -870,8 +876,15 @@ impl Popup {
         // Slot tops inside the column, newest (0) at the bottom, level with
         // the first line's middle.
         let top = TEXT_TOP + 0.5 * LINE + 0.5 * SLOT - COLUMN_SLOTS as f32 * SLOT;
-        let slot_y = |i: usize| (COLUMN_SLOTS - 1 - i) as f32 * SLOT * k;
-        let words = column_words(&self.shown);
+        let ahead = self.tron_ahead();
+        let below = if self.lookahead.is_some() {
+            AHEAD_SLOTS
+        } else {
+            0
+        };
+        // Slot `i` words before the newest; a coming word's `i` is negative.
+        let slot_y = |i: isize| (COLUMN_SLOTS as isize - 1 - below as isize - i) as f32 * SLOT * k;
+        let words = column_words(&self.shown, COLUMN_SLOTS - below);
         let n = words.len();
         // A word wider than the column is cut at its edge, not wrapped.
         let mut col = at(Element::layer("column"), column_x() * k, top * k)
@@ -905,7 +918,7 @@ impl Popup {
                         .text_halo(halo, 3.0 * k)
                         .width(self.measure.layout(&w.text, &style, None).size.w.ceil() + 2.0),
                     8.0 * k,
-                    slot_y(i),
+                    slot_y(i as isize),
                 )
                 .motion(Prop::Position, glide)
                 .motion(Prop::Opacity, Spring::critical_to_98(0.25))
@@ -916,7 +929,40 @@ impl Popup {
                 ),
             );
         }
+        // A coming word is keyed by its place in the sentence, so it glides
+        // up a slot per word. When it comes it goes at once, and the word
+        // itself fades in from that same slot.
+        for (j, (place, w)) in ahead.iter().take(below).enumerate() {
+            col = col.child(
+                at(
+                    Element::label(format!("col-ahead-{place}"), w.as_str())
+                        .text_style(style)
+                        .color(hex(TEXT, AHEAD_INK))
+                        .width(self.measure.layout(w, &style, None).size.w.ceil() + 2.0),
+                    8.0 * k,
+                    slot_y(-1 - j as isize),
+                )
+                .motion(Prop::Position, glide)
+                .presence(Transition::fade(), Transition::NONE),
+            );
+        }
         Some(col)
+    }
+
+    /// EG-35: the words after the shown ones that have not come yet, with
+    /// their places in the sentence. Empty live, where nothing knows them.
+    fn tron_ahead(&self) -> Vec<(usize, String)> {
+        let Some(l) = &self.lookahead else {
+            return Vec::new();
+        };
+        let ahead = l.ahead(self.shown.len(), self.extra.now);
+        let first = l.words.len() - ahead.len();
+        ahead
+            .iter()
+            .take(AHEAD_SLOTS)
+            .enumerate()
+            .map(|(j, w)| (first + j, w.0.clone()))
+            .collect()
     }
 
     /// MO-68: the light line for the newest word, in the canvas's pixels.
@@ -1319,12 +1365,61 @@ mod tests {
                 text: format!("w{i}"),
             })
             .collect();
-        let col = column_words(&words);
+        let col = column_words(&words, COLUMN_SLOTS);
         assert_eq!(col.len(), COLUMN_SLOTS);
         assert_eq!(col.first().unwrap().id, 4);
         assert_eq!(col.last().unwrap().id, 11);
-        assert_eq!(column_words(&words[..3]).len(), 3);
-        assert!(column_words(&[]).is_empty());
+        assert_eq!(column_words(&words[..3], COLUMN_SLOTS).len(), 3);
+        assert!(column_words(&[], COLUMN_SLOTS).is_empty());
+        // A replay keeps slots under the newest for the coming words.
+        let col = column_words(&words, COLUMN_SLOTS - AHEAD_SLOTS);
+        assert_eq!(col.first().unwrap().id, 7);
+    }
+
+    /// EG-35: the column's coming words are the next ones not come yet,
+    /// at most `AHEAD_SLOTS`, and none live.
+    #[test]
+    fn the_column_shows_coming_words_only_in_a_replay() {
+        let cfg = OsdConfig {
+            theme: OsdTheme::Tron,
+            ..OsdConfig::default()
+        };
+        let plasma = PlasmaTheme::default();
+        let reg = load_fonts(&plasma).unwrap();
+        let look = Look::new(&cfg, &plasma, String::new(), &reg);
+        let words = ["open", "the", "file", "and", "set", "the", "theme"];
+        let lookahead = replay::Lookahead {
+            words: words
+                .iter()
+                .enumerate()
+                .map(|(i, w)| (w.to_string(), 1.0 + i as f64))
+                .collect(),
+        };
+        let shown: Vec<Word> = words[..2]
+            .iter()
+            .enumerate()
+            .map(|(i, w)| Word {
+                id: i as u32 + 1,
+                text: w.to_string(),
+            })
+            .collect();
+        let mut live = Popup::new(look.clone(), &reg);
+        live.shown = shown.clone();
+        live.extra.now = 2.5;
+        assert!(live.tron_ahead().is_empty());
+        let mut replayed = Popup::replayed(look, &reg, Some(lookahead));
+        replayed.shown = shown;
+        replayed.extra.now = 2.5;
+        let words = |p: &Popup| p.tron_ahead().into_iter().map(|w| w.1).collect::<Vec<_>>();
+        assert_eq!(words(&replayed), ["file", "and", "set"]);
+        assert_eq!(replayed.tron_ahead()[0].0, 2);
+        // A word whose time has passed is not ahead, though not shown yet,
+        // and each keeps its place in the sentence.
+        replayed.extra.now = 3.5;
+        assert_eq!(words(&replayed), ["and", "set", "the"]);
+        assert_eq!(replayed.tron_ahead()[0].0, 3);
+        replayed.extra.now = 9.0;
+        assert!(replayed.tron_ahead().is_empty());
     }
 }
 

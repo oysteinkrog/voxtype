@@ -56,121 +56,121 @@ use voxtype::osd::swiss::{
 };
 use voxtype::osd::visual::Color as OsdColor;
 
-#[path = "osd_vo/swiss_look.rs"]
-mod swiss_look;
-#[path = "osd_vo/showcase.rs"]
-mod showcase;
-#[path = "osd_vo/type_look.rs"]
-mod type_look;
 #[path = "osd_vo/amber.rs"]
 mod amber;
-#[path = "osd_vo/radial.rs"]
-mod radial;
-#[path = "osd_vo/tron.rs"]
-mod tron;
-#[path = "osd_vo/phosphor.rs"]
-mod phosphor;
-#[path = "osd_vo/mission.rs"]
-mod mission;
-#[path = "osd_vo/palette.rs"]
-mod palette;
-#[path = "osd_vo/dotmatrix.rs"]
-mod dotmatrix;
-#[path = "osd_vo/kit.rs"]
-mod kit;
-#[path = "osd_vo/revision.rs"]
-mod revision;
-#[path = "osd_vo/letter_fx.rs"]
-mod letter_fx;
-#[path = "osd_vo/tally.rs"]
-mod tally;
-#[path = "osd_vo/limit.rs"]
-mod limit;
-#[path = "osd_vo/swissfi.rs"]
-mod swissfi;
-#[path = "osd_vo/scope.rs"]
-mod scope;
-#[path = "osd_vo/captions.rs"]
-mod captions;
-#[path = "osd_vo/karaoke.rs"]
-mod karaoke;
-#[path = "osd_vo/island.rs"]
-mod island;
-#[path = "osd_vo/envelope.rs"]
-mod envelope;
-#[path = "osd_vo/entry_latency.rs"]
-mod entry_latency;
-#[path = "osd_vo/jarvis.rs"]
-mod jarvis;
-#[path = "osd_vo/particles.rs"]
-mod particles;
-#[path = "osd_vo/cyberpunk.rs"]
-mod cyberpunk;
-#[path = "osd_vo/set_type.rs"]
-mod set_type;
-#[path = "osd_vo/orb.rs"]
-mod orb;
-#[path = "osd_vo/chrome.rs"]
-mod chrome;
-#[path = "osd_vo/glass.rs"]
-mod glass;
-#[path = "osd_vo/biolume.rs"]
-mod biolume;
 #[path = "osd_vo/aurora.rs"]
 mod aurora;
+#[path = "osd_vo/biolume.rs"]
+mod biolume;
+#[path = "osd_vo/captions.rs"]
+mod captions;
+#[path = "osd_vo/chrome.rs"]
+mod chrome;
+#[path = "osd_vo/cyberpunk.rs"]
+mod cyberpunk;
+#[path = "osd_vo/dotmatrix.rs"]
+mod dotmatrix;
+#[path = "osd_vo/entry_latency.rs"]
+mod entry_latency;
+#[path = "osd_vo/envelope.rs"]
+mod envelope;
+#[path = "osd_vo/glass.rs"]
+mod glass;
 #[path = "osd_vo/hologram.rs"]
 mod hologram;
-#[path = "osd_vo/river.rs"]
-mod river;
-#[path = "osd_vo/wall.rs"]
-mod wall;
+#[path = "osd_vo/island.rs"]
+mod island;
+#[path = "osd_vo/jarvis.rs"]
+mod jarvis;
+#[path = "osd_vo/karaoke.rs"]
+mod karaoke;
+#[path = "osd_vo/kit.rs"]
+mod kit;
+#[path = "osd_vo/letter_fx.rs"]
+mod letter_fx;
+#[path = "osd_vo/limit.rs"]
+mod limit;
+#[path = "osd_vo/mission.rs"]
+mod mission;
+#[path = "osd_vo/orb.rs"]
+mod orb;
+#[path = "osd_vo/palette.rs"]
+mod palette;
+#[path = "osd_vo/particles.rs"]
+mod particles;
+#[path = "osd_vo/phosphor.rs"]
+mod phosphor;
+#[path = "osd_vo/radial.rs"]
+mod radial;
 #[path = "osd_vo/replay.rs"]
 mod replay;
+#[path = "osd_vo/revision.rs"]
+mod revision;
+#[path = "osd_vo/river.rs"]
+mod river;
+#[path = "osd_vo/scope.rs"]
+mod scope;
+#[path = "osd_vo/set_type.rs"]
+mod set_type;
+#[path = "osd_vo/showcase.rs"]
+mod showcase;
+#[path = "osd_vo/swiss_look.rs"]
+mod swiss_look;
+#[path = "osd_vo/swissfi.rs"]
+mod swissfi;
+#[path = "osd_vo/tally.rs"]
+mod tally;
+#[path = "osd_vo/tron.rs"]
+mod tron;
+#[path = "osd_vo/type_look.rs"]
+mod type_look;
+#[path = "osd_vo/wall.rs"]
+mod wall;
 #[path = "osd_vo/wild_motion.rs"]
 mod wild_motion;
 use wild_motion::WildMotion;
+#[path = "osd_vo/defaults.rs"]
+mod defaults;
+#[path = "osd_vo/endings.rs"]
+mod endings;
+#[path = "osd_vo/mecha.rs"]
+mod mecha;
 #[path = "osd_vo/moments.rs"]
 mod moments;
 #[path = "osd_vo/station/mod.rs"]
 mod station;
 #[path = "osd_vo/synthwave.rs"]
 mod synthwave;
-#[path = "osd_vo/mecha.rs"]
-mod mecha;
 #[path = "osd_vo/wild_space.rs"]
 mod wild_space;
-#[path = "osd_vo/defaults.rs"]
-mod defaults;
-#[path = "osd_vo/endings.rs"]
-mod endings;
 #[allow(unused_imports)]
 use endings::RewindHide;
-#[path = "osd_vo/sounding.rs"]
-mod sounding;
-#[path = "osd_vo/choice.rs"]
-mod choice;
-#[path = "osd_vo/hearing.rs"]
-mod hearing;
-#[path = "osd_vo/channels.rs"]
-mod channels;
-#[path = "osd_vo/glyph_paths.rs"]
-mod glyph_paths;
 #[path = "osd_vo/app_icon.rs"]
 mod app_icon;
-#[path = "osd_vo/lifecycle.rs"]
-mod lifecycle;
-#[path = "osd_vo/ruler.rs"]
-mod ruler;
-#[path = "osd_vo/model_signals.rs"]
-mod model_signals;
-#[path = "osd_vo/forming.rs"]
-mod forming;
-#[path = "osd_vo/display.rs"]
-mod display;
-#[path = "osd_vo/realtime.rs"]
-mod realtime;
+#[path = "osd_vo/channels.rs"]
+mod channels;
+#[path = "osd_vo/choice.rs"]
+mod choice;
 #[path = "osd_vo/correction_note.rs"]
 mod correction_note;
+#[path = "osd_vo/display.rs"]
+mod display;
+#[path = "osd_vo/forming.rs"]
+mod forming;
+#[path = "osd_vo/glyph_paths.rs"]
+mod glyph_paths;
+#[path = "osd_vo/hearing.rs"]
+mod hearing;
+#[path = "osd_vo/lifecycle.rs"]
+mod lifecycle;
+#[path = "osd_vo/model_signals.rs"]
+mod model_signals;
+#[path = "osd_vo/realtime.rs"]
+mod realtime;
+#[path = "osd_vo/ruler.rs"]
+mod ruler;
+#[path = "osd_vo/sounding.rs"]
+mod sounding;
 // Parts of the keyboard edit link the edit layer (M7.3) draws from.
 #[allow(dead_code)]
 #[path = "osd_vo/edit_link.rs"]
@@ -385,6 +385,14 @@ struct Args {
     /// `DIR/<unix ms>.jsonl`, for `--preview --replay FILE`.
     #[arg(long, value_name = "DIR", env = "VOXTYPE_OSD_VO_RECORD")]
     record: Option<PathBuf>,
+
+    /// With `--offline DIR` or `--envelope`: play a dictation recorded with
+    /// `--record` instead of the scripted one. A finished dictation's words
+    /// are known ahead, so looks that show the sentence ahead (karaoke's
+    /// coming words, Tron's word column with `luminous-typewriter`,
+    /// Mission's haze with `spectral-focus`) do so only here.
+    #[arg(long, value_name = "FILE")]
+    replay: Option<PathBuf>,
 
     /// Development: a wall of looks side by side on one surface, all fed the
     /// same dictation. With `--offline`, renders one loop of the demo.
@@ -945,9 +953,7 @@ impl Look {
             return false;
         }
         self.asked(name)
-            || (self.look_set
-                && defaults::in_set(self.theme, name)
-                && !self.removed(name))
+            || (self.look_set && defaults::in_set(self.theme, name) && !self.removed(name))
     }
 
     /// Whether the motion feature `name` is switched on. Read by the looks
@@ -961,6 +967,11 @@ impl Look {
         self.asked_or_set(name)
             || (self.asked_or_set(choice::LOOK_CHOICE)
                 && choice::picks(self.theme).contains(&name)
+                && !self.removed(name))
+            // R2-24-a: River's ink reveal writes with the stroke-write pen.
+            || (name == glyph_paths::WRITE
+                && self.theme == OsdTheme::River
+                && self.asked_or_set(river::INK_REVEAL)
                 && !self.removed(name))
     }
 
@@ -985,7 +996,11 @@ impl Look {
         }
         let mark = MarginMark::new(self.accent);
         Some(if self.on("reduced-motion") {
-            MarginMark { travel: Spring::critical_to_98(0.001), fade: 0.001, ..mark }
+            MarginMark {
+                travel: Spring::critical_to_98(0.001),
+                fade: 0.001,
+                ..mark
+            }
         } else {
             mark
         })
@@ -1017,9 +1032,16 @@ impl Look {
         if !self.on("overflow-spine") {
             return None;
         }
-        let spine = Spine { y: 1.5, ..Spine::new(self.accent) };
+        let spine = Spine {
+            y: 1.5,
+            ..Spine::new(self.accent)
+        };
         Some(if self.on("reduced-motion") {
-            Spine { hold: 0.0, close: 0.0, ..spine }
+            Spine {
+                hold: 0.0,
+                close: 0.0,
+                ..spine
+            }
         } else {
             spine
         })
@@ -1793,9 +1815,20 @@ struct Popup {
     /// The text the words were last built from: the preview, or after an
     /// edit the edited text and the speech since.
     source: String,
+    /// A replayed dictation's words ahead of time (EG-35); None live and in
+    /// scripted runs, which cannot know a word before it is spoken.
+    lookahead: Option<Arc<replay::Lookahead>>,
 }
 
 impl Popup {
+    /// A popup playing back a recorded dictation, with its words ahead.
+    fn replayed(look: Look, fonts: &FontRegistry, lookahead: Option<replay::Lookahead>) -> Popup {
+        Popup {
+            lookahead: lookahead.map(Arc::new),
+            ..Popup::scripted(look, fonts)
+        }
+    }
+
     /// A popup for a scripted run: the look chord steps the look, unsaved.
     fn scripted(look: Look, fonts: &FontRegistry) -> Popup {
         Popup {
@@ -1880,6 +1913,7 @@ impl Popup {
             step_seen: false,
             picked_at: None,
             live_surface: false,
+            lookahead: None,
         }
     }
 
@@ -1900,9 +1934,11 @@ impl Popup {
                 finishing: false,
             };
         }
-        if let Some((state, detail)) =
-            correction_note::status(self.correction_view(), &self.correction_note, self.extra.now)
-        {
+        if let Some((state, detail)) = correction_note::status(
+            self.correction_view(),
+            &self.correction_note,
+            self.extra.now,
+        ) {
             return StatusLine {
                 state,
                 detail,
@@ -3197,7 +3233,14 @@ fn main() -> anyhow::Result<()> {
         return run_wall(&args, &cfg, &theme, stop_hint(&hotkey), fonts);
     }
     if args.envelope {
-        return envelope::run(look, fonts, args.fps, args.cancel, args.moment.as_deref());
+        return envelope::run(
+            look,
+            fonts,
+            args.fps,
+            args.cancel,
+            args.moment.as_deref(),
+            args.replay.as_deref(),
+        );
     }
     if args.entry_latency {
         return entry_latency::run(look, fonts, args.fps, args.moment.as_deref());
@@ -3207,6 +3250,9 @@ fn main() -> anyhow::Result<()> {
     }
     if args.exit_check {
         return exit_check(look, fonts, args.fps, args.cancel, args.moment.as_deref());
+    }
+    if let (Some(dir), Some(file)) = (&args.offline, &args.replay) {
+        return replay::offline(look, fonts, dir, args.fps, file, args.gpu_times);
     }
     if let (Some(dir), Some(m)) = (&args.offline, &args.moment) {
         return moments::offline(look, fonts, dir, args.fps, m, args.gpu_times);
@@ -3610,7 +3656,11 @@ fn demo_delivery(text: &str) -> voxtype::osd::outcome::Delivery {
         chars,
         method: method.into(),
         enter: how.ends_with("-enter"),
-        output_ms: if method == "wtype" { chars as u64 * 3 } else { 40 },
+        output_ms: if method == "wtype" {
+            chars as u64 * 3
+        } else {
+            40
+        },
         latency_ms: Some(620),
         audio_s: Some(6.4),
     }
@@ -4126,8 +4176,18 @@ mod tests {
         let mut frames = |amp: f32| {
             seq += 2;
             vec![
-                AudioFrame { seq: seq - 1, min: -amp, max: amp, peak_dbfs: 0.0 },
-                AudioFrame { seq, min: -amp, max: amp, peak_dbfs: 0.0 },
+                AudioFrame {
+                    seq: seq - 1,
+                    min: -amp,
+                    max: amp,
+                    peak_dbfs: 0.0,
+                },
+                AudioFrame {
+                    seq,
+                    min: -amp,
+                    max: amp,
+                    peak_dbfs: 0.0,
+                },
             ]
         };
         // Speech: every vblank.

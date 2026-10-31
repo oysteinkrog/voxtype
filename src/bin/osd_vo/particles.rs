@@ -42,7 +42,8 @@ use vo::scene::emitter::{
     WordParticles,
 };
 use vo::scene::geom::{Point, RRect};
-use vo::scene::path::{icons, make, Morph, Outline, StrokeStyle};
+use vo::scene::glass::{Glass, GlassKind, GlassShape};
+use vo::scene::path::{icons, make, Contour, Morph, Outline, StrokeStyle};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
 use vo::scene::{MarkShape, WordMark};
@@ -123,6 +124,93 @@ fn letters() -> wild_motion::LetterPhysics {
 const KICK_SECS: f64 = 0.12;
 const KICK_MAX: f32 = 1.5;
 const MORPH_SECS: f64 = 0.35;
+
+/// R2-09-a: ink round the button and a thin ribbon of it behind the text,
+/// both stirred by the voice. The newest word blooms from 70 % to full ink
+/// in `INK_BLOOM_SECS`. Drawn on the CPU: the popup has no fluid painter.
+pub(crate) const INK_FLOW: &str = "ink-flow";
+const INK_BLOBS: usize = 7;
+const INK_ALPHA: f32 = 0.16;
+/// The ribbon's alpha, and its alpha on the newest line.
+const RIBBON_ALPHA: f32 = 0.1;
+const RIBBON_NEWEST: f32 = 0.06;
+const INK_BLOOM_SECS: f64 = 0.3;
+/// R2-09-b: a beam enters a small glass prism left of the button and leaves
+/// as a spectrum fan; the newest word starts in the spectrum and goes back to
+/// its own colours over `SPECTRUM_SECS`.
+pub(crate) const PRISM_REVEAL: &str = "prism-reveal";
+const FAN_ALPHA: f32 = 0.2;
+/// The fan's half angle in degrees: quiet, and added at full voice.
+const FAN_HALF: (f32, f32) = (3.0, 5.0);
+const SPECTRUM_SECS: f64 = 0.6;
+const SPECTRUM: [u32; 6] = [0xff6b8a, 0xffb35c, 0xffe86b, 0x7dff9a, 0x6bc8ff, 0xa98bff];
+/// R2-09-c: the newest word's letters set in 20 ms apart, and the dots round
+/// the text, the look's guide, step on `RULER_STEP` degrees a word.
+pub(crate) const LETTERPRESS_BUILD: &str = "letterpress-build";
+const RULER_STEP: f32 = 4.0;
+const RULER_SECS: f64 = 0.12;
+// The fan and the ink stay faint: at most 25 % and 20 % on the newest line.
+const _: () = assert!(FAN_ALPHA <= 0.25 && RIBBON_NEWEST <= 0.2 && RIBBON_ALPHA <= 0.2);
+
+/// R2-09-c: a letter falls 3 px at most, lands in 60 ms with one short
+/// press and is locked 160 ms after it starts.
+fn press() -> wild_motion::LetterPhysics {
+    wild_motion::LetterPhysics {
+        drop: 3.0,
+        land: 0.06,
+        restitution: 0.2,
+        stagger: 0.02,
+        nudge: 0.0,
+        drift: 0.0,
+        lock: 0.16,
+        ..wild_motion::LetterPhysics::default()
+    }
+}
+
+/// R2-09-a: the ink blobs round the button at `t` and voice level `level`:
+/// each one's offset from the button's centre, radius (design pixels) and
+/// alpha. Still at `t` 0 and no voice under reduced motion.
+fn ink_blobs(t: f64, level: f32) -> [(Point, f32, f32); INK_BLOBS] {
+    let level = (level * 2.6).clamp(0.0, 1.0);
+    std::array::from_fn(|i| {
+        let k = i as f32 / INK_BLOBS as f32;
+        let dir = if i % 3 == 0 { -1.0 } else { 1.0 };
+        let a = k * std::f32::consts::TAU + dir * (t * (0.18 + 0.05 * k as f64)) as f32;
+        let wave = (t * 0.7 + i as f64 * 1.3).sin() as f32;
+        let reach = DISC_R + 9.0 + 4.0 * wave + 6.0 * level;
+        let at = Point::new(reach * a.cos(), 0.8 * reach * a.sin());
+        (at, 9.0 + 5.0 * level, INK_ALPHA * (0.6 + 0.4 * level))
+    })
+}
+
+/// R2-09-a: the ribbon's height above its middle line at `u` (0 to 1 across
+/// the text) at `t` and voice level `level`, in design pixels.
+fn ribbon_y(u: f32, t: f64, level: f32) -> f32 {
+    let level = (level * 2.6).clamp(0.0, 1.0);
+    let phase = u as f64 * std::f64::consts::TAU * 1.5 - t * 1.2;
+    (3.0 + 6.0 * level) * phase.sin() as f32 * (std::f32::consts::PI * u).sin()
+}
+
+/// R2-09-b: the fan's half angle at voice level `level`, in radians.
+fn fan_half(level: f32) -> f32 {
+    (FAN_HALF.0 + FAN_HALF.1 * (level * 2.6).clamp(0.0, 1.0)).to_radians()
+}
+
+/// R2-09-b: how far the newest word is back to its own colours, `age`
+/// seconds after it came: 0 all spectrum, 1 its own colours.
+fn spectrum_back(age: f64) -> f32 {
+    ease_out(age / SPECTRUM_SECS) as f32
+}
+
+/// R2-09-c: how far the guide dots have stepped on at `t`, in radians, for
+/// words that came at `borns`.
+fn ruler_turn(t: f64, borns: &[f64]) -> f32 {
+    borns
+        .iter()
+        .map(|b| RULER_STEP * ease_out((t - b) / RULER_SECS) as f32)
+        .sum::<f32>()
+        .to_radians()
+}
 
 const CYAN: u32 = 0x2fc8ff;
 const BLUE: u32 = 0x3a5cff;
@@ -373,7 +461,7 @@ impl StillSwirl {
 }
 
 /// The idle dots round the text box, in the card's own space.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct IdleDots {
     card: Size,
     /// The text box and the newest line's band within it.
@@ -381,6 +469,8 @@ struct IdleDots {
     newest: (f32, f32),
     s: f32,
     shown_at: f64,
+    /// When each word came, for `letterpress-build`'s step; else none.
+    steps: Arc<[f64]>,
 }
 
 impl IdleDots {
@@ -395,7 +485,8 @@ impl IdleDots {
         );
         let newest = (card.y + self.newest.0, card.y + self.newest.1);
         let (cx, cy) = (text.x + text.w / 2.0, text.y + text.h / 2.0);
-        let turn = ((t - self.shown_at) * IDLE_DEG_PER_S).to_radians() as f32;
+        let turn =
+            ((t - self.shown_at) * IDLE_DEG_PER_S).to_radians() as f32 + ruler_turn(t, &self.steps);
         let hash = |i: u32, k: u32| {
             let x = (i.wrapping_mul(0x9E37_79B9) ^ k).wrapping_mul(0x85EB_CA6B);
             ((x >> 16) & 0xFFFF) as f32 / 65535.0
@@ -765,6 +856,7 @@ impl Popup {
                 0.0,
                 y0 + RING_Y * s - band.h / 2.0,
             ))
+            .children(self.particles_r2(phase, x0, y0, surface))
             .child(at(
                 self.particles_button(phase),
                 x0 + l.width / 2.0 - DISC_R * s,
@@ -821,6 +913,11 @@ impl Popup {
             newest,
             s,
             shown_at: self.shown_at,
+            steps: if l.on(LETTERPRESS_BUILD) {
+                self.particles_borns()
+            } else {
+                Arc::from([])
+            },
         };
         Some(at(
             Element::canvas("idle-dots", f64::INFINITY, move |t, r, p| {
@@ -831,6 +928,161 @@ impl Popup {
             x0,
             y0,
         ))
+    }
+
+    /// When each shown word came, oldest first.
+    fn particles_borns(&self) -> Arc<[f64]> {
+        self.shown
+            .iter()
+            .filter_map(|w| self.heard.word(w.id).map(|h| h.born))
+            .collect()
+    }
+
+    /// The newest word's colours, left, middle and right. With
+    /// `prism-reveal` a new word starts in the spectrum and goes back to its
+    /// own colours over `SPECTRUM_SECS`; not under reduced motion.
+    fn particles_newest_ramp(&self) -> [Color; 3] {
+        let own = [hex(NEWEST_LEFT), hex(NEWEST_MID), hex(NEWEST_RIGHT)];
+        if !self.look.on(PRISM_REVEAL) || self.still() {
+            return own;
+        }
+        let Some(born) = self
+            .shown
+            .last()
+            .and_then(|w| self.heard.word(w.id))
+            .map(|h| h.born)
+        else {
+            return own;
+        };
+        let k = spectrum_back(self.extra.now - born);
+        let spectrum = [hex(SPECTRUM[0]), hex(SPECTRUM[2]), hex(SPECTRUM[4])];
+        std::array::from_fn(|i| mix(spectrum[i], own[i], k))
+    }
+
+    /// The round-2 motions (R2-09) under the button: the ink round it and
+    /// behind the text, and the prism with its beam and fan. Gone once done.
+    fn particles_r2(&self, phase: Phase, x0: f32, y0: f32, surface: Size) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        if phase == Phase::Done || self.edit_view.is_some() {
+            return Vec::new();
+        }
+        let s = scale(l);
+        let mic = Point::new(x0 + l.width / 2.0, y0 + RING_Y * s);
+        let still = self.still();
+        let levels = self.kit_levels();
+        let mut out = Vec::new();
+        if l.on(INK_FLOW) {
+            let (tx, ty) = self.particles_text_at(x0, y0);
+            let lines = self.lines.max(1) as f32;
+            let text = Rect::new(tx, ty, TEXT_W * s, lines * TEXT_LINE * s);
+            let newest = (
+                ty + (lines - 1.0) * TEXT_LINE * s,
+                ty + lines * TEXT_LINE * s,
+            );
+            let levels = levels.clone();
+            let ink = Element::canvas("ink", f64::INFINITY, move |t, r, p| {
+                let (t, level) = if still { (0.0, 0.0) } else { (t, levels.at(t)) };
+                let o = Point::new(r.x, r.y);
+                for (c, rad, a) in ink_blobs(t, level) {
+                    let at = Point::new(o.x + mic.x + c.x * s, o.y + mic.y + c.y * s);
+                    p.shape(ShapeInstance::circle(
+                        at,
+                        rad * s,
+                        Paint::glow(hex(BLUE).fade(a), rad * s, 0.5),
+                    ));
+                }
+                let mid = text.y + text.h / 2.0;
+                let n = (text.w / (6.0 * s)) as usize;
+                for i in 0..=n {
+                    let u = i as f32 / n as f32;
+                    let (x, y) = (text.x + u * text.w, mid + ribbon_y(u, t, level) * s);
+                    let on_newest = y > newest.0 - 4.0 * s && y < newest.1 + 4.0 * s;
+                    let a = if on_newest {
+                        RIBBON_NEWEST
+                    } else {
+                        RIBBON_ALPHA
+                    };
+                    let a = a * (std::f32::consts::PI * u).sin();
+                    let c = mix(hex(CYAN), hex(VIOLET), u);
+                    p.shape(ShapeInstance::circle(
+                        Point::new(o.x + x, o.y + y),
+                        3.0 * s,
+                        Paint::glow(c.fade(a), 4.0 * s, 0.5),
+                    ));
+                }
+            })
+            .size(surface.w, surface.h)
+            .presence(Transition::fade(), Transition::fade());
+            out.push(at(ink, 0.0, 0.0));
+        }
+        if l.on(PRISM_REVEAL) {
+            let side = 20.0 * s;
+            let cube = Point::new(mic.x - 118.0 * s, mic.y);
+            let from = x0 + 30.0 * s;
+            let to = mic.x + 230.0 * s;
+            let fan = Element::canvas("prism-fan", f64::INFINITY, move |t, r, p| {
+                let level = if still { 0.0 } else { levels.at(t) };
+                let o = Point::new(r.x, r.y);
+                let beam = [
+                    Point::new(o.x + from, o.y + cube.y),
+                    Point::new(o.x + cube.x - side / 2.0, o.y + cube.y),
+                ];
+                p.stroke(
+                    &Contour::polyline(&beam, false),
+                    &StrokeStyle::solid(1.5 * s, Color::hex(INK, 0.2))
+                        .linear(beam[0], Color::hex(INK, 0.0), beam[1], Color::hex(INK, 0.2))
+                        .glow(3.0 * s),
+                );
+                let apex = Point::new(o.x + cube.x + 0.3 * side, o.y + cube.y);
+                let half = fan_half(level);
+                let reach = to - cube.x;
+                let n = SPECTRUM.len();
+                for (i, &c) in SPECTRUM.iter().enumerate() {
+                    let a0 = -half + 2.0 * half * i as f32 / n as f32;
+                    let a1 = -half + 2.0 * half * (i + 1) as f32 / n as f32;
+                    let end = Point::new(o.x + to, apex.y);
+                    let band = [
+                        apex,
+                        Point::new(end.x, apex.y + reach * a0.tan()),
+                        Point::new(end.x, apex.y + reach * a1.tan()),
+                    ];
+                    p.fill(
+                        &[Contour::polyline(&band, true)],
+                        &StrokeStyle::solid(0.0, Color::hex(c, FAN_ALPHA)).linear(
+                            apex,
+                            Color::hex(c, FAN_ALPHA),
+                            end,
+                            Color::hex(c, 0.0),
+                        ),
+                    );
+                }
+            })
+            .size(surface.w, surface.h)
+            .presence(Transition::fade(), Transition::fade());
+            out.push(at(fan, 0.0, 0.0));
+            let glass = Glass {
+                sheen: false,
+                shadow: [0.0; 3],
+                blur_behind: false,
+                tint: Color::hex(MIC, 0.12),
+                edge_alpha: 0.35,
+                rim: 0.8,
+                bevel: 4.0,
+                grain: 0.0,
+                dispersion: 0.6,
+                ..Glass::of_kind(GlassKind::Dark)
+            }
+            .with_shape(GlassShape::Polygon {
+                sides: 4,
+                turn: 0.0,
+            });
+            let prism = Element::panel("prism")
+                .size(side, side)
+                .glass(glass)
+                .presence(Transition::fade(), Transition::fade());
+            out.push(at(prism, cube.x - side / 2.0, cube.y - side / 2.0));
+        }
+        out
     }
 
     /// The swirl as light: strands, rings and dust, in a band `surface`.
@@ -1019,19 +1271,26 @@ impl Popup {
             .color(hex(INK))
             .motion(Prop::Opacity, Spring::critical_to_98(0.10))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(self.ghost_enter(Transition::fade().opacity(0.0)))
+            .word_enter(self.ghost_enter(if l.on(INK_FLOW) {
+                // R2-09-a: the word blooms from 70 % ink, also under reduced motion.
+                Transition::fade().opacity(0.7)
+            } else {
+                Transition::fade().opacity(0.0)
+            }))
             // A revised word on the reading line stays readable: it starts at the
             // reading-line ink (0.7), as a rewrapped or rolled word does.
             .word_change(Transition::fade().opacity(0.7))
             // The newest word runs from pale blue through blue to violet, as drawn.
             .current_word(self.shown.last().map(|w| w.id))
-            .word_mark(
-                WordMark::new(MarkShape::Underline, Color::TRANSPARENT).accent_gradient(
-                    hex(NEWEST_LEFT),
-                    hex(NEWEST_MID),
-                    hex(NEWEST_RIGHT),
-                ),
-            );
+            .word_mark({
+                let [c0, mid, c1] = self.particles_newest_ramp();
+                WordMark::new(MarkShape::Underline, Color::TRANSPARENT).accent_gradient(c0, mid, c1)
+            });
+        let words = if l.on(INK_FLOW) {
+            words.motion(Prop::Opacity, Spring::critical_to_98(INK_BLOOM_SECS))
+        } else {
+            words
+        };
         let words = if l.on(wild_motion::LETTER_PHYSICS) {
             // The letters' drop moves the glyphs: a revision swaps them at once, as the
             // particle text does.
@@ -1039,7 +1298,9 @@ impl Popup {
         } else {
             words
         };
-        let words = if self.still() {
+        // R2-09-c sets the letters in whole: formed from dust, their 3 px fall
+        // and press could not be seen.
+        let words = if self.still() || l.on(LETTERPRESS_BUILD) {
             words
         } else {
             words.word_particles(WordParticles {
@@ -1069,6 +1330,15 @@ impl Popup {
             },
         )
         .wild_motion_with(self, letters());
+        let words = if l.on(LETTERPRESS_BUILD) && !self.still() {
+            // R2-09-c: the letters are set in one after another, readable at once.
+            words
+                .word_enter(self.ghost_enter(Transition::fade().opacity(0.7)))
+                .word_revise(vo::scene::flow::Revise::Swap)
+                .letter_physics(press())
+        } else {
+            words
+        };
         let (style, w) = (text_style(l), text_width(l));
         // For a rewind the live text turns clear rather than fading: particle text that
         // fades scatters into dots.
@@ -1517,5 +1787,65 @@ mod edit_tests {
                 "{outcome:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+
+    /// R2-09-c: a letter on the newest line falls 3 px at most, stays in
+    /// its column, and is exactly in place once the word is set.
+    #[test]
+    fn letterpress_letters_land_within_three_pixels() {
+        let p = press();
+        let starts: Vec<f64> = (0..6).map(|k| k as f64 * p.stagger).collect();
+        let end = p.settled_at(starts.iter().copied());
+        for k in 0..starts.len() {
+            let mut t = 0.0;
+            while t < end {
+                let l = p.letter(&starts, k, t, TEXT_PX, 7, true);
+                assert!(l.dy.abs() <= 3.0 && l.dx == 0.0, "{k} {t} {l:?}");
+                t += 0.004;
+            }
+            assert_eq!(p.letter(&starts, k, end, TEXT_PX, 7, true).dy, 0.0);
+        }
+        assert!(p.lock < 0.2);
+    }
+
+    /// R2-09-b: the spectrum is gone 600 ms after the word came, and the fan
+    /// stays faint.
+    #[test]
+    fn the_spectrum_fill_is_gone_after_600_ms() {
+        assert_eq!(spectrum_back(0.0), 0.0);
+        assert_eq!(spectrum_back(SPECTRUM_SECS), 1.0);
+        assert_eq!(spectrum_back(5.0), 1.0);
+        assert!(fan_half(1.0) <= 8.0f32.to_radians() + 1e-6);
+    }
+
+    /// R2-09-a: the ink is faint, at most 20 % on the newest line, and a
+    /// pure function of time and level.
+    #[test]
+    fn the_ink_stays_faint() {
+        for level in [0.0, 0.3, 1.0] {
+            assert_eq!(ink_blobs(1.3, level), ink_blobs(1.3, level));
+            for (c, r, a) in ink_blobs(1.3, level) {
+                assert!(a <= INK_ALPHA);
+                // The ink stays round the button, clear of the text.
+                assert!(RING_Y + c.y + r < TEXT_TOP, "{c:?} {r}");
+            }
+            assert!(ribbon_y(0.5, 2.0, level).abs() <= 9.0);
+        }
+    }
+
+    /// R2-09-c: the guide dots step on once a word and then hold.
+    #[test]
+    fn the_guide_steps_on_once_a_word() {
+        let borns = [1.0, 2.0];
+        assert_eq!(ruler_turn(0.5, &borns), 0.0);
+        let one = ruler_turn(1.5, &borns);
+        assert!((one - RULER_STEP.to_radians()).abs() < 1e-6);
+        assert_eq!(ruler_turn(1.9, &borns), one);
+        assert!((ruler_turn(3.0, &borns) - 2.0 * one).abs() < 1e-6);
     }
 }

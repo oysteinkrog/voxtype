@@ -10,6 +10,22 @@
 //! the tendrils and dims the words. While the popup is open and listening
 //! the bell's glow breathes and the tendrils sway; under reduced motion
 //! nothing in them moves.
+//!
+//! Round 2 (R2-15), each opt-in by its motion feature:
+//!
+//! - `breathing-membrane`: three faint membranes round the bell's rim
+//!   ripple slowly and grow a little with the smoothed voice, then settle
+//!   when it pauses. Each stays at 20 % alpha or less. Reduced motion:
+//!   still membranes.
+//! - `prism-light`: soft rays fall through the top of the bell and on
+//!   through the tendrils, brighter with the voice, and a rainbow band with
+//!   a few glints runs along the rim. The rays stop above the words, stay
+//!   at 12 % alpha or less, and fade out over 600 ms when the dictation
+//!   finishes. Reduced motion: a still band, no rays or glints.
+//! - `ink-reveal`: each word feeds soft ink at its box on a fixed tick; the
+//!   ink swirls out round and behind the text and drifts away as wisps.
+//!   One hue, 22 % alpha at most and 16 % over the newest line. Reduced
+//!   motion: a still wash behind the words.
 
 use super::glyph_paths::PathsText;
 use super::kit::{at, ease_out, hex, mix, Levels, Mode};
@@ -17,9 +33,12 @@ use super::*;
 
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
-use vo::scene::geom::{Point, Rect};
+use vo::scene::geom::{Point, RRect, Rect};
 use vo::scene::path::{make, Contour, StrokeStyle};
 use vo::scene::{Loop, LoopProp};
+use vo_core::words::WordId;
+
+use std::collections::HashMap;
 
 /// Colours sampled from the redesign.
 const DEEP: u32 = 0x040a26;
@@ -88,6 +107,43 @@ const GLOW_PERIOD: f64 = 4.0;
 const SWAY_PX: f32 = 4.0;
 const SWAY_HZ: f64 = 0.25;
 const SWAY_LAG: f32 = 2.4;
+
+/// R2-15 round 2 features and their limits.
+pub(crate) const BREATHING_MEMBRANE: &str = "breathing-membrane";
+pub(crate) const PRISM_LIGHT: &str = "prism-light";
+pub(crate) const INK_REVEAL: &str = "ink-reveal";
+/// The membranes: their size against the rim, their alpha, how much the
+/// voice grows them, over how many seconds the voice is smoothed, and how
+/// far (design units) and how fast (radians a second) they ripple.
+const MEMBRANES: [f32; 3] = [0.96, 1.0, 1.035];
+const MEMBRANE_ALPHA: f32 = 0.2;
+const MEMBRANE_GROW: f32 = 0.04;
+/// The membranes' sides grow at most this much, so their glow stays on
+/// the surface; the voice grows them up and down the rest.
+const MEMBRANE_SIDE: f32 = 1.04;
+const MEMBRANE_SMOOTH: f64 = 0.3;
+const MEMBRANE_RIPPLE: f32 = 3.0;
+const MEMBRANE_SPEED: f32 = 0.7;
+/// The rays: how many, their alpha at full voice, where those above the
+/// words stop (design units, above `CLIP_TOP`), and how long they take to
+/// fade on a finish. The band along the rim: its alpha and pieces.
+const RAYS: usize = 9;
+const RAY_ALPHA: f32 = 0.12;
+const RAY_STOP: f32 = 124.0;
+const PRISM_FADE: f64 = 0.6;
+const BAND_ALPHA: f32 = 0.3;
+const BAND_SEGS: usize = 90;
+const GLINTS: u32 = 6;
+/// The ink: fed on a fixed tick, gone after its life, its strongest alpha,
+/// the share of it left over the newest line, and the reduced wash.
+const INK_TICK: f64 = 0.1;
+const INK_LIFE: f64 = 2.4;
+const INK_ALPHA: f32 = 0.22;
+const INK_NEWEST: f32 = 0.7;
+const INK_WASH: f32 = 0.06;
+const INK: u32 = 0x5a6cff;
+const _: () = assert!(MEMBRANE_ALPHA <= 0.2 && RAY_ALPHA <= 0.12 && INK_ALPHA * INK_NEWEST <= 0.2);
+const _: () = assert!(RAY_STOP < CLIP_TOP);
 
 // The waveform, the words and the status sit inside the bell, and the
 // longest tendril inside the surface.
@@ -479,6 +535,288 @@ impl Wave {
     }
 }
 
+/// R2-15-a: the voice at `t`, averaged over the last `MEMBRANE_SMOOTH`
+/// seconds, room tone counted as none.
+fn smoothed(levels: &Levels, t: f64) -> f32 {
+    const N: usize = 6;
+    (0..N)
+        .map(|i| {
+            let v = levels.at(t - MEMBRANE_SMOOTH * i as f64 / N as f64);
+            if v < WAVE_GATE {
+                0.0
+            } else {
+                v
+            }
+        })
+        .sum::<f32>()
+        / N as f32
+}
+
+/// R2-15-a: the membranes' scale at smoothed voice `rms`, 1 quiet.
+fn membrane_scale(rms: f32) -> f32 {
+    1.0 + MEMBRANE_GROW * (rms * 2.2).clamp(0.0, 1.0)
+}
+
+/// R2-15-b: how strong the rays and glints are at `t`: full while
+/// listening, gone `PRISM_FADE` after the dictation finishes.
+fn prism_power(mode: Mode, finish_at: Option<f64>, t: f64) -> f32 {
+    match (mode, finish_at) {
+        (Mode::Cancelled, _) => 0.0,
+        (Mode::Loading | Mode::Listening, None) => 1.0,
+        (_, Some(f)) => (1.0 - ((t - f) / PRISM_FADE).clamp(0.0, 1.0)) as f32,
+        (_, None) => 0.0,
+    }
+}
+
+/// A colour `u` of the way round a soft rainbow, wrapping.
+fn spectrum(u: f32) -> Color {
+    const RING: [u32; 5] = [CYAN, BLUE, VIOLET, 0xff7ad9, 0xffd27a];
+    let x = u.rem_euclid(1.0) * RING.len() as f32;
+    let i = x.floor() as usize % RING.len();
+    mix(hex(RING[i]), hex(RING[(i + 1) % RING.len()]), x.fract())
+}
+
+/// R2-15-c: the ink at `t`, as (centre, radius, alpha), in the surface's
+/// space. `words` are each word's middle and when it came, oldest first.
+/// The voice feeds the newest word on a fixed `INK_TICK`, so the ink at
+/// `t` depends on `t`, the words and the levels only. Ink over `band`, the
+/// newest line's top and bottom, keeps `INK_NEWEST` of its strength.
+fn ink_puffs(
+    t: f64,
+    words: &[(f64, Point)],
+    band: (f32, f32),
+    middle: Point,
+    k: f32,
+    level: impl Fn(f64) -> f32,
+) -> Vec<(Point, f32, f32)> {
+    let ticks = (INK_LIFE / INK_TICK).round() as i64;
+    let newest = (t / INK_TICK).floor() as i64;
+    let mut out = Vec::new();
+    for n in (newest - ticks + 1)..=newest {
+        let s = n as f64 * INK_TICK;
+        let age = t - s;
+        if !(0.0..INK_LIFE).contains(&age) {
+            continue;
+        }
+        let Some(&(born, at)) = words.iter().rev().find(|w| w.0 <= s) else {
+            continue;
+        };
+        // A word feeds for a while after it came, as long as the voice does.
+        let fresh = (1.0 - (s - born) / 1.5).clamp(0.0, 1.0) as f32;
+        let feed = (level(s) * 2.6).clamp(0.0, 1.0).max(0.6 * fresh);
+        if feed < 0.05 {
+            continue;
+        }
+        let u = (age / INK_LIFE) as f32;
+        let a = age as f32;
+        for m in 0..2u32 {
+            let seed = (n as u32).wrapping_mul(2).wrapping_add(m);
+            // Out from the text's middle, curling as it goes.
+            let (dx, dy) = (at.x - middle.x, at.y - middle.y);
+            let len = (dx * dx + dy * dy).sqrt().max(1.0);
+            let (ox, oy) = (dx / len, dy / len);
+            let spin = 2.2 * a + std::f32::consts::TAU * noise(seed + 3);
+            let curl = (10.0 + 8.0 * noise(seed + 5)) * a.min(1.2) * k;
+            let push = (12.0 + 14.0 * noise(seed)) * a * k;
+            let x = at.x + ox * push + curl * spin.cos() + (noise(seed + 9) - 0.5) * 30.0 * k;
+            let y = at.y + oy * push * 0.6 + 0.6 * curl * spin.sin() - 6.0 * a * k;
+            let r = (8.0 + 18.0 * u) * k;
+            let off = (band.0 - y).max(y - band.1).max(0.0);
+            let clear = INK_NEWEST + (1.0 - INK_NEWEST) * (off / (2.0 * r)).min(1.0);
+            let alpha = INK_ALPHA * feed * (1.0 - u) * (1.0 - u) * (a / 0.12).min(1.0) * clear;
+            out.push((Point::new(x, y), r, alpha));
+        }
+    }
+    out
+}
+
+/// R2-15-c under reduced motion: the still wash's strength `age` seconds
+/// after the newest word, in over 300 ms and out by `INK_LIFE`.
+fn ink_wash(age: f64) -> f32 {
+    if !(0.0..INK_LIFE).contains(&age) {
+        return 0.0;
+    }
+    let fade_in = (age / 0.3).min(1.0) as f32;
+    let fade_out = ((INK_LIFE - age) / 0.6).min(1.0) as f32;
+    INK_WASH * fade_in.min(fade_out)
+}
+
+/// A round 2 layer's drawing.
+type Draw = Box<dyn Fn(f64, Rect, &mut Painter) + Send + Sync>;
+
+/// R2-15-a: the membranes round the rim, in the surface's space.
+struct Membrane {
+    k: f32,
+    levels: Levels,
+    mode: Mode,
+    mode_at: f64,
+    still: bool,
+}
+
+impl Membrane {
+    fn until(&self) -> f64 {
+        match self.mode {
+            _ if self.still => f64::NEG_INFINITY,
+            Mode::Loading | Mode::Listening => f64::INFINITY,
+            _ => self.mode_at + SETTLE_SECS + 0.1,
+        }
+    }
+
+    fn draw(&self, t: f64, r: Rect, p: &mut Painter) {
+        let k = self.k;
+        let listening = matches!(self.mode, Mode::Loading | Mode::Listening);
+        // The ripple's clock steps at the idle pace and stops where it was
+        // when the listening ends.
+        let clock = if self.still {
+            0.0
+        } else {
+            let t = if listening { t } else { t.min(self.mode_at) };
+            ((t * IDLE_FPS).floor() / IDLE_FPS) as f32
+        };
+        let rms = if self.still {
+            0.0
+        } else {
+            let calm = if listening {
+                1.0
+            } else {
+                1.0 - change(t, self.mode_at, false)
+            };
+            smoothed(&self.levels, t) * calm
+        };
+        let grow = membrane_scale(rms);
+        let n = RIM_POINTS;
+        for (j, &f) in MEMBRANES.iter().enumerate() {
+            let phase = 1.7 * j as f32;
+            let dir = if j % 2 == 0 { 1.0 } else { -1.0 };
+            let pts: Vec<Point> = (0..n)
+                .map(|i| {
+                    let a =
+                        i as f32 / n as f32 * std::f32::consts::TAU + std::f32::consts::FRAC_PI_2;
+                    let q = rim_at(a);
+                    let ripple = MEMBRANE_RIPPLE
+                        * ((5.0 + j as f32) * a + phase + dir * MEMBRANE_SPEED * clock).sin();
+                    let (dx, dy) = (q.x - BELL_X, q.y - BELL_Y);
+                    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                    let g = f * grow;
+                    let x = BELL_X + dx * g.min(MEMBRANE_SIDE) + dx / len * ripple;
+                    let y = BELL_Y + dy * g + dy / len * ripple;
+                    Point::new(r.x + x * k, r.y + y * k)
+                })
+                .collect();
+            let alpha = MEMBRANE_ALPHA * (1.0 - 0.15 * j as f32);
+            let c = mix(hex(BLUE), hex(VIOLET), j as f32 / 2.0);
+            p.stroke(
+                &Contour::polyline(&pts, true),
+                &StrokeStyle::solid(3.0 * k, c.fade(alpha)).glow(5.0 * k),
+            );
+        }
+    }
+}
+
+/// R2-15-b: rays through the bell and the tendrils, and the rim's band and
+/// glints, in the surface's space.
+struct Prism {
+    k: f32,
+    levels: Levels,
+    mode: Mode,
+    finish_at: Option<f64>,
+    still: bool,
+}
+
+impl Prism {
+    fn until(&self) -> f64 {
+        match (self.mode, self.finish_at) {
+            _ if self.still => f64::NEG_INFINITY,
+            (Mode::Cancelled, _) => f64::NEG_INFINITY,
+            (_, Some(f)) => f + PRISM_FADE + 0.05,
+            _ => f64::INFINITY,
+        }
+    }
+
+    fn draw(&self, t: f64, r: Rect, p: &mut Painter) {
+        let k = self.k;
+        let pt = |x: f32, y: f32| Point::new(r.x + x * k, r.y + y * k);
+        let power = if self.still {
+            0.0
+        } else {
+            prism_power(self.mode, self.finish_at, t)
+        };
+        let clock = ((t * IDLE_FPS).floor() / IDLE_FPS) as f32;
+        let voice = if self.still {
+            0.0
+        } else {
+            smoothed(&self.levels, self.finish_at.map_or(t, |f| t.min(f)))
+        };
+        let bright = power * (0.35 + 0.65 * (voice * 2.2).min(1.0));
+        if bright > 0.01 {
+            // Rays fan down from above the bell; those over the bell stop
+            // above the words, those under it run on through the tendrils.
+            let top = BELL_Y - BELL_RY;
+            let low = BELL_Y + BELL_RY - 20.0;
+            for i in 0..RAYS {
+                let u = (i as f32 + 0.5) / RAYS as f32 - 0.5;
+                let sway = 6.0 * (0.4 * clock + 2.0 * noise(i as u32 + 200)).sin();
+                let x = BELL_X + u * 300.0 + sway;
+                let w = 14.0 + 16.0 * noise(i as u32 + 210);
+                let a = RAY_ALPHA * bright * (0.5 + 0.5 * noise(i as u32 + 220));
+                let tint = mix(hex(CYAN), spectrum(noise(i as u32 + 230)), 0.4);
+                let lean = 0.18 * u;
+                for (y0, y1) in [(top - 10.0, RAY_STOP), (low, SURFACE_H - 40.0)] {
+                    let (x0, x1) = (x + lean * (y0 - top), x + lean * (y1 - top));
+                    // A soft beam, strongest at its start, gone at its end.
+                    p.stroke(
+                        &Contour::polyline(&[pt(x0, y0), pt(x1, y1)], false),
+                        &StrokeStyle::solid(w * k, tint)
+                            .linear(pt(x0, y0), tint.fade(a), pt(x1, y1), tint.fade(0.0))
+                            .glow(0.8 * w * k),
+                    );
+                }
+            }
+        }
+        // The band along the rim: still under reduced motion.
+        let flow = if self.still { 0.0 } else { 0.05 * clock };
+        let band = if self.still { 1.0 } else { 0.3 + 0.7 * power };
+        if band > 0.01 {
+            for i in 0..BAND_SEGS {
+                let u = i as f32 / BAND_SEGS as f32;
+                let v = (i + 1) as f32 / BAND_SEGS as f32;
+                let tau = std::f32::consts::TAU;
+                let a = (0.5 + 0.5 * (tau * 3.0 * u + 2.0 * flow).sin()).powi(2);
+                let alpha = BAND_ALPHA * band * a;
+                if alpha < 0.01 {
+                    continue;
+                }
+                let at = |w: f32| {
+                    let q = rim_at(w * tau + std::f32::consts::FRAC_PI_2);
+                    pt(
+                        BELL_X + (q.x - BELL_X) * 0.975,
+                        BELL_Y + (q.y - BELL_Y) * 0.975,
+                    )
+                };
+                p.stroke(
+                    &Contour::polyline(&[at(u), at(v)], false),
+                    &StrokeStyle::solid(2.0 * k, spectrum(2.0 * u + flow).fade(alpha))
+                        .glow(5.0 * k),
+                );
+            }
+        }
+        // Glints run slowly along the rim with the voice.
+        if power > 0.01 {
+            for g in 0..GLINTS {
+                let u = noise(g + 300) + 0.02 * clock * (0.5 + noise(g + 310));
+                let q = rim_at(u * std::f32::consts::TAU);
+                let twinkle = 0.5 + 0.5 * (3.0 * clock + 6.0 * noise(g + 320)).sin();
+                let a = power * (0.3 + 0.7 * (voice * 2.2).min(1.0)) * twinkle;
+                p.shape(ShapeInstance::circle(
+                    pt(q.x, q.y),
+                    1.6 * k,
+                    Paint::glow(hex(0xfff2d6).fade(0.8 * a), 5.0 * k, 0.5),
+                ));
+            }
+        }
+    }
+}
+
 /// The look's transcript for the outline features.
 fn biolume_paths(look: &Look) -> PathsText {
     PathsText {
@@ -561,6 +899,7 @@ impl Popup {
             .child(layer("body", Part::Body))
             .child(glow)
             .child(layer("edge", Part::Edge))
+            .children(self.biolume_round2(mode, mode_at, size, k))
             .child(at(
                 Element::canvas("wave", wave_until, move |t, r, p| wave.draw(t, r, p))
                     .size((WAVE_X1 - WAVE_X0) * k, 2.0 * WAVE_HALF * k),
@@ -579,6 +918,161 @@ impl Popup {
                 (DESIGN_W - STATUS_W) / 2.0 * k,
                 (STATUS_Y - STATUS_H / 2.0) * k,
             ))
+    }
+
+    /// The round 2 layers over the bell and under the waveform and words:
+    /// the membranes, the light and the ink, each when its feature is on.
+    /// None while editing or on a cancel.
+    fn biolume_round2(&self, mode: Mode, mode_at: f64, size: Size, k: f32) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        let mut out = Vec::new();
+        if self.edit_view.is_some() || mode == Mode::Cancelled {
+            return out;
+        }
+        let still = self.still();
+        let levels = Levels {
+            levels: self.exhale_levels(&self.kit_levels().levels),
+            newest_at: self.newest_at,
+        };
+        let layer = |key: &'static str, until: f64, draw: Draw| {
+            at(
+                Element::canvas(key, until, move |t, r, p| draw(t, r, p))
+                    .size(size.w, size.h)
+                    .presence(Transition::fade(), Transition::fade()),
+                0.0,
+                0.0,
+            )
+        };
+        if l.on(PRISM_LIGHT) {
+            let prism = Prism {
+                k,
+                levels: levels.clone(),
+                mode,
+                finish_at: self.extra.finish_at,
+                still,
+            };
+            let until = prism.until();
+            out.push(layer(
+                "prism",
+                until,
+                Box::new(move |t, r, p| prism.draw(t, r, p)),
+            ));
+        }
+        if l.on(BREATHING_MEMBRANE) {
+            let membrane = Membrane {
+                k,
+                levels: levels.clone(),
+                mode,
+                mode_at,
+                still,
+            };
+            let until = membrane.until();
+            out.push(layer(
+                "membrane",
+                until,
+                Box::new(move |t, r, p| membrane.draw(t, r, p)),
+            ));
+        }
+        if l.on(INK_REVEAL) && mode == Mode::Listening {
+            out.extend(self.biolume_ink(levels, size, k));
+        }
+        out
+    }
+
+    /// R2-15-c: the ink round and behind the words, in the surface's space;
+    /// under reduced motion a still wash that comes and goes with them.
+    fn biolume_ink(&self, levels: Levels, size: Size, k: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        let tw = l.text_width();
+        let lines = self.lines.clamp(1, MAX_LINES) as usize;
+        let (boxes, total) =
+            sounding::word_boxes(&self.measure, &self.shown, &l.text_style(), Some(tw));
+        let first = total.saturating_sub(lines);
+        // The layout sets lines from the left; the live text centres each
+        // one in the column.
+        let mut ends: HashMap<usize, (f32, f32)> = HashMap::new();
+        for b in &boxes {
+            let e = ends.entry(b.line).or_insert((f32::MAX, f32::MIN));
+            e.0 = e.0.min(b.rect.x);
+            e.1 = e.1.max(b.rect.x + b.rect.w);
+        }
+        let x0 = (DESIGN_W - TEXT_W) / 2.0 * k;
+        let y0 = TEXT_TOP * k - first as f32 * TEXT_LINE * k;
+        let born = |id: WordId| self.heard.word(id).map(|h| h.born);
+        let words: Vec<(f64, Point)> = boxes
+            .iter()
+            .filter(|b| b.line >= first)
+            .filter_map(|b| {
+                let (a, z) = ends[&b.line];
+                let shift = x0 + (tw - (z - a)) / 2.0 - a;
+                let c = Point::new(
+                    b.rect.x + b.rect.w / 2.0 + shift,
+                    y0 + b.baseline - 0.3 * TEXT_PX * k,
+                );
+                Some((born(b.id)?, c))
+            })
+            .collect();
+        let last_line = boxes.last()?.line;
+        let band_top = y0 + (last_line as f32 * TEXT_LINE) * k;
+        let band = (band_top, band_top + TEXT_LINE * k);
+        let newest = words.iter().map(|w| w.0).fold(f64::NEG_INFINITY, f64::max);
+        let t = self.extra.now;
+        let middle = Point::new(
+            DESIGN_W / 2.0 * k,
+            (TEXT_TOP + lines as f32 * TEXT_LINE / 2.0) * k,
+        );
+        // Inside the bell: ink thins out towards its rim.
+        let (cx, cy, rx, ry) = (
+            BELL_X * k,
+            BELL_Y * k,
+            BELL_RX * 0.86 * k,
+            BELL_RY * 0.8 * k,
+        );
+        let inside = move |q: Point| {
+            let (u, v) = ((q.x - cx) / rx, (q.y - cy) / ry);
+            (1.0 - (u * u + v * v).sqrt()).clamp(0.0, 0.25) * 4.0
+        };
+        let canvas = if self.still() {
+            if !(0.0..INK_LIFE).contains(&(t - newest)) {
+                return None;
+            }
+            let rows = lines as f32 * TEXT_LINE * k;
+            Element::canvas("ink", newest + INK_LIFE, move |t, r, p| {
+                let a = ink_wash(t - newest);
+                if a > 0.0 {
+                    let wash = Rect::new(r.x + x0, r.y + TEXT_TOP * k, TEXT_W * k, rows);
+                    p.shape(ShapeInstance::rrect(
+                        RRect::new(wash, 12.0 * k),
+                        Paint::glow(hex(INK).fade(a), 14.0 * k, 0.5),
+                    ));
+                }
+            })
+        } else {
+            let last = newest.max(levels.newest_at);
+            if t - last >= INK_LIFE {
+                return None;
+            }
+            let words: Arc<[(f64, Point)]> = words.into();
+            Element::canvas("ink", last + INK_LIFE, move |t, r, p| {
+                for (c, rad, a) in ink_puffs(t, &words, band, middle, k, |s| levels.at(s)) {
+                    let a = a * inside(c);
+                    if a > 0.002 {
+                        p.shape(ShapeInstance::circle(
+                            Point::new(r.x + c.x, r.y + c.y),
+                            rad,
+                            Paint::glow(hex(INK).fade(a), rad, 0.5),
+                        ));
+                    }
+                }
+            })
+        };
+        Some(at(
+            canvas
+                .size(size.w, size.h)
+                .presence(Transition::fade(), Transition::fade()),
+            0.0,
+            0.0,
+        ))
     }
 
     /// The words, clipped under the waveform, so a line that leaves on an
@@ -739,5 +1233,55 @@ impl Popup {
             );
         }
         row
+    }
+}
+
+#[cfg(test)]
+mod round2_tests {
+    use super::*;
+
+    #[test]
+    fn the_membranes_grow_with_the_voice_alone() {
+        assert_eq!(membrane_scale(0.0), 1.0);
+        assert!(membrane_scale(0.2) > membrane_scale(0.1));
+        assert_eq!(membrane_scale(1.0), 1.0 + MEMBRANE_GROW);
+        assert_eq!(membrane_scale(5.0), membrane_scale(1.0));
+        assert_eq!(membrane_scale(0.3), membrane_scale(0.3));
+    }
+
+    #[test]
+    fn the_rays_are_gone_600_ms_after_the_finish() {
+        assert_eq!(prism_power(Mode::Listening, None, 3.0), 1.0);
+        let f = 2.0;
+        assert!(prism_power(Mode::Finishing, Some(f), f + 0.3) > 0.0);
+        assert_eq!(prism_power(Mode::Finishing, Some(f), f + PRISM_FADE), 0.0);
+        assert_eq!(prism_power(Mode::Done, Some(f), f + 2.0), 0.0);
+        assert_eq!(prism_power(Mode::Cancelled, None, 1.0), 0.0);
+    }
+
+    #[test]
+    fn the_ink_replays_and_stays_faint_over_the_newest_line() {
+        let words = [
+            (1.0, Point::new(200.0, 180.0)),
+            (1.4, Point::new(260.0, 180.0)),
+        ];
+        let band = (165.0, 203.0);
+        let middle = Point::new(300.0, 190.0);
+        let level = |s: f64| if (1.0..2.0).contains(&s) { 0.4 } else { 0.0 };
+        let at = |t| ink_puffs(t, &words, band, middle, 1.0, level);
+        assert_eq!(at(1.73), at(1.73));
+        assert!(at(0.9).is_empty());
+        assert!(!at(1.3).is_empty(), "ink at the word soon after it comes");
+        assert!(at(4.0 + INK_LIFE).is_empty());
+        for t in [1.2, 1.6, 2.2, 3.0] {
+            for (c, _, a) in at(t) {
+                assert!(a <= INK_ALPHA, "{a}");
+                if (band.0..=band.1).contains(&c.y) {
+                    assert!(a <= INK_ALPHA * INK_NEWEST + 1e-6, "{a}");
+                }
+            }
+        }
+        assert_eq!(ink_wash(-0.1), 0.0);
+        assert!(ink_wash(1.0) <= INK_WASH);
     }
 }

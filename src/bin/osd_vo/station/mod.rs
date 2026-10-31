@@ -887,8 +887,10 @@ mod tests {
         let first = all[0].clone();
         let by_id = filter(all.clone(), &[first.id.to_lowercase()]);
         assert!(by_id.iter().all(|e| e.id == first.id) && !by_id.is_empty());
+        // A number takes every exhibit with it: MO-01 and R2-01-a to c.
         let by_n = filter(all.clone(), &[first.number().to_string()]);
-        assert_eq!(by_n.len(), by_id.len());
+        assert!(by_n.iter().all(|e| e.number() == first.number()));
+        assert!(by_n.iter().any(|e| e.id == first.id));
         assert!(filter(all.clone(), &["MO-999".into()]).is_empty());
         assert_eq!(filter(all.clone(), &[]).len(), all.len());
     }
