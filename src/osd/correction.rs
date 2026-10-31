@@ -370,6 +370,15 @@ impl Corrections {
     /// text with no placed correction comes back unchanged; when the newest
     /// correction places nowhere, its note says so.
     pub fn apply_final(&mut self, text: &str) -> String {
+        self.apply_final_from(text, None)
+    }
+
+    /// [`Corrections::apply_final`] for a text of the audio from `from`
+    /// seconds on alone (after a keyboard edit's last resume): only holds
+    /// that start there count, the live words before it do not, and no
+    /// hold's audio was cut out of it.
+    pub fn apply_final_from(&mut self, text: &str, from: Option<f32>) -> String {
+        let after = |t: f32| from.is_none_or(|f| t >= f);
         self.render_with(None, true);
         self.applied.clear();
         // Each placed hold with the words to try: the clip's, then the live
@@ -378,6 +387,7 @@ impl Corrections {
         let placed: Vec<FinalHold> = self
             .windows
             .iter()
+            .filter(|w| after(w.t0))
             .filter_map(|w| match &w.state {
                 State::Placed {
                     wrong,
@@ -385,16 +395,17 @@ impl Corrections {
                     spelled: true,
                     ..
                 } => {
-                    let cut = self
-                        .clips
-                        .iter()
-                        .any(|c| (c.t0 - w.t0).abs() < 0.05 && c.cut);
+                    let cut = from.is_none()
+                        && self
+                            .clips
+                            .iter()
+                            .any(|c| (c.t0 - w.t0).abs() < 0.05 && c.cut);
                     (right.join(" ") != *wrong)
                         .then(|| (w.t0, w.t1, vec![right.clone()], cut, true))
                 }
                 State::Placed { wrong, right, .. } => {
                     let clip = self.clips.iter().find(|c| (c.t0 - w.t0).abs() < 0.05);
-                    let cut = clip.is_some_and(|c| c.cut);
+                    let cut = from.is_none() && clip.is_some_and(|c| c.cut);
                     let mut tries: Vec<Vec<String>> = clip
                         .map(|c| clip_words(&c.text, wrong))
                         .into_iter()
@@ -419,7 +430,11 @@ impl Corrections {
         // from the corrections already made.
         let mut shift: isize = 0;
         let before = |t: f32, shift: isize| {
-            let n = self.raw.iter().filter(|(w, _)| middle(w) < t).count() as isize;
+            let n = self
+                .raw
+                .iter()
+                .filter(|(w, _)| middle(w) < t && after(middle(w)))
+                .count() as isize;
             (n + shift).max(0) as usize + FINAL_SLACK_WORDS
         };
         let newest = placed.last().map(|p| p.0);
@@ -680,6 +695,27 @@ pub fn apply_final(text: &str) -> String {
     with(|c| c.apply_final(text))
 }
 
+/// The final text of the audio from `from` seconds on, with the
+/// corrections made there ([`Corrections::apply_final_from`]).
+pub fn apply_final_after(text: &str, from: f32) -> String {
+    with(|c| c.apply_final_from(text, Some(from)))
+}
+
+/// A keyboard edit session ended with `from` changed to `to`, which will be
+/// learned once pasted: the popup says "Learned" as for a spoken one.
+pub fn learned(from: &str, to: &str) {
+    with(|c| {
+        c.notes += 1;
+        c.note = Some(CorrectionNote {
+            id: c.notes,
+            from: from.to_string(),
+            to: to.to_string(),
+            dropped: None,
+            learned: true,
+        });
+    });
+}
+
 /// The corrections the last [`apply_final`] made, for the corrections log.
 pub fn applied() -> Vec<learn::Entry> {
     with(|c| c.applied.clone())
@@ -870,6 +906,30 @@ mod tests {
             c.apply_final("use franken term here FrankenTerm"),
             "use FrankenTerm here"
         );
+    }
+
+    /// M9.2: the engine's text of the audio after a keyboard edit's
+    /// resume gets the corrections made there, counted from the resume; a
+    /// hold before it is not looked for.
+    #[test]
+    fn a_text_after_a_resume_gets_only_the_corrections_made_after_it() {
+        let lists = steps(&[
+            (0.0, "we said this first"),
+            (2.0, "use franken term here"),
+            (3.3, "FrankenTerm"),
+            (4.4, "and run it"),
+        ]);
+        let mut c = Corrections::default();
+        c.start(3.2);
+        c.end(4.0);
+        c.overlay(lists[3].clone(), 0.0);
+        let resumed = "Use franken term here. FrankenTerm And run it.";
+        assert_eq!(
+            c.apply_final_from(resumed, Some(1.5)),
+            "Use FrankenTerm here. And run it."
+        );
+        // The hold is before this text: nothing to do.
+        assert_eq!(c.apply_final_from("And run it.", Some(4.2)), "And run it.");
     }
 
     fn placed_hold() -> Corrections {

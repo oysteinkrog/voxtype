@@ -5,9 +5,10 @@
 //! and an italic status line.
 //!
 //! New words are written by a bright 3 px beam head that sweeps each word in
-//! 80 ms, leaving the glyphs lit behind it (MO-61). The caret glides to the
+//! 80 ms, leaving the glyphs lit behind it (MO-61). The caret steps to the
 //! end of each new word, stays solid while words come and blinks once they
-//! stop. A revision flashes only the changed letters in reverse video, and
+//! stop. It never covers a letter: it hides a moment while a wrap or a cut
+//! rolls the lines under its new place (xj49). A revision flashes only the changed letters in reverse video, and
 //! the beam rewrites just those letters. The meter's columns
 //! light whole blocks, the newest level in the middle and older ones running
 //! out to both sides; once the recording stops they sink to a row of dots
@@ -100,7 +101,9 @@ const SINK_SECS: f64 = 0.4;
 /// 530 ms on and 530 ms off (5ti).
 const CARET_HOLD: f64 = 0.4;
 const CARET_BLINK: f64 = 0.53;
-const CARET_GLIDE: f64 = 0.12;
+/// xj49: how long the caret hides when the text is laid out anew (a wrap
+/// or a cut), while the old lines roll away under its new place.
+const CARET_REFLOW: f64 = 0.35;
 /// 5ti: the idle motion's pace (RD-02's slow-loop cap); the scanline's
 /// period, pass, first pass after the popup opens, height and alpha; the
 /// static's rate, specks and alpha (in linear light, like every blend here:
@@ -256,8 +259,8 @@ struct Screen {
     rate: f32,
     /// The meter's clock during a rewind cancel (MO-50).
     scrub: endings::Scrub,
-    /// Where the caret goes, where it came from and when it left, or `None`
-    /// when no caret shows.
+    /// Where the caret stands, where it stood before and when it stepped,
+    /// or `None` when no caret shows.
     caret: Option<(Point, Point, f64)>,
     /// The revised word's box and when it changed.
     flash: Option<(Rect, f64)>,
@@ -282,6 +285,13 @@ struct Screen {
     /// R2-06-a and R2-06-c: the liquid surface and the halo are on.
     liquid: bool,
     halo: bool,
+}
+
+/// xj49: whether the caret, `age` seconds after it stepped from `from` to
+/// `to`, waits for the text to settle: it went back or to another line, so
+/// the text was laid out anew and old lines still roll under `to`.
+fn caret_reflows(to: Point, from: Point, age: f64) -> bool {
+    (to.x < from.x - 0.5 || (to.y - from.y).abs() > 0.5) && age < CARET_REFLOW
 }
 
 /// A number from 0 to 1 that depends only on `n`.
@@ -591,14 +601,12 @@ impl Screen {
             }
         }
 
-        // The block caret: glides to the new end, solid while words come,
-        // then blinks.
-        if let Some((to, from, moved)) = self.caret {
-            let g = ease_out((t - moved) / CARET_GLIDE);
-            let pos = Point::new(from.x + (to.x - from.x) * g, from.y + (to.y - from.y) * g);
+        // The block caret: at the new end, solid while words come, then
+        // blinks. Hidden a moment when the text is laid out anew.
+        if let Some((pos, from, moved)) = self.caret {
             // Solid under reduced motion; the blink steps with the idle pace.
             let idle = (t * IDLE_FPS).floor() / IDLE_FPS - moved - CARET_HOLD;
-            if self.still || caret_on(idle) {
+            if (self.still || caret_on(idle)) && !caret_reflows(pos, from, t - moved) {
                 p.shape(rect(pos.x, pos.y, 15.0 * k, 37.0 * k, solid(GREEN, 1.0)));
             }
         }
@@ -808,12 +816,9 @@ impl Popup {
             return;
         };
         match self.phos.caret {
-            Some((old, from, moved)) if old != to => {
-                // Start the glide from where the caret is now.
-                let g = ease_out((t - moved) / CARET_GLIDE);
-                let here = Point::new(from.x + (old.x - from.x) * g, from.y + (old.y - from.y) * g);
-                self.phos.caret = Some((to, here, t));
-            }
+            // xj49: it steps to the new end. A glide from the old end
+            // crossed the new word's letters, which stand there already.
+            Some((old, _, _)) if old != to => self.phos.caret = Some((to, old, t)),
             Some(_) => {}
             None => self.phos.caret = Some((to, to, t)),
         }
@@ -1623,6 +1628,114 @@ impl edit_site::EditSite for PhosphorSite {
 mod tests {
     use super::*;
 
+    /// The block caret's box and the ink boxes of the transcript's glyphs
+    /// in each frame of `moment`, sampled at 30 fps, in surface space.
+    fn caret_and_ink(
+        width_px: u32,
+        moment: super::super::moments::Moment,
+    ) -> Vec<(f64, Rect, Vec<Rect>)> {
+        use vo::scene::display::{ItemKind, ShapeKind};
+        let fonts = super::super::swiss_look::edit_check::fonts();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Phosphor,
+            width_px,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &PlasmaTheme::default(), String::new(), &fonts);
+        look.set_motion(&cfg.motion);
+        let k = Geo::new(&look).k;
+        let style = look.text_style();
+        let popup = Popup::new(look.clone(), &fonts);
+        let space = popup.measure.layout(" a", &style, None).glyphs[0].glyph;
+        let options = Options {
+            fonts: fonts.clone(),
+            default_motion: default_motion(&look),
+            ..Options::default()
+        };
+        let mut out = Vec::new();
+        vo::envelope::sample_scenario(
+            popup,
+            &super::super::moments::scenario(&look, moment),
+            30.0,
+            options,
+            &mut |_, t, dl| {
+                let mut caret = None;
+                let mut ink = Vec::new();
+                for (i, l) in dl.layers.iter().enumerate() {
+                    for it in dl.layer_items(i as _) {
+                        let range = it.start as usize..(it.start + it.len) as usize;
+                        match it.kind {
+                            ItemKind::Shapes => {
+                                for sh in &dl.shapes[range] {
+                                    let [x, y, w, h] = sh.geom;
+                                    if sh.kind == ShapeKind::RRect
+                                        && (w - 15.0 * k).abs() < 0.5
+                                        && (h - 37.0 * k).abs() < 0.5
+                                    {
+                                        let p = l.transform.apply(Point::new(x, y));
+                                        caret = Some(Rect::new(p.x, p.y, w, h));
+                                    }
+                                }
+                            }
+                            ItemKind::Glyphs => {
+                                for g in &dl.glyphs[range] {
+                                    if g.glyph == space
+                                        || g.color.a < 0.3
+                                        || (g.size - style.size).abs() > 1.0
+                                    {
+                                        continue;
+                                    }
+                                    let p = l.transform.apply(g.pos);
+                                    // A monospaced letter's ink, a little inside its cell.
+                                    ink.push(Rect::new(
+                                        p.x + 0.08 * g.size,
+                                        p.y - 0.68 * g.size,
+                                        0.44 * g.size,
+                                        0.66 * g.size,
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some(c) = caret {
+                    out.push((t, c, ink));
+                }
+            },
+        );
+        out
+    }
+
+    /// xj49: in a dictation at 30 fps the block caret never covers a letter
+    /// of the drawn transcript, also while it glides to a new end or the
+    /// pen rewrites a revised letter.
+    #[test]
+    fn the_block_caret_never_covers_a_letter() {
+        use super::super::moments::Moment;
+        for width_px in [400, 600] {
+            for moment in [
+                Moment::FirstWord,
+                Moment::Dictation,
+                Moment::Pause,
+                Moment::Lookahead,
+                Moment::Correction,
+            ] {
+                let frames = caret_and_ink(width_px, moment);
+                assert!(frames.len() > 10, "{moment:?}: the caret shows");
+                for (t, c, ink) in &frames {
+                    let hit = ink.iter().find(|g| {
+                        g.x < c.x + c.w && c.x < g.x + g.w && g.y < c.y + c.h && c.y < g.y + g.h
+                    });
+                    assert!(
+                        hit.is_none(),
+                        "{moment:?} at {width_px} px, t {t:.3}: caret {c:?} covers a letter at {hit:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// s3th: with the ghost tail on, the block caret stands after the last
     /// drawn ghost word, not over the first one.
     #[test]
@@ -1727,7 +1840,7 @@ mod tests {
         }
         // The band runs from under the header rule to the meter's base,
         // which is above the text.
-        assert!(RULE_Y + 16.0 < METER_BASE && METER_BASE < TEXT_TOP);
+        const { assert!(RULE_Y + 16.0 < METER_BASE && METER_BASE < TEXT_TOP) };
     }
 
     #[test]

@@ -613,6 +613,7 @@ mod tests {
             tail: String::new(),
             pause: 1,
             raw_words: frozen.split_whitespace().count(),
+            insert_at: None,
         }
     }
 

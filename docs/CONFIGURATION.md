@@ -3503,6 +3503,8 @@ Learn words from spoken corrections (see `correction_key`). Each correction that
 
 A fix that only adds words ("test" corrected to "quiet test") is never learned, since the rule would rewrite every "test". `replacements` and `replacements_file` win over a learned rule with the same words. Learned words only change the output text: they are not sent to a transcription engine or a post-processing command as a word list.
 
+Keyboard edits of spoken words (see [Keyboard editing](#keyboard-editing)) are learned too, when the dictation is pasted. They are logged with `"source": "keyboard"`. Only 1 to 3 words changed for 1 to 3 words can become a rule, and it does the first time; a change of case only when the new words look like a name. The popup says "Learned" with the fix when you resume or finish after the edit. Deleting words teaches nothing, and added words or a longer rewording are logged without a rule. Words you typed are never learned from, and a discarded dictation is not logged. Within one dictation, a fix applies at once to the words you say after it.
+
 List the learned words with `voxtype glossary learned`, and remove one with `voxtype glossary forget <words>`. A removed word stops at the next recording.
 
 ### corrections_log
@@ -4122,6 +4124,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_EDIT_KEY` | string | `hotkey.edit_key` |
 | `VOXTYPE_EDIT_QUIET_MS` | integer | `hotkey.edit_quiet_ms` |
 | `VOXTYPE_OSD_KEYBOARD_EDIT` | bool | `osd.keyboard_edit` |
+| `VOXTYPE_OSD_EDIT_RESUME_AT` | string | `osd.edit_resume_at` |
 | `VOXTYPE_OSD_DOUBT_BELOW` | float | `osd.doubt_below` |
 
 **Whisper / Engine:**
@@ -4517,6 +4520,21 @@ With it off, nothing changes: the edit key's taps do nothing new, and dictation 
 [osd]
 frontend = "vo"
 keyboard_edit = true
+```
+
+### Speech after a keyboard edit
+
+**Type:** String, `end` or `caret` (`[osd] edit_resume_at`)
+**Default:** `"end"`
+**Required:** No
+**CLI:** `--osd-edit-resume-at` · **Env:** `VOXTYPE_OSD_EDIT_RESUME_AT`
+
+Where the words you say after a keyboard edit go. With `end`, they go after all the text. With `caret`, they go where the caret was when you resumed, so you can move the caret back, resume, and say a missing sentence there. With a selection, they go after it; the selected text stays. Only used with `keyboard_edit = true`.
+
+```toml
+[osd]
+keyboard_edit = true
+edit_resume_at = "caret"
 ```
 
 ### Unsure-word threshold

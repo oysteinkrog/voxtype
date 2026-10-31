@@ -12,6 +12,19 @@
 //! step at 15 frames a second, stop once the popup closes and stay still
 //! under reduced motion.
 //!
+//! Round 2 (R2-17) adds three opt-in features:
+//!
+//! - `breathing-ribbon`: a silk ribbon of three strands lies behind the bar
+//!   waveform, above the text, and folds and unfolds with the voice (at most
+//!   22 % alpha). Reduced motion: the ribbon stands still.
+//! - `typewriter-reveal`: when a line wraps, the older lines fade to a soft
+//!   ghost (45 % ink) over 400 ms while the newest line stays crisp.
+//!   Reduced motion: the fade is instant.
+//! - `lens-echo`: each new word sends wide arcs to the right behind the
+//!   text, from the word, three in a fading trail, wider and brighter with
+//!   the voice (at most 15 % alpha, gone 1.2 s after the word). Reduced
+//!   motion: off.
+//!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
 
@@ -23,8 +36,12 @@ use std::sync::OnceLock;
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
+use vo::scene::levels::{Levels as LevelTrack, Stops};
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
+use vo::scene::ribbon::Ribbon;
 use vo::scene::roll::digit_roll;
+use vo::scene::typo::{Typo, TypoMotion, Typos, WordTypo};
+use vo_core::words::WordId;
 
 /// Colours sampled from the mock-up.
 const CARD: u32 = 0x070D1A;
@@ -75,6 +92,112 @@ const PAD_BOTTOM: f32 = 21.0;
 const MAX_LINES: u32 = 5;
 /// The caret blinks once no word has come for this long.
 const CARET_IDLE: f64 = 0.6;
+
+/// R2-17-a: the ribbon's alpha.
+pub(crate) const BREATHING_RIBBON: &str = "breathing-ribbon";
+const RIBBON_ALPHA: f32 = 0.22;
+/// R2-17-b: the older lines' ink and how long they take to fade to it.
+pub(crate) const TYPEWRITER_REVEAL: &str = "typewriter-reveal";
+const GHOST_INK: f32 = 0.45;
+const GHOST_SECS: f64 = 0.4;
+/// R2-17-c: how long one arc grows, the delay between the arcs of one
+/// word, how many it sends, their alpha, their reach at rest and at full
+/// voice in design pixels, and the half angle they span.
+pub(crate) const LENS_ECHO: &str = "lens-echo";
+const LENS_SECS: f64 = 0.85;
+const LENS_STEP: f64 = 0.15;
+const LENS_ARCS: usize = 3;
+const LENS_ALPHA: f32 = 0.15;
+const LENS_REACH: (f32, f32) = (150.0, 320.0);
+const LENS_SPAN: f32 = 0.95;
+
+/// R2-17-c: arc `n`'s radius as a share of its reach and its alpha as a
+/// share of `LENS_ALPHA`, `age` seconds after its word came; `None` once it
+/// has faded. Each later arc starts `LENS_STEP` after the one before and is
+/// fainter, so they read as a trail.
+fn lens_arc(age: f64, n: usize) -> Option<(f32, f32)> {
+    let u = (age - n as f64 * LENS_STEP) / LENS_SECS;
+    if !(0.0..1.0).contains(&u) {
+        return None;
+    }
+    let fade = (1.0 - u as f32).powf(1.5) * (1.0 - 0.4 * n as f32);
+    Some((ease_out(u), fade))
+}
+
+/// R2-17-b: the ink of each word: a ghost on every line but the newest.
+/// `lines` gives each word with its line, in order.
+fn reveal_typos(lines: &[(WordId, usize)], still: bool) -> Typos {
+    let newest = lines.iter().map(|w| w.1).max().unwrap_or(0);
+    let secs = if still { 0.001 } else { GHOST_SECS };
+    let mut typos = Typos::new().motion(TypoMotion {
+        ink: Spring::critical_to_98(secs),
+        ..TypoMotion::default()
+    });
+    for &(id, _) in lines.iter().filter(|w| w.1 < newest) {
+        typos.set(id, WordTypo::rest(Typo::REST.ink(GHOST_INK)));
+    }
+    typos
+}
+
+/// R2-17-c: a word that sends arcs: where it starts (left, middle) in the
+/// text box, when it came and the voice's level then.
+#[derive(Clone, Copy)]
+struct Echo {
+    at: Point,
+    born: f64,
+    level: f32,
+}
+
+/// R2-17-c: the arcs of the newest words, behind the text.
+#[derive(Clone)]
+struct Lens {
+    echoes: Vec<Echo>,
+    /// The text box's top left in the canvas, and the design scale.
+    origin: Point,
+    k: f32,
+}
+
+impl Lens {
+    fn until(&self) -> f64 {
+        let end = LENS_SECS + (LENS_ARCS - 1) as f64 * LENS_STEP;
+        self.echoes.iter().map(|e| e.born + end).fold(0.0, f64::max)
+    }
+
+    fn draw(&self, t: f64, r: Rect, p: &mut Painter) {
+        for e in &self.echoes {
+            let c = Point::new(r.x + self.origin.x + e.at.x, r.y + self.origin.y + e.at.y);
+            let reach = (LENS_REACH.0 + (LENS_REACH.1 - LENS_REACH.0) * e.level.min(1.0)) * self.k;
+            for n in 0..LENS_ARCS {
+                let Some((grow, fade)) = lens_arc(t - e.born, n) else {
+                    continue;
+                };
+                let radius = 12.0 * self.k + reach * grow;
+                let color = mix(hex(LILAC), hex(BLUE), n as f32 / (LENS_ARCS - 1) as f32);
+                let style = StrokeStyle::solid(1.4 * self.k, color.fade(LENS_ALPHA * fade));
+                // Only the parts inside the box: the arcs stay behind the
+                // text, clear of the panel's edge and the status row.
+                let inside = |q: &Point| {
+                    q.x > r.x + 4.0 && q.x < r.x + r.w - 4.0 && q.y > r.y && q.y < r.y + r.h
+                };
+                let mut run: Vec<Point> = Vec::new();
+                for j in 0..=48 {
+                    let a = LENS_SPAN * (2.0 * j as f32 / 48.0 - 1.0);
+                    let q = Point::new(c.x + radius * a.cos(), c.y + radius * a.sin());
+                    if inside(&q) {
+                        run.push(q);
+                        if j < 48 {
+                            continue;
+                        }
+                    }
+                    if run.len() > 1 {
+                        p.stroke(&Contour::polyline(&run, false), &style.glow(6.0 * self.k));
+                    }
+                    run.clear();
+                }
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Fonts {
@@ -434,9 +557,16 @@ impl Popup {
             idle: self.palette_idle(mode),
         };
         let until = bars.until();
-        let wave = Element::canvas("bars", until, move |t, r, p| bars.draw(t, r, p))
-            .size(l.width, WAVE_H)
-            .margin_edges(WAVE_GAP, 0.0, 0.0, 0.0);
+        let wave =
+            Element::canvas("bars", until, move |t, r, p| bars.draw(t, r, p)).size(l.width, WAVE_H);
+        let wave = match self.palette_ribbon(mode, mode_at) {
+            Some(ribbon) => Element::column("wave-box")
+                .size(l.width, WAVE_H)
+                .child(ribbon)
+                .child(at(wave, 0.0, 0.0)),
+            None => wave,
+        }
+        .margin_edges(WAVE_GAP, 0.0, 0.0, 0.0);
         let rule_w = l.width - 2.0 * RULE_X;
         Element::panel("panel")
             .width(l.width)
@@ -462,6 +592,108 @@ impl Popup {
             )
             .child(self.palette_progress(mode, rule_w))
             .child(self.palette_status(mode, mode_at))
+    }
+
+    /// R2-17-a: the ribbon behind the bars, folding and unfolding with the
+    /// voice and lying down once the recording ends.
+    fn palette_ribbon(&self, mode: Mode, mode_at: f64) -> Option<Element<Msg>> {
+        if !self.look.on(BREATHING_RIBBON) {
+            return None;
+        }
+        let k = self.look.width / DESIGN_W;
+        let mut ribbon = Ribbon {
+            levels: LevelTrack {
+                levels: self.wave.clone(),
+                newest_at: self.newest_at,
+                rate: FRAME_HZ as f32,
+                ..LevelTrack::default()
+            },
+            strands: 3,
+            cycles: 1.2,
+            speed: 0.1,
+            spread: 0.4,
+            gain: 0.9,
+            floor: 0.25,
+            belly: 0.55,
+            width: 9.0 * k,
+            alpha: RIBBON_ALPHA,
+            glow: 10.0 * k,
+            left: Stops::new(&[(0.0, hex(BLUE)), (1.0, hex(VIOLET))]),
+            right: Stops::new(&[(0.0, hex(VIOLET)), (0.5, hex(LILAC)), (1.0, hex(BLUE))]),
+            core: None,
+            settle: matches!(mode, Mode::Done | Mode::Cancelled).then_some(mode_at),
+            settle_secs: 0.6,
+            run: 1024,
+            ..Ribbon::default()
+        };
+        if self.still() {
+            // The strands stand at their resting swing.
+            ribbon.speed = 0.0;
+            ribbon.levels = LevelTrack {
+                newest_at: self.shown_at,
+                ..LevelTrack::default()
+            };
+            ribbon.settle = None;
+        }
+        let x0 = BAR_X0 * k;
+        Some(
+            at(Element::ribbon("ribbon", ribbon), x0, 0.0)
+                .size((BAR_X1 - BAR_X0) * k, WAVE_H)
+                .presence(Transition::fade(), Transition::fade()),
+        )
+    }
+
+    /// R2-17-b: the live text's words with their lines, for the reveal.
+    fn palette_reveal(&self, mode: Mode) -> Option<Typos> {
+        let l = &self.look;
+        if !l.on(TYPEWRITER_REVEAL) || self.edit_view.is_some() || mode == Mode::Cancelled {
+            return None;
+        }
+        let (boxes, _) = sounding::word_boxes(
+            &self.measure,
+            &self.shown,
+            &l.text_style(),
+            Some(l.text_width()),
+        );
+        let lines: Vec<(WordId, usize)> = boxes.iter().map(|b| (b.id, b.line)).collect();
+        Some(reveal_typos(&lines, self.still()))
+    }
+
+    /// R2-17-c: the arcs behind the text from the newest words, in a canvas
+    /// over the whole panel width and the text's rows.
+    fn palette_lens(&self, mode: Mode) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(LENS_ECHO) || self.still() || matches!(mode, Mode::Cancelled) {
+            return None;
+        }
+        let style = l.text_style();
+        let (boxes, _) =
+            sounding::word_boxes(&self.measure, &self.shown, &style, Some(l.text_width()));
+        let levels = self.kit_raw_levels();
+        let from = boxes.len().saturating_sub(3);
+        let echoes: Vec<Echo> = boxes[from..]
+            .iter()
+            .filter_map(|b| {
+                let h = self.heard.word(b.id)?;
+                Some(Echo {
+                    at: Point::new(b.rect.x, b.rect.y + b.rect.h / 2.0),
+                    born: h.born,
+                    level: (levels.at(h.born) * 1.6).min(1.0),
+                })
+            })
+            .collect();
+        let lens = Lens {
+            echoes,
+            origin: Point::new(TEXT_X, TEXT_TOP),
+            k: l.width / DESIGN_W,
+        };
+        let h = TEXT_TOP + self.lines.min(MAX_LINES) as f32 * TEXT_LINE + TEXT_BOTTOM;
+        Some(at(
+            Element::canvas("lens", lens.until(), move |t, r, p| lens.draw(t, r, p))
+                .size(l.width, h),
+            -TEXT_X,
+            -TEXT_TOP,
+        ))
     }
 
     /// 5wu: the idle motion runs: open, listening or loading, not reduced.
@@ -618,10 +850,15 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0)));
+        let words = match self.palette_reveal(mode) {
+            Some(typos) => words.word_typo(typos),
+            None => words,
+        };
         let words = self.handoff_or(words, &style, Some(l.text_width()), hex(INK), hex(VIOLET));
         let mut text = Element::column("text")
             .height(self.lines.min(MAX_LINES) as f32 * TEXT_LINE)
             .margin_edges(TEXT_TOP, TEXT_X, TEXT_BOTTOM, TEXT_X)
+            .children(self.palette_lens(mode))
             .child(words)
             .children(self.line_marks(
                 style,
@@ -957,4 +1194,49 @@ mod idle_tests {
 
     // The caret keeps its 530 ms beat and the sheen stays soft.
     const _: () = assert!(BLINK_SECS == 0.53 && SHEEN_ALPHA <= 0.10);
+}
+
+#[cfg(test)]
+mod round2_tests {
+    use super::*;
+
+    // R2-17: the ribbon at 25 % alpha or less, the arcs at 15 % or less.
+    const _: () = assert!(RIBBON_ALPHA <= 0.25 && LENS_ALPHA <= 0.15);
+
+    #[test]
+    fn older_lines_ghost_and_the_newest_stays_crisp() {
+        let lines = [(1, 0), (2, 0), (3, 1), (4, 2), (5, 2)];
+        let typos = reveal_typos(&lines, false);
+        let ink = |id| {
+            typos
+                .words
+                .iter()
+                .find(|w| w.0 == id)
+                .map_or(1.0, |w| w.1.rest.ink)
+        };
+        for id in [1, 2, 3] {
+            assert!(
+                (ink(id) - GHOST_INK).abs() < 1e-6,
+                "word {id} on an older line"
+            );
+        }
+        for id in [4, 5] {
+            assert!(ink(id) >= 0.7, "word {id} on the newest line");
+        }
+        assert_eq!(typos.motion.ink, Spring::critical_to_98(GHOST_SECS));
+        // One line: nothing dims.
+        assert!(reveal_typos(&[(1, 0), (2, 0)], false).words.is_empty());
+    }
+
+    #[test]
+    fn arcs_trail_and_are_gone_in_1_2_s() {
+        for n in 0..LENS_ARCS {
+            assert!(lens_arc(1.2, n).is_none(), "arc {n}");
+            assert!(lens_arc(-0.01, n).is_none());
+        }
+        // A word's first arc shows at once, the trail follows.
+        assert!(lens_arc(0.0, 0).is_some() && lens_arc(0.0, 1).is_none());
+        let (a, b) = (lens_arc(0.3, 0).unwrap(), lens_arc(0.3, 1).unwrap());
+        assert!(a.0 > b.0 && a.1 > b.1, "the trail is behind and fainter");
+    }
 }

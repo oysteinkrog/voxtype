@@ -183,7 +183,7 @@ impl EditLink {
             self.enter(block);
             return Change::Entered;
         }
-        if block.frozen != self.seeded && self.add_tail(&block.frozen) {
+        if block.frozen != self.seeded && self.add_tail(block) {
             return Change::Tail;
         }
         if was == Some(phase) {
@@ -238,31 +238,53 @@ impl EditLink {
         } else {
             self.buffer = Some(EditBuffer::new(block.frozen.clone()));
         }
+        if let (Some(at), Some(buffer)) = (block.insert_at, self.buffer.as_mut()) {
+            // Speech goes on at the caret: so does the caret.
+            if block.frozen == self.seeded && buffer.text() == block.frozen {
+                buffer.set_selection(Selection::caret(at));
+            }
+        }
         self.write();
         if block.frozen != self.seeded {
-            self.add_tail(&block.frozen);
+            self.add_tail(block);
         }
     }
 
-    /// The tail settled: the frozen text grew at its end. The buffer gets
-    /// the new words at its end. A caret at the end moves to the new end; a
-    /// caret moved elsewhere stays. The added words cannot be undone.
-    fn add_tail(&mut self, frozen: &str) -> bool {
-        let Some(added) = frozen.strip_prefix(self.seeded.as_str()) else {
-            return false;
-        };
-        let added = added.to_string();
-        self.seeded = frozen.to_string();
+    /// The tail settled: the frozen text grew at its end, or at the resume
+    /// point with `edit_resume_at = "caret"`. The buffer gets the new words
+    /// there. A caret where they go moves past them; a caret moved
+    /// elsewhere stays with its text. The added words cannot be undone.
+    fn add_tail(&mut self, block: &EditBlock) -> bool {
+        let frozen = block.frozen.as_str();
         let Some(buffer) = self.buffer.as_mut() else {
+            if frozen.starts_with(self.seeded.as_str()) {
+                self.seeded = frozen.to_string();
+            }
             return false;
         };
+        // With `edit_resume_at = "caret"` the daemon put the words at the
+        // caret, inside the text.
+        let inside = block.insert_at.is_some();
+        let (with, added) =
+            voxtype::osd::edit_doc::add_unseen(buffer.text(), &self.seeded, frozen, inside);
+        let Some((pos, len)) = added else {
+            return false;
+        };
+        let words = with[pos..pos + len].to_string();
+        self.seeded = frozen.to_string();
         let sel = buffer.selection();
-        let at_end = sel.is_caret() && sel.focus == buffer.text().len();
-        buffer.set_selection(Selection::caret(buffer.text().len()));
-        buffer.apply_plain(EditAction::Insert(added), 0.0);
+        let at_end = sel.is_caret() && sel.focus == pos;
+        buffer.set_selection(Selection::caret(pos));
+        buffer.apply_plain(EditAction::Insert(words), 0.0);
         buffer.set_floor();
         if !at_end {
-            buffer.set_selection(sel);
+            // A selection after the new words moves with the text there.
+            let shift = |at: usize| if at > pos { at + len } else { at };
+            buffer.set_selection(Selection {
+                anchor: shift(sel.anchor),
+                focus: shift(sel.focus),
+                ..sel
+            });
         }
         self.write();
         true
@@ -399,6 +421,7 @@ mod tests {
             tail: String::new(),
             pause,
             raw_words: 0,
+            insert_at: None,
         }
     }
 
@@ -593,6 +616,28 @@ mod tests {
         assert_eq!(link.buffer().unwrap().selection(), Selection::caret(3));
         let file = read_buffer_from(&dir.path().join("edit-buffer.json")).unwrap();
         assert_eq!(file.text, "the quick brown fox");
+    }
+
+    /// `edit_resume_at = "caret"`: the caret starts where the speech went,
+    /// and the settled tail goes there too, even after typing before it.
+    #[test]
+    fn the_tail_goes_at_the_resume_point() {
+        let dir = TempDir::new().unwrap();
+        let mut link = EditLink::new(paths(&dir));
+        let mut settling = block("settling", "One FOUR two three.", 2);
+        settling.insert_at = Some(8);
+        link.sync(Some(&settling));
+        assert_eq!(link.buffer().unwrap().selection(), Selection::caret(8));
+        back(&mut link, 8);
+        act(&mut link, EditAction::Insert("X ".into()));
+        let mut editing = block("editing", "One FOUR FIVE two three.", 2);
+        editing.insert_at = Some(13);
+        assert_eq!(link.sync(Some(&editing)), Change::Tail);
+        let buffer = link.buffer().unwrap();
+        assert_eq!(buffer.text(), "X One FOUR FIVE two three.");
+        assert_eq!(buffer.selection(), Selection::caret(2));
+        let file = read_buffer_from(&dir.path().join("edit-buffer.json")).unwrap();
+        assert_eq!(file.text, "X One FOUR FIVE two three.");
     }
 
     #[test]

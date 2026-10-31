@@ -17,8 +17,11 @@ use super::*;
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
+use vo::scene::levels::{Levels as LevelTrack, Stops};
 use vo::scene::path::{icons, make, Outline, StrokeStyle};
+use vo::scene::ribbon::Ribbon;
 use vo::scene::roll::digit_roll;
+use vo::scene::Ripples;
 
 /// Colours sampled from the mock-up.
 const ORANGE: u32 = 0xFF5A0A;
@@ -82,6 +85,23 @@ const NOTCH_ROOM: f32 = 7.0;
 /// How far a new word rises, and the state label as it first shows.
 const WORD_RISE: f32 = 8.0;
 const LABEL_SLIDE: f32 = 7.0;
+/// R2-12-a: ribbon strands in the wave band that swing with the voice, in
+/// place of the ticks, their alpha and width.
+pub(crate) const BREATHING_TYPESCAPE: &str = "breathing-typescape";
+const TYPESCAPE_ALPHA: f32 = 0.45;
+const TYPESCAPE_W: f32 = 0.9;
+/// R2-12-b: dust that gathers into each new word and is gone after
+/// `DUST_SECS`; its grains per word and alpha.
+pub(crate) const WORD_PARTICLES: &str = "word-particles";
+const DUST_SECS: f64 = 0.4;
+const DUST_GRAINS: u32 = 60;
+const DUST_ALPHA: f32 = 0.3;
+/// R2-12-c: one ring from the text end at the stop, its life, reach and
+/// alpha; under reduced motion a still ring.
+pub(crate) const ECHO_FOCUS: &str = "echo-focus";
+const ECHO_SECS: f64 = 0.9;
+const ECHO_R: f32 = 56.0;
+const ECHO_ALPHA: f32 = 0.2;
 
 /// The fonts the look adds to the registry.
 #[derive(Clone, Copy)]
@@ -152,6 +172,8 @@ struct Ticks {
     finish_at: Option<f64>,
     /// Reduced motion: no idle drift or shimmer.
     still: bool,
+    /// R2-12-a: the ribbon stands in for the ticks; the baseline stays.
+    quiet: bool,
 }
 
 impl Ticks {
@@ -242,6 +264,9 @@ impl Ticks {
         } else {
             ease_out((since - TICKS_DELAY) / TICKS_SECS)
         };
+        if self.quiet {
+            return;
+        }
         for i in -n..=n {
             let d = i.unsigned_abs() as f32;
             let reach = d / n as f32;
@@ -295,6 +320,27 @@ fn noise(n: u32) -> f32 {
     x = x.wrapping_mul(0x2C1B_3C6D);
     x ^= x >> 12;
     (x & 0xFFFF) as f32 / 65535.0
+}
+
+/// R2-12-b: a dust grain's alpha `age` seconds after its word came: up
+/// fast, then down to 0 at `DUST_SECS`.
+fn dust_alpha(age: f64) -> f32 {
+    if !(0.0..DUST_SECS).contains(&age) {
+        return 0.0;
+    }
+    let u = (age / DUST_SECS) as f32;
+    DUST_ALPHA * (u / 0.15).min(1.0) * (1.0 - u)
+}
+
+/// R2-12-c under reduced motion: the still ring's alpha `age` seconds after
+/// the stop, in over 300 ms and out by `ECHO_SECS`.
+fn echo_still_alpha(age: f64) -> f32 {
+    if !(0.0..ECHO_SECS).contains(&age) {
+        return 0.0;
+    }
+    let fade_in = (age / 0.3).min(1.0) as f32;
+    let fade_out = ((ECHO_SECS - age) / 0.3).min(1.0) as f32;
+    fade_in.min(fade_out)
 }
 
 /// The status mark: a square that breathes, a spinner, a check or an X.
@@ -399,6 +445,8 @@ impl Popup {
             .motion(Prop::Size, Motion::Snap)
             .child(self.swissfi_frame(h, cancelled))
             .child(self.swissfi_cast(h))
+            .children(self.swissfi_echo(mode, h))
+            .children(self.swissfi_dust(h))
             .children(self.limit_line(
                 Point::new(PAD_X + TEXT_INSET, PAD_TOP + HEADER_H + WAVE_H + TEXT_TOP),
                 Size::new(l.width, h),
@@ -407,6 +455,7 @@ impl Popup {
             ))
             .child(self.swissfi_header())
             .child(self.swissfi_ticks(mode, mode_at))
+            .children(self.swissfi_typescape(mode, mode_at, inner))
             .child(self.with_hearing(
                 self.swissfi_text(mode),
                 &l.text_style(),
@@ -548,6 +597,175 @@ impl Popup {
         .size(l.width, h)
     }
 
+    /// R2-12-a: the ribbon in the wave band, swinging with the voice and
+    /// fading from orange at the left to grey toward the words' end. It
+    /// lies down at the end; under reduced motion it rests still.
+    fn swissfi_typescape(&self, mode: Mode, mode_at: f64, w: f32) -> Option<Element<Msg>> {
+        if !self.look.on(BREATHING_TYPESCAPE) {
+            return None;
+        }
+        let mut ribbon = Ribbon {
+            levels: LevelTrack {
+                levels: self.exhale_levels(&self.kit_levels().levels),
+                newest_at: self.newest_at,
+                rate: FRAME_HZ as f32,
+                ..LevelTrack::default()
+            },
+            strands: 9,
+            cycles: 1.4,
+            speed: 0.12,
+            spread: 0.35,
+            gain: 0.95,
+            floor: 0.2,
+            belly: 0.4,
+            width: TYPESCAPE_W,
+            alpha: TYPESCAPE_ALPHA,
+            glow: 1.5,
+            left: Stops::two(hex(ORANGE), hex(ORANGE).fade(0.6)),
+            right: Stops::two(hex(GREY).fade(0.5), hex(GREY).fade(0.2)),
+            core: None,
+            settle: matches!(mode, Mode::Done | Mode::Cancelled).then_some(mode_at),
+            settle_secs: 0.6,
+            run: 1024,
+            ..Ribbon::default()
+        };
+        if self.still() {
+            ribbon.speed = 0.0;
+            ribbon.levels = LevelTrack {
+                newest_at: self.shown_at,
+                ..LevelTrack::default()
+            };
+            ribbon.settle = None;
+        }
+        Some(
+            at(
+                Element::ribbon("typescape", ribbon),
+                PAD_X,
+                PAD_TOP + HEADER_H + 2.0,
+            )
+            .size(w, WAVE_H - 4.0)
+            .presence(Transition::fade(), Transition::fade()),
+        )
+    }
+
+    /// R2-12-b: fine dust gathering into each word that came in the last
+    /// `DUST_SECS`, behind the word. None under reduced motion.
+    fn swissfi_dust(&self, h: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(WORD_PARTICLES) || self.still() || self.edit_view.is_some() {
+            return None;
+        }
+        let style = l.text_style();
+        let size = style.size;
+        let origin = Point::new(PAD_X + TEXT_INSET, PAD_TOP + HEADER_H + WAVE_H + TEXT_TOP);
+        let words: Vec<(Rect, f64)> = self
+            .tally_arrivals(&style, self.tally_text_width(), DUST_SECS)
+            .into_iter()
+            // A word that opens a line, or comes with a cut that re-lays
+            // the lines, shows only once they have rolled: no dust ahead.
+            .filter(|(b, born)| {
+                (b.rect.x >= 1.0 || self.shown.len() < 2) && self.cut_at < born - 0.1
+            })
+            .map(|(b, born)| {
+                let top = origin.y + b.baseline - 0.75 * size;
+                (
+                    Rect::new(origin.x + b.rect.x, top, b.rect.w, 0.8 * size),
+                    born,
+                )
+            })
+            .filter(|(r, _)| r.y >= origin.y - 1.0)
+            .collect();
+        let until = words
+            .iter()
+            .map(|w| w.1 + DUST_SECS)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if words.is_empty() {
+            return None;
+        }
+        let canvas = Element::canvas("dust", until, move |t, r, p| {
+            for (b, born) in &words {
+                let k = dust_alpha(t - born);
+                if k <= 0.0 {
+                    continue;
+                }
+                let u = ((t - born) / DUST_SECS).clamp(0.0, 1.0);
+                let pull = ease_out(u / 0.7);
+                for g in 0..DUST_GRAINS {
+                    let n = ((*born * 1000.0) as u32).wrapping_mul(977) + g * 13;
+                    // Each grain ends on a point of the word's box and
+                    // starts scattered round it, mostly up and to the right.
+                    let end = Point::new(b.x + noise(n) * b.w, b.y + noise(n + 1) * b.h);
+                    let a = std::f32::consts::TAU * noise(n + 2);
+                    let d = 8.0 + 18.0 * noise(n + 3);
+                    let (dx, dy) = (a.cos() * d + 6.0, a.sin() * d * 0.6 - 4.0);
+                    let q = Point::new(
+                        r.x + end.x + dx * (1.0 - pull),
+                        r.y + end.y + dy * (1.0 - pull),
+                    );
+                    let c = mix(hex(ORANGE), hex(PAPER), noise(n + 4));
+                    p.shape(ShapeInstance::circle(
+                        q,
+                        0.9,
+                        Paint::solid(c.fade(k * (0.5 + 0.5 * noise(n + 5)))),
+                    ));
+                }
+            }
+        });
+        Some(at(canvas, 0.0, 0.0).size(l.width, h))
+    }
+
+    /// R2-12-c: one ring that grows from the end of the text at the stop
+    /// and fades in under a second, behind the words. Under reduced
+    /// motion a still ring fades in and out. None on a cancel.
+    fn swissfi_echo(&self, mode: Mode, h: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(ECHO_FOCUS) || mode == Mode::Cancelled || self.edit_view.is_some() {
+            return None;
+        }
+        let at_stop = self.extra.finish_at?;
+        if self.extra.now - at_stop >= ECHO_SECS {
+            return None;
+        }
+        let style = l.text_style();
+        let last = self.shown.len().checked_sub(1)?;
+        let b = self.tally_word_box(last, &style, self.tally_text_width())?;
+        let end = Point::new(
+            PAD_X + TEXT_INSET + b.rect.x + b.rect.w + 4.0,
+            PAD_TOP + HEADER_H + WAVE_H + TEXT_TOP + b.baseline - 0.35 * style.size,
+        );
+        // The ring stays inside the panel.
+        let reach = ECHO_R
+            .min(end.x - 3.0)
+            .min(l.width - 3.0 - end.x)
+            .min(end.y - 3.0)
+            .min(h - 3.0 - end.y)
+            .max(8.0);
+        let d = 2.0 * reach + 4.0;
+        let ring = if self.still() {
+            Element::canvas("echo", at_stop + ECHO_SECS, move |t, r, p| {
+                let k = echo_still_alpha(t - at_stop);
+                if k > 0.0 {
+                    let c = Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
+                    let mut ring = ShapeInstance::circle(c, 0.6 * reach, Paint::NONE);
+                    ring.stroke = Paint::solid(hex(ORANGE).fade(ECHO_ALPHA * k));
+                    ring.stroke_width = 1.2;
+                    p.shape(ring);
+                }
+            })
+        } else {
+            Element::ripples(
+                "echo",
+                Ripples::new(hex(ORANGE).fade(ECHO_ALPHA))
+                    .width(1.4)
+                    .radii(4.0, reach)
+                    .timing(ECHO_SECS * 4.0, ECHO_SECS)
+                    .active(false)
+                    .pulses([at_stop]),
+            )
+        };
+        Some(at(ring, end.x - d / 2.0, end.y - d / 2.0).size(d, d))
+    }
+
     fn swissfi_ticks(&self, mode: Mode, mode_at: f64) -> Element<Msg> {
         let l = &self.look;
         let ticks = Ticks {
@@ -561,6 +779,7 @@ impl Popup {
             mode_at,
             finish_at: self.extra.finish_at,
             still: self.still(),
+            quiet: l.on(BREATHING_TYPESCAPE),
         };
         let until = ticks.until(self.extra.now);
         let w = ticks.w;
@@ -749,6 +968,67 @@ impl Popup {
 mod tests {
     use super::super::moments::edit_scenario;
     use super::*;
+
+    /// R2-12-b: a word's dust is at most 30 % alpha and gone after 400 ms.
+    #[test]
+    fn the_dust_is_faint_and_gone_after_400_ms() {
+        let peak = (0..40)
+            .map(|i| dust_alpha(i as f64 * 0.01))
+            .fold(0.0, f32::max);
+        assert!(peak > 0.0 && peak <= 0.3, "{peak}");
+        for age in [DUST_SECS, 0.45, 1.0, -0.1] {
+            assert_eq!(dust_alpha(age), 0.0, "{age}");
+        }
+    }
+
+    /// R2-12-c: one ring at the stop, gone within its second, and none on
+    /// a cancel; the reduced form fades in over 300 ms and out again.
+    #[test]
+    fn one_echo_ring_per_finish_and_none_on_a_cancel() {
+        let fonts = super::super::swiss_look::edit_check::fonts();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Swissfi,
+            motion: OsdMotion::Names(vec![ECHO_FOCUS.into()]),
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &PlasmaTheme::default(), String::new(), &fonts);
+        look.set_motion(&cfg.motion);
+        let mut popup = Popup::new(look, &fonts);
+        popup.shown = ["set", "the", "theme"]
+            .iter()
+            .enumerate()
+            .map(|(i, w)| Word {
+                id: i as u32 + 1,
+                text: (*w).into(),
+            })
+            .collect();
+        popup.lines = 1;
+        popup.extra.now = 0.5;
+        assert!(
+            popup.swissfi_echo(Mode::Listening, 200.0).is_none(),
+            "no ring before the stop"
+        );
+        popup.extra.finish_at = Some(1.0);
+        for now in [1.0, 1.5, 1.0 + ECHO_SECS - 0.01] {
+            popup.extra.now = now;
+            assert!(
+                popup.swissfi_echo(Mode::Finishing, 200.0).is_some(),
+                "{now}"
+            );
+            assert!(
+                popup.swissfi_echo(Mode::Cancelled, 200.0).is_none(),
+                "{now}"
+            );
+        }
+        popup.extra.now = 1.0 + ECHO_SECS + 0.01;
+        assert!(
+            popup.swissfi_echo(Mode::Done, 200.0).is_none(),
+            "gone after its life"
+        );
+        assert!((echo_still_alpha(0.3) - 1.0).abs() < 1e-6);
+        assert!(echo_still_alpha(0.15) < 0.6);
+        assert_eq!(echo_still_alpha(ECHO_SECS), 0.0);
+    }
 
     /// tnhp: at 400 px the popup measured the transcript 5.3 px narrower
     /// than its column wraps, so it cut the top line one word early. The

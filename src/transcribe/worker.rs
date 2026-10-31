@@ -39,6 +39,10 @@ pub enum WorkerResponse {
         /// The final engine's text of each spoken correction (live worker).
         #[serde(skip_serializing_if = "Vec::is_empty")]
         corrections: Vec<crate::osd::correction::FinalClip>,
+        /// The final engine's text of the audio after a keyboard edit's
+        /// last resume alone (live worker, `edit-resume.json`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resumed: Option<String>,
     },
     Error {
         ok: bool,
@@ -53,6 +57,7 @@ impl WorkerResponse {
             text,
             language,
             corrections: Vec::new(),
+            resumed: None,
         }
     }
 
@@ -253,9 +258,20 @@ fn free_vram_mib() -> Option<u64> {
 enum EngineMsg {
     /// A part is done: seconds of audio, seconds it took.
     Part(f32, f32),
-    /// All parts done (joined text, language, the correction clips' texts
-    /// in order), or the first error.
-    Done(Result<(String, Option<String>, Vec<String>), String>),
+    /// All parts done, or the first error.
+    Done(Result<EngineDone, String>),
+}
+
+/// What the engine thread made of a recording.
+#[cfg(feature = "parakeet")] // only the parakeet live worker uses this
+struct EngineDone {
+    /// The parts' texts joined.
+    text: String,
+    language: Option<String>,
+    /// The correction clips' texts, in order.
+    clips: Vec<String>,
+    /// The text of the audio after a keyboard edit's last resume.
+    resumed: Option<String>,
 }
 
 /// Work for the engine thread.
@@ -265,6 +281,17 @@ enum Job {
     Part(Vec<f32>),
     /// A spoken correction's audio, with the words it replaces pushed down.
     Clip(Vec<f32>, String),
+    /// The audio after a keyboard edit's last resume, alone: only this part
+    /// of the final text may differ from what the popup froze.
+    Resumed(Vec<f32>),
+}
+
+/// Where the audio after a keyboard edit's last resume starts, as a sample
+/// index into a recording of `len` samples: None with no resume, or none
+/// with audio after it.
+pub fn resumed_from(mark: Option<crate::osd::edit_ipc::ResumeMark>, len: usize) -> Option<usize> {
+    let at = (mark?.at.max(0.0) * 16000.0) as usize;
+    (at < len).then_some(at)
 }
 
 /// Sends the parts of the final text with the spoken corrections' audio cut
@@ -772,9 +799,22 @@ fn live_session(
             loaded_flag.store(true, std::sync::atomic::Ordering::SeqCst);
             let mut texts: Vec<String> = Vec::new();
             let mut clips: Vec<String> = Vec::new();
+            let mut resumed = None;
             for job in part_rx {
                 let part = match job {
                     Job::Part(part) => part,
+                    Job::Resumed(clip) => {
+                        // A clip that fails leaves the live words after
+                        // the resume as they are.
+                        let start = std::time::Instant::now();
+                        match transcriber.transcribe(&clip) {
+                            Ok(text) => resumed = Some(text.trim().to_string()),
+                            Err(e) => eprintln!("[worker] Clip after the resume failed: {}", e),
+                        }
+                        let audio = clip.len() as f32 / 16000.0;
+                        let _ = msg_tx.send(EngineMsg::Part(audio, start.elapsed().as_secs_f32()));
+                        continue;
+                    }
                     Job::Clip(clip, avoid) => {
                         // A clip that fails gives no correction text; the
                         // live words stand in for it.
@@ -804,11 +844,12 @@ fn live_session(
                     }
                 }
             }
-            let _ = msg_tx.send(EngineMsg::Done(Ok((
-                texts.join(" "),
-                transcriber.last_detected_language(),
+            let _ = msg_tx.send(EngineMsg::Done(Ok(EngineDone {
+                text: texts.join(" "),
+                language: transcriber.last_detected_language(),
                 clips,
-            ))));
+                resumed,
+            })));
         });
     });
 
@@ -1099,6 +1140,15 @@ fn live_session(
             })
             .collect()
     };
+    // After a keyboard edit, only the audio after the last resume may change
+    // the text: the daemon takes the engine's text of it alone.
+    let resume = crate::osd::edit_ipc::read_resume_from(&crate::osd::edit_ipc::resume_path());
+    if let Some(at) = resumed_from(resume, samples.len()) {
+        progress
+            .pending
+            .push_back((samples.len() - at) as f32 / 16000.0);
+        let _ = part_tx.send(Job::Resumed(samples[at..].to_vec()));
+    }
     drop(part_tx);
     let start = std::time::Instant::now();
     let result = loop {
@@ -1118,14 +1168,25 @@ fn live_session(
         }
     };
     let response = match result {
-        Some(Ok((text, language, clip_texts))) => {
+        Some(Ok(EngineDone {
+            text,
+            language,
+            clips: clip_texts,
+            resumed,
+        })) => {
             eprintln!(
                 "[worker] Final transcription in {:.2}s ({} parts sent while recording)",
                 start.elapsed().as_secs_f32(),
                 parts_sent
             );
             let mut response = WorkerResponse::success(text, language);
-            if let WorkerResponse::Success { corrections, .. } = &mut response {
+            if let WorkerResponse::Success {
+                corrections,
+                resumed: r,
+                ..
+            } = &mut response
+            {
+                *r = resumed;
                 *corrections = clip_holds
                     .into_iter()
                     .zip(clip_texts)
@@ -1752,6 +1813,20 @@ fn write_response_to<W: Write>(writer: &mut W, response: WorkerResponse) {
 mod tests {
     use super::*;
 
+    /// M9.2: only the audio after the last resume goes to the engine as
+    /// the resumed clip; no mark, or a mark at the end, sends nothing.
+    #[test]
+    fn the_resumed_clip_starts_at_the_mark() {
+        use crate::osd::edit_ipc::ResumeMark;
+        assert_eq!(resumed_from(None, 32000), None);
+        assert_eq!(
+            resumed_from(Some(ResumeMark { at: 1.5 }), 32000),
+            Some(24000)
+        );
+        assert_eq!(resumed_from(Some(ResumeMark { at: 2.0 }), 32000), None);
+        assert_eq!(resumed_from(Some(ResumeMark { at: -1.0 }), 32000), Some(0));
+    }
+
     /// `secs` of fake speech: 150 ms bursts of a 200 Hz tone at `amp`
     /// with 50 ms gaps, like syllables, over faint noise.
     fn tone(secs: f32, amp: f32) -> Vec<f32> {
@@ -2018,7 +2093,7 @@ mod tests {
         rx.try_iter()
             .map(|job| match job {
                 Job::Part(p) => p.len(),
-                Job::Clip(..) => panic!("no clips here"),
+                Job::Clip(..) | Job::Resumed(..) => panic!("no clips here"),
             })
             .collect()
     }

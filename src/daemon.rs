@@ -323,6 +323,12 @@ struct EditLink {
     freeze: Box<dyn Fn(f32) + Send + Sync>,
     buffer: PathBuf,
     cmds: PathBuf,
+    /// Where the last resume began, for the live worker.
+    resume: PathBuf,
+    /// The final engine's text of the audio after the last resume.
+    engine_resumed: Box<dyn Fn() -> Option<String> + Send + Sync>,
+    /// That text with the spoken corrections made after the given second.
+    correct_after: CorrectAfter,
     /// Where a finish says how the recording was stopped (`hotkey-last`).
     hotkey_last: PathBuf,
     /// Where a discarded edited dictation is kept for a minute.
@@ -333,7 +339,13 @@ struct EditLink {
     /// Waits up to the given time for the modifiers and Enter to be up;
     /// false when one is still held.
     keys_up: KeysUp,
+    /// Tells the popup that a keyboard change (from, to) will be learned.
+    learned: LearnedNote,
 }
+
+type CorrectAfter = Box<dyn Fn(&str, f32) -> String + Send + Sync>;
+
+type LearnedNote = Box<dyn Fn(&str, &str) + Send + Sync>;
 
 type KeysUp = Box<dyn Fn(Duration) -> futures_util::future::BoxFuture<'static, bool> + Send + Sync>;
 
@@ -350,11 +362,18 @@ impl Default for EditLink {
             }),
             buffer: crate::osd::edit_ipc::buffer_path(),
             cmds: crate::osd::edit_ipc::cmd_path(),
+            resume: crate::osd::edit_ipc::resume_path(),
+            engine_resumed: Box::new(crate::osd::edit_ipc::engine_resumed),
+            correct_after: Box::new(crate::osd::correction::apply_final_after),
             hotkey_last: Config::runtime_dir().join("hotkey-last"),
             discarded: crate::osd::edit_journal::discarded_path(),
             reader: Default::default(),
             windows: Arc::new(std::sync::Mutex::new(Box::new(crate::osd::target::Kdotool))),
             keys_up: Box::new(|t| Box::pin(modifiers_released(t))),
+            learned: Box::new(|from, to| {
+                crate::osd::correction::learned(from, to);
+                refresh_live_correction();
+            }),
         }
     }
 }
@@ -2168,13 +2187,74 @@ impl Daemon {
         // placed now and frozen with the rest.
         (self.edit_link.freeze)(clock as f32 / 16000.0);
         let shown = (self.edit_link.shown)();
-        let tp = &self.text_processor;
+        let session = self.edit_processor();
+        let tp = session.as_ref().unwrap_or(&self.text_processor);
         let doc = self
             .edit_doc
             .get_or_insert_with(|| crate::osd::edit_doc::EditDoc::new(crate::osd::live::session()));
         doc.freeze(&shown, |t| {
             output::normalize_quotes(&tp.process(t)).into_owned()
         });
+    }
+
+    /// The text processor for words frozen or pasted after a keyboard edit,
+    /// with the rules this dictation's edits made (table 2.7); None when
+    /// they made none.
+    fn edit_processor(&self) -> Option<TextProcessor> {
+        let rules = self.edit_doc.as_ref()?.session_rules();
+        if rules.is_empty() {
+            return None;
+        }
+        let mut tp = self.text_processor.clone();
+        for (from, to) in &rules {
+            tp.learn(from, to);
+        }
+        Some(tp)
+    }
+
+    /// An edit session ended (a resume or a finish): the popup says
+    /// "Learned" for the newest kept change it has not named yet that will
+    /// be learned once pasted. A change put back before this is not named.
+    fn edit_note_learned(&mut self) {
+        let learning = &self.learning;
+        let Some(doc) = self.edit_doc.as_mut() else {
+            return;
+        };
+        let new = doc.take_unnoted(|e| learning.would_learn_keyboard(&e.wrong, &e.right));
+        if let Some(e) = new.last() {
+            (self.edit_link.learned)(&e.wrong, &e.right);
+        }
+    }
+
+    /// Log the delivered dictation's keyboard edits of spoken words, and
+    /// learn the rules they make (table 2.7). A discarded dictation learns
+    /// nothing, and an edit undone or put back was never kept.
+    fn edit_learn(&mut self, pasted: &str) {
+        use crate::text::learn;
+        let edits = self
+            .edit_doc
+            .as_ref()
+            .map(|d| d.edits().to_vec())
+            .unwrap_or_default();
+        for e in edits {
+            let entry = learn::Entry {
+                time: learn::now(),
+                wrong: e.wrong,
+                right: e.right,
+                pasted: pasted.to_string(),
+                source: learn::Source::Keyboard,
+                ..learn::Entry::default()
+            };
+            match self.learning.record(&entry) {
+                Ok(Some((from, to))) => self.text_processor.learn(&from, &to),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    "Could not log a keyboard edit to {:?}: {}",
+                    self.learning.log,
+                    e
+                ),
+            }
+        }
     }
 
     /// Tell the popup the edit phase and the frozen text. Nothing is shown
@@ -2195,6 +2275,7 @@ impl Daemon {
                     },
                     pause: self.edit_pauses,
                     raw_words: doc.frozen_words(),
+                    insert_at: doc.insert_at(),
                 })
             }
             (None, Some(Phase::Pending)) => Some(crate::osd::edit_ipc::EditBlock {
@@ -2260,7 +2341,8 @@ impl Daemon {
                 if let Some(snap) =
                     snapshot.filter(|b| Some(b.session) == session && b.pause == self.edit_pauses)
                 {
-                    self.edit_take_buffer(&snap.text, snap.base.as_deref());
+                    let caret = Some(snap.sel.0.max(snap.sel.1));
+                    self.edit_take_buffer(&snap.text, snap.base.as_deref(), caret);
                 }
                 self.edit_resume(state).await
             }
@@ -2298,18 +2380,47 @@ impl Daemon {
     }
 
     /// The popup's text replaces the frozen region, with the words frozen
-    /// after the popup last saw it (its `base`) added at the end.
-    fn edit_take_buffer(&mut self, text: &str, base: Option<&str>) {
-        if let Some(doc) = self.edit_doc.as_mut() {
-            let text = crate::osd::edit_ipc::with_unseen(text, base, &doc.frozen());
-            doc.replace_frozen(&text);
+    /// after the popup last saw it (its `base`) added where the daemon put
+    /// them. With `[osd] edit_resume_at = "caret"`, speech after a resume
+    /// goes at `caret` (the end of the popup's selection, a byte offset
+    /// into `text`); None keeps it at the end.
+    fn edit_take_buffer(&mut self, text: &str, base: Option<&str>, caret: Option<usize>) {
+        let at_caret = self.config.osd.edit_resume_at == crate::osd::config::EditResumeAt::Caret;
+        let Some(doc) = self.edit_doc.as_mut() else {
+            return;
+        };
+        let (text, unseen) = match base {
+            Some(base) => crate::osd::edit_doc::add_unseen(text, base, &doc.frozen(), at_caret),
+            None => (text.to_string(), None),
+        };
+        doc.replace_frozen(&text);
+        if at_caret {
+            // Words added at or before the caret move it on.
+            doc.resume_at(caret.map(|c| match unseen {
+                Some((pos, len)) if pos <= c => c + len,
+                _ => c,
+            }));
         }
     }
 
     /// Pass mic audio again; new speech goes after the edited text. The
-    /// caller has taken the popup's text.
+    /// caller has taken the popup's text. The live worker learns where the
+    /// audio after the resume starts, for the final engine (M9.2).
     async fn edit_resume(&mut self, state: &mut State) {
-        self.with_gate(|g| g.resume());
+        let mut clock = 0;
+        self.with_gate(|g| {
+            g.resume();
+            clock = g.clock();
+        });
+        let at = clock as f32 / 16000.0;
+        if let Some(doc) = self.edit_doc.as_mut() {
+            doc.resumed(at);
+        }
+        self.edit_note_learned();
+        let mark = crate::osd::edit_ipc::ResumeMark { at };
+        if let Err(e) = crate::osd::edit_ipc::write_resume_to(&self.edit_link.resume, mark) {
+            tracing::warn!("Could not write the edit resume mark: {}", e);
+        }
         if let Some(tracker) = &self.silence_tracker {
             tracker.resume().await;
         }
@@ -2362,8 +2473,10 @@ impl Daemon {
     fn edit_final_text(&mut self, phase: Option<Phase>) -> Option<String> {
         let shown = (self.edit_link.shown)();
         let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
-        let tp = &self.text_processor;
+        let session = self.edit_processor();
+        let tp = session.as_ref().unwrap_or(&self.text_processor);
         let pause = self.edit_pauses;
+        let at_caret = self.config.osd.edit_resume_at == crate::osd::config::EditResumeAt::Caret;
         let doc = self.edit_doc.as_mut()?;
         let popup_owned = matches!(
             phase,
@@ -2374,14 +2487,24 @@ impl Daemon {
         if let Some(snapshot) =
             snapshot.filter(|b| popup_owned && b.session == doc.session() && b.pause == pause)
         {
-            let text = crate::osd::edit_ipc::with_unseen(
-                &snapshot.text,
-                snapshot.base.as_deref(),
-                &doc.frozen(),
-            );
+            let text = match snapshot.base.as_deref() {
+                Some(base) => {
+                    crate::osd::edit_doc::add_unseen(&snapshot.text, base, &doc.frozen(), at_caret)
+                        .0
+                }
+                None => snapshot.text,
+            };
             doc.replace_frozen(&text);
         }
         doc.live(&shown);
+        // Engine mode: the engine's text of the audio after the last resume
+        // replaces the live words there, and nothing before it (M9.2).
+        let engine = self.config.live_preview_final != "preview";
+        if let (true, Some(at), Some(text)) =
+            (engine, doc.resumed_at(), (self.edit_link.engine_resumed)())
+        {
+            doc.engine_live(&(self.edit_link.correct_after)(&text, at));
+        }
         Some(doc.final_text(|t| output::normalize_quotes(&tp.process(t)).into_owned()))
     }
 
@@ -2529,10 +2652,14 @@ impl Daemon {
         let clipboard: Vec<Box<dyn TextOutput>> = vec![Box::new(
             output::clipboard::ClipboardOutput::new(self.config.output.append_text.clone()),
         )];
+        self.edit_note_learned();
         let started = Instant::now();
         let d = self
             .deliver_edited(session, chain, &clipboard, edited)
             .await;
+        if d.result.is_ok() {
+            self.edit_learn(edited);
+        }
         if !d.paste.confirmed() && d.result.is_ok() {
             self.report_not_pasted(edited, d.paste, started).await;
         } else if d.result.is_ok() {
@@ -2614,15 +2741,21 @@ impl Daemon {
     }
 
     /// The popup's commands ready to act on: the buffer file holds the
-    /// revision they name. Also the buffer's `base`, which their texts share.
-    fn edit_commands(&mut self) -> (Vec<crate::osd::edit_ipc::Accepted>, Option<String>) {
+    /// revision they name. Also the buffer, whose `base` and selection
+    /// their texts share.
+    fn edit_commands(
+        &mut self,
+    ) -> (
+        Vec<crate::osd::edit_ipc::Accepted>,
+        Option<crate::osd::edit_ipc::EditBuffer>,
+    ) {
         let Some(doc) = &self.edit_doc else {
             return (Vec::new(), None);
         };
         let buffer = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
         let link = &mut self.edit_link;
         let ready = link.reader.poll(&link.cmds, doc.session(), buffer.as_ref());
-        (ready, buffer.and_then(|b| b.base))
+        (ready, buffer)
     }
 
     /// Act on the popup's commands. Returns true when one asks to stop the
@@ -2630,17 +2763,19 @@ impl Daemon {
     async fn edit_handle_commands(&mut self, state: &mut State) -> bool {
         use crate::osd::edit_ipc::{Accepted, FinishMode};
         let mut finish = false;
-        let (ready, base) = self.edit_commands();
+        let (ready, buffer) = self.edit_commands();
+        let base = buffer.as_ref().and_then(|b| b.base.clone());
+        let caret = buffer.as_ref().map(|b| b.sel.0.max(b.sel.1));
         for cmd in ready {
             match cmd {
                 Accepted::Resume { text } => {
-                    self.edit_take_buffer(&text, base.as_deref());
+                    self.edit_take_buffer(&text, base.as_deref(), caret);
                     if matches!(state.phase(), Some(p) if p.is_paused() && p != Phase::Pending) {
                         self.edit_resume(state).await;
                     }
                 }
                 Accepted::Finish { mode, text } => {
-                    self.edit_take_buffer(&text, base.as_deref());
+                    self.edit_take_buffer(&text, base.as_deref(), None);
                     // How the output hook tells "paste" from "paste and
                     // Enter", as for the double taps.
                     let last = match mode {
@@ -6807,6 +6942,10 @@ mod tests {
         published: Arc<std::sync::Mutex<Vec<Option<crate::osd::edit_ipc::EditBlock>>>>,
         /// The audio times the spoken corrections were frozen at.
         frozen_at: Arc<std::sync::Mutex<Vec<f32>>>,
+        /// What the worker said of the audio after the last resume.
+        engine: Arc<std::sync::Mutex<Option<String>>>,
+        /// The changes the popup was told will be learned.
+        learned: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     }
 
     impl TestLink {
@@ -6824,24 +6963,41 @@ mod tests {
         let shown = Arc::new(std::sync::Mutex::new(String::new()));
         let published = Arc::new(std::sync::Mutex::new(Vec::new()));
         let frozen_at = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine = Arc::new(std::sync::Mutex::new(None));
         let (s, p, f) = (shown.clone(), published.clone(), frozen_at.clone());
+        let e = engine.clone();
+        let learned = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let l = learned.clone();
+        // Keyboard edits are logged at delivery: never in the real log.
+        daemon.learning = crate::text::learn::Learning {
+            log: dir.path().join("corrections.jsonl"),
+            rules: dir.path().join("words-learned.toml"),
+            enabled: true,
+        };
         daemon.edit_link = EditLink {
             publish: Box::new(move |b| p.lock().unwrap().push(b)),
             shown: Box::new(move || s.lock().unwrap().clone()),
             freeze: Box::new(move |t| f.lock().unwrap().push(t)),
             buffer: dir.path().join("edit-buffer.json"),
             cmds: dir.path().join("edit-cmd"),
+            resume: dir.path().join("edit-resume.json"),
+            engine_resumed: Box::new(move || e.lock().unwrap().clone()),
+            // Marks a corrected text, with the second it was counted from.
+            correct_after: Box::new(|t, at| format!("{t} [{at}]")),
             hotkey_last: dir.path().join("hotkey-last"),
             discarded: dir.path().join("discarded.json"),
             reader: Default::default(),
             windows: Arc::new(std::sync::Mutex::new(Box::new(FakeWindows::default()))),
             keys_up: Box::new(|_| Box::pin(async { true })),
+            learned: Box::new(move |from, to| l.lock().unwrap().push((from.into(), to.into()))),
         };
         TestLink {
             dir,
             shown,
             published,
             frozen_at,
+            engine,
+            learned,
         }
     }
 
@@ -7068,6 +7224,229 @@ mod tests {
             (block.phase.as_str(), block.frozen.as_str()),
             ("listening", "hello world!")
         );
+    }
+
+    /// M9.4: an edit session's swap of spoken words applies to the words
+    /// frozen after it in the same dictation, and a delivered dictation
+    /// logs its keyboard edits with their source.
+    #[tokio::test]
+    async fn keyboard_edits_teach_the_rest_of_the_dictation_and_the_log() {
+        use crate::osd::edit_ipc::{append_cmd_to, write_buffer_to, EditBuffer, EditCmd};
+        use crate::text::learn::Source;
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("teh cat");
+        daemon.edit_toggle(&mut state).await;
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        let buffer = EditBuffer {
+            session,
+            rev: 1,
+            text: "the cat".into(),
+            sel: (7, 7),
+            pause: 1,
+            base: Some("teh cat".into()),
+        };
+        write_buffer_to(&daemon.edit_link.buffer, &buffer).unwrap();
+        append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev: 1 }).unwrap();
+        daemon.edit_handle_commands(&mut state).await;
+        // The model writes the same word wrong again after the resume.
+        link.show("teh cat saw teh dog");
+        assert_eq!(
+            daemon.edit_final_text(state.phase()).as_deref(),
+            Some("the cat saw the dog")
+        );
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(link.last().unwrap().frozen, "the cat saw the dog");
+        // Nothing is logged before delivery.
+        assert!(daemon.learning.entries().is_empty());
+        daemon.edit_learn("the cat saw the dog");
+        let entries = daemon.learning.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            (entries[0].wrong.as_str(), entries[0].right.as_str()),
+            ("teh", "the")
+        );
+        assert_eq!(entries[0].source, Source::Keyboard);
+        assert_eq!(entries[0].pasted, "the cat saw the dog");
+    }
+
+    /// An edit session with `live` shown, ended by a resume with the frozen
+    /// text changed to `edited`.
+    async fn edit_and_resume(
+        daemon: &mut Daemon,
+        state: &mut State,
+        link: &TestLink,
+        live: &str,
+        edited: &str,
+    ) {
+        use crate::osd::edit_ipc::{append_cmd_to, write_buffer_to, EditBuffer, EditCmd};
+        link.show(live);
+        daemon.edit_toggle(state).await;
+        daemon
+            .edit_tick(state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let doc = daemon.edit_doc.as_ref().unwrap();
+        let (session, base) = (doc.session(), doc.frozen());
+        let pause = daemon.edit_pauses;
+        let rev = u64::from(pause);
+        let buffer = EditBuffer {
+            session,
+            rev,
+            text: edited.into(),
+            sel: (edited.len(), edited.len()),
+            pause,
+            base: Some(base),
+        };
+        write_buffer_to(&daemon.edit_link.buffer, &buffer).unwrap();
+        append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev }).unwrap();
+        daemon.edit_handle_commands(state).await;
+        assert_eq!(state.phase(), Some(Phase::Listening));
+    }
+
+    /// The user's choice "at once, with a note": a kept swap of spoken
+    /// words is learned the first time, and the popup says so when the
+    /// edit session ends, once per change. A change of case that is not a
+    /// name, a deletion and a change put back are not named.
+    #[tokio::test]
+    async fn a_kept_swap_is_named_learned_when_the_session_ends() {
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        let learned = |l: &TestLink| l.learned.lock().unwrap().clone();
+        let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+        edit_and_resume(&mut daemon, &mut state, &link, "teh cat", "the cat").await;
+        assert_eq!(learned(&link), [pair("teh", "the")]);
+        // The next session: a plain capital, a deletion and a swap.
+        edit_and_resume(
+            &mut daemon,
+            &mut state,
+            &link,
+            "teh cat in paris saw a dog",
+            "the cat in Paris saw dog",
+        )
+        .await;
+        assert_eq!(learned(&link), [pair("teh", "the")]);
+        // Put back: the change is gone and nothing new is named.
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        edit_and_resume(&mut daemon, &mut state, &link, "a dog", "a frog").await;
+        // The model still says "dog"; the frozen text shows "frog".
+        edit_and_resume(&mut daemon, &mut state, &link, "a dog ran", "a dog ran").await;
+        assert_eq!(learned(&link), [pair("dog", "frog")]);
+        assert!(daemon.edit_doc.as_ref().unwrap().edits().is_empty());
+        // A finish (delivery starting) names only what no resume named.
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        edit_and_resume(&mut daemon, &mut state, &link, "one too", "one two").await;
+        assert_eq!(learned(&link), [pair("too", "two")]);
+        daemon.edit_note_learned();
+        assert_eq!(learned(&link), [pair("too", "two")], "named once");
+        // Typed words teach nothing; a spoken one changed at the finish does.
+        let doc = daemon.edit_doc.as_mut().unwrap();
+        doc.replace_frozen("won two");
+        daemon.edit_note_learned();
+        assert_eq!(learned(&link), [pair("too", "two"), pair("one", "won")]);
+    }
+
+    /// M9.2: in engine mode, the final engine's text of the audio after the
+    /// last resume replaces the live words there, with the spoken
+    /// corrections made after the resume; the frozen and edited text never
+    /// changes. In preview mode, and when a pause froze the words after the
+    /// resume, the live words stand.
+    #[tokio::test]
+    async fn the_engine_changes_only_the_words_after_the_last_resume() {
+        use crate::osd::edit_ipc::{append_cmd_to, read_resume_from, write_buffer_to};
+        use crate::osd::edit_ipc::{EditBuffer, EditCmd};
+        for final_from in ["engine", "preview"] {
+            let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+            daemon.config.live_preview_final = final_from.into();
+            link.show("one two");
+            mic(&daemon, 0.1);
+            daemon.edit_toggle(&mut state).await;
+            daemon
+                .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+                .await;
+            let session = daemon.edit_doc.as_ref().unwrap().session();
+            let buffer = EditBuffer {
+                session,
+                rev: 1,
+                text: "One two.".into(),
+                sel: (8, 8),
+                pause: 1,
+                base: Some("one two".into()),
+            };
+            write_buffer_to(&daemon.edit_link.buffer, &buffer).unwrap();
+            append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev: 1 }).unwrap();
+            daemon.edit_handle_commands(&mut state).await;
+            assert_eq!(state.phase(), Some(Phase::Listening));
+            // The worker learns where the audio after the resume starts:
+            // after the mic chunk and the silence pad.
+            let mark = read_resume_from(&daemon.edit_link.resume).unwrap();
+            let pad = daemon.edit_pad_samples();
+            assert_eq!(mark.at, (160 + pad) as f32 / 16000.0);
+            link.show("one too three for");
+            // The engine's text of the whole clip would also change "too";
+            // its text after the resume only has the words said there.
+            *link.engine.lock().unwrap() = Some("Three, four.".into());
+            let want = match final_from {
+                "engine" => format!("One two. Three, four. [{}]", mark.at),
+                _ => "One two. three for".to_string(),
+            };
+            assert_eq!(daemon.edit_final_text(state.phase()), Some(want));
+            // A pause froze the words after the resume: the engine's text
+            // of them is not used.
+            daemon.edit_toggle(&mut state).await;
+            assert_eq!(
+                daemon.edit_final_text(state.phase()).as_deref(),
+                Some("One two. three for")
+            );
+        }
+    }
+
+    /// R23 v2: with `edit_resume_at = "caret"`, speech after a resume goes
+    /// where the popup's caret was: in the popup's block, in the pasted
+    /// text and at the next pause. By default it goes at the end.
+    #[tokio::test]
+    async fn speech_after_a_resume_goes_at_the_caret_when_asked() {
+        use crate::osd::config::EditResumeAt;
+        use crate::osd::edit_ipc::{append_cmd_to, write_buffer_to, EditBuffer, EditCmd};
+        for (resume_at, pasted, point) in [
+            (EditResumeAt::End, "one three two", None),
+            (EditResumeAt::Caret, "one two three", Some(3)),
+        ] {
+            let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+            daemon.config.osd.edit_resume_at = resume_at;
+            link.show("one three");
+            daemon.edit_toggle(&mut state).await;
+            daemon
+                .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+                .await;
+            let session = daemon.edit_doc.as_ref().unwrap().session();
+            // The caret is after "one".
+            let buffer = EditBuffer {
+                session,
+                rev: 1,
+                text: "one three".into(),
+                sel: (3, 3),
+                pause: 1,
+                base: Some("one three".into()),
+            };
+            write_buffer_to(&daemon.edit_link.buffer, &buffer).unwrap();
+            append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev: 1 }).unwrap();
+            daemon.edit_handle_commands(&mut state).await;
+            assert_eq!(state.phase(), Some(Phase::Listening));
+            assert_eq!(link.last().unwrap().insert_at, point, "{resume_at:?}");
+            link.show("one three two");
+            assert_eq!(
+                daemon.edit_final_text(state.phase()).as_deref(),
+                Some(pasted),
+                "{resume_at:?}"
+            );
+            // The next pause freezes "two" there, and more speech goes on
+            // after it.
+            daemon.edit_toggle(&mut state).await;
+            let block = link.last().unwrap();
+            assert_eq!(block.frozen, pasted, "{resume_at:?}");
+            assert_eq!(block.insert_at, point.map(|_| "one two".len()));
+        }
     }
 
     #[tokio::test]

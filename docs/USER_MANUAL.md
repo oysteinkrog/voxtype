@@ -1253,17 +1253,21 @@ When the pause starts, the microphone is muted and the last words still being de
 
 | Key | What it does |
 |---|---|
-| Edit key, one tap (or Esc) | Resume listening. New speech is added at the end. |
+| Edit key, one tap (or Esc) | Resume listening. New speech is added at the end, or at the caret with `[osd] edit_resume_at = "caret"`. |
 | Edit key, two taps | Stop and paste, without Enter |
 | Right Ctrl, two taps (the main key) | Stop, paste and press Enter |
 | Enter | Stop, paste and press Enter (on release) |
 | Cancel key, two taps (Right Alt) | Discard. The text is kept for 60 s. |
+
+When you stop while listening after a resume, the words said since the resume come from the engine model (`live_preview_final = "engine"`, the default), as in a dictation without an edit. Only those words can change; text you paused on or typed is pasted as it was.
 
 A spoken correction (holding the correction key) works again once you resume, but it never changes text you already paused on or typed. If the words it hears only fit there, the popup says "Not changed: frozen text". Holding the key while editing does nothing.
 
 **Focus.** While you edit, the popup has the keyboard. If you click another window, Alt+Tab, lock the screen or the popup's screen goes away, the popup lets go and shows "paused · Shift to edit". Your text and caret are kept, and the recording stays paused. One tap of the edit key takes you back. With focus-follows-mouse, moving the pointer over another window for about 300 ms has the same effect.
 
 **Pasting.** Before it pastes, voxtype checks that the window you were dictating into is active again, and checks once more before pressing Enter. If it is not (you closed it, or another window took focus), the text goes to the clipboard only and the popup says "Copied, not pasted". Paste it yourself with Ctrl+V.
+
+**Learning.** When you fix a spoken word by keyboard, the same fix applies to the words you say after it in the same dictation. When the dictation is pasted, the fix is logged and learned the first time, so it applies to later dictations too (see `learn_corrections` in the Configuration Guide). When you resume or finish, the popup says "Learned" with the fix. Undone fixes and discarded dictations teach nothing.
 
 **Undo a discard.** A dictation you discarded after pausing it is kept for 60 seconds:
 

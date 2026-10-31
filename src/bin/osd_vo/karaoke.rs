@@ -19,6 +19,20 @@
 //! a second, outside the newest line's box; neither runs once the popup
 //! closes or under reduced motion.
 //!
+//! Round 2 (R2-14) adds three opt-in features:
+//!
+//! - `living-typewriter-ribbon`: a faint fabric band in the gap under the
+//!   newest line; a glowing head glides to the newest word and inks the band
+//!   under it, at most 25 % alpha. Reduced motion: the head jumps.
+//! - `breathing-glass-ripple`: the waveform becomes a band of particles that
+//!   breathes with the voice, and each new word sends flat rings out across
+//!   it from under the word, at most 15 % alpha. Reduced motion: no rings,
+//!   and the band only brightens with the voice.
+//! - `connecting-thoughts`: a 3 px dot under each word, joined along its
+//!   line by a thin line; when the final text lands, each line's dots ease
+//!   into one smooth strand. The dots sit in the gap under each line's
+//!   descenders and ride with it. Reduced motion: dots and lines, no easing.
+//!
 //! While editing ([`KaraokeSite`]) the three large slots hold the edit
 //! window and the two small ones the two lines above it, which the caret
 //! never enters. The lit word is off, and a line keeps its left edge while
@@ -31,7 +45,7 @@ use std::sync::OnceLock;
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
-use vo::scene::path::{icons, make, Outline, StrokeStyle};
+use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
 
@@ -93,6 +107,31 @@ const WRAP: f32 = 495.0;
 /// Each line's box: wider than the wrap, so a line whose words change in
 /// the final pass never wraps inside it; the words sit centred in it.
 const LINE_BOX: f32 = WRAP + 60.0;
+/// R2-14-a: the ribbon's band in the gap under the newest line, its ends,
+/// alpha and the head's glide.
+pub(crate) const TYPEWRITER_RIBBON: &str = "living-typewriter-ribbon";
+const RIBBON_Y: f32 = 362.0;
+const RIBBON_H: f32 = 12.0;
+const RIBBON_X0: f32 = WAVE_X0 - 24.0;
+const RIBBON_X1: f32 = WAVE_X1 + 24.0;
+const RIBBON_ALPHA: f32 = 0.25;
+const RIBBON_GLIDE: f64 = 0.2;
+/// R2-14-b: the particle band, the rings' life, reach and alpha.
+pub(crate) const GLASS_RIPPLE: &str = "breathing-glass-ripple";
+const RIPPLE_DOTS: usize = 110;
+const RIPPLE_SECS: f64 = 1.2;
+const RIPPLE_REACH: f32 = 90.0;
+const RIPPLE_ALPHA: f32 = 0.15;
+/// R2-14-c: the dots' radius, the joining line's alpha and how long the
+/// dots take to ease into a strand.
+pub(crate) const CONNECTING_THOUGHTS: &str = "connecting-thoughts";
+const THOUGHT_R: f32 = 1.5;
+const THOUGHT_ALPHA: f32 = 0.25;
+const THOUGHT_GAP: f32 = 5.0;
+const STRAND_SECS: f64 = 0.6;
+/// The newest line's words, its left edge and each word's span.
+type NewestLine = (Vec<Word>, f32, Vec<(f32, f32)>);
+
 /// The lines kept: three large and two small ones above them.
 pub(crate) const MAX_LINES: u32 = 5;
 /// Each line's centre by its age, 0 the newest, with its scale and opacity.
@@ -288,6 +327,10 @@ struct Scene {
     /// words last stopped coming, which starts the badge's bob.
     idle: bool,
     quiet_from: f64,
+    /// R2-14-b: the particle band is on, and the rings: each new word's x
+    /// (relative to the card) and when it came.
+    glass: Option<Vec<(f32, f64)>>,
+    still: bool,
 }
 
 impl Scene {
@@ -434,6 +477,9 @@ impl Scene {
     /// tails are dots. After the stop the bars settle into a dotted line;
     /// the final text leaves one thin gradient line.
     fn draw_wave(&self, t: f64, p: &mut Painter) {
+        if self.glass.is_some() {
+            return self.draw_glass(t, p);
+        }
         let span = WAVE_X1 - WAVE_X0;
         let pitch = span / (BARS - 1) as f32;
         let t_eff = self.scrub.map(self.finish_at.map_or(t, |f| t.min(f)));
@@ -486,6 +532,77 @@ impl Scene {
                     hex(MAGENTA),
                 ),
             ));
+        }
+    }
+
+    /// R2-14-b: the waveform as a band of particles on a slow wave that
+    /// swells with the voice, and the rings each new word sends across it.
+    /// Under reduced motion the band holds still and only its brightness
+    /// follows the voice.
+    fn draw_glass(&self, t: f64, p: &mut Painter) {
+        let span = WAVE_X1 - WAVE_X0;
+        let t_eff = self.scrub.map(self.finish_at.map_or(t, |f| t.min(f)));
+        let settle = self
+            .finish_at
+            .map_or(1.0, |f| 1.0 - ease_out((t - f) / 0.45));
+        let dim = if self.mode == Mode::Cancelled {
+            0.35
+        } else {
+            1.0
+        };
+        let level = (0..6)
+            .map(|j| self.level_at(t_eff - 0.05 * j as f64))
+            .fold(0.0, f32::max);
+        let swell = (level * 2.4).min(1.0) * settle;
+        let phase = if self.still {
+            0.0
+        } else {
+            (t - self.shown_at) as f32 * 1.3
+        };
+        let grow = if self.still { 0.4 } else { 0.15 + 0.85 * swell };
+        for i in 0..RIPPLE_DOTS {
+            let u = i as f32 / (RIPPLE_DOTS - 1) as f32;
+            let taper = (1.0 - (2.0 * u - 1.0).abs().powf(2.2)).max(0.0);
+            let spread = noise(i as i64 * 7 + 3) * 2.0 - 1.0;
+            let y = WAVE_Y
+                + WAVE_HALF * grow * taper * ((u * 11.0 - phase).sin() * 0.7 + spread * 0.35);
+            let x = WAVE_X0 + u * span;
+            let w = 1.0 - (2.0 * u - 1.0).abs();
+            let c = if w < 0.55 {
+                mix(hex(CYAN), hex(VIOLET), w / 0.55)
+            } else {
+                mix(hex(VIOLET), hex(MAGENTA), (w - 0.55) / 0.45)
+            };
+            let a = (0.35 + 0.5 * swell) * dim * (0.6 + 0.4 * noise(i as i64 * 13 + 1));
+            p.shape(ShapeInstance::circle(
+                Point::new(x, y),
+                1.1,
+                Paint::solid(c.fade(a)),
+            ));
+        }
+        if self.still {
+            return;
+        }
+        for &(x, born) in self.glass.iter().flatten() {
+            for j in 0..2 {
+                let u = ((t - born) / RIPPLE_SECS) as f32 - 0.25 * j as f32;
+                if !(0.0..1.0).contains(&u) {
+                    continue;
+                }
+                let rx = 8.0 + RIPPLE_REACH * ease_out(u as f64);
+                let ry = (rx * 0.22).min(WAVE_HALF);
+                let a = RIPPLE_ALPHA * (1.0 - u) * (1.0 - u);
+                let pts: Vec<Point> = (0..=48)
+                    .map(|k| {
+                        let a = std::f32::consts::TAU * k as f32 / 48.0;
+                        Point::new(x + rx * a.cos(), WAVE_Y + ry * a.sin())
+                    })
+                    .collect();
+                p.stroke(
+                    &Contour::polyline(&pts, true),
+                    &StrokeStyle::solid(1.2, hex(VIOLET).fade(a)).glow(3.0),
+                );
+            }
         }
     }
 
@@ -727,6 +844,8 @@ impl Popup {
                 && !reduced()
                 && !l.on("reduced-motion"),
             quiet_from: self.event_at + ROOM_TONE_AFTER_EVENT_SECS,
+            glass: l.on(GLASS_RIPPLE).then(|| self.karaoke_ripples(mode)),
+            still: self.still(),
         };
         let until = scene.until(self.extra.now);
         let canvas = at(
@@ -754,6 +873,7 @@ impl Popup {
             ));
 
         panel = self.karaoke_text(panel, mode, ox, oy);
+        panel = panel.children(self.karaoke_ribbon(mode, ox, oy));
 
         let status_row = Element::row("status")
             .align_items(AlignItems::CENTER)
@@ -1167,6 +1287,7 @@ impl Popup {
                 .align_items(AlignItems::CENTER)
                 .child(inline)
                 .children(self.karaoke_rewind(words, &style))
+                .children(self.karaoke_thoughts(words, *lw, &style, editing))
                 .children(hot)
                 .children(
                     (age == 1 && !editing)
@@ -1287,6 +1408,24 @@ mod tests {
         // Reduced motion: straight, whatever the pitch.
         assert_eq!(bow_sag(0.0, Some(1.0), true), 0.0);
         assert_eq!(bow_sag(1.0, None, true), 0.0);
+    }
+
+    /// R2-14-a: the ribbon, its head included, sits in the gap between the
+    /// newest line's box and the wave, inside the card.
+    #[test]
+    fn the_ribbon_keeps_to_the_gap_under_the_newest_line() {
+        let line_bottom = SLOTS[0].0 + LINE / 2.0;
+        assert!(
+            RIBBON_Y - 3.0 > line_bottom,
+            "the head reaches the newest line"
+        );
+        const {
+            assert!(
+                RIBBON_Y + RIBBON_H + 3.0 < WAVE_Y - WAVE_HALF,
+                "the ribbon reaches the wave"
+            )
+        };
+        const { assert!(RIBBON_X0 >= MARGIN && RIBBON_X1 <= CARD_W - MARGIN) };
     }
 }
 
@@ -1451,6 +1590,200 @@ mod roll_tests {
 
 /// Lines the caret can be on while editing: the three large slots.
 const KARAOKE_EDIT_LINES: usize = 3;
+
+impl Popup {
+    /// R2-14: each word's x span in a line of `words` laid out alone, from
+    /// one layout of the line: the glyphs of each word's bytes.
+    fn karaoke_spans(&self, words: &[Word], style: &TextStyle) -> Vec<(f32, f32)> {
+        let mut text = String::new();
+        let mut ranges = Vec::with_capacity(words.len());
+        for w in words {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            let start = text.len() as u32;
+            text.push_str(&w.text);
+            ranges.push(start..text.len() as u32);
+        }
+        let shaped = self.measure.layout(&text, style, None);
+        ranges
+            .iter()
+            .map(|r| {
+                let gs = shaped.glyphs.iter().filter(|g| r.contains(&g.cluster));
+                gs.fold((f32::MAX, f32::MIN), |(a, b), g| {
+                    (a.min(g.pos.x), b.max(g.pos.x + g.advance))
+                })
+            })
+            .map(|(a, b)| if a > b { (0.0, 0.0) } else { (a, b) })
+            .collect()
+    }
+
+    /// R2-14: the newest line's words, its left edge in the card and each
+    /// word's span from that edge, while listening and not editing.
+    fn karaoke_newest(&self, mode: Mode) -> Option<NewestLine> {
+        if mode != Mode::Listening || self.edit_view.is_some() || self.edit_tapped() {
+            return None;
+        }
+        let style = self.look.text_style();
+        let all = self.text_lines(&style, WRAP);
+        let (words, lw) = all.last()?.clone();
+        if words.is_empty() {
+            return None;
+        }
+        let x0 = (CARD_W - LINE_BOX) / 2.0 + (LINE_BOX - lw) / 2.0;
+        let spans = self.karaoke_spans(&words, &style);
+        Some((words, x0, spans))
+    }
+
+    /// R2-14-b: each word of the newest line that came in the last
+    /// `RIPPLE_SECS`, as its middle's x in the card and when it came.
+    fn karaoke_ripples(&self, mode: Mode) -> Vec<(f32, f64)> {
+        let Some((words, x0, spans)) = self.karaoke_newest(mode) else {
+            return Vec::new();
+        };
+        let now = self.extra.now;
+        words
+            .iter()
+            .zip(spans)
+            .filter_map(|(w, (a, b))| {
+                let born = self.heard.word(w.id)?.born;
+                (0.0..RIPPLE_SECS)
+                    .contains(&(now - born))
+                    .then_some((x0 + (a + b) / 2.0, born))
+            })
+            .collect()
+    }
+
+    /// R2-14-a: the ribbon's band in the gap under the newest line, the ink
+    /// under the newest word and the head on it. The ink and the head glide
+    /// to each new word; under reduced motion they jump.
+    fn karaoke_ribbon(&self, mode: Mode, ox: f32, oy: f32) -> Vec<Element<Msg>> {
+        if !self.look.on(TYPEWRITER_RIBBON) {
+            return Vec::new();
+        }
+        let Some((_, x0, spans)) = self.karaoke_newest(mode) else {
+            return Vec::new();
+        };
+        let (a, b) = spans.last().copied().unwrap_or((0.0, 0.0));
+        let (wx0, wx1) = ((x0 + a).max(RIBBON_X0), (x0 + b).min(RIBBON_X1));
+        let glide: Motion = if self.still() {
+            Motion::Snap
+        } else {
+            Spring::critical_to_98(RIBBON_GLIDE).into()
+        };
+        let band = Element::canvas("ribbon-band", f64::NEG_INFINITY, |_, r, p| {
+            let rr = RRect::new(r, r.h / 2.0);
+            p.shape(
+                ShapeInstance::rrect(
+                    rr,
+                    Paint::linear(
+                        Point::new(r.x, 0.0),
+                        hex(CYAN).fade(0.04),
+                        Point::new(r.x + r.w, 0.0),
+                        hex(VIOLET).fade(0.06),
+                    ),
+                )
+                .with_stroke(Paint::solid(hex(EDGE).fade(0.3)), 1.0),
+            );
+            // The weave: faint threads along the band.
+            for i in 1..4 {
+                let y = r.y + r.h * i as f32 / 4.0;
+                p.shape(ShapeInstance::line(
+                    Point::new(r.x + r.h / 2.0, y),
+                    Point::new(r.x + r.w - r.h / 2.0, y),
+                    0.6,
+                    Paint::solid(hex(EDGE).fade(0.12)),
+                ));
+            }
+        });
+        let ink = Element::panel("ribbon-ink")
+            .size((wx1 - wx0).max(4.0), RIBBON_H - 4.0)
+            .radius((RIBBON_H - 4.0) / 2.0)
+            .fill(hex(BLUE).fade(RIBBON_ALPHA))
+            .glow(hex(BLUE).fade(RIBBON_ALPHA), 6.0, 0.5);
+        let head = Element::panel("ribbon-head")
+            .size(4.0, RIBBON_H + 6.0)
+            .radius(2.0)
+            .fill(hex(WHITE).fade(0.85))
+            .glow(hex(CYAN).fade(0.7), 6.0, 0.6);
+        let y = oy + RIBBON_Y;
+        vec![
+            at(
+                band.size(RIBBON_X1 - RIBBON_X0, RIBBON_H),
+                ox + RIBBON_X0,
+                y,
+            )
+            .presence(Transition::fade(), Transition::fade()),
+            at(ink, ox + wx0, y + 2.0)
+                .motion(Prop::Position, glide)
+                .motion(Prop::Size, glide)
+                .presence(Transition::fade(), Transition::fade()),
+            at(head, ox + (wx0 + wx1) / 2.0 - 2.0, y - 3.0)
+                .motion(Prop::Position, glide)
+                .presence(Transition::fade(), Transition::fade()),
+        ]
+    }
+
+    /// R2-14-c: a dot under each word of a line `lw` wide, joined by a thin
+    /// line, in the line's own box so it rides with the line. When the final
+    /// text lands the dots shrink into one strand from the first to the last.
+    fn karaoke_thoughts(
+        &self,
+        words: &[Word],
+        lw: f32,
+        style: &TextStyle,
+        editing: bool,
+    ) -> Option<Element<Msg>> {
+        if !self.look.on(CONNECTING_THOUGHTS) || words.is_empty() || editing {
+            return None;
+        }
+        let x0 = (LINE_BOX - lw) / 2.0;
+        let xs: Arc<[f32]> = self
+            .karaoke_spans(words, style)
+            .iter()
+            .map(|(a, b)| x0 + (a + b) / 2.0)
+            .collect();
+        let (final_at, still) = (self.extra.final_at, self.still());
+        // Under the descenders, above the next line's letters.
+        let y = LINE - 1.0;
+        let until = final_at.map_or(f64::NEG_INFINITY, |f| f + STRAND_SECS);
+        let canvas = Element::canvas("thoughts", until, move |t, r, p| {
+            let k = match final_at {
+                Some(f) if !still => ease_out((t - f) / STRAND_SECS),
+                Some(_) => 1.0,
+                None => 0.0,
+            };
+            let y = r.y + y;
+            let pts: Vec<Point> = xs.iter().map(|&x| Point::new(r.x + x, y)).collect();
+            // Dot to dot with a gap at each dot, so it reads as linked words,
+            // not an underline; the gaps close as the strand pulls taut.
+            let gap = THOUGHT_GAP * (1.0 - k);
+            let a = THOUGHT_ALPHA * (1.0 + k);
+            for w in pts.windows(2) {
+                let (s, e) = (Point::new(w[0].x + gap, y), Point::new(w[1].x - gap, y));
+                if e.x > s.x {
+                    p.shape(ShapeInstance::line(
+                        s,
+                        e,
+                        0.8 + 0.6 * k,
+                        Paint::linear(s, hex(CYAN).fade(a), e, hex(VIOLET).fade(a)),
+                    ));
+                }
+            }
+            for q in &pts {
+                let r = THOUGHT_R * (1.0 - k);
+                if r > 0.1 {
+                    p.shape(ShapeInstance::circle(
+                        *q,
+                        r,
+                        Paint::solid(hex(CYAN).fade(0.9)),
+                    ));
+                }
+            }
+        });
+        Some(at(canvas.size(LINE_BOX, LINE + 2.0), 0.0, 0.0))
+    }
+}
 
 /// Karaoke's edit adapter (plan section 4.5): the window in the three
 /// large slots, one node per line, the default caret.

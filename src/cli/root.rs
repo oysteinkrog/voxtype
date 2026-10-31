@@ -247,6 +247,17 @@ pub struct Cli {
     #[arg(long, help_heading = "Hotkey")]
     pub osd_keyboard_edit: bool,
 
+    /// Where speech goes after a keyboard edit: end (after all the text)
+    /// or caret (where the caret was when the edit ended)
+    #[arg(
+        long,
+        value_name = "WHERE",
+        value_parser = ["end", "caret"],
+        help_heading = "Hotkey",
+        hide_short_help = true
+    )]
+    pub osd_edit_resume_at: Option<String>,
+
     // -- Audio --
     /// Audio input device: an ALSA name from `voxtype info devices`, "default"
     /// for the system default, or "pipewire:<node>" for one PipeWire node
@@ -619,14 +630,18 @@ mod tests {
             "F9",
             "--edit-quiet-ms",
             "200",
+            "--osd-edit-resume-at",
+            "caret",
         ]);
         assert!(cli.osd_keyboard_edit);
         assert_eq!(cli.edit_key.as_deref(), Some("F9"));
         assert_eq!(cli.edit_quiet_ms, Some(200));
+        assert_eq!(cli.osd_edit_resume_at.as_deref(), Some("caret"));
         let cli = Cli::parse_from(["voxtype"]);
         assert!(!cli.osd_keyboard_edit);
         assert_eq!(cli.edit_key, None);
         assert_eq!(cli.edit_quiet_ms, None);
+        assert_eq!(cli.osd_edit_resume_at, None);
     }
 
     #[test]

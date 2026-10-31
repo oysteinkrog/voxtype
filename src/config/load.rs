@@ -226,6 +226,12 @@ fn load_config_with_env(path: Option<&Path>, env: Env) -> Result<Config, Voxtype
     if let Ok(val) = env("VOXTYPE_OSD_KEYBOARD_EDIT") {
         config.osd.keyboard_edit = parse_bool_env(&val);
     }
+    if let Ok(val) = env("VOXTYPE_OSD_EDIT_RESUME_AT") {
+        match val.parse() {
+            Ok(at) => config.osd.edit_resume_at = at,
+            Err(e) => tracing::warn!("VOXTYPE_OSD_EDIT_RESUME_AT: {e}"),
+        }
+    }
     if let Ok(val) = env("VOXTYPE_OSD_DOUBT_BELOW") {
         if let Ok(v) = val.parse::<f32>() {
             config.osd.doubt_below = v;
@@ -442,11 +448,16 @@ mod tests {
             ("VOXTYPE_EDIT_QUIET_MS", "220"),
             ("VOXTYPE_OSD_KEYBOARD_EDIT", "true"),
             ("VOXTYPE_OSD_DOUBT_BELOW", "0.3"),
+            ("VOXTYPE_OSD_EDIT_RESUME_AT", "caret"),
         ]);
         let config = load_config_with_env(Some(&path), &env).unwrap();
         assert_eq!(config.hotkey.edit_key(), Some("F9"));
         assert_eq!(config.hotkey.edit_quiet_ms, 220);
         assert!(config.osd.keyboard_edit);
+        assert_eq!(
+            config.osd.edit_resume_at,
+            crate::osd::config::EditResumeAt::Caret
+        );
         assert_eq!(config.osd.doubt_below, 0.3);
     }
 

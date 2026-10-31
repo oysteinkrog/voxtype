@@ -1,6 +1,6 @@
-default Newest: 3 lines, caret on line 2 at 264.9,302.4, words w141 to w159; typed: 3 lines, caret on line 2 at 378.0,302.4, words w141 to w159abcdefghij
-default Middle: 3 lines, caret on line 1 at 267.4,262.6, words w141 to w159; typed: 3 lines, caret on line 1 at 380.5,262.6, words w141 to w159
-default Top: 3 lines, caret on line 0 at 266.4,222.8, words w141 to w159; typed: 3 lines, caret on line 0 at 379.5,222.8, words w141 to w159
-wide Newest: 3 lines, caret on line 2 at 264.9,302.4, words w141 to w159; typed: 3 lines, caret on line 2 at 378.0,302.4, words w141 to w159abcdefghij
-wide Middle: 3 lines, caret on line 1 at 267.4,262.6, words w141 to w159; typed: 3 lines, caret on line 1 at 380.5,262.6, words w141 to w159
-wide Top: 3 lines, caret on line 0 at 266.4,222.8, words w141 to w159; typed: 3 lines, caret on line 0 at 379.5,222.8, words w141 to w159
+default Newest: 3 lines, caret on line 2 at 326.7,302.4, words w142 to w159; typed: 3 lines, caret on line 2 at 439.7,302.4, words w142 to w159abcdefghij
+default Middle: 3 lines, caret on line 1 at 328.4,262.6, words w142 to w159; typed: 3 lines, caret on line 1 at 441.5,262.6, words w142 to w159
+default Top: 3 lines, caret on line 0 at 327.2,222.8, words w142 to w159; typed: 3 lines, caret on line 0 at 440.3,222.8, words w142 to w159
+wide Newest: 3 lines, caret on line 2 at 326.7,302.4, words w142 to w159; typed: 3 lines, caret on line 2 at 439.7,302.4, words w142 to w159abcdefghij
+wide Middle: 3 lines, caret on line 1 at 328.4,262.6, words w142 to w159; typed: 3 lines, caret on line 1 at 441.5,262.6, words w142 to w159
+wide Top: 3 lines, caret on line 0 at 327.2,222.8, words w142 to w159; typed: 3 lines, caret on line 0 at 440.3,222.8, words w142 to w159

@@ -977,6 +977,7 @@ mod tests {
             tail: "there".into(),
             pause: 1,
             raw_words: 1,
+            insert_at: None,
         });
         let new = serde_json::to_string(&doc).unwrap();
         assert!(new.contains(

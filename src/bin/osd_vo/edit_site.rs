@@ -322,6 +322,7 @@ mod tests {
             tail: String::new(),
             pause: 1,
             raw_words: frozen.split_whitespace().count(),
+            insert_at: None,
         });
         p.edit.as_mut().unwrap().sync(block.as_ref());
         p.sync_quiet();

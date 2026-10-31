@@ -26,6 +26,8 @@ use crate::osd::style::{list_installed_styles, InstalledStyle};
 pub struct OsdState {
     pub enabled: bool,
     pub keyboard_edit: bool,
+    /// `edit_resume_at`: "end" or "caret".
+    pub edit_resume_at: String,
     pub frontend: String,
     pub theme: String,
     pub style: String,
@@ -77,6 +79,7 @@ pub struct TextEdit {
 pub enum Field {
     Enabled,
     KeyboardEdit,
+    EditResumeAt,
     Frontend,
     Theme,
     Style,
@@ -106,6 +109,7 @@ impl Field {
     const ALL: &'static [Field] = &[
         Field::Enabled,
         Field::KeyboardEdit,
+        Field::EditResumeAt,
         Field::Frontend,
         Field::Theme,
         Field::Style,
@@ -146,6 +150,7 @@ const POSITION_CHOICES: &[&str] = &[
     "top-left",
     "top-right",
 ];
+const EDIT_RESUME_AT_CHOICES: &[&str] = &["end", "caret"];
 const ANCHOR_CHOICES: &[&str] = &["top", "reading-line", "center"];
 const MOTION_CHOICES: &[&str] = &["look", "none"];
 
@@ -173,6 +178,9 @@ impl OsdState {
         Ok(Self {
             enabled: ed.get_bool(TABLE, "enabled").unwrap_or(true),
             keyboard_edit: ed.get_bool(TABLE, "keyboard_edit").unwrap_or(false),
+            edit_resume_at: ed
+                .get_string(TABLE, "edit_resume_at")
+                .unwrap_or_else(|| "end".to_string()),
             frontend: ed
                 .get_string(TABLE, "frontend")
                 .unwrap_or_else(|| "gtk4".to_string()),
@@ -238,6 +246,11 @@ impl OsdState {
             ed.set_bool(TABLE, "keyboard_edit", true);
         } else {
             ed.unset(TABLE, "keyboard_edit");
+        }
+        if self.edit_resume_at == "end" {
+            ed.unset(TABLE, "edit_resume_at");
+        } else {
+            ed.set_string(TABLE, "edit_resume_at", &self.edit_resume_at);
         }
         ed.set_string(TABLE, "frontend", &self.frontend);
         // Leave the key out until someone picks a theme, like palette.
@@ -346,6 +359,9 @@ impl OsdState {
         match self.field {
             Field::Enabled => self.enabled = !self.enabled,
             Field::KeyboardEdit => self.keyboard_edit = !self.keyboard_edit,
+            Field::EditResumeAt => {
+                self.edit_resume_at = cycle_str(EDIT_RESUME_AT_CHOICES, &self.edit_resume_at, delta)
+            }
             Field::Frontend => self.frontend = cycle_str(FRONTEND_CHOICES, &self.frontend, delta),
             Field::Theme => self.theme = cycle_str(THEME_CHOICES, &self.theme, delta),
             Field::Style => {
@@ -542,6 +558,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             yesno(state.keyboard_edit),
         ),
         FormRowSpec::new(
+            state.field == Field::EditResumeAt,
+            "Speech after an edit",
+            state.edit_resume_at.clone(),
+        ),
+        FormRowSpec::new(
             state.field == Field::Frontend,
             "Frontend",
             state.frontend.clone(),
@@ -732,6 +753,19 @@ fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {
             ),
             Line::from(""),
             dim("Off by default. The edit key is [hotkey] edit_key (default: the alt double-tap key)."),
+        ],
+        Field::EditResumeAt => vec![
+            heading("Speech after an edit"),
+            Line::from(""),
+            Line::from(
+                "Where the words you say after a keyboard edit go: after all \
+                 the text, or where the caret was when you resumed.",
+            ),
+            Line::from(""),
+            Line::from("  end    after all the text"),
+            Line::from("  caret  where the caret was (after a selection)"),
+            Line::from(""),
+            dim("Default: end. Only used with Keyboard editing on."),
         ],
         Field::Frontend => vec![
             heading("Frontend"),
@@ -1120,6 +1154,7 @@ mod tests {
             .map(|f| match f {
                 Field::Enabled => "osd.enabled",
                 Field::KeyboardEdit => "osd.keyboard_edit",
+                Field::EditResumeAt => "osd.edit_resume_at",
                 Field::Frontend => "osd.frontend",
                 Field::Theme => "osd.theme",
                 Field::Style => "osd.style",
@@ -1169,6 +1204,7 @@ mod tests {
         let mut state = OsdState {
             enabled: true,
             keyboard_edit: false,
+            edit_resume_at: "end".to_string(),
             frontend: "quickshell".to_string(),
             theme: "default".to_string(),
             style: "default".to_string(),
@@ -1222,6 +1258,7 @@ mod tests {
         let mut state = OsdState {
             enabled: true,
             keyboard_edit: false,
+            edit_resume_at: "end".to_string(),
             frontend: "quickshell".to_string(),
             theme: "default".to_string(),
             style: "default".to_string(),

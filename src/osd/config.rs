@@ -308,6 +308,29 @@ pub enum OsdPaletteSource {
     Custom,
 }
 
+/// Where speech goes after a keyboard edit resumes the dictation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EditResumeAt {
+    /// After all the text, as before keyboard editing had this option.
+    #[default]
+    End,
+    /// Where the caret was when the edit ended.
+    Caret,
+}
+
+impl std::str::FromStr for EditResumeAt {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "end" => Ok(Self::End),
+            "caret" => Ok(Self::Caret),
+            _ => Err(format!("'{s}' is not end or caret")),
+        }
+    }
+}
+
 /// Layout preset for the Quickshell OSD host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -672,6 +695,9 @@ pub struct OsdConfig {
     /// vo popup: a single tap of `[hotkey] edit_key`, or `voxtype record
     /// edit`. Off by default.
     pub keyboard_edit: bool,
+    /// Where speech goes after a keyboard edit: `end` (after all the text)
+    /// or `caret` (where the caret was when the edit ended). Default `end`.
+    pub edit_resume_at: EditResumeAt,
     /// The vo popup marks a word as unsure (Type's wavy line, Palette's
     /// wave, Captions' thin line) when the engine's confidence in it is
     /// below this, 0 to 1. Default [`DOUBT_BELOW`].
@@ -726,6 +752,7 @@ impl Default for OsdConfig {
             look_badge: false,
             realtime: true,
             keyboard_edit: false,
+            edit_resume_at: EditResumeAt::End,
             doubt_below: DOUBT_BELOW,
             motion: OsdMotion::Look,
             waveform_window_secs: 3.0,
@@ -770,6 +797,17 @@ mod tests {
         assert!(!old.keyboard_edit);
         let on: OsdConfig = toml::from_str("keyboard_edit = true").unwrap();
         assert!(on.keyboard_edit);
+    }
+
+    #[test]
+    fn edit_resume_at_is_the_end_unless_set() {
+        assert_eq!(OsdConfig::default().edit_resume_at, EditResumeAt::End);
+        let old: OsdConfig = toml::from_str("keyboard_edit = true").unwrap();
+        assert_eq!(old.edit_resume_at, EditResumeAt::End);
+        let set: OsdConfig = toml::from_str("edit_resume_at = \"caret\"").unwrap();
+        assert_eq!(set.edit_resume_at, EditResumeAt::Caret);
+        assert_eq!("Caret".parse(), Ok(EditResumeAt::Caret));
+        assert!("start".parse::<EditResumeAt>().is_err());
     }
 
     #[test]

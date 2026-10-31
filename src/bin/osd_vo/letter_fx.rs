@@ -12,6 +12,12 @@
 //!
 //! Under reduced motion each draws its settled state: the ink trace, still
 //! light and shadows, the corrected word at once.
+//!
+//! The light and the ink follow the live text's glyphs as they are drawn
+//! (`Element::glyph_follow_in`), so they stay on the letters while a line
+//! glides, re-centres or rises on a depth stack's sheet; a layout laid apart
+//! from the live text would leave a faint second copy where the letters
+//! come to rest.
 
 use super::*;
 
@@ -19,7 +25,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use vo::scene::flow::Revise;
-use vo::scene::geom::Point;
+use vo::scene::geom::{Point, Rect};
 use vo::scene::text::ShapedText;
 use vo_3d::glyph_fx::{Effect, FxGlyph, GlyphFx, Ink, Light, Morph, Part, Side};
 use vo_core::words::WordId;
@@ -144,6 +150,132 @@ impl Popup {
             };
             words = words.word_revise(Revise::Swap).words_drawn_elsewhere(&ids);
         }
+        self.letter_fx_follow(words)
+    }
+
+    /// The light the look's letters stand in front of.
+    fn letter_fx_light(&self) -> Light {
+        let l = &self.look;
+        match l.theme {
+            OsdTheme::Glass => super::glass::letter_light(),
+            OsdTheme::Orb => super::orb::letter_light(),
+            OsdTheme::Aurora => super::aurora::letter_light(),
+            _ => Light {
+                accent: l.accent,
+                ..Light::default()
+            },
+        }
+    }
+
+    /// The letters' colour: the look's own text colour where it has one.
+    fn letter_fx_ink(&self) -> Color {
+        let l = &self.look;
+        match l.theme {
+            OsdTheme::Hologram => super::hologram::text_color(),
+            OsdTheme::Chrome => super::chrome::text_color(),
+            OsdTheme::Aurora => super::aurora::text_color(),
+            _ => l.foreground,
+        }
+    }
+
+    /// The light and the ink on `words`, the live text, as drawings that
+    /// follow its glyphs. Each is laid out once, with every glyph tagged
+    /// with its word; the scene moves each word's glyphs to where the live
+    /// text draws that word in this frame. Under a depth stack only the
+    /// reading line carries them, and their area is the whole text box, so
+    /// the light falls on the panel as before.
+    ///
+    /// On Glass the stack's place for the reading line is known exactly
+    /// (`glass_reading_line`). The other stacks set their reading line in
+    /// the box's last row, so the box is that far above it; a stack that
+    /// centres the line on its sheet moves the box sideways with it, which
+    /// shifts where the light stands but never the letters it lights.
+    fn letter_fx_follow(&self, words: Element<Msg>) -> Element<Msg> {
+        let l = &self.look;
+        // The hand-off takes the text away; letter_fx_layers dims the light.
+        if !(l.on(LIGHT) || l.on(INK)) || self.delivered().is_some() {
+            return words;
+        }
+        let style = l.text_style();
+        let width = l.text_width();
+        let height = self.lines as f32 * style.line_height;
+        let breath = if l.on(super::wild_motion::VARIABLE_BREATH) {
+            self.breath_fonts(style.size, false)
+        } else {
+            None
+        };
+        // The words the effects are for, the style they are set in, and
+        // the text box from the live text's top left: the flat text sits
+        // at the box's top left, a stack's reading line in its last row.
+        let stable;
+        let (line, set, area): (&[Word], TextStyle, Rect) =
+            if let Some((line, left, at)) = self.glass_reading_line() {
+                stable = vec![(line, 0.0)];
+                (&stable[0].0, left, Rect::new(-at.x, -at.y, width, height))
+            } else if l.on(super::wild_space::DEPTH_STACK) {
+                // Showcase gives every line of its stack the reading line's
+                // dress, so only the reading line's words are the effects';
+                // the other stacks pass only their reading line here.
+                let line = if l.theme == OsdTheme::Showcase {
+                    self.stack_reading_line()
+                } else {
+                    &self.shown
+                };
+                let dy = self.lines.saturating_sub(1) as f32 * style.line_height;
+                (line, style, Rect::new(0.0, -dy, width, height))
+            } else {
+                (&self.shown, style, Rect::new(0.0, 0.0, width, height))
+            };
+        let laid = self.letter_fx_laid(line, &set, width, breath.as_ref());
+        let mut starts = Vec::with_capacity(line.len());
+        let mut at = 0usize;
+        for w in line {
+            starts.push(at);
+            at += w.text.len() + 1;
+        }
+        let word_of = |cluster: u32| starts.iter().rposition(|&s| s <= cluster as usize);
+        let ink = self.letter_fx_ink();
+        let glyph = |g: &vo::scene::text::PlacedGlyph, start: f64| {
+            let w = word_of(g.cluster).map_or(vo::scene::display::NO_WORD, |i| line[i].id);
+            FxGlyph::new(g.font, g.glyph, g.pos, set.size, ink, start).word(w)
+        };
+        let fx = |effect, glyphs| {
+            Arc::new(
+                GlyphFx::new(effect, glyphs)
+                    .fonts(l.fonts.clone())
+                    .signals(self.signals.clone())
+                    .reduced(self.letter_fx_reduced()),
+            )
+        };
+        let mut words = words;
+        if l.on(LIGHT) {
+            let all: Vec<FxGlyph> = laid.glyphs.iter().map(|g| glyph(g, 0.0)).collect();
+            let light = self.letter_fx_light();
+            words = words
+                .glyph_follow_in(
+                    fx(Effect::Light(light, Side::Under), all.clone()),
+                    false,
+                    area,
+                )
+                .glyph_follow_in(fx(Effect::Light(light, Side::Over), all), true, area);
+        }
+        if l.on(INK) {
+            let (born, _) = self.letter_fx_sync();
+            let t = self.extra.now;
+            let ink = Ink::default();
+            let window = (ink.secs + ink.trace_secs) as f64;
+            let fresh: Vec<FxGlyph> = laid
+                .glyphs
+                .iter()
+                .filter_map(|g| {
+                    let b = *born.get(&line[word_of(g.cluster)?].id)?;
+                    (t - b < window).then(|| glyph(g, b))
+                })
+                .collect();
+            if !fresh.is_empty() {
+                words = words.glyph_follow_in(fx(Effect::Ink(ink), fresh), true, area);
+            }
+        }
         words
     }
 
@@ -231,16 +363,9 @@ impl Popup {
             None
         };
         let height = self.lines as f32 * style.line_height;
-        // The letters' colour: the look's own text colour where it has one.
-        let letter_ink = match l.theme {
-            OsdTheme::Hologram => super::hologram::text_color(),
-            OsdTheme::Chrome => super::chrome::text_color(),
-            OsdTheme::Aurora => super::aurora::text_color(),
-            _ => l.foreground,
-        };
+        let letter_ink = self.letter_fx_ink();
         let reduced = self.letter_fx_reduced();
-        let (born, morphs) = self.letter_fx_sync();
-        let t = self.extra.now;
+        let (_, morphs) = self.letter_fx_sync();
         let leaving = self.delivered().is_some();
 
         // Every glyph on screen with its word, from the layout the live
@@ -267,90 +392,28 @@ impl Popup {
 
         let mut under = Vec::new();
         let mut over = Vec::new();
-        if l.on(LIGHT) {
-            // While the text is handed off it leaves the box, so the light keeps shining
-            // but casts no letters, or it would show the old text as a ghost.
-            let all: Vec<FxGlyph> = if leaving {
-                Vec::new()
-            } else if l.theme == OsdTheme::Glass && l.on(super::wild_space::DEPTH_STACK) {
-                // Glass: the stack's reading line where the stack draws it,
-                // or the flat text once the stack gives way to it.
-                match self.glass_reading_line() {
-                    Some((line, left, at)) => self
-                        .letter_fx_laid(&line, &left, width, breath.as_ref())
-                        .glyphs
-                        .iter()
-                        .map(|g| {
-                            let pos = Point::new(g.pos.x + at.x, g.pos.y + at.y);
-                            FxGlyph::new(g.font, g.glyph, pos, left.size, letter_ink, 0.0)
-                        })
-                        .collect(),
-                    None => laid.glyphs.iter().map(|g| glyph(g, 0.0)).collect(),
-                }
-            } else if l.on(super::wild_space::DEPTH_STACK) {
-                // Under a depth stack only the reading line lies on the
-                // panel, in the box's last row; the older lines sit on
-                // sheets in front of it.
-                let stable;
-                let line = if l.theme == OsdTheme::Showcase {
-                    self.stack_reading_line()
-                } else {
-                    // Looks without showcase's stack state: the newest of
-                    // their stable lines.
-                    stable = self.stable_lines(&style, width);
-                    stable.last().map_or(&[][..], |(w, _)| w.as_slice())
-                };
-                let dy = self.lines.saturating_sub(1) as f32 * style.line_height;
-                self.letter_fx_laid(line, &style, width, breath.as_ref())
-                    .glyphs
-                    .iter()
-                    .map(|g| {
-                        let pos = Point::new(g.pos.x, g.pos.y + dy);
-                        FxGlyph::new(g.font, g.glyph, pos, style.size, letter_ink, 0.0)
-                    })
-                    .collect()
-            } else {
-                laid.glyphs.iter().map(|g| glyph(g, 0.0)).collect()
-            };
-            let light = match l.theme {
-                OsdTheme::Glass => super::glass::letter_light(),
-                OsdTheme::Orb => super::orb::letter_light(),
-                OsdTheme::Aurora => super::aurora::letter_light(),
-                _ => Light {
-                    accent: l.accent,
-                    ..Light::default()
-                },
-            };
-            // The light dims away with the text it shone through.
-            let dim = Spring::critical_to_98(0.45);
+        if l.on(LIGHT) && leaving {
+            // The light follows the live text (letter_fx_follow), which the
+            // hand-off takes away. The light on the panel stays a moment
+            // longer, casting no letters, and dims away with the text.
             under.push(place(
                 Element::gpu(
                     "light-under",
-                    fx(Effect::Light(light, Side::Under), all.clone()),
+                    fx(
+                        Effect::Light(self.letter_fx_light(), Side::Under),
+                        Vec::new(),
+                    ),
                 )
-                .opacity(if leaving { 0.0 } else { 1.0 })
-                .motion(Prop::Opacity, dim),
+                .opacity(0.0)
+                .motion(Prop::Opacity, Spring::critical_to_98(0.45))
+                .presence(
+                    Transition {
+                        opacity: Some(1.0),
+                        ..Transition::NONE
+                    },
+                    Transition::NONE,
+                ),
             ));
-            over.push(place(Element::gpu(
-                "light-over",
-                fx(Effect::Light(light, Side::Over), all),
-            )));
-        }
-        if l.on(INK) && !leaving {
-            let ink = Ink::default();
-            let window = (ink.secs + ink.trace_secs) as f64;
-            let fresh: Vec<FxGlyph> = laid
-                .glyphs
-                .iter()
-                .filter_map(|g| {
-                    let w = &self.shown[word_of(g.cluster)?];
-                    let b = *born.get(&w.id)?;
-                    (t - b < window).then(|| glyph(g, b))
-                })
-                .collect();
-            if !fresh.is_empty() {
-                over.push(place(Element::gpu("ink", fx(Effect::Ink(ink), fresh))));
-            }
         }
         if l.on(LIQUID) && !leaving && !morphs.is_empty() {
             let mut glyphs = Vec::new();

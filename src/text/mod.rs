@@ -13,6 +13,7 @@ use regex::Regex;
 use std::collections::HashMap;
 
 /// Text processor that applies transformations to transcribed text
+#[derive(Clone)]
 pub struct TextProcessor {
     /// Whether spoken punctuation is enabled
     spoken_punctuation: bool,

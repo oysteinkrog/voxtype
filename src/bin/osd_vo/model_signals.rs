@@ -422,6 +422,35 @@ impl Popup {
         self.signal_marks_in(text, words, &tail, origin, ink)
     }
 
+    /// The boxes of the ghost words drawn after `words` (left, line top,
+    /// width and line height, in `tail`'s layout), for a look that draws
+    /// behind them. Empty when no ghost is drawn.
+    pub(crate) fn ghost_tail_boxes(&self, words: &[Word], tail: &TailText) -> Vec<Rect> {
+        let l = &self.look;
+        if !(l.on(GHOST_TAIL) || l.on(THREE_TIER)) {
+            return Vec::new();
+        }
+        let Some(laid) = self
+            .live_signals()
+            .and_then(|s| self.tail_layout(s, words, tail))
+        else {
+            return Vec::new();
+        };
+        let style = TextStyle {
+            align: Align::Start,
+            ..laid.style
+        };
+        laid.tail
+            .iter()
+            .zip(&laid.at)
+            .filter_map(|(w, at)| {
+                let (x, top) = (*at)?;
+                let gw = self.measure.layout(&w.text, &style, None).size.w;
+                Some(Rect::new(x, top, gw, laid.line_h))
+            })
+            .collect()
+    }
+
     /// Where the drawn ghost words after `words` end (x, line top, in
     /// `tail`'s layout), when any are drawn. A look's caret or pen head
     /// that stands after the text goes here, so it never covers a ghost.
@@ -968,6 +997,8 @@ impl Popup {
             let alpha = match (tiers, w.edge >= PENDING_FRAMES) {
                 (true, true) => PENDING_INK,
                 (true, false) => EDGE_INK,
+                // R2-22-c: the tail stands sharp at 70 % ink over its dust.
+                (false, _) if l.on(super::mission::SPECTRAL_FOCUS) => PENDING_INK,
                 (false, _) => GHOST_INK,
             };
             let place = first + i - usize::from(w.joins);

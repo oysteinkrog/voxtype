@@ -177,6 +177,7 @@ mod tests {
                 tail: String::new(),
                 pause: 1,
                 raw_words: 0,
+                insert_at: None,
             };
             self.link.sync(Some(&block));
             self.focus.follow(&mut self.link, &mut self.ctl, 0.0);

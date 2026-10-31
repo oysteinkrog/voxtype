@@ -11,6 +11,12 @@
 //! rule applies from the next text on; `text.replacements` and
 //! `replacements_file` win over it.
 //!
+//! Keyboard edits of spoken words in the popup ([`Source::Keyboard`]) are
+//! logged too, at delivery, and learned the first time. Only 1 to 3 words
+//! changed for 1 to 3 words, or a change of case, can make a rule, and a
+//! change of case only when the right words look like a name; a pure
+//! insertion is logged without a rule.
+//!
 //! Learned words stay on this machine: they only replace words in the
 //! output text and are never sent to an engine or a post-processing
 //! command as a word list.
@@ -23,6 +29,23 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, TextConfig};
+
+/// Where a logged correction came from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    /// A spoken correction (the correction key held).
+    #[default]
+    Spoken,
+    /// A keyboard edit of spoken words in the popup.
+    Keyboard,
+}
+
+impl Source {
+    fn is_spoken(&self) -> bool {
+        *self == Source::Spoken
+    }
+}
 
 /// One applied correction in the corrections log. No audio.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -46,6 +69,9 @@ pub struct Entry {
     /// The right word was spelled ([`crate::text::spell`]): learned at once.
     #[serde(default)]
     pub spelled: bool,
+    /// Spoken corrections leave it out of the log.
+    #[serde(default, skip_serializing_if = "Source::is_spoken")]
+    pub source: Source,
 }
 
 /// Where corrections are logged and learned, from the config.
@@ -133,6 +159,17 @@ fn rule(wrong: &str, right: &str) -> Option<(String, String)> {
     Some((from, to))
 }
 
+/// The rule a keyboard edit of spoken `wrong` words to `right` may make:
+/// 1 to 3 words for 1 to 3 words, or a change of case. None for a pure
+/// insertion or deletion, or a rewording of more words.
+pub fn keyboard_rule(wrong: &str, right: &str) -> Option<(String, String)> {
+    let counts = |s: &str| s.split_whitespace().count();
+    if !(1..=3).contains(&counts(wrong)) || !(1..=3).contains(&counts(right)) {
+        return None;
+    }
+    rule(wrong, right)
+}
+
 impl Learning {
     pub fn from_config(text: &TextConfig) -> Self {
         let path = |set: &Option<String>, name: &str| {
@@ -173,13 +210,31 @@ impl Learning {
             })
     }
 
+    /// Whether a keyboard edit of spoken `wrong` words to `right` is
+    /// learned: at once when it makes a [`keyboard_rule`], and a change of
+    /// case only when the right words look like a name.
+    pub fn would_learn_keyboard(&self, wrong: &str, right: &str) -> bool {
+        self.enabled
+            && keyboard_rule(wrong, right)
+                .is_some_and(|(from, to)| key(&to) != from || looks_like_a_name(&to))
+    }
+
+    /// Whether logging `entry` learns it, as [`Learning::would_learn`] or
+    /// [`Learning::would_learn_keyboard`] says.
+    fn learns(&self, entry: &Entry) -> bool {
+        match entry.source {
+            Source::Spoken => self.would_learn(&entry.wrong, &entry.right, entry.spelled),
+            Source::Keyboard => self.would_learn_keyboard(&entry.wrong, &entry.right),
+        }
+    }
+
     /// Logs `entry` and learns its pair when it qualifies. Returns the new
     /// rule, if one was written.
     pub fn record(&self, entry: &Entry) -> std::io::Result<Option<(String, String)>> {
         if !self.enabled {
             return Ok(None);
         }
-        let learn = self.would_learn(&entry.wrong, &entry.right, entry.spelled);
+        let learn = self.learns(entry);
         if let Some(dir) = self.log.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -208,7 +263,7 @@ impl Learning {
         }
         rules.insert(from.clone(), to.clone());
         self.write_rules(&rules)?;
-        tracing::info!(%from, %to, "Learned a word from a spoken correction");
+        tracing::info!(%from, %to, source = ?entry.source, "Learned a word from a correction");
         Ok(Some((from, to)))
     }
 
@@ -316,6 +371,56 @@ mod tests {
             Some("blueberry")
         );
         assert_eq!(l.entries().len(), 2);
+    }
+
+    fn typed(wrong: &str, right: &str) -> Entry {
+        Entry {
+            source: Source::Keyboard,
+            ..entry(wrong, right)
+        }
+    }
+
+    /// Table 2.7, the permanent rules: keyboard edits are logged with their
+    /// source, and only short swaps and name-like changes of case learn.
+    #[test]
+    fn keyboard_edits_follow_table_2_7() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = learning(dir.path());
+        // 1 to 3 words for 1 to 3 words: the first time.
+        assert!(l.would_learn_keyboard("blue barrel", "blueberry"));
+        assert_eq!(
+            l.record(&typed("blue barrel", "blueberry")).unwrap(),
+            Some(("blue barrel".into(), "blueberry".into()))
+        );
+        // Already a rule: logged, nothing new written.
+        assert_eq!(l.record(&typed("blue barrel", "blueberry")).unwrap(), None);
+        assert!(l.record(&typed("glim bot", "GlimBot")).unwrap().is_some());
+        // Case only: a name at once, a plain capital never.
+        assert!(l.record(&typed("nfs", "NFS")).unwrap().is_some());
+        assert!(!l.would_learn_keyboard("paris", "Paris"));
+        assert_eq!(l.record(&typed("paris", "Paris")).unwrap(), None);
+        assert_eq!(l.record(&typed("paris", "Paris")).unwrap(), None);
+        assert!(!l.would_learn_keyboard("", "very"));
+        // A pure insertion and a long rewording: logged, no rule.
+        assert_eq!(l.record(&typed("", "very")).unwrap(), None);
+        let long = typed("this is not what I", "it is what we said");
+        assert_eq!(l.record(&long).unwrap(), None);
+        assert_eq!(l.record(&long).unwrap(), None);
+        assert_eq!(l.rules().len(), 3);
+        let entries = l.entries();
+        assert_eq!(entries.len(), 9);
+        assert!(entries.iter().all(|e| e.source == Source::Keyboard));
+        assert_eq!(keyboard_rule("a b c d", "e"), None);
+        assert_eq!(keyboard_rule("", "e"), None);
+        assert_eq!(keyboard_rule("e", ""), None);
+    }
+
+    #[test]
+    fn a_spoken_entry_logs_as_before() {
+        let line = serde_json::to_string(&entry("a", "b")).unwrap();
+        assert!(!line.contains("source"), "{line}");
+        let line = serde_json::to_string(&typed("a", "b")).unwrap();
+        assert!(line.ends_with(r#","source":"keyboard"}"#), "{line}");
     }
 
     #[test]

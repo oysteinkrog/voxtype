@@ -21,8 +21,10 @@ use std::sync::OnceLock;
 use std::f32::consts::TAU;
 use vo::scene::ambient::{Loop, LoopProp, Wave};
 use vo::scene::canvas::Painter;
+use vo::scene::display::BackdropRes;
 use vo::scene::display::{Paint, ShapeInstance};
-use vo::scene::geom::Point;
+use vo::scene::geom::{Affine, Point};
+use vo::scene::glass::{Glass, GlassKind, GlassShape, LensProfile, Refract};
 use vo::scene::path::{icons, make, Contour, Morph, Outline, StrokeStyle};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
@@ -246,6 +248,105 @@ pub(crate) const RING_READS: &str = "ring-reads";
 const EYE_R: f32 = 188.0;
 /// How long the eye takes to settle on a new word.
 const EYE_SETTLE: f64 = 0.35;
+
+/// R2-02-a Living glass: a glass bubble over the inner ring bends the ring
+/// and the spectrum under it; its ripple follows the voice. It bends only
+/// what the popup drew (its layer's backdrop), never the desktop.
+pub(crate) const LIVING_GLASS: &str = "living-glass";
+/// The lens, in concept pixels from the centre: inside the thin ring, well
+/// above the text frame.
+const LENS_R: f32 = 155.0;
+/// The lens's still bend and the most the voice adds, logical pixels; the
+/// two stay within 3 px.
+const LENS_BEND: f32 = 1.5;
+const LENS_RIPPLE: f32 = 1.5;
+/// R2-02-b Particle orbit: fine particles orbit the mic, pulled into a
+/// tighter, brighter ring as you speak and loosening on a pause.
+pub(crate) const PARTICLE_ORBIT: &str = "particle-orbit";
+const ORBIT_PARTICLES: usize = 240;
+/// The ring the voice pulls the particles towards, concept pixels.
+const ORBIT_R: f32 = 128.0;
+const ORBIT_PULL: f32 = 0.75;
+const ORBIT_ALPHA: f32 = 0.4;
+/// R2-02-c Typewriter approach: when a word comes, two to four faint copies
+/// of it glide round the ring towards it and fade out above the frame, in
+/// `APPROACH_SECS`. The word itself comes in at 70 % ink, in place.
+pub(crate) const TYPEWRITER_APPROACH: &str = "typewriter-approach";
+const APPROACH_SECS: f64 = 0.3;
+const COPY_ALPHA: f32 = 0.22;
+/// The copies' size against the text's.
+const COPY_SCALE: f32 = 0.55;
+
+/// R2-02-a: the lens's bend at voice level `level`, logical pixels.
+fn lens_bend(level: f32, still: bool) -> (f32, f32) {
+    let ripple = if still {
+        0.0
+    } else {
+        LENS_RIPPLE * (level * 2.6).clamp(0.0, 1.0)
+    };
+    (LENS_BEND, ripple)
+}
+
+/// R2-02-b: the voice's pull at `level`, 0 loose to 1 tight.
+fn orbit_pull(level: f32) -> f32 {
+    (level * 2.6).clamp(0.0, 1.0)
+}
+
+/// R2-02-b: particle `i`'s radius in concept pixels at voice level
+/// `level`: a pure function of the level, drawn towards `ORBIT_R`.
+fn orbit_radius(i: usize, level: f32) -> f32 {
+    let loose = 62.0 + 112.0 * seed(i, 1);
+    loose + (ORBIT_R + 14.0 * (seed(i, 2) - 0.5) - loose) * ORBIT_PULL * orbit_pull(level)
+}
+
+/// R2-02-b: particle `i` at `t` seconds after the open, at voice level
+/// `level`: its angle in radians, its radius in concept pixels and its
+/// alpha. The voice swirls it forward a little and brightens it.
+fn orbit_particle(i: usize, t: f64, level: f32) -> (f32, f32, f32) {
+    let pull = orbit_pull(level);
+    let speed = 0.12 + 0.18 * seed(i, 3);
+    let angle = TAU * seed(i, 0) + (t * speed as f64).rem_euclid(TAU as f64) as f32 + 0.5 * pull;
+    let alpha = (0.12 + 0.28 * pull) * (0.5 + 0.5 * seed(i, 4));
+    (angle, orbit_radius(i, level), alpha.min(ORBIT_ALPHA))
+}
+
+/// A fixed number in 0..1 for particle `i` and `salt`.
+fn seed(i: usize, salt: u32) -> f32 {
+    let x = (i as f32 * 12.9898 + salt as f32 * 78.233).sin() * 43_758.547;
+    x.fract().abs()
+}
+
+/// R2-02-c: where copy `j` of `n` is `u` of the way (0 to 1) round to the
+/// word, and its turn in radians and alpha. It runs round the ring from
+/// one side, then down towards `to`, fading out before it gets there.
+fn approach(centre: Point, r: f32, to: Point, j: usize, u: f32) -> (Point, f32, f32) {
+    let side = if j.is_multiple_of(2) { 1.0 } else { -1.0 };
+    let from = std::f32::consts::FRAC_PI_2 + side * (1.1 + 0.45 * (j / 2) as f32);
+    let bottom = Point::new(centre.x, centre.y + r);
+    let u = u.clamp(0.0, 1.0);
+    let alpha = COPY_ALPHA * (std::f32::consts::PI * u).sin();
+    if u < 0.7 {
+        let k = ease_out((u / 0.7) as f64);
+        let a = from + (std::f32::consts::FRAC_PI_2 - from) * k;
+        let p = Point::new(centre.x + r * a.cos(), centre.y + r * a.sin());
+        (p, a - std::f32::consts::FRAC_PI_2, alpha)
+    } else {
+        let k = (u - 0.7) / 0.3;
+        let p = Point::new(
+            bottom.x + (to.x - bottom.x) * k,
+            bottom.y + (to.y - bottom.y) * k,
+        );
+        (p, 0.0, alpha)
+    }
+}
+
+/// R2-02-c: how a new word comes in, at 70 % ink and in place.
+fn approach_enter() -> Transition {
+    Transition {
+        opacity: Some(0.7),
+        ..Transition::NONE
+    }
+}
 
 /// MO-62: where the eye looks, as angles in degrees on the ring.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -790,11 +891,15 @@ impl Popup {
         } else {
             Transition::fade().scale(0.96)
         };
-        let hud = at(Element::layer("hud"), 0.0, 0.0)
+        let mut hud = at(Element::layer("hud"), 0.0, 0.0)
             .size(size.w, size.h)
             .bloom(0.2, 6.0)
             .presence(Transition::fade().opacity(1.0), exit)
-            .child(self.jarvis_ring(&g, &status, size))
+            .child(self.jarvis_ring(&g, &status, size));
+        for e in self.jarvis_r2(&g, size) {
+            hud = hud.child(e);
+        }
+        let hud = hud
             .child(self.jarvis_center(&g, &status))
             .child(self.jarvis_labels(&g, &status))
             .child(self.jarvis_frame(&g, &status))
@@ -961,6 +1066,164 @@ impl Popup {
             layer = layer.child(self.jarvis_progress(g));
         }
         layer
+    }
+
+    /// The round-2 motions (R2-02) over the ring, in drawing order: the
+    /// particles, the glass that bends them and the ring, and the copies of
+    /// a new word on their way round.
+    fn jarvis_r2(&self, g: &Geo, size: Size) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        if self.extra.final_at.is_some() || self.edit_view.is_some() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        if l.on(PARTICLE_ORBIT) {
+            out.push(self.jarvis_orbit(g, size));
+        }
+        if l.on(LIVING_GLASS) {
+            out.push(self.jarvis_lens(g));
+        }
+        if l.on(TYPEWRITER_APPROACH) && !self.still() && !self.ended() {
+            out.extend(self.jarvis_approach(g, size));
+        }
+        out
+    }
+
+    /// The voice level at `t`, smoothed over the last 100 ms.
+    fn jarvis_level(levels: &kit::Levels, t: f64) -> f32 {
+        (levels.at(t) + levels.at(t - 0.05) + levels.at(t - 0.1)) / 3.0
+    }
+
+    /// R2-02-a: the glass bubble over the inner ring, in a layer that
+    /// captures what the popup drew under it. Its ripple is the voice's
+    /// level now; under reduced motion and after the end it is still.
+    fn jarvis_lens(&self, g: &Geo) -> Element<Msg> {
+        let r = LENS_R * g.k;
+        let level = Self::jarvis_level(&self.kit_levels(), self.extra.now);
+        let (bend, wobble) = lens_bend(level, self.still() || self.ended());
+        let glass = Glass {
+            sheen: false,
+            shadow: [0.0; 3],
+            tint: Color::hex(INK, 0.02),
+            edge_alpha: 0.0,
+            rim: 0.35,
+            grain: 0.0,
+            bevel: 8.0,
+            dispersion: 0.3,
+            // The lens bends only what the popup drew: no desktop blur.
+            blur_behind: false,
+            ..Glass::of_kind(GlassKind::Dark)
+        }
+        .with_shape(GlassShape::Ellipse)
+        .with_refract(Refract {
+            profile: LensProfile::Bubble,
+            bend,
+            magnify: 1.0,
+            dispersion: 0.08,
+            film: 0.0,
+            wobble,
+        });
+        let lens = Element::panel("lens")
+            .size(2.0 * r, 2.0 * r)
+            .radius(r)
+            .glass(glass);
+        at(
+            Element::layer("lens-fx").backdrop(BackdropRes::Full, Color::TRANSPARENT),
+            g.cx - r,
+            g.cy - r,
+        )
+        .size(2.0 * r, 2.0 * r)
+        .radius(r)
+        .child(lens)
+    }
+
+    /// R2-02-b: the particles round the mic; under reduced motion a still
+    /// dotted ring whose brightness follows the voice.
+    fn jarvis_orbit(&self, g: &Geo, size: Size) -> Element<Msg> {
+        let levels = self.kit_levels();
+        let (k, centre, shown_at) = (g.k, Point::new(g.cx, g.cy), self.shown_at);
+        let still = self.still();
+        let canvas = Element::canvas("orbit", self.jarvis_until(), move |t, r, p| {
+            let level = Self::jarvis_level(&levels, t);
+            let c = Point::new(r.x + centre.x, r.y + centre.y);
+            if still {
+                let a = 0.1 + 0.25 * orbit_pull(level);
+                for i in 0..90 {
+                    let ang = TAU * i as f32 / 90.0;
+                    let at =
+                        Point::new(c.x + ORBIT_R * k * ang.cos(), c.y + ORBIT_R * k * ang.sin());
+                    p.shape(ShapeInstance::circle(
+                        at,
+                        1.1 * k,
+                        Paint::solid(hex(BRIGHT, a)),
+                    ));
+                }
+                return;
+            }
+            for i in 0..ORBIT_PARTICLES {
+                let (ang, rad, a) = orbit_particle(i, t - shown_at, level);
+                let at = Point::new(c.x + rad * k * ang.cos(), c.y + rad * k * ang.sin());
+                let size = (0.8 + 0.9 * seed(i, 5)) * k;
+                p.shape(ShapeInstance::circle(
+                    at,
+                    size,
+                    Paint::solid(hex(BRIGHT, a)),
+                ));
+            }
+        });
+        at(canvas, 0.0, 0.0).size(size.w, size.h)
+    }
+
+    /// R2-02-c: faint copies of the newest word gliding round the ring
+    /// towards it for `APPROACH_SECS`, fading out above the frame.
+    fn jarvis_approach(&self, g: &Geo, size: Size) -> Option<Element<Msg>> {
+        let (id, centre) = *self.jarvis_word_centres(g).last()?;
+        let born = self.heard.word(id)?.born;
+        if self.extra.now - born >= APPROACH_SECS || self.cut_at >= born - 0.1 {
+            return None;
+        }
+        let word = self.shown.iter().rev().find(|w| w.id == id)?;
+        let style = self.look.text_style();
+        let shaped = self.measure.layout(&word.text, &style, None);
+        let own = shaped.lines.first().map_or(style.size, |l| l.baseline);
+        let w = shaped.size.w;
+        let outline = vo::scene::glyph_morph::WordOutline::new(
+            self.measure.fonts(),
+            &shaped,
+            style.size,
+            Point::ZERO,
+        );
+        let ink: Arc<[Contour]> = outline
+            .glyphs
+            .iter()
+            .flat_map(|g| g.outline.contours.clone())
+            .collect();
+        let n = 2 + (id as usize % 3);
+        let ring = Point::new(g.cx, g.cy);
+        let r = EYE_R * 0.92 * g.k;
+        let to = Point::new(centre.x, g.frame_top - 8.0 * g.k);
+        let lift = own - 0.35 * style.size;
+        let canvas = Element::canvas("approach", born + APPROACH_SECS, move |t, rect, p| {
+            let u = ((t - born) / APPROACH_SECS) as f32;
+            if !(0.0..1.0).contains(&u) {
+                return;
+            }
+            for j in 0..n {
+                // Each copy starts a little after the one before.
+                let uj = (u * (1.0 + 0.15 * j as f32) - 0.15 * j as f32).clamp(0.0, 1.0);
+                let (at, turn, a) = approach(ring, r, to, j, uj);
+                if a <= 0.005 {
+                    continue;
+                }
+                let m = Affine::translate(-w / 2.0, -lift)
+                    .then(&Affine::scale(COPY_SCALE))
+                    .then(&Affine::rotate(turn))
+                    .then(&Affine::translate(rect.x + at.x, rect.y + at.y));
+                let moved: Vec<Contour> = ink.iter().map(|c| c.transform(&m)).collect();
+                p.fill(&moved, &StrokeStyle::solid(1.0, hex(BRIGHT, a)));
+            }
+        });
+        Some(at(canvas, 0.0, 0.0).size(size.w, size.h))
     }
 
     /// MO-62: where the ring's eye looks, from the words on screen.
@@ -1349,17 +1612,18 @@ impl Popup {
             // A new line comes in through its words' own entry: a fade of
             // the whole line from 0 put its first word under the reading
             // line's 70 % ink floor (RD-09).
-            let (enter, exit) = if tapped {
-                (Transition::NONE, Transition::NONE)
+            let enter = if tapped {
+                Transition::NONE
+            } else if self.look.on(TYPEWRITER_APPROACH) {
+                self.ghost_enter(approach_enter())
             } else {
-                (
-                    self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k)),
-                    Transition::fade(),
-                )
+                self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k))
             };
+            // A line goes at once: the top line fading where it was when the
+            // text scrolled drew the line below over it as it moved up.
             let line = Element::layer(format!("line{key}"))
                 .size(text_w, style.line_height)
-                .presence(Transition::NONE, exit)
+                .presence(Transition::NONE, Transition::NONE)
                 .child(
                     at(live, text_x, 0.0)
                         .text_style(style)
@@ -1867,6 +2131,55 @@ mod edit_tests {
                 "{theme:?}"
             );
             assert!(at >= hold.since, "{theme:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+
+    /// R2-02-a: the lens bends the ring by at most 3 px, and holds still
+    /// when the voice stops.
+    #[test]
+    fn the_lens_bends_by_three_pixels_at_most() {
+        for level in [0.0, 0.2, 0.5, 1.0, 4.0] {
+            let (bend, ripple) = lens_bend(level, false);
+            assert!(bend + ripple <= 3.0, "{level}");
+        }
+        assert_eq!(lens_bend(1.0, true).1, 0.0);
+    }
+
+    /// R2-02-b: the orbit is a pure function of the level, and the voice
+    /// draws every particle closer to the ring.
+    #[test]
+    fn the_orbit_tightens_with_the_voice() {
+        let spread = |level: f32| {
+            (0..ORBIT_PARTICLES)
+                .map(|i| (orbit_radius(i, level) - ORBIT_R).abs())
+                .sum::<f32>()
+        };
+        assert!(spread(1.0) < spread(0.0) * 0.5);
+        for i in 0..ORBIT_PARTICLES {
+            assert_eq!(orbit_radius(i, 0.3), orbit_radius(i, 0.3));
+            let (_, r, a) = orbit_particle(i, 1.7, 0.3);
+            assert_eq!(r, orbit_radius(i, 0.3));
+            assert!(a <= ORBIT_ALPHA);
+        }
+    }
+
+    /// R2-02-c: a copy stays at 25 % ink or less, and is gone when the
+    /// approach ends (the canvas ends at `APPROACH_SECS`, 300 ms).
+    #[test]
+    fn the_copies_are_faint_and_brief() {
+        let c = Point::new(0.0, 0.0);
+        let to = Point::new(20.0, 200.0);
+        for j in 0..4 {
+            for s in 0..=100 {
+                let (_, _, a) = approach(c, 128.0, to, j, s as f32 / 100.0);
+                assert!(a <= 0.25, "{j} {s}");
+            }
+            assert!(approach(c, 128.0, to, j, 1.0).2 < 1e-3);
         }
     }
 }

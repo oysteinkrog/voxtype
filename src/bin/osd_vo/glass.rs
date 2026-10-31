@@ -13,6 +13,21 @@
 //!
 //! The glass faintly reflects a made-up desktop (EG-21): a few still window
 //! shapes in the look's own blue, under everything else on the card.
+//!
+//! Round 2 (R2-08), each opt-in by its motion feature:
+//!
+//! - `breathing-aurora`: soft aurora strands behind the text swell with the
+//!   voice and lie down once the recording ends; at most 15 % alpha. Reduced
+//!   motion: still strands, only their brightness follows the voice.
+//! - `page-reveal`: a faint paper strip behind the newest line grows by each
+//!   new word's width over 250 ms, a soft curl at its right end unrolling as
+//!   it grows; at most 12 % alpha. The text stays flat. Reduced motion: the
+//!   strip grows, the curl holds still.
+//! - `resonant-droplets`: at each phrase end (0.6 s with no new word) one
+//!   droplet falls into the water below the text and sends calm rings,
+//!   gone 1.5 s after it lands. Drawn rings in perspective, a pure function of
+//!   time and the words' times (the bead's allowed fallback for the water
+//!   simulation). Reduced motion: one still ring that flashes and fades.
 
 use super::kit::{at, ease_out, glass_reflection, hex, mix, Levels, Mode};
 use super::*;
@@ -22,7 +37,9 @@ use vo::scene::depth_stack::DepthStack;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::glass::Glass;
-use vo::scene::path::{icons, make, Outline, StrokeStyle};
+use vo::scene::levels::{Levels as LevelTrack, Stops};
+use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
+use vo::scene::ribbon::Ribbon;
 
 /// Colours sampled from the redesign.
 const TINT: u32 = 0x0e1638;
@@ -80,6 +97,29 @@ const STATUS_Y: f32 = 548.0;
 const STATUS_H: f32 = 20.0;
 const PROGRESS_W: f32 = 220.0;
 const PROGRESS_GAP: f32 = 22.0;
+
+/// R2-08 round 2 features and their limits.
+pub(crate) const BREATHING_AURORA: &str = "breathing-aurora";
+pub(crate) const PAGE_REVEAL: &str = "page-reveal";
+pub(crate) const RESONANT_DROPLETS: &str = "resonant-droplets";
+/// Each of the two aurora strands; where they cross the newest line they
+/// add up to 14 %.
+const AURORA_ALPHA: f32 = 0.07;
+const STRIP_SECS: f64 = 0.25;
+const STRIP_ALPHA: f32 = 0.12;
+/// The curl's radius at rest and while the strip grows.
+const CURL_R: f32 = 5.0;
+const CURL_GROW_R: f32 = 9.0;
+/// A phrase ends this long after a word with no word after it.
+const PHRASE_GAP: f64 = 0.6;
+const DROP_FALL: f64 = 0.25;
+const RING_SECS: f64 = 1.5;
+const RINGS: usize = 3;
+const RING_STEP: f64 = 0.18;
+const RING_ALPHA: f32 = 0.35;
+/// How flat the water's rings look: their height over their width.
+const RING_TILT: f32 = 0.22;
+const _: () = assert!(2.0 * AURORA_ALPHA <= 0.15 && STRIP_ALPHA <= 0.2);
 
 // The words sit between the waveform and the button, and the button above
 // the progress line and the status row, inside the card.
@@ -314,6 +354,173 @@ impl Caustic {
 }
 
 /// A repeatable 0..1 for `seed`.
+/// R2-08-b: the strip's left and right ends `age` seconds after the newest
+/// word came: from `before` (the newest line without that word) to `now`
+/// over `STRIP_SECS`. It grows so under reduced motion too.
+fn strip_span(before: (f32, f32), now: (f32, f32), age: f64) -> (f32, f32) {
+    let u = ease_out((age / STRIP_SECS).clamp(0.0, 1.0));
+    let lerp = |a: f32, b: f32| a + (b - a) * u;
+    (lerp(before.0, now.0), lerp(before.1, now.1))
+}
+
+/// R2-08-b: the curl's radius `age` seconds after the newest word came: it
+/// swells as the strip unrolls and settles once it has grown.
+fn curl_radius(age: f64, still: bool) -> f32 {
+    if still {
+        return CURL_R;
+    }
+    let u = (age / STRIP_SECS).clamp(0.0, 1.0) as f32;
+    CURL_R + (CURL_GROW_R - CURL_R) * (1.0 - u) * (1.0 - u)
+}
+
+/// R2-08-c: the phrase ends among words that came at `born`, oldest
+/// first: `PHRASE_GAP` after each word no word followed within it.
+fn phrase_ends(born: &[f64]) -> Vec<f64> {
+    born.iter()
+        .enumerate()
+        .filter(|&(i, &b)| born.get(i + 1).is_none_or(|&n| n - b > PHRASE_GAP))
+        .map(|(_, &b)| b + PHRASE_GAP)
+        .collect()
+}
+
+/// R2-08-c: ring `n` of a droplet that landed `age` seconds ago: its size
+/// as a share of the widest ring and its alpha; `None` before it and once it
+/// has faded, 1.5 s after the landing at the latest.
+fn ring(age: f64, n: usize) -> Option<(f32, f32)> {
+    let start = n as f64 * RING_STEP;
+    let u = (age - start) / (RING_SECS - start);
+    if !(0.0..1.0).contains(&u) {
+        return None;
+    }
+    let fade = (1.0 - u as f32).powi(2) * (1.0 - 0.25 * n as f32);
+    Some((ease_out(u), RING_ALPHA * fade))
+}
+
+/// R2-08-b: the paper strip behind the newest line, in the canvas's space
+/// (the text column's left edge at `pad`, the line's top at `pad`).
+struct Page {
+    before: (f32, f32),
+    now: (f32, f32),
+    born: f64,
+    line_h: f32,
+    pad: f32,
+    k: f32,
+    still: bool,
+}
+
+impl Page {
+    fn until(&self) -> f64 {
+        self.born + STRIP_SECS
+    }
+
+    fn draw(&self, t: f64, r: Rect, p: &mut Painter) {
+        let k = self.k;
+        let age = t - self.born;
+        let (x0, x1) = strip_span(self.before, self.now, age);
+        if x1 - x0 < 1.0 {
+            return;
+        }
+        let (ox, oy) = (r.x + self.pad, r.y + self.pad);
+        let (top, h) = (oy - 4.0 * k, self.line_h + 6.0 * k);
+        let (left, right) = (ox + x0 - 10.0 * k, ox + x1 + 14.0 * k);
+        let paper = hex(ICE);
+        p.shape(ShapeInstance::rrect(
+            RRect::new(Rect::new(left, top, right - left, h), 3.0 * k),
+            Paint::linear(
+                Point::new(left, top),
+                paper.fade(STRIP_ALPHA),
+                Point::new(left, top + h),
+                paper.fade(STRIP_ALPHA * 0.6),
+            ),
+        ));
+        // The curl: a rolled edge at the right end, lit on its left.
+        let cr = curl_radius(age, self.still) * k;
+        p.shape(ShapeInstance::capsule(
+            Rect::new(right - cr, top - 1.0 * k, 2.0 * cr, h + 4.0 * k),
+            Paint::linear(
+                Point::new(right - cr, top),
+                paper.fade(STRIP_ALPHA),
+                Point::new(right + cr, top),
+                paper.fade(STRIP_ALPHA * 0.3),
+            ),
+        ));
+    }
+}
+
+/// R2-08-c: the droplets and their rings below the text, in the canvas's
+/// space: they fall from `from` to the water at `surface`, `x` across.
+struct Drops {
+    ends: Vec<f64>,
+    x: f32,
+    from: f32,
+    surface: f32,
+    half_w: f32,
+    k: f32,
+    still: bool,
+}
+
+impl Drops {
+    /// Under reduced motion a still ring flashes for this long.
+    const FLASH_SECS: f64 = 0.6;
+
+    fn until(&self) -> f64 {
+        let last = self.ends.last().copied().unwrap_or(f64::NEG_INFINITY);
+        if self.still {
+            last + Self::FLASH_SECS
+        } else {
+            last + DROP_FALL + RING_SECS
+        }
+    }
+
+    fn draw(&self, t: f64, r: Rect, p: &mut Painter) {
+        let k = self.k;
+        let (x, surface) = (r.x + self.x, r.y + self.surface);
+        let ellipse = |size: f32| {
+            let (rx, ry) = (self.half_w * size, self.half_w * size * RING_TILT);
+            let pts: Vec<Point> = (0..48)
+                .map(|i| {
+                    let a = i as f32 / 48.0 * std::f32::consts::TAU;
+                    Point::new(x + rx * a.cos(), surface + ry * a.sin())
+                })
+                .collect();
+            Contour::polyline(&pts, true)
+        };
+        for &end in &self.ends {
+            if self.still {
+                let age = t - end;
+                if (0.0..Self::FLASH_SECS).contains(&age) {
+                    let a = RING_ALPHA * (1.0 - (age / Self::FLASH_SECS) as f32);
+                    p.stroke(
+                        &ellipse(0.5),
+                        &StrokeStyle::solid(1.2 * k, hex(CYAN).fade(a)),
+                    );
+                }
+                continue;
+            }
+            let fall = (t - end) / DROP_FALL;
+            if (0.0..1.0).contains(&fall) {
+                let y = r.y + self.from + (self.surface - self.from) * (fall * fall) as f32;
+                p.shape(ShapeInstance::circle(
+                    Point::new(x, y),
+                    2.2 * k,
+                    Paint::glow(hex(ICE).fade(0.5), 3.0 * k, 0.6),
+                ));
+            }
+            let age = t - end - DROP_FALL;
+            for n in 0..RINGS {
+                let Some((size, a)) = ring(age, n) else {
+                    continue;
+                };
+                let color = mix(hex(ICE), hex(CYAN), n as f32 / (RINGS - 1) as f32);
+                p.stroke(
+                    &ellipse(0.08 + 0.92 * size),
+                    &StrokeStyle::solid(1.2 * k, color.fade(a)),
+                );
+            }
+        }
+    }
+}
+
 fn hash(seed: u32) -> f32 {
     let mut x = seed.wrapping_mul(0x9E37_79B9) ^ 0x85EB_CA6B;
     x ^= x >> 15;
@@ -538,7 +745,10 @@ impl Popup {
                 hex(CYAN),
             ))
             .children(self.glass_caustic(mode, k, w))
+            .children(self.glass_aurora(mode, mode_at, k, w))
+            .children(self.glass_page(mode, k, w))
             .child(self.glass_text(mode, k, w))
+            .children(self.glass_drops(mode, k, w))
             .child(at(
                 Element::canvas("mic", mic_until, move |t, r, p| mic.draw(t, r, p))
                     .size(mic_box, mic_box),
@@ -626,6 +836,152 @@ impl Popup {
         .motion(Prop::Position, Motion::Snap)
     }
 
+    /// When each word on screen came, oldest first.
+    fn glass_born(&self) -> Vec<f64> {
+        self.shown
+            .iter()
+            .filter_map(|w| self.heard.word(w.id).map(|h| h.born))
+            .collect()
+    }
+
+    /// R2-08-a: aurora strands behind the text, swinging with the voice
+    /// and lying down once the recording ends.
+    fn glass_aurora(&self, mode: Mode, mode_at: f64, k: f32, w: f32) -> Option<Element<Msg>> {
+        if !self.look.on(BREATHING_AURORA) || self.edit_view.is_some() {
+            return None;
+        }
+        let top = (TEXT_TOP - 24.0) * k;
+        let h = (MAX_LINES as f32 * TEXT_LINE + 48.0) * k;
+        let mut ribbon = Ribbon {
+            levels: LevelTrack {
+                levels: self.wave.clone(),
+                newest_at: self.newest_at,
+                rate: FRAME_HZ as f32,
+                ..LevelTrack::default()
+            },
+            strands: 2,
+            cycles: 0.8,
+            speed: 0.06,
+            spread: 0.35,
+            gain: 0.7,
+            floor: 0.2,
+            belly: 0.5,
+            width: 70.0 * k,
+            alpha: AURORA_ALPHA,
+            glow: 40.0 * k,
+            left: Stops::new(&[(0.0, hex(CYAN)), (1.0, hex(BLUE))]),
+            right: Stops::new(&[(0.0, hex(VIOLET)), (1.0, hex(CYAN))]),
+            core: None,
+            settle: (mode != Mode::Listening).then_some(mode_at),
+            settle_secs: 1.2,
+            // The strands bend slowly: a point every 12 units is smooth,
+            // and a quarter of the default's tessellation.
+            step: 12.0,
+            ..Ribbon::default()
+        };
+        if self.still() {
+            // Still strands; only their brightness follows the voice.
+            let level = self.kit_raw_levels().at(self.extra.now).clamp(0.0, 1.0);
+            ribbon.alpha = AURORA_ALPHA * (0.4 + 0.6 * level);
+            ribbon.speed = 0.0;
+            ribbon.levels = LevelTrack {
+                newest_at: self.shown_at,
+                ..LevelTrack::default()
+            };
+            ribbon.settle = None;
+        }
+        Some(
+            at(Element::ribbon("aurora", ribbon), 0.0, top)
+                .size(w, h)
+                .presence(Transition::fade(), Transition::fade()),
+        )
+    }
+
+    /// R2-08-b: the paper strip behind the newest line, grown by the newest
+    /// word. None before the first word, while editing and on a cancel.
+    fn glass_page(&self, mode: Mode, k: f32, w: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(PAGE_REVEAL)
+            || self.edit_view.is_some()
+            || mode == Mode::Cancelled
+            || self.glass_stacking(mode)
+        {
+            return None;
+        }
+        let newest = self.shown.last()?;
+        let born = self.heard.word(newest.id).map_or(self.shown_at, |h| h.born);
+        let style = l.text_style();
+        let tw = text_width(l);
+        let (boxes, _) = sounding::word_boxes(&self.measure, &self.shown, &style, Some(tw));
+        let line_of = |boxes: &[sounding::WordBox]| {
+            let last = boxes.last()?;
+            let on: Vec<_> = boxes.iter().filter(|b| b.line == last.line).collect();
+            let x0 = on.iter().map(|b| b.rect.x).fold(f32::MAX, f32::min);
+            let x1 = on
+                .iter()
+                .map(|b| b.rect.x + b.rect.w)
+                .fold(f32::MIN, f32::max);
+            // The layout sets lines from the left; the live text centres
+            // each one in the column.
+            let shift = (tw - (x1 - x0)) / 2.0 - x0;
+            Some((last.line, x0 + shift, x1 + shift))
+        };
+        let (line, x0, x1) = line_of(&boxes)?;
+        let before = match line_of(&boxes[..boxes.len() - 1]) {
+            // Centred: the line grew at both ends.
+            Some((l0, b0, b1)) if l0 == line => (b0, b1),
+            // The word opened the line: the strip starts at its middle.
+            _ => ((x0 + x1) / 2.0, (x0 + x1) / 2.0),
+        };
+        let pad = 16.0 * k;
+        let page = Page {
+            before,
+            now: (x0, x1),
+            born,
+            line_h: TEXT_LINE * k,
+            pad,
+            k,
+            still: self.still(),
+        };
+        let line_top = (TEXT_TOP + (MAX_LINES - 1) as f32 * TEXT_LINE) * k;
+        Some(at(
+            Element::canvas("page", page.until(), move |t, r, p| page.draw(t, r, p))
+                .size(tw + 2.0 * pad, TEXT_LINE * k + 2.0 * pad)
+                .presence(Transition::fade(), Transition::fade()),
+            (w - tw) / 2.0 - pad,
+            line_top - pad,
+        ))
+    }
+
+    /// R2-08-c: one droplet at each phrase end, its rings in the water
+    /// between the text and the button. None while editing or on a cancel.
+    fn glass_drops(&self, mode: Mode, k: f32, w: f32) -> Option<Element<Msg>> {
+        if !self.look.on(RESONANT_DROPLETS) || self.edit_view.is_some() || mode == Mode::Cancelled {
+            return None;
+        }
+        let ends = phrase_ends(&self.glass_born());
+        if ends.is_empty() {
+            return None;
+        }
+        let top = (TEXT_TOP + MAX_LINES as f32 * TEXT_LINE) * k;
+        let bottom = (MIC_Y - MIC_R - 8.0) * k;
+        let drops = Drops {
+            ends: ends[ends.len().saturating_sub(2)..].to_vec(),
+            x: w / 2.0,
+            from: 4.0 * k,
+            surface: (bottom - top) * 0.5,
+            half_w: 130.0 * k,
+            k,
+            still: self.still(),
+        };
+        Some(at(
+            Element::canvas("drops", drops.until(), move |t, r, p| drops.draw(t, r, p))
+                .size(w, bottom - top),
+            0.0,
+            top,
+        ))
+    }
+
     /// The idle caustic while the popup listens, above the newest line;
     /// none under reduced motion, while editing or once the words end.
     fn glass_caustic(&self, mode: Mode, k: f32, w: f32) -> Option<Element<Msg>> {
@@ -653,9 +1009,10 @@ impl Popup {
     /// Where the depth stack draws its reading line, for the effects under
     /// the letters: its words, its style, and the top left of its live text
     /// in the stack's text column (as `depth_stack_lines` places it on the
-    /// newest sheet). `None` while the stack is not drawn.
+    /// newest sheet). `None` while the stack is not drawn, and in other
+    /// looks, whose stacks lie elsewhere.
     pub(crate) fn glass_reading_line(&self) -> Option<(Vec<Word>, TextStyle, Point)> {
-        if !self.glass_stacking(self.kit_mode()) {
+        if self.look.theme != OsdTheme::Glass || !self.glass_stacking(self.kit_mode()) {
             return None;
         }
         let l = &self.look;
@@ -958,5 +1315,51 @@ impl edit_site::EditSite for GlassSite {
 
     fn place(&self, look: &Look, el: Element<Msg>, view: &edit::EditView) -> Element<Msg> {
         edit_site::place_lines(self, look, el, view)
+    }
+}
+
+#[cfg(test)]
+mod round2_tests {
+    use super::*;
+
+    #[test]
+    fn the_strip_reaches_the_line_width_after_each_word() {
+        let (before, now) = ((40.0, 120.0), (20.0, 160.0));
+        assert_eq!(strip_span(before, now, 0.0), before);
+        let mid = strip_span(before, now, 0.1);
+        assert!(mid.0 < before.0 && mid.0 > now.0 && mid.1 > before.1 && mid.1 < now.1);
+        assert_eq!(strip_span(before, now, STRIP_SECS), now);
+        assert_eq!(strip_span(before, now, 9.0), now);
+        // The curl swells while the strip grows, then rests; still under
+        // reduced motion.
+        assert!(curl_radius(0.05, false) > CURL_R);
+        assert_eq!(curl_radius(STRIP_SECS, false), CURL_R);
+        assert_eq!(curl_radius(0.05, true), CURL_R);
+    }
+
+    #[test]
+    fn one_droplet_per_phrase_end() {
+        let born = [1.0, 1.3, 1.5, 3.0, 3.2, 3.5];
+        let ends = phrase_ends(&born);
+        assert_eq!(ends.len(), 2);
+        assert!((ends[0] - (1.5 + PHRASE_GAP)).abs() < 1e-9);
+        assert!((ends[1] - (3.5 + PHRASE_GAP)).abs() < 1e-9);
+        assert!(phrase_ends(&[]).is_empty());
+    }
+
+    #[test]
+    fn rings_spread_and_are_gone_1_5_s_after_the_landing() {
+        for n in 0..RINGS {
+            assert!(ring(RING_SECS, n).is_none(), "ring {n}");
+            assert!(ring(-0.01, n).is_none());
+            assert!(ring(RING_SECS - 0.01, n).is_some_and(|(_, a)| a < 0.01));
+        }
+        assert!(ring(0.0, 0).is_some() && ring(0.0, 1).is_none());
+        let (a, b) = (ring(0.5, 0).unwrap(), ring(0.5, 1).unwrap());
+        assert!(
+            a.0 > b.0 && a.1 > b.1,
+            "the later ring is inside and fainter"
+        );
+        assert!(ring(0.0, 0).unwrap().1 <= RING_ALPHA);
     }
 }

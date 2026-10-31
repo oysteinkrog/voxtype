@@ -1684,6 +1684,9 @@ struct Popup {
     shown: Vec<Word>,
     /// The first word on screen. It only moves forward, a whole line at a time.
     cut: usize,
+    /// When `cut` last moved: the live text re-lays its lines then, and a
+    /// look's marks keyed to the newest word wait for it.
+    cut_at: f64,
     /// Transcript lines the text area has room for. Grows, never shrinks.
     lines: u32,
     check: Option<vo::TimerId>,
@@ -1836,6 +1839,7 @@ impl Popup {
             model: WordModel::new(),
             shown: Vec::new(),
             cut: 0,
+            cut_at: f64::NEG_INFINITY,
             lines: 1,
             check: None,
             closing: false,
@@ -1978,6 +1982,7 @@ impl Popup {
             OsdTheme::Showcase => showcase::ROOM_TONE_FPS,
             OsdTheme::Scope => scope::ROOM_TONE_FPS,
             OsdTheme::Biolume => biolume::ROOM_TONE_FPS,
+            OsdTheme::Synthwave => synthwave::ROOM_TONE_FPS,
             _ => ROOM_TONE_FPS,
         };
         quiet.then_some(fps)
@@ -2119,6 +2124,9 @@ impl Popup {
         };
         let inline = !self.look.margin_ellipsis();
         let (cut, shown) = cut_lines(words, self.cut, self.look.max_lines(), inline, lines_of);
+        if cut != self.cut {
+            self.cut_at = self.extra.now;
+        }
         self.cut = cut;
         self.lines = self
             .lines
@@ -2232,6 +2240,10 @@ impl Popup {
                 let after = voxtype::osd::edit_doc::after_words(preview, b.raw_words).trim();
                 if after.is_empty() {
                     frozen.to_string()
+                } else if let Some(at) = b.insert_at.filter(|&at| frozen.is_char_boundary(at)) {
+                    // `edit_resume_at = "caret"`: the new words where the
+                    // caret was.
+                    voxtype::osd::edit_doc::insert(frozen, at, after).0
                 } else {
                     format!("{} {after}", frozen.trim_end())
                 }
@@ -2313,6 +2325,7 @@ impl App for Popup {
         self.arm_island_tick(cx);
         self.arm_hologram_tick(cx);
         self.arm_cyber_tick(cx);
+        self.arm_synthwave_tick(cx);
         self.arm_dotmatrix_tick(cx);
     }
 
@@ -2478,6 +2491,7 @@ impl App for Popup {
         self.arm_jarvis_wake(cx);
         self.arm_glass_wake(cx);
         self.arm_cyber_tick(cx);
+        self.arm_synthwave_tick(cx);
         self.arm_dotmatrix_tick(cx);
         self.pace = self.room_tone_pace(t);
         if !tick && self.idle(t) {

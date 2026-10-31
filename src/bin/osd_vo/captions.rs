@@ -21,6 +21,20 @@
 //! times a second. Neither runs once the popup closes or under reduced
 //! motion.
 //!
+//! Round 2 (R2-13) adds three opt-in features:
+//!
+//! - `liquid-echo`: a faint water surface in the strip above the top line;
+//!   each new word sends a flat ring out from its x there, at most 20 %
+//!   alpha, gone in 1 s. Reduced motion: the surface without rings.
+//! - `prism-capture`: in the same strip a thin beam meets a glass slab and
+//!   fans out into a fine spectrum with a little dust, the fan wider and
+//!   brighter with the voice, at most 25 % alpha. Reduced motion: a still
+//!   fan whose brightness follows the voice.
+//! - `typewriter-set`: a ticking ruler under the newest line with a carriage
+//!   marker that glides to the end of the newest word, and in a pause a thin
+//!   box round the newest phrase. The tick is drawn only, never heard.
+//!   Reduced motion: the marker jumps.
+//!
 //! While editing ([`CaptionsSite`]) both lines are full size and flat, the
 //! newest word is part of its line, and a line keeps its left edge while
 //! you type (the sticky centring of `EditView::centre`).
@@ -32,7 +46,7 @@ use std::sync::OnceLock;
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
-use vo::scene::path::{icons, Outline, StrokeStyle};
+use vo::scene::path::{icons, Contour, Outline, StrokeStyle};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
 
@@ -66,6 +80,31 @@ const STATUS_Y: f32 = 160.0;
 const TICK_HZ: f64 = 60.0;
 /// MO-33: the fold's spring; it nears edge-on in about 220 ms.
 const FOLD_SECS: f64 = 0.22;
+
+/// R2-13-a: a ring's life, its reach and its alpha.
+pub(crate) const LIQUID_ECHO: &str = "liquid-echo";
+const ECHO_SECS: f64 = 1.0;
+const ECHO_REACH: f32 = 70.0;
+const ECHO_ALPHA: f32 = 0.2;
+/// R2-13-b: the fan's length at rest and at full voice, its alpha at full
+/// voice, its colours and dust.
+pub(crate) const PRISM_CAPTURE: &str = "prism-capture";
+const FAN_LEN: (f32, f32) = (160.0, 460.0);
+const FAN_ALPHA: f32 = 0.25;
+const FAN_COLOURS: [u32; 7] = [
+    0xff5a6e, 0xff9a4a, 0xffe35a, 0x5ae68a, 0x4ac8ff, 0x6f88ff, 0xa66bff,
+];
+const FAN_DUST: u32 = 14;
+/// R2-13-a and R2-13-b: the strip over the top line is at most this tall.
+const SKY_H: f32 = 40.0;
+/// R2-13-c: the ruler's tick pitch, the marker's glide and how long a
+/// pause is before the phrase box shows; words this close together are
+/// one phrase.
+pub(crate) const TYPEWRITER_SET: &str = "typewriter-set";
+const RULER_TICK: f32 = 12.0;
+const CARRIAGE_SECS: f64 = 0.18;
+const PHRASE_PAUSE: f64 = 0.6;
+const PHRASE_GAP: f64 = 0.45;
 
 #[derive(Clone, Copy)]
 struct Fonts {
@@ -174,6 +213,135 @@ struct Scene {
     check: Option<Point>,
     /// pcn: the idle grain and flicker run (open, listening, not reduced).
     idle: bool,
+    /// R2-13-a and R2-13-b: what the strip above the top line holds.
+    sky: Option<Sky>,
+}
+
+/// R2-13-a and R2-13-b: the strip above the top line, its rings and fan.
+#[derive(Clone, Debug)]
+struct Sky {
+    /// The strip, in the band's pixels.
+    strip: Rect,
+    /// R2-13-a: each new word's x and when it came; `None` when off.
+    rings: Option<Vec<(f32, f64)>>,
+    /// R2-13-b: the voice level now (0 to 1); `None` when off.
+    prism: Option<f32>,
+    still: bool,
+}
+
+impl Sky {
+    fn until(&self, now: f64) -> f64 {
+        let rings = self
+            .rings
+            .iter()
+            .flatten()
+            .map(|r| r.1 + ECHO_SECS)
+            .fold(now, f64::max);
+        if self.prism.is_some() {
+            now + 0.25
+        } else {
+            rings
+        }
+    }
+
+    fn draw(&self, t: f64, p: &mut Painter) {
+        let s = self.strip;
+        let mid = s.y + s.h * 0.55;
+        if let Some(rings) = &self.rings {
+            // The water: three faint lines that close up toward the
+            // horizon, as a tilted surface does.
+            for (i, f) in [0.35f32, 0.65, 0.88].iter().enumerate() {
+                let y = s.y + s.h * f;
+                p.shape(ShapeInstance::line(
+                    Point::new(s.x, y),
+                    Point::new(s.x + s.w, y),
+                    1.0,
+                    Paint::linear(
+                        Point::new(s.x, y),
+                        hex(EDGE).fade(0.0),
+                        Point::new(s.x + s.w / 2.0, y),
+                        hex(EDGE).fade(0.05 + 0.03 * i as f32),
+                    ),
+                ));
+            }
+            if !self.still {
+                for &(x, born) in rings {
+                    for j in 0..2 {
+                        let u = ((t - born) / ECHO_SECS) as f32 - 0.2 * j as f32;
+                        if !(0.0..1.0).contains(&u) {
+                            continue;
+                        }
+                        let rx = 6.0 + ECHO_REACH * ease_out(u as f64);
+                        let ry = (rx * 0.16).min(s.h * 0.45);
+                        let a = ECHO_ALPHA * (1.0 - u) * (1.0 - u);
+                        let pts: Vec<Point> = (0..=48)
+                            .map(|k| {
+                                let a = std::f32::consts::TAU * k as f32 / 48.0;
+                                Point::new(x + rx * a.cos(), mid + ry * a.sin())
+                            })
+                            .filter(|q| q.x > s.x && q.x < s.x + s.w)
+                            .collect();
+                        if pts.len() > 2 {
+                            p.stroke(
+                                &Contour::polyline(&pts, false),
+                                &StrokeStyle::solid(1.2, hex(ACCENT).fade(a)).glow(3.0),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(level) = self.prism {
+            let grow = if self.still { 0.5 } else { level };
+            let len = FAN_LEN.0 + (FAN_LEN.1 - FAN_LEN.0) * grow;
+            let a = FAN_ALPHA * (0.25 + 0.75 * level);
+            let slab = Point::new(s.x + 90.0, mid);
+            // The beam in, and the slab it meets.
+            p.shape(ShapeInstance::line(
+                Point::new(s.x + 10.0, mid),
+                slab,
+                1.2,
+                Paint::linear(
+                    Point::new(s.x + 10.0, mid),
+                    Color::WHITE.fade(0.0),
+                    slab,
+                    Color::WHITE.fade(a * 1.6),
+                ),
+            ));
+            let half = (s.h * 0.5 - 2.0).max(2.0);
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(slab.x - 1.5, mid - half, 3.0, 2.0 * half), 1.0),
+                Paint::solid(Color::WHITE.fade(a)),
+            ));
+            // The fan: a spectrum spreading to the strip's height.
+            let n = FAN_COLOURS.len();
+            for (i, c) in FAN_COLOURS.iter().enumerate() {
+                let f = i as f32 / (n - 1) as f32 * 2.0 - 1.0;
+                let end = Point::new((slab.x + len).min(s.x + s.w), mid + f * half);
+                p.shape(ShapeInstance::line(
+                    slab,
+                    end,
+                    1.4,
+                    Paint::linear(slab, hex(*c).fade(a), end, hex(*c).fade(0.0)),
+                ));
+            }
+            if !self.still {
+                for i in 0..FAN_DUST {
+                    let u =
+                        (noise(i * 37 + 1) + 0.12 * t as f32 * (0.5 + noise(i * 11 + 4))).fract();
+                    let f = noise(i * 23 + 9) * 2.0 - 1.0;
+                    let q = Point::new(slab.x + u * len, mid + f * half * u);
+                    if q.x < s.x + s.w {
+                        p.shape(ShapeInstance::circle(
+                            q,
+                            0.8,
+                            Paint::solid(Color::WHITE.fade(a * (1.0 - u))),
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// pcn: the idle motion's frame rate; the grain's alpha (3 % white as an
@@ -245,6 +413,11 @@ fn lerp_rect(a: Rect, b: Rect, k: f32) -> Rect {
 
 impl Scene {
     fn until(&self, now: f64) -> f64 {
+        let sky = self.sky.as_ref().map_or(now, |s| s.until(now));
+        self.until_base(now).max(sky)
+    }
+
+    fn until_base(&self, now: f64) -> f64 {
         let back = self.back.2 + 0.4;
         match self.mode {
             Mode::Listening | Mode::Loading => (now + 0.25).max(back),
@@ -268,6 +441,9 @@ impl Scene {
         ));
         if self.idle {
             draw_film(b, (t * IDLE_FPS).floor() as i64 as u32, p);
+        }
+        if let Some(sky) = &self.sky {
+            sky.draw(t, p);
         }
         if let Some(c) = self.dot {
             let pulse = if reduced() {
@@ -491,6 +667,8 @@ impl Popup {
 
         let mut doubts = Vec::new();
         let mut dot = None;
+        let mut newest_line: Option<(Vec<Word>, f32, f32)> = None;
+        let mut top_cy = SLOTS[0].0;
         let mut texts = Vec::new();
         let mut sculpt_rows = Vec::new();
         for (i, (words, w)) in lines.iter().enumerate() {
@@ -503,6 +681,12 @@ impl Popup {
             let leaving = age + 1 >= SLOTS.len();
             if age == 0 && live {
                 dot = Some(Point::new(lx - 22.0, cy + 1.0));
+            }
+            if age == 0 {
+                newest_line = Some((words.clone(), lx, cy));
+            }
+            if !leaving {
+                top_cy = top_cy.min(cy);
             }
             // The newest word in the accent colour: the line is drawn as the
             // words before it and the word itself, side by side.
@@ -680,6 +864,7 @@ impl Popup {
                 && matches!(mode, Mode::Loading | Mode::Listening)
                 && !reduced()
                 && !l.on("reduced-motion"),
+            sky: self.captions_sky(newest_line.as_ref(), top_cy, base, &style, mode),
         };
         let until = scene.until(self.extra.now);
         let canvas = at(
@@ -700,6 +885,7 @@ impl Popup {
             }
         }
         panel = panel.children(texts);
+        panel = panel.children(self.captions_carriage(newest_line.as_ref(), &style, mode));
         let ink = endings::Ink {
             text: hex(WHITE),
             mark: hex(ACCENT),
@@ -719,6 +905,166 @@ impl Popup {
             );
         }
         panel
+    }
+}
+
+impl Popup {
+    /// R2-13: each word of a line that starts at `lx`, as its x span.
+    fn captions_spans(&self, words: &[Word], lx: f32, style: &TextStyle) -> Vec<(f32, f32)> {
+        let width = |t: &str| self.measure.layout(t, style, None).size.w;
+        let space = width("x x") - 2.0 * width("x");
+        let mut x = lx;
+        words
+            .iter()
+            .map(|w| {
+                let ww = width(&w.text);
+                let span = (x, x + ww);
+                x += ww + space;
+                span
+            })
+            .collect()
+    }
+
+    /// R2-13-a and R2-13-b: the strip above the top line, from the band's
+    /// top to just over the top line's letters, with the rings and the fan
+    /// that are on. `base` is a line's baseline under its top.
+    fn captions_sky(
+        &self,
+        newest: Option<&(Vec<Word>, f32, f32)>,
+        top_cy: f32,
+        base: f32,
+        style: &TextStyle,
+        mode: Mode,
+    ) -> Option<Sky> {
+        let l = &self.look;
+        let (echo, prism) = (l.on(LIQUID_ECHO), l.on(PRISM_CAPTURE));
+        if !(echo || prism)
+            || !matches!(mode, Mode::Listening | Mode::Loading)
+            || self.edit_view.is_some()
+        {
+            return None;
+        }
+        let still = self.still() || reduced();
+        let back = self.captions_back_target();
+        let bottom = top_cy - LINE / 2.0 + base - 0.8 * style.size - 3.0;
+        // At most `SKY_H` tall, just over the text.
+        let top = (bottom - SKY_H).max(4.0);
+        let strip = Rect::new(
+            back.x + back.h / 2.0,
+            top,
+            (back.w - back.h).max(40.0),
+            (bottom - top).max(0.0),
+        );
+        if strip.h < 6.0 {
+            return None;
+        }
+        let rings = echo.then(|| {
+            let now = self.extra.now;
+            newest.map_or_else(Vec::new, |(words, lx, _)| {
+                words
+                    .iter()
+                    .zip(self.captions_spans(words, *lx, style))
+                    .filter_map(|(w, (x0, x1))| {
+                        let born = self.heard.word(w.id)?.born;
+                        (0.0..ECHO_SECS)
+                            .contains(&(now - born))
+                            .then_some(((x0 + x1) / 2.0, born))
+                    })
+                    .collect()
+            })
+        });
+        let n = self.wave.len();
+        let level = self.wave[n.saturating_sub(15)..]
+            .iter()
+            .fold(0.0f32, |a, &b| a.max(b))
+            .clamp(0.0, 1.0);
+        Some(Sky {
+            strip,
+            rings,
+            prism: prism.then_some(level),
+            still,
+        })
+    }
+
+    /// R2-13-c: the ruler under the newest line, its carriage marker at the
+    /// newest word's end and, in a pause, a box round the newest phrase.
+    /// While listening only.
+    fn captions_carriage(
+        &self,
+        newest: Option<&(Vec<Word>, f32, f32)>,
+        style: &TextStyle,
+        mode: Mode,
+    ) -> Vec<Element<Msg>> {
+        if !self.look.on(TYPEWRITER_SET) || mode != Mode::Listening || self.edit_view.is_some() {
+            return Vec::new();
+        }
+        let Some((words, lx, cy)) = newest.filter(|n| !n.0.is_empty()) else {
+            return Vec::new();
+        };
+        let still = self.still() || reduced();
+        let spans = self.captions_spans(words, *lx, style);
+        let back = self.captions_back_target();
+        let y = cy + LINE / 2.0 + 9.0;
+        let (x0, x1) = (back.x + back.h / 2.0, back.x + back.w - back.h / 2.0);
+        let ruler = Element::canvas("ruler", 0.0, move |_, r, p| {
+            let n = ((x1 - x0) / RULER_TICK) as usize;
+            p.shape(ShapeInstance::line(
+                Point::new(r.x, r.y + 4.0),
+                Point::new(r.x + r.w, r.y + 4.0),
+                1.0,
+                Paint::solid(Color::WHITE.fade(0.14)),
+            ));
+            for i in 0..=n {
+                let x = r.x + i as f32 * RULER_TICK;
+                let h = if i % 5 == 0 { 5.0 } else { 2.5 };
+                p.shape(ShapeInstance::line(
+                    Point::new(x, r.y + 4.0 - h),
+                    Point::new(x, r.y + 4.0),
+                    1.0,
+                    Paint::solid(Color::WHITE.fade(0.18)),
+                ));
+            }
+        });
+        let end = spans.last().map_or(*lx, |s| s.1);
+        let glide = if still {
+            Motion::Snap
+        } else {
+            Spring::critical_to_98(CARRIAGE_SECS).into()
+        };
+        let marker = Element::panel("carriage")
+            .size(4.0, 11.0)
+            .radius(2.0)
+            .fill(hex(ACCENT))
+            .glow(hex(ACCENT).fade(0.6), 5.0, 0.5);
+        let mut out = vec![
+            at(ruler.size(x1 - x0, 8.0), x0, y).presence(Transition::fade(), Transition::fade()),
+            at(marker, end + 2.0, y - 3.5)
+                .motion(Prop::Position, glide)
+                .presence(Transition::fade(), Transition::fade()),
+        ];
+        // The phrase: the newest words, each within `PHRASE_GAP` of the one
+        // before it; framed once no word has come for `PHRASE_PAUSE`.
+        let births: Vec<f64> = words
+            .iter()
+            .filter_map(|w| self.heard.word(w.id).map(|h| h.born))
+            .collect();
+        if births.len() == words.len() && self.extra.now - births[births.len() - 1] >= PHRASE_PAUSE
+        {
+            let mut first = births.len() - 1;
+            while first > 0 && births[first] - births[first - 1] <= PHRASE_GAP {
+                first -= 1;
+            }
+            let (px0, px1) = (spans[first].0 - 6.0, spans[spans.len() - 1].1 + 6.0);
+            let frame = Element::panel(format!("phrase-{}", words[first].id))
+                .size(px1 - px0, LINE - 6.0)
+                .radius(3.0)
+                .stroke(hex(ACCENT).fade(0.55), 1.0);
+            out.push(
+                at(frame, px0, cy - LINE / 2.0 + 3.0)
+                    .presence(Transition::fade(), Transition::fade()),
+            );
+        }
+        out
     }
 }
 
@@ -903,6 +1249,27 @@ mod idle_tests {
 
     // The grain and the flicker stay faint and at most 12 steps a second.
     const _: () = assert!(GRAIN_ALPHA <= 0.03 && FLICKER <= 0.02 && IDLE_FPS <= 12.0);
+
+    #[test]
+    fn the_sky_draws_until_its_last_ring_or_while_the_fan_follows_the_voice() {
+        let strip = Rect::new(0.0, 10.0, 600.0, 30.0);
+        let rings = Sky {
+            strip,
+            rings: Some(vec![(100.0, 2.0), (200.0, 2.5)]),
+            prism: None,
+            still: false,
+        };
+        assert_eq!(rings.until(2.6), 2.5 + ECHO_SECS);
+        let fan = Sky {
+            strip,
+            rings: None,
+            prism: Some(0.5),
+            still: false,
+        };
+        assert_eq!(fan.until(3.0), 3.25);
+        // Within the subtle limits of the bead.
+        const { assert!(ECHO_ALPHA <= 0.2 && FAN_ALPHA <= 0.25 && SKY_H <= 40.0) };
+    }
 
     #[test]
     fn the_flicker_changes_from_step_to_step() {

@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
-use vo::scene::path::{icons, make, Outline, StrokeStyle};
+use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
@@ -143,6 +143,140 @@ const FLOOR_LIFT: f32 = 1.0;
 /// The level that lifts a flat bar the whole `FLOOR_LIFT`; from four times
 /// it the lift is gone, so speech draws as before.
 const FLOOR_REF: f32 = 0.004;
+
+/// R2-03-a Breathing lens: thin lens rims stacked left of the text that
+/// breathe 0.97 to 1.03 with the voice. Each word lights the next rim and
+/// sends an arc round it that fades in `LENS_TRAIL`.
+pub(crate) const BREATHING_LENS: &str = "breathing-lens";
+const LENS_RINGS: usize = 4;
+const LENS_GAP: f32 = 3.5;
+const LENS_RX: f32 = 4.5;
+const LENS_ALPHA: f32 = 0.14;
+const LENS_LIT: f32 = 0.2;
+const LENS_TRAIL: f64 = 0.6;
+const LENS_BREATH: f32 = 0.03;
+/// R2-03-b Ink flow: soft ink behind the text, fed at the caret by the
+/// voice on a fixed tick and drifting back under the older words; it is
+/// gone `INK_LIFE` after the voice stops.
+pub(crate) const INK_FLOW: &str = "ink-flow";
+const INK_TICK: f64 = 0.1;
+const INK_LIFE: f64 = 2.0;
+const INK_ALPHA: f32 = 0.14;
+const INK_NEWEST: f32 = 0.2;
+/// The still wash under reduced motion.
+const INK_WASH: f32 = 0.06;
+/// R2-03-c Tape reveal: sprocket holes on the bottom edge step one hole
+/// per word, and an amber glow sweeps behind the new word as its ink comes
+/// up from 70 %. The text does not move.
+pub(crate) const TAPE_REVEAL: &str = "tape-reveal";
+const TAPE_PITCH: f32 = 9.0;
+const TAPE_STEP: f64 = 0.2;
+const SWEEP_SECS: f64 = 0.25;
+const SWEEP_ALPHA: f32 = 0.3;
+const AMBER: u32 = 0xffb347;
+
+/// Points round an ellipse at `c`, from angle `from` to `to`.
+fn ellipse(c: Point, rx: f32, ry: f32, from: f32, to: f32) -> Vec<Point> {
+    const STEPS: usize = 32;
+    (0..=STEPS)
+        .map(|i| {
+            let a = from + (to - from) * i as f32 / STEPS as f32;
+            Point::new(c.x + rx * a.cos(), c.y + ry * a.sin())
+        })
+        .collect()
+}
+
+/// R2-03-a: a rim's alpha `age` seconds after its word; `None` for no word.
+fn lens_alpha(age: Option<f64>) -> f32 {
+    match age {
+        Some(a) if (0.0..LENS_TRAIL).contains(&a) => {
+            let k = (1.0 - a / LENS_TRAIL) as f32;
+            LENS_ALPHA + LENS_LIT * k * k
+        }
+        _ => LENS_ALPHA,
+    }
+}
+
+/// R2-03-a: a rim's scale at voice level `level`, 0.97 quiet to 1.03 loud.
+fn lens_scale(level: f32) -> f32 {
+    let n = (level * 2.6).clamp(0.0, 1.0);
+    1.0 + LENS_BREATH * (2.0 * n - 1.0)
+}
+
+/// R2-03-b: the ink at `t`, as (centre, radius, alpha). `words` are the
+/// caret after each word and when the word came, oldest first. The voice
+/// feeds the caret on a fixed `INK_TICK`, so the ink at `t` depends on `t`,
+/// the words and the levels only, and a replay draws the same frame. Ink
+/// over `band`, the newest line's top and bottom, is held to `INK_NEWEST`
+/// of its strength so the line being read stays clear.
+fn ink_blobs(
+    t: f64,
+    words: &[(f64, Point)],
+    band: (f32, f32),
+    level: impl Fn(f64) -> f32,
+) -> Vec<(Point, f32, f32)> {
+    let ticks = (INK_LIFE / INK_TICK).round() as i64;
+    let newest = (t / INK_TICK).floor() as i64;
+    let mut out = Vec::new();
+    for n in (newest - ticks + 1)..=newest {
+        let s = n as f64 * INK_TICK;
+        let age = t - s;
+        if !(0.0..INK_LIFE).contains(&age) {
+            continue;
+        }
+        let Some(&(_, at)) = words.iter().rev().find(|w| w.0 <= s) else {
+            continue;
+        };
+        let feed = (level(s) * 2.6).clamp(0.0, 1.0);
+        if feed < 0.05 {
+            continue;
+        }
+        let u = (age / INK_LIFE) as f32;
+        let a = age as f32;
+        for m in 0..2 {
+            let seed = n * 2 + m;
+            let x = at.x - (14.0 + 12.0 * noise(seed)) * a;
+            let y = at.y - 3.0 * a
+                + (noise(seed + 7) - 0.5) * 12.0 * a.min(1.0)
+                + 3.0 * (a * 2.2 + 6.0 * noise(seed + 3)).sin();
+            let r = 4.0 + 12.0 * u;
+            let off = (band.0 - y).max(y - band.1).max(0.0);
+            let clear = INK_NEWEST + (1.0 - INK_NEWEST) * (off / (2.0 * r)).min(1.0);
+            let alpha = INK_ALPHA * feed * (1.0 - u) * (1.0 - u) * (a / 0.15).min(1.0) * clear;
+            out.push((Point::new(x, y), r, alpha));
+        }
+    }
+    out
+}
+
+/// R2-03-b under reduced motion: the still wash's strength `age` seconds
+/// after the newest word, in over 300 ms and out by `INK_LIFE`.
+fn ink_wash(age: f64) -> f32 {
+    if !(0.0..INK_LIFE).contains(&age) {
+        return 0.0;
+    }
+    let fade_in = (age / 0.3).min(1.0) as f32;
+    let fade_out = ((INK_LIFE - age) / 0.6).min(1.0) as f32;
+    INK_WASH * fade_in.min(fade_out)
+}
+
+/// R2-03-c: how far the strip has stepped, in holes, at `t`. `tape` is
+/// from, to and when, as `State::tape`.
+fn tape_pos(tape: (f32, f32, f64), t: f64, still: bool) -> f32 {
+    let (from, to, at) = tape;
+    if still {
+        return to;
+    }
+    from + (to - from) * ease_out((t - at) / TAPE_STEP)
+}
+
+/// R2-03-c: how a new word comes in, at 70 % ink and in place.
+fn tape_enter() -> Transition {
+    Transition {
+        opacity: Some(0.7),
+        ..Transition::NONE
+    }
+}
 
 /// The point a fraction `u` of the way round `r`'s edge, clockwise from
 /// the start of the top side.
@@ -367,6 +501,8 @@ pub struct State {
     status: Option<StatusText>,
     old: Option<StatusText>,
     label_at: f64,
+    /// R2-03-c: the sprocket strip's step in holes: from, to and when.
+    tape: (f32, f32, f64),
 }
 
 /// What the status row says, and how it is set.
@@ -405,6 +541,7 @@ impl Default for State {
             status: None,
             old: None,
             label_at: f64::NEG_INFINITY,
+            tape: (0.0, 0.0, f64::NEG_INFINITY),
         }
     }
 }
@@ -930,6 +1067,8 @@ impl Popup {
         if self.word_count != s.words {
             s.words = self.word_count;
             s.word_at = t;
+            let now = tape_pos(s.tape, t, false);
+            s.tape = (now, s.words as f32, t);
         }
     }
 
@@ -1208,6 +1347,10 @@ impl Popup {
                 )
             };
         }
+        let field = Rect::new(ox + text_x, oy + text_y, text_w, text_bottom - text_y);
+        for e in self.island_r2(mode, card, field, ox, oy) {
+            panel = panel.child(e);
+        }
         panel =
             panel.child(self.island_words(card, ox + text_x, oy + text_y, text_w, lines, opacity));
         // While finishing the status is larger and has no dot, as in 03-finish.
@@ -1249,6 +1392,256 @@ impl Popup {
             panel = panel.child(row(old, 1.0 - ease_out(since / SWAP_OUT)));
         }
         panel.child(row(&text, swap_in))
+    }
+
+    /// The round-2 motions (R2-03) in drawing order: the ink and the sweep
+    /// behind the words, then the lens rims and the sprocket strip. `field`
+    /// is the text box in the panel and `(ox, oy)` the capsule's corner.
+    fn island_r2(
+        &self,
+        mode: Mode,
+        card: bool,
+        field: Rect,
+        ox: f32,
+        oy: f32,
+    ) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        if !matches!(mode, Mode::Listening | Mode::Finishing) {
+            return Vec::new();
+        }
+        let speaking = mode == Mode::Listening && !self.island_editing();
+        let mut out = Vec::new();
+        if l.on(INK_FLOW) && speaking {
+            out.extend(self.island_ink(card, field));
+        }
+        if l.on(TAPE_REVEAL) && speaking && !self.still() {
+            out.extend(self.island_sweep(card, field));
+        }
+        if l.on(BREATHING_LENS) {
+            out.push(self.island_lens(mode, card, ox, oy));
+        }
+        if l.on(TAPE_REVEAL) {
+            out.push(self.island_tape(card, ox, oy));
+        }
+        out
+    }
+
+    /// The boxes of the shown words that have room, in the panel, and the
+    /// style they are laid out in.
+    fn island_boxes(&self, card: bool, field: Rect) -> (Vec<sounding::WordBox>, TextStyle) {
+        let style = if card {
+            card_style(&self.look)
+        } else {
+            pill_style(&self.look)
+        };
+        let words = &self.shown[..self.island_room(field.w, &style)];
+        let (mut boxes, _) = sounding::word_boxes(&self.measure, words, &style, Some(field.w));
+        for b in &mut boxes {
+            b.rect.x += field.x;
+            b.rect.y += field.y;
+            b.baseline += field.y;
+        }
+        (boxes, style)
+    }
+
+    /// R2-03-b: the ink behind the text, thinning out towards the edges of
+    /// a box round the text inside the capsule; under reduced motion a
+    /// still wash that comes and goes with the words.
+    fn island_ink(&self, card: bool, field: Rect) -> Option<Element<Msg>> {
+        let (boxes, style) = self.island_boxes(card, field);
+        let words: Vec<(f64, Point)> = boxes
+            .iter()
+            .filter_map(|b| {
+                let born = self.heard.word(b.id)?.born;
+                let caret = Point::new(b.rect.x + b.rect.w + 2.0, b.baseline - 0.35 * style.size);
+                Some((born, caret))
+            })
+            .collect();
+        let newest = words.iter().map(|w| w.0).fold(f64::NEG_INFINITY, f64::max);
+        let band = boxes
+            .last()
+            .map_or((0.0, 0.0), |b| (b.rect.y, b.rect.y + b.rect.h));
+        let t = self.extra.now;
+        let room = Rect::new(
+            field.x - 16.0,
+            field.y - 10.0,
+            field.w + 20.0,
+            field.h + 14.0,
+        );
+        let canvas = if self.still() {
+            if !(0.0..INK_LIFE).contains(&(t - newest)) {
+                return None;
+            }
+            Element::canvas("ink", newest + INK_LIFE, move |t, r, p| {
+                let a = ink_wash(t - newest);
+                if a > 0.0 {
+                    let wash = Rect::new(
+                        r.x + room.x + 14.0,
+                        r.y + room.y + 10.0,
+                        room.w - 28.0,
+                        room.h - 20.0,
+                    );
+                    p.shape(ShapeInstance::rrect(
+                        RRect::new(wash, 10.0),
+                        Paint::glow(hex(BLUE).fade(a), 10.0, 0.5),
+                    ));
+                }
+            })
+        } else {
+            let levels = self.kit_levels();
+            let last = newest.max(levels.newest_at);
+            if t - last >= INK_LIFE {
+                return None;
+            }
+            let words: Arc<[(f64, Point)]> = words.into();
+            Element::canvas("ink", last + INK_LIFE, move |t, r, p| {
+                for (c, rad, a) in ink_blobs(t, &words, band, |s| levels.at(s)) {
+                    // Ink thins out towards the box's edges, glow and all,
+                    // so it never shows an edge or leaves the capsule.
+                    let d = (c.x - room.x)
+                        .min(room.x + room.w - c.x)
+                        .min(c.y - room.y)
+                        .min(room.y + room.h - c.y);
+                    let a = a * (d / (3.0 * rad)).clamp(0.0, 1.0);
+                    if a > 0.002 {
+                        p.shape(ShapeInstance::circle(
+                            Point::new(r.x + c.x, r.y + c.y),
+                            rad,
+                            Paint::glow(hex(BLUE).fade(a), rad, 0.5),
+                        ));
+                    }
+                }
+            })
+        };
+        Some(at(canvas, 0.0, 0.0).size(room.x + room.w, room.y + room.h))
+    }
+
+    /// R2-03-c: the amber glow that sweeps behind the newest word, left to
+    /// right in `SWEEP_SECS`. None for a word that opens a line or comes
+    /// with a cut, which shows only once the lines have settled.
+    fn island_sweep(&self, card: bool, field: Rect) -> Option<Element<Msg>> {
+        let (boxes, style) = self.island_boxes(card, field);
+        let b = boxes.last()?;
+        let born = self.heard.word(b.id)?.born;
+        if self.extra.now - born >= SWEEP_SECS || self.cut_at >= born - 0.1 {
+            return None;
+        }
+        if b.rect.x - field.x < 1.0 && boxes.len() > 1 {
+            return None;
+        }
+        let (x0, x1) = (b.rect.x, b.rect.x + b.rect.w);
+        let y = b.baseline - 0.35 * style.size;
+        let rad = 0.4 * style.size;
+        let canvas = Element::canvas("sweep", born + SWEEP_SECS, move |t, r, p| {
+            let u = (t - born) / SWEEP_SECS;
+            if !(0.0..1.0).contains(&u) {
+                return;
+            }
+            let a = SWEEP_ALPHA * (std::f64::consts::PI * u).sin() as f32;
+            let x = x0 + (x1 - x0) * u as f32;
+            p.shape(ShapeInstance::circle(
+                Point::new(r.x + x, r.y + y),
+                rad,
+                Paint::glow(hex(AMBER).fade(a), rad, 0.5),
+            ));
+        });
+        Some(at(canvas, 0.0, 0.0).size(x1 + rad + 4.0, y + rad + 4.0))
+    }
+
+    /// R2-03-a: the lens rims between the waveform and the text in the
+    /// pill, or before the waveform in the card's header.
+    fn island_lens(&self, mode: Mode, card: bool, ox: f32, oy: f32) -> Element<Msg> {
+        let shape = self.island.shape;
+        let still = self.still();
+        let breathe = mode == Mode::Listening && !still;
+        let levels = self.kit_levels();
+        let t = self.extra.now;
+        // Each word lights the rim after the one the word before lit.
+        let lit: Vec<(usize, f64)> = self
+            .shown
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| {
+                let born = self.heard.word(w.id)?.born;
+                (t - born < LENS_TRAIL).then_some((i % LENS_RINGS, born))
+            })
+            .collect();
+        let until = lit
+            .iter()
+            .fold(shape.at + MORPH_SECS + 0.2, |a, l| a.max(l.1 + LENS_TRAIL))
+            .max(if breathe { t + 0.25 } else { t });
+        let x0 = ox + if card { 176.0 } else { 225.5 };
+        let size = Self::island_surface(&self.look);
+        let canvas = Element::canvas("lens", until, move |t, r, p| {
+            let g = shape.at(t);
+            let (cy, ry) = if card {
+                (CARD_HEADER / 2.0, 30.0)
+            } else {
+                (g.h / 2.0, (g.h / 2.0 - 7.0).min(30.0))
+            };
+            for i in 0..LENS_RINGS {
+                let age = lit.iter().rev().find(|l| l.0 == i).map(|l| t - l.1);
+                let k = if breathe {
+                    lens_scale(levels.at(t - 0.05 * i as f64))
+                } else {
+                    1.0
+                };
+                let c = Point::new(r.x + x0 + i as f32 * LENS_GAP, r.y + oy + cy);
+                let colour = mix(hex(CYAN), hex(VIOLET), i as f32 / (LENS_RINGS - 1) as f32);
+                let rim = ellipse(c, LENS_RX * k, ry * k, 0.0, std::f32::consts::TAU);
+                p.stroke(
+                    &Contour::polyline(&rim, true),
+                    &StrokeStyle::solid(1.1, colour.fade(lens_alpha(age))),
+                );
+                let Some(a) = age.filter(|a| !still && (0.0..LENS_TRAIL).contains(a)) else {
+                    continue;
+                };
+                // The arc runs three quarters round, just outside the rim.
+                let head = -std::f32::consts::FRAC_PI_2
+                    + 1.5 * std::f32::consts::PI * ease_out(a / LENS_TRAIL);
+                let arc = ellipse(c, (LENS_RX + 1.0) * k, (ry + 1.0) * k, head - 1.2, head);
+                let fade = 1.0 - (a / LENS_TRAIL) as f32;
+                p.stroke(
+                    &Contour::polyline(&arc, false),
+                    &StrokeStyle::solid(1.3, colour.fade(0.3 * fade)).glow(3.0),
+                );
+            }
+        });
+        at(canvas, 0.0, 0.0).size(size.w, size.h)
+    }
+
+    /// R2-03-c: the sprocket holes on the capsule's bottom edge, under the
+    /// status row, stepping left one hole per word.
+    fn island_tape(&self, card: bool, ox: f32, oy: f32) -> Element<Msg> {
+        let shape = self.island.shape;
+        let tape = self.island.tape;
+        let still = self.still();
+        let w = shape.to.w;
+        let (x0, x1) = if card {
+            (ox + CARD_PAD_X, ox + w - CARD_PAD_X)
+        } else {
+            (ox + PILL_TEXT_X, ox + w - 76.0)
+        };
+        let until = (tape.2 + TAPE_STEP).max(shape.at + MORPH_SECS + 0.2);
+        let size = Self::island_surface(&self.look);
+        let canvas = Element::canvas("tape", until, move |t, r, p| {
+            let y = r.y + oy + shape.at(t).h - 8.0;
+            let phase = (tape_pos(tape, t, still) * TAPE_PITCH).rem_euclid(TAPE_PITCH);
+            let n = ((x1 - x0) / TAPE_PITCH).ceil() as i32 + 1;
+            for i in 0..=n {
+                let x = x0 + i as f32 * TAPE_PITCH - phase;
+                // The holes fade in and out at the strip's ends, so a step
+                // shows no hole popping in.
+                let edge = ((x - x0).min(x1 - 4.0 - x) / 12.0).clamp(0.0, 1.0);
+                if edge > 0.0 {
+                    p.shape(ShapeInstance::rrect(
+                        RRect::new(Rect::new(r.x + x, y, 4.0, 2.5), 1.0),
+                        Paint::solid(hex(DIM).fade(0.3 * edge)),
+                    ));
+                }
+            }
+        });
+        at(canvas, 0.0, 0.0).size(size.w, size.h)
     }
 
     fn loading_style(&self) -> TextStyle {
@@ -1379,6 +1772,11 @@ impl Popup {
         // the 70 % floor too. A form change still fades the old words out
         // through `presence`.
         let opacity = if opacity <= 0.0 { 0.0 } else { 1.0 };
+        let enter = if l.on(TAPE_REVEAL) {
+            tape_enter()
+        } else {
+            Transition::fade().offset(0.0, 5.0)
+        };
         let live = |key: String, words: &[Word], style: TextStyle, colour: Color| {
             Element::live_text(key, words)
                 .text_style(style)
@@ -1387,7 +1785,7 @@ impl Popup {
                 .color(colour)
                 .motion(Prop::Opacity, Spring::critical_to_98(0.12))
                 .motion(Prop::Offset, Spring::POP)
-                .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 5.0)))
+                .word_enter(self.ghost_enter(enter))
         };
         if !card {
             let style = pill_style(l);
@@ -1644,5 +2042,91 @@ mod edit_tests {
         let v = r.p.edit_view.as_ref().unwrap();
         assert!(v.lines <= PILL_LINES, "{} lines", v.lines);
         assert!(!r.p.island.card);
+    }
+}
+
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+
+    /// R2-03-c: after each word the strip has stepped one pitch per word,
+    /// over `TAPE_STEP`; under reduced motion at once.
+    #[test]
+    fn the_strip_steps_one_pitch_per_committed_word() {
+        let mut tape = (0.0, 0.0, f64::NEG_INFINITY);
+        for n in 1..=6 {
+            let t = n as f64 * 0.15;
+            let now = tape_pos(tape, t, false);
+            tape = (now, n as f32, t);
+            let mid = tape_pos(tape, t + TAPE_STEP / 2.0, false);
+            assert!(mid > now && mid < n as f32, "{n}: {mid}");
+            assert_eq!(tape_pos(tape, t, true), n as f32);
+        }
+        let settled = tape_pos(tape, 0.9 + TAPE_STEP, false);
+        assert_eq!(settled * TAPE_PITCH, 6.0 * TAPE_PITCH);
+    }
+
+    /// R2-03-c: the new word comes in at 70 % ink or more, in place.
+    #[test]
+    fn a_new_word_never_falls_below_70_percent_ink() {
+        let enter = tape_enter();
+        assert!(enter.opacity.is_some_and(|o| o >= 0.7));
+        assert!(enter.offset.is_none() && enter.scale.is_none() && enter.blur.is_none());
+    }
+
+    /// R2-03-b: the ink at `t` is a function of `t`, the words and the
+    /// levels: the same inputs give the same ink, the feed comes on the
+    /// fixed tick, and it is gone `INK_LIFE` after the voice stops.
+    #[test]
+    fn the_ink_steps_on_a_fixed_tick_and_replays() {
+        let words = [
+            (0.2, Point::new(300.0, 40.0)),
+            (0.6, Point::new(340.0, 40.0)),
+        ];
+        let level = |s: f64| if s < 1.0 { 0.3 } else { 0.0 };
+        let band = (30.0, 50.0);
+        for t in [0.35, 0.8, 1.27, 2.4] {
+            assert_eq!(
+                ink_blobs(t, &words, band, level),
+                ink_blobs(t, &words, band, level)
+            );
+        }
+        // Within one tick no new ink comes; the next tick adds two blobs.
+        let a = ink_blobs(0.71, &words, band, level).len();
+        assert_eq!(ink_blobs(0.79, &words, band, level).len(), a);
+        assert_eq!(ink_blobs(0.81, &words, band, level).len(), a + 2);
+        assert!(ink_blobs(1.0 + INK_LIFE, &words, band, level).is_empty());
+        assert!(
+            ink_blobs(0.1, &words, band, level).is_empty(),
+            "nothing before a word"
+        );
+        for (_, _, a) in ink_blobs(0.9, &words, band, level) {
+            assert!(a <= INK_ALPHA, "{a}");
+        }
+    }
+
+    /// R2-03-a: the rims stay at 35 % alpha or less and breathe within
+    /// 0.97 and 1.03.
+    #[test]
+    fn the_lens_stays_faint_and_breathes_within_3_percent() {
+        for i in -2..=80 {
+            let age = i as f64 * 0.01;
+            let a = lens_alpha(Some(age));
+            assert!((LENS_ALPHA..=0.35).contains(&a), "{age}: {a}");
+        }
+        assert_eq!(lens_alpha(None), LENS_ALPHA);
+        assert_eq!(lens_alpha(Some(LENS_TRAIL)), LENS_ALPHA);
+        assert!((lens_scale(0.0) - 0.97).abs() < 1e-6);
+        assert!((lens_scale(1.0) - 1.03).abs() < 1e-6);
+    }
+
+    /// R2-03-b under reduced motion: the still wash comes in and goes with
+    /// the words.
+    #[test]
+    fn the_still_wash_comes_and_goes() {
+        assert_eq!(ink_wash(-0.1), 0.0);
+        assert!(ink_wash(0.1) < ink_wash(0.5));
+        assert!(ink_wash(0.5) <= INK_WASH);
+        assert_eq!(ink_wash(INK_LIFE), 0.0);
     }
 }

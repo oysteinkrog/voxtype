@@ -247,6 +247,7 @@ const OSD_PALETTE_CHOICES: &[&str] = &["omarchy", "fallback", "package", "custom
 const OSD_FRAME_BACKGROUND_CHOICES: &[&str] = &["background", "none"];
 const OSD_FRAME_BORDER_CHOICES: &[&str] = &["state", "accent", "none"];
 const OSD_LAYOUT_CHOICES: &[&str] = &["compact", "wide", "minimal", "tile", "orb", "custom"];
+const OSD_EDIT_RESUME_AT_CHOICES: &[&str] = &["end", "caret"];
 const OSD_ANCHOR_CHOICES: &[&str] = &["top", "reading-line", "center"];
 const OSD_POSITION_CHOICES: &[&str] = &[
     "bottom-center",
@@ -1387,6 +1388,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "OSD",
         "Keyboard editing",
         "Pause a live preview dictation and fix its text by keyboard in the vo popup.",
+    ),
+    spec(
+        "osd.edit_resume_at",
+        "osd",
+        "edit_resume_at",
+        closed(OSD_EDIT_RESUME_AT_CHOICES),
+        "OSD",
+        "Speech after an edit",
+        "Where speech goes after a keyboard edit: after all the text (`end`) or where the caret was (`caret`).",
     ),
     spec(
         "osd.doubt_below",
@@ -2987,6 +2997,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
 
         "osd.enabled" => json!(cfg.osd.enabled),
         "osd.keyboard_edit" => json!(cfg.osd.keyboard_edit),
+        "osd.edit_resume_at" => serde_json::to_value(cfg.osd.edit_resume_at).ok()?,
         "osd.doubt_below" => f32_json(cfg.osd.doubt_below),
         "osd.frontend" => serde_json::to_value(cfg.osd.frontend).ok()?,
         "osd.style" => json!(cfg.osd.style),

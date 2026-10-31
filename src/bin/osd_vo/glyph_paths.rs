@@ -549,6 +549,20 @@ impl Popup {
         h: f32,
         pen: BrokenPen,
     ) -> Option<Element<Msg>> {
+        self.paths_broken_frame_within(border, top, w, h, pen, f32::INFINITY)
+    }
+
+    /// `paths_broken_frame_at` with the stage label's right end at most
+    /// `label_right`, so a look can keep the label off its own frame.
+    pub(crate) fn paths_broken_frame_within(
+        &self,
+        border: &Contour,
+        top: f32,
+        w: f32,
+        h: f32,
+        pen: BrokenPen,
+        label_right: f32,
+    ) -> Option<Element<Msg>> {
         if !self.paths_broken() {
             return None;
         }
@@ -582,7 +596,7 @@ impl Popup {
         };
         let shaped = self.measure.layout(stage, &label_style, None);
         let break_x = border.at(top).map_or(0.45 * w, |x| x.0.x);
-        let lx = (break_x + 10.0).min(w - shaped.size.w - 4.0);
+        let lx = (break_x + 10.0).min(w.min(label_right) - shaped.size.w - 4.0);
         let glyphs: Vec<_> = shaped
             .glyphs
             .iter()
@@ -611,7 +625,9 @@ impl Popup {
                     p.stroke(&b.trim(0.0, END), &tip);
                 }
                 for c in snapped(&border, &snap, k).into_iter().filter(|_| !open) {
-                    p.stroke(&c, &StrokeStyle::solid(width, line));
+                    let pen = StrokeStyle::solid(width, line);
+                    let pen = if glow > 0.0 { pen.glow(glow) } else { pen };
+                    p.stroke(&c, &pen);
                     // The two ends light up in the accent as they part.
                     let len = c.length();
                     p.stroke(&c.trim(0.0, END), &tip);
