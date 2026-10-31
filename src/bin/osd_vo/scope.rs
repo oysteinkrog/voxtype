@@ -50,9 +50,8 @@ use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::path::{icons, Contour, Outline, StrokeStyle};
-use vo::scene::roll::digit_roll;
 use vo::scene::taffy;
-use vo::scene::taffy::prelude::{auto, length};
+use vo::scene::taffy::prelude::{auto, length, AlignItems};
 use vo::scene::{Loop, LoopProp};
 
 const BG: u32 = 0x04100b;
@@ -192,6 +191,11 @@ const GLOW_PERIOD: f64 = 4.0;
 const TRIGGER_DIM: f32 = 0.35;
 /// m18: the idle loops' pace, the slow-loop cap of MOTION-PLAN rule 8.
 const IDLE_FPS: f64 = 15.0;
+/// The frame pace while the popup records room tone (RD-11, ddyi): the
+/// room-tone trace is fresh carrier noise each frame either way, and the
+/// glow and marker loops are slow, so 10 a second reads the same as 15 and
+/// keeps idle-open under its CPU limit.
+pub(crate) const ROOM_TONE_FPS: f64 = 10.0;
 
 /// MO-63: one word's stretch of trace, frozen when the word came.
 #[derive(Clone, Debug, PartialEq)]
@@ -1047,7 +1051,7 @@ impl Popup {
         };
         let value = |key: &'static str, text: String, py: f32| {
             at(
-                digit_roll(key, &text, mono(17.0 * S * 1.25), hex(VALUE), roll),
+                readout_roll(key, &text, mono(17.0 * S * 1.25), hex(VALUE), roll),
                 o + 760.0 * S,
                 o + py * S,
             )
@@ -1209,6 +1213,67 @@ impl Popup {
             .presence(Transition::fade(), Transition::fade()),
         )
     }
+}
+
+/// The ten digits, one a line, for a rolling digit's column.
+const DIGIT_COLUMN: &str = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9";
+
+/// `vo::scene::roll::digit_roll` as Scope's readouts use it, with each
+/// digit column drawn as one ten-line label instead of ten labels. It looks
+/// the same with a quarter of the nodes. The readouts were 90 of the view's
+/// 130 nodes, and the view is built and matched again for every audio batch.
+fn readout_roll(
+    key: &str,
+    text: &str,
+    style: TextStyle,
+    color: Color,
+    spring: Spring,
+) -> Element<Msg> {
+    let lh = style.line_height;
+    let n = text.chars().count();
+    let cells = text.chars().enumerate().map(|(i, c)| {
+        // Keyed by place from the right, and a column by the text to its
+        // left, so a carry rolls a new column in from below.
+        let place = n - 1 - i;
+        match c.to_digit(10) {
+            Some(d) => {
+                let prefix: String = text.chars().take(i).collect();
+                let digits = Element::column(format!("{key}-c{place}-{prefix}"))
+                    .height(10.0 * lh)
+                    .shrink(0.0)
+                    .child(
+                        Element::label(format!("{key}-c{place}-{prefix}-n"), DIGIT_COLUMN)
+                            .text_style(style)
+                            .color(color)
+                            .height(10.0 * lh)
+                            .shrink(0.0),
+                    )
+                    .offset(0.0, -(d as f32) * lh)
+                    .motion(Prop::Offset, spring)
+                    .presence(
+                        Transition::NONE.offset(0.0, lh),
+                        Transition::NONE
+                            .offset(0.0, -(d as f32 + 1.0) * lh)
+                            .opacity(0.0),
+                    )
+                    .motion(Prop::Opacity, Spring::SNAP);
+                Element::layer(format!("{key}-d{place}"))
+                    .height(lh)
+                    .align_items(AlignItems::FLEX_START)
+                    .fade_edges(0.0, 0.2 * lh, 0.0, 0.2 * lh)
+                    .child(digits)
+            }
+            // A space has no ink, so it gets the width text layout would give it.
+            None if c.is_whitespace() => Element::row(format!("{key}-s{place}"))
+                .width(0.26 * style.size)
+                .height(lh),
+            None => Element::label(format!("{key}-s{place}"), c.to_string())
+                .text_style(style)
+                .color(color)
+                .height(lh),
+        }
+    });
+    Element::row(key.to_string()).children(cells)
 }
 
 /// R2-18-a: the reflection's alpha `age` seconds after the newest word
