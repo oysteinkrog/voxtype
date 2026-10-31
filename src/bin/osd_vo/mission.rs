@@ -7,6 +7,14 @@
 //! Five tiles do not fit in 600 px with type that can be read, so the panel
 //! is wider than the other looks: 760 px at the default width.
 //!
+//! While the popup is open it keeps a little idle life (n7b, RD-02). The
+//! latency tile's level meter ticks at 4 Hz with the real level, as
+//! telemetry does. The status mark's ring turns into a radar: a soft
+//! sweep goes round inside it once every 4 s. The elapsed tile's three dots
+//! act as status LEDs and blink at 0.5, 0.8 and 1.3 Hz between 40 % and
+//! 100 %. All step at 15 frames a second, stop once the popup closes and
+//! stay still under reduced motion.
+//!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
 
@@ -474,12 +482,48 @@ impl Wave {
     }
 }
 
+/// n7b: the idle motion's pace (RD-02's slow-loop cap), the telemetry
+/// meter's rate, the radar's turn, its sweep's alpha and half width in
+/// turns, and the three LEDs' rates and dimmest alpha.
+const IDLE_FPS: f64 = 15.0;
+const TELEMETRY_HZ: f64 = 4.0;
+const RADAR_SECS: f64 = 4.0;
+const RADAR_ALPHA: f32 = 0.35;
+const RADAR_WIDTH: f32 = 0.12;
+const LED_HZ: [f64; 3] = [0.5, 0.8, 1.3];
+const LED_LOW: f32 = 0.4;
+
+/// n7b: `t` held to the start of its idle step.
+fn idle_step(t: f64) -> f64 {
+    (t * IDLE_FPS).floor() / IDLE_FPS
+}
+
+/// n7b: the radar sweep's direction in turns `s` seconds after the popup
+/// opened, from straight up.
+fn radar_turn(s: f64) -> f32 {
+    ((s / RADAR_SECS).rem_euclid(1.0) - 0.25) as f32
+}
+
+/// n7b: LED `i`'s alpha `s` seconds after the popup opened: on for the
+/// first half of each period, at `LED_LOW` for the second.
+fn led(i: usize, s: f64) -> f32 {
+    if (s * LED_HZ[i]).rem_euclid(1.0) < 0.5 {
+        1.0
+    } else {
+        LED_LOW
+    }
+}
+
 /// The status mark: an orange ring with a dot, a spinner on a grey ring, a
 /// check in a closing ring, or a grey X.
 #[derive(Clone)]
 struct Mark {
     mode: Mode,
     mode_at: f64,
+    /// n7b: the radar sweep turns (open, working, not reduced), timed
+    /// from when the popup opened.
+    idle: bool,
+    shown_at: f64,
 }
 
 impl Mark {
@@ -498,6 +542,20 @@ impl Mark {
         match self.mode {
             Mode::Loading | Mode::Listening => {
                 p.stroke(&make::ring(c, s), &StrokeStyle::solid(1.6, orange));
+                if self.idle {
+                    let turn = radar_turn(idle_step(t) - self.shown_at);
+                    p.shape(ShapeInstance::circle(
+                        c,
+                        s - 1.0,
+                        Paint::conic(
+                            c,
+                            orange.fade(RADAR_ALPHA),
+                            orange.fade(0.0),
+                            turn,
+                            RADAR_WIDTH,
+                        ),
+                    ));
+                }
                 let pulse = if reduced() {
                     1.0
                 } else {
@@ -569,6 +627,14 @@ impl Popup {
             .child(self.mission_transcript(mode, inner, accent))
             .child(self.mission_wave(mode, mode_at, inner, accent))
             .child(self.mission_status(mode, mode_at, inner))
+    }
+
+    /// n7b: the idle motion runs: open, listening or loading, not reduced.
+    fn mission_idle(&self, mode: Mode) -> bool {
+        !self.closing
+            && matches!(mode, Mode::Listening | Mode::Loading)
+            && !reduced()
+            && !self.look.on("reduced-motion")
     }
 
     /// The row of telemetry tiles.
@@ -728,11 +794,18 @@ impl Popup {
             .map_or("0".to_string(), |s| format!("{:.0}", s * 1000.0));
         let levels = self.kit_raw_levels();
         let live = mode == Mode::Listening;
+        // n7b: while idle the meter reads the level 4 times a second.
+        let idle = self.mission_idle(mode);
         let meter = Element::canvas(
             "meter",
             if live { f64::INFINITY } else { 0.0 },
             move |t, r, p| {
-                let level = if live { (levels.at(t) * 1.6).min(1.0) } else { 0.0 };
+                let at = if idle {
+                    (t * TELEMETRY_HZ).floor() / TELEMETRY_HZ
+                } else {
+                    t
+                };
+                let level = if live { (levels.at(at) * 1.6).min(1.0) } else { 0.0 };
                 for i in 0..5 {
                     let h = r.h * (0.3 + 0.175 * i as f32);
                     let on = (i as f32) < 1.0 + level * 4.0;
@@ -778,8 +851,10 @@ impl Popup {
         .child(at(text("value", mic, value, INK), 38.0, 30.0))
         .child(at(text("about", "Input".into(), small, SOFT), 38.0, 50.0));
 
-        // Elapsed time, with three dots that run once a second.
+        // Elapsed time, with three dots that run once a second; while idle
+        // they blink as status LEDs instead (n7b).
         let clock = format!("00:{}", self.clock);
+        let shown_at = self.shown_at;
         let dots = Element::canvas(
             "dots",
             if live { f64::INFINITY } else { 0.0 },
@@ -787,7 +862,13 @@ impl Popup {
                 let u = if live && !reduced() { (t.fract() * 3.0) as usize } else { 3 };
                 for i in 0..3 {
                     let c = Point::new(r.x + 2.0 + i as f32 * 6.0, r.y + r.h / 2.0);
-                    let a = if i == u { 1.0 } else { 0.45 };
+                    let a = if idle {
+                        led(i, idle_step(t) - shown_at)
+                    } else if i == u {
+                        1.0
+                    } else {
+                        0.45
+                    };
                     p.shape(ShapeInstance::circle(c, 1.4, Paint::solid(hex(ORANGE).fade(a))));
                 }
             },
@@ -1076,7 +1157,12 @@ impl Popup {
         let big = TextStyle::new(f.bold, 13.0, 17.0);
         let small = TextStyle::new(f.ui, 11.0, 15.0);
         let status = self.status();
-        let mark = Mark { mode, mode_at };
+        let mark = Mark {
+            mode,
+            mode_at,
+            idle: self.mission_idle(mode),
+            shown_at: self.shown_at,
+        };
         let until = mark.until();
         let state = match mode {
             Mode::Done => self.delivery_word().to_string(),
@@ -1245,4 +1331,29 @@ mod edit_tests {
     fn mission_draws_every_word_while_editing() {
         super::super::type_look::edit_tests::every_word_draws(OsdTheme::Mission);
     }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn the_radar_turns_once_every_4_s_from_straight_up() {
+        assert_eq!(radar_turn(0.0), -0.25);
+        assert!((radar_turn(1.0) - 0.0).abs() < 1e-6);
+        assert!((radar_turn(2.6) - radar_turn(2.6 + RADAR_SECS)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_leds_blink_at_their_own_rates_between_40_and_100_percent() {
+        for (i, hz) in LED_HZ.iter().enumerate() {
+            let period = 1.0 / hz;
+            assert_eq!(led(i, 0.1 * period), 1.0);
+            assert_eq!(led(i, 0.6 * period), LED_LOW);
+            assert_eq!(led(i, 1.1 * period), 1.0);
+        }
+    }
+
+    // The LEDs dim to 40 %, and the radar sweep stays soft.
+    const _: () = assert!(LED_LOW == 0.4 && RADAR_ALPHA <= 0.35);
 }
