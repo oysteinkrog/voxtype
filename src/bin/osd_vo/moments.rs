@@ -55,6 +55,9 @@ pub(crate) enum Moment {
     /// Words four at a time every 0.6 s for 7.2 s, as the engine sends
     /// them after a stall, for the same.
     WordBurst,
+    /// Norwegian, accented, CJK and emoji words at a word every 0.3 s, for
+    /// the glyphs a pen writes and the ones it sweeps (SW-07, SW-10).
+    Nordic,
 }
 
 impl Moment {
@@ -82,6 +85,7 @@ impl Moment {
         Moment::Edit,
         Moment::Cadence,
         Moment::WordBurst,
+        Moment::Nordic,
     ];
 
     /// The name on the command line.
@@ -110,6 +114,7 @@ impl Moment {
             Moment::Edit => "edit",
             Moment::Cadence => "cadence",
             Moment::WordBurst => "word-burst",
+            Moment::Nordic => "nordic",
         }
     }
 
@@ -134,6 +139,11 @@ const SENTENCE: &str = "open the configuration file and set the popup theme to s
     dictation window shows the live words in the middle of the screen with the waveform above \
     them then press the key again to stop and let the final pass fix the casing and the \
     punctuation before the text is typed into the editor";
+
+/// The nordic moment's words: its own, since the demo sentence is plain
+/// ASCII.
+const NORDIC: &str = "nå skriver pennen på norsk med æ ø og å i hvert ord før økten er ferdig \
+    og en naïve café i 東京 får et smil 🙂";
 
 fn sentence_words(from: usize, n: usize) -> Vec<&'static str> {
     SENTENCE.split_whitespace().skip(from).take(n).collect()
@@ -707,6 +717,16 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             let t = k.speak(s0, &sentence_words(0, 24), 0.3);
             k.stop(t);
             let shown = k.finish(t, 0.6, &final_text(&sentence_words(0, 24)));
+            k.pump(t + 0.03, shown);
+            k.end(shown + 0.2, Outcome::Done);
+            k.scenario(look, shown + 1.4)
+        }
+        Moment::Nordic => {
+            let words: Vec<&str> = NORDIC.split_whitespace().collect();
+            k.record(s0);
+            let t = k.speak(s0, &words, 0.3);
+            k.stop(t);
+            let shown = k.finish(t, 0.6, &final_text(&words));
             k.pump(t + 0.03, shown);
             k.end(shown + 0.2, Outcome::Done);
             k.scenario(look, shown + 1.4)
