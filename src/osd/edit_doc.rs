@@ -6,12 +6,20 @@
 //! is processed at delivery, as today. The live preview text is the whole
 //! recording's text, so the freeze boundary is kept in its terms: the raw
 //! text through the boundary, and its word count.
+//!
+//! With `[osd] edit_resume_at = "caret"`, speech after a resume goes where
+//! the caret was when the edit ended, not at the end.
 
 /// One piece of the frozen region.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Piece {
-    /// Spoken words as the model gave them (`raw`) and as frozen (`text`).
-    Spoken { raw: String, text: String },
+    /// Spoken words as the model gave them (`raw`) and as frozen (`text`),
+    /// put at byte `at` of the region before them, or at its end.
+    Spoken {
+        raw: String,
+        text: String,
+        at: Option<usize>,
+    },
     /// The popup's text at the end of an edit session. It stands for every
     /// piece before it.
     Edited { text: String },
@@ -28,6 +36,9 @@ pub struct EditDoc {
     frozen_words: usize,
     /// Raw live text after the boundary.
     live: String,
+    /// Where speech after the last resume goes: a byte offset into the
+    /// frozen region, or None for its end.
+    insert_at: Option<usize>,
 }
 
 impl EditDoc {
@@ -57,8 +68,26 @@ impl EditDoc {
         self.pieces[start..]
             .iter()
             .fold(String::new(), |text, piece| match piece {
-                Piece::Spoken { text: t, .. } | Piece::Edited { text: t } => join(&text, t),
+                Piece::Spoken { text: t, at, .. } => match at {
+                    Some(at) => insert(&text, *at, t).0,
+                    None => join(&text, t),
+                },
+                Piece::Edited { text: t } => join(&text, t),
             })
+    }
+
+    /// Where speech after the last resume goes in the frozen region: a
+    /// byte offset, or None for its end.
+    pub fn insert_at(&self) -> Option<usize> {
+        self.insert_at
+    }
+
+    /// Speech after the resume goes at byte `at` of the frozen region (the
+    /// popup's caret), or at its end for None. An offset at or past the
+    /// end, or inside a character, is the end.
+    pub fn resume_at(&mut self, at: Option<usize>) {
+        let region = self.frozen();
+        self.insert_at = at.filter(|&a| a < region.len() && region.is_char_boundary(a));
     }
 
     /// Words of the live preview text through the freeze boundary.
@@ -101,30 +130,42 @@ impl EditDoc {
             return String::new();
         }
         let text = process(&new);
+        let at = self.insert_at;
+        if let Some(a) = at {
+            // Later speech goes on after this piece.
+            self.insert_at = Some(insert(&self.frozen(), a, &text).1);
+        }
         self.pieces.push(Piece::Spoken {
             raw: new,
             text: text.clone(),
+            at,
         });
         text
     }
 
     /// The popup's text at the end of an edit session replaces the whole
-    /// frozen region. The live text is left alone.
+    /// frozen region. The live text is left alone, and goes at the end
+    /// until [`EditDoc::resume_at`] says otherwise.
     pub fn replace_frozen(&mut self, text: &str) {
+        self.insert_at = None;
         self.pieces.push(Piece::Edited {
             text: text.to_string(),
         });
     }
 
     /// The text to paste: the frozen region exactly as frozen or edited,
-    /// then the live text after the last resume, run through `process`.
+    /// with the live text after the last resume, run through `process`, at
+    /// its end or at the resume point.
     pub fn final_text(&self, process: impl Fn(&str) -> String) -> String {
         let live = if self.live.is_empty() {
             String::new()
         } else {
             process(&self.live)
         };
-        join(&self.frozen(), &live)
+        match self.insert_at {
+            Some(at) => insert(&self.frozen(), at, &live).0,
+            None => join(&self.frozen(), &live),
+        }
     }
 }
 
@@ -137,6 +178,77 @@ fn join(a: &str, b: &str) -> String {
         return format!("{a}{b}");
     }
     format!("{a} {b}")
+}
+
+/// `add` put into `s` at byte `at`, with a space wherever it would touch a
+/// word. Also the byte just after `add` in the result, where more speech
+/// goes. At the end of `s` this is [`join`].
+pub fn insert(s: &str, at: usize, add: &str) -> (String, usize) {
+    if add.is_empty() {
+        return (s.to_string(), at);
+    }
+    let (left, right) = s.split_at(at);
+    let mut out = join(left, add);
+    let end = out.len();
+    if !right.is_empty() && !starts_word_gap(right) && !add.ends_with(char::is_whitespace) {
+        out.push(' ');
+    }
+    out.push_str(right);
+    (out, end)
+}
+
+/// Where `frozen` added text to `base`, when it is `base` with one
+/// insertion: the byte offset in `base` and the text added. The end of
+/// `base` when `frozen` starts with it.
+pub fn insertion<'a>(base: &str, frozen: &'a str) -> Option<(usize, &'a str)> {
+    if let Some(added) = frozen.strip_prefix(base) {
+        return Some((base.len(), added));
+    }
+    if frozen.len() < base.len() {
+        return None;
+    }
+    let common = base
+        .char_indices()
+        .zip(frozen.chars())
+        .find(|((_, a), b)| a != b)
+        .map_or(base.len(), |((i, _), _)| i);
+    (0..=common)
+        .rev()
+        .filter(|&p| base.is_char_boundary(p))
+        .find(|&p| {
+            frozen.ends_with(&base[p..]) && frozen.is_char_boundary(frozen.len() - (base.len() - p))
+        })
+        .map(|p| (p, &frozen[p..frozen.len() - (base.len() - p)]))
+}
+
+/// The popup's `text`, made from `base`, with what `frozen` added to
+/// `base` since: at the end, or, with `inside`, where it was added when
+/// `text` still ends as `base` does after that point. Also where the added
+/// text went and its length, None when nothing was added.
+pub fn add_unseen(
+    text: &str,
+    base: &str,
+    frozen: &str,
+    inside: bool,
+) -> (String, Option<(usize, usize)>) {
+    let found = if inside {
+        insertion(base, frozen)
+    } else {
+        frozen.strip_prefix(base).map(|added| (base.len(), added))
+    };
+    let Some((at, added)) = found.filter(|(_, a)| !a.is_empty()) else {
+        return (text.to_string(), None);
+    };
+    let suffix = &base[at..];
+    if !suffix.is_empty() && !text.ends_with(suffix) {
+        // The popup changed what came after: the words go at the end.
+        let out = join(text, added.trim());
+        let len = out.len() - text.len();
+        return (out, Some((text.len(), len)));
+    }
+    let pos = text.len() - suffix.len();
+    let out = format!("{}{added}{}", &text[..pos], &text[pos..]);
+    (out, Some((pos, added.len())))
 }
 
 fn starts_word_gap(s: &str) -> bool {
@@ -251,7 +363,8 @@ mod tests {
             doc.pieces()[0],
             Piece::Spoken {
                 raw: "fix this word".into(),
-                text: "FIX THIS WORD".into()
+                text: "FIX THIS WORD".into(),
+                at: None
             }
         );
     }
@@ -276,6 +389,93 @@ mod tests {
         assert_eq!(after_words("a b  c", 3), "");
         assert_eq!(after_words("æø å", 1), " å");
         assert_eq!(after_words("", 2), "");
+    }
+
+    /// R23 v2: speech after a resume goes at the caret, the pause after it
+    /// freezes it there, and the tail goes on after it.
+    #[test]
+    fn speech_after_a_resume_goes_at_the_caret() {
+        let mut doc = EditDoc::new(1);
+        doc.freeze("one two three", upper);
+        doc.replace_frozen("One two three.");
+        // The caret was before "two".
+        doc.resume_at(Some(4));
+        assert_eq!(doc.insert_at(), Some(4));
+        doc.live("one two three four five");
+        assert_eq!(doc.live_text(), "four five");
+        assert_eq!(doc.final_text(upper), "One FOUR FIVE two three.");
+        // The next pause freezes the new speech at the caret.
+        doc.freeze("one two three four five", upper);
+        assert_eq!(doc.frozen(), "One FOUR FIVE two three.");
+        assert_eq!(doc.insert_at(), Some("One FOUR FIVE".len()));
+        // The settling tail goes after it, not at the end.
+        doc.freeze("one two three four five six", upper);
+        assert_eq!(doc.frozen(), "One FOUR FIVE SIX two three.");
+        assert_eq!(
+            doc.pieces().last(),
+            Some(&Piece::Spoken {
+                raw: "six".into(),
+                text: "SIX".into(),
+                at: Some("One FOUR FIVE".len())
+            })
+        );
+        // An edit takes the point away until the next resume says.
+        doc.replace_frozen("Done.");
+        assert_eq!(doc.insert_at(), None);
+        doc.live("one two three four five six seven");
+        assert_eq!(doc.final_text(upper), "Done. SEVEN");
+    }
+
+    #[test]
+    fn a_caret_at_the_end_or_inside_a_letter_is_the_end() {
+        let mut doc = EditDoc::new(1);
+        doc.freeze("æble pie", |t| t.to_string());
+        doc.resume_at(Some("æble pie".len()));
+        assert_eq!(doc.insert_at(), None);
+        doc.resume_at(Some(1));
+        assert_eq!(doc.insert_at(), None, "inside æ");
+        doc.resume_at(Some(99));
+        assert_eq!(doc.insert_at(), None);
+        doc.resume_at(Some(0));
+        assert_eq!(doc.insert_at(), Some(0));
+        doc.live("æble pie good");
+        assert_eq!(doc.final_text(upper), "GOOD æble pie");
+    }
+
+    #[test]
+    fn insert_puts_a_space_where_words_would_touch() {
+        assert_eq!(insert("ab cd", 2, "x"), ("ab x cd".into(), 4));
+        assert_eq!(insert("ab cd", 3, "x"), ("ab x cd".into(), 4));
+        assert_eq!(insert("ab cd", 5, "x"), ("ab cd x".into(), 7));
+        assert_eq!(insert("ab cd", 0, "x"), ("x ab cd".into(), 1));
+        assert_eq!(insert("ab\ncd", 3, "x"), ("ab\nx cd".into(), 4));
+        assert_eq!(insert("ab cd", 2, ""), ("ab cd".into(), 2));
+    }
+
+    #[test]
+    fn unseen_words_go_where_the_daemon_put_them() {
+        assert_eq!(insertion("a b", "a b c"), Some((3, " c")));
+        assert_eq!(insertion("a b.", "a X b."), Some((2, "X ")));
+        assert_eq!(insertion("a b", "x"), None);
+        // At the end, as in v1, and only at the end without `inside`.
+        assert_eq!(
+            add_unseen("A b", "a b", "a b c", false),
+            ("A b c".into(), Some((3, 2)))
+        );
+        assert_eq!(
+            add_unseen("A b.", "a b.", "a X b.", false),
+            ("A b.".into(), None)
+        );
+        // Inside: before the part of the base that the popup kept.
+        assert_eq!(
+            add_unseen("Hi a b.", "a b.", "a X b.", true),
+            ("Hi a X b.".into(), Some((5, 2)))
+        );
+        // The popup changed that part too: the words go at the end.
+        assert_eq!(
+            add_unseen("a c", "a b.", "a X b.", true),
+            ("a c X".into(), Some((3, 2)))
+        );
     }
 
     /// R21: random live logs with appends and changes to earlier words,

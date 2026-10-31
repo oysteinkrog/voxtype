@@ -2195,6 +2195,7 @@ impl Daemon {
                     },
                     pause: self.edit_pauses,
                     raw_words: doc.frozen_words(),
+                    insert_at: doc.insert_at(),
                 })
             }
             (None, Some(Phase::Pending)) => Some(crate::osd::edit_ipc::EditBlock {
@@ -2260,7 +2261,8 @@ impl Daemon {
                 if let Some(snap) =
                     snapshot.filter(|b| Some(b.session) == session && b.pause == self.edit_pauses)
                 {
-                    self.edit_take_buffer(&snap.text, snap.base.as_deref());
+                    let caret = Some(snap.sel.0.max(snap.sel.1));
+                    self.edit_take_buffer(&snap.text, snap.base.as_deref(), caret);
                 }
                 self.edit_resume(state).await
             }
@@ -2298,11 +2300,26 @@ impl Daemon {
     }
 
     /// The popup's text replaces the frozen region, with the words frozen
-    /// after the popup last saw it (its `base`) added at the end.
-    fn edit_take_buffer(&mut self, text: &str, base: Option<&str>) {
-        if let Some(doc) = self.edit_doc.as_mut() {
-            let text = crate::osd::edit_ipc::with_unseen(text, base, &doc.frozen());
-            doc.replace_frozen(&text);
+    /// after the popup last saw it (its `base`) added where the daemon put
+    /// them. With `[osd] edit_resume_at = "caret"`, speech after a resume
+    /// goes at `caret` (the end of the popup's selection, a byte offset
+    /// into `text`); None keeps it at the end.
+    fn edit_take_buffer(&mut self, text: &str, base: Option<&str>, caret: Option<usize>) {
+        let at_caret = self.config.osd.edit_resume_at == crate::osd::config::EditResumeAt::Caret;
+        let Some(doc) = self.edit_doc.as_mut() else {
+            return;
+        };
+        let (text, unseen) = match base {
+            Some(base) => crate::osd::edit_doc::add_unseen(text, base, &doc.frozen(), at_caret),
+            None => (text.to_string(), None),
+        };
+        doc.replace_frozen(&text);
+        if at_caret {
+            // Words added at or before the caret move it on.
+            doc.resume_at(caret.map(|c| match unseen {
+                Some((pos, len)) if pos <= c => c + len,
+                _ => c,
+            }));
         }
     }
 
@@ -2364,6 +2381,7 @@ impl Daemon {
         let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
         let tp = &self.text_processor;
         let pause = self.edit_pauses;
+        let at_caret = self.config.osd.edit_resume_at == crate::osd::config::EditResumeAt::Caret;
         let doc = self.edit_doc.as_mut()?;
         let popup_owned = matches!(
             phase,
@@ -2374,11 +2392,13 @@ impl Daemon {
         if let Some(snapshot) =
             snapshot.filter(|b| popup_owned && b.session == doc.session() && b.pause == pause)
         {
-            let text = crate::osd::edit_ipc::with_unseen(
-                &snapshot.text,
-                snapshot.base.as_deref(),
-                &doc.frozen(),
-            );
+            let text = match snapshot.base.as_deref() {
+                Some(base) => {
+                    crate::osd::edit_doc::add_unseen(&snapshot.text, base, &doc.frozen(), at_caret)
+                        .0
+                }
+                None => snapshot.text,
+            };
             doc.replace_frozen(&text);
         }
         doc.live(&shown);
@@ -2614,15 +2634,21 @@ impl Daemon {
     }
 
     /// The popup's commands ready to act on: the buffer file holds the
-    /// revision they name. Also the buffer's `base`, which their texts share.
-    fn edit_commands(&mut self) -> (Vec<crate::osd::edit_ipc::Accepted>, Option<String>) {
+    /// revision they name. Also the buffer, whose `base` and selection
+    /// their texts share.
+    fn edit_commands(
+        &mut self,
+    ) -> (
+        Vec<crate::osd::edit_ipc::Accepted>,
+        Option<crate::osd::edit_ipc::EditBuffer>,
+    ) {
         let Some(doc) = &self.edit_doc else {
             return (Vec::new(), None);
         };
         let buffer = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
         let link = &mut self.edit_link;
         let ready = link.reader.poll(&link.cmds, doc.session(), buffer.as_ref());
-        (ready, buffer.and_then(|b| b.base))
+        (ready, buffer)
     }
 
     /// Act on the popup's commands. Returns true when one asks to stop the
@@ -2630,17 +2656,19 @@ impl Daemon {
     async fn edit_handle_commands(&mut self, state: &mut State) -> bool {
         use crate::osd::edit_ipc::{Accepted, FinishMode};
         let mut finish = false;
-        let (ready, base) = self.edit_commands();
+        let (ready, buffer) = self.edit_commands();
+        let base = buffer.as_ref().and_then(|b| b.base.clone());
+        let caret = buffer.as_ref().map(|b| b.sel.0.max(b.sel.1));
         for cmd in ready {
             match cmd {
                 Accepted::Resume { text } => {
-                    self.edit_take_buffer(&text, base.as_deref());
+                    self.edit_take_buffer(&text, base.as_deref(), caret);
                     if matches!(state.phase(), Some(p) if p.is_paused() && p != Phase::Pending) {
                         self.edit_resume(state).await;
                     }
                 }
                 Accepted::Finish { mode, text } => {
-                    self.edit_take_buffer(&text, base.as_deref());
+                    self.edit_take_buffer(&text, base.as_deref(), None);
                     // How the output hook tells "paste" from "paste and
                     // Enter", as for the double taps.
                     let last = match mode {
@@ -7068,6 +7096,54 @@ mod tests {
             (block.phase.as_str(), block.frozen.as_str()),
             ("listening", "hello world!")
         );
+    }
+
+    /// R23 v2: with `edit_resume_at = "caret"`, speech after a resume goes
+    /// where the popup's caret was: in the popup's block, in the pasted
+    /// text and at the next pause. By default it goes at the end.
+    #[tokio::test]
+    async fn speech_after_a_resume_goes_at_the_caret_when_asked() {
+        use crate::osd::config::EditResumeAt;
+        use crate::osd::edit_ipc::{append_cmd_to, write_buffer_to, EditBuffer, EditCmd};
+        for (resume_at, pasted, point) in [
+            (EditResumeAt::End, "one three two", None),
+            (EditResumeAt::Caret, "one two three", Some(3)),
+        ] {
+            let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+            daemon.config.osd.edit_resume_at = resume_at;
+            link.show("one three");
+            daemon.edit_toggle(&mut state).await;
+            daemon
+                .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+                .await;
+            let session = daemon.edit_doc.as_ref().unwrap().session();
+            // The caret is after "one".
+            let buffer = EditBuffer {
+                session,
+                rev: 1,
+                text: "one three".into(),
+                sel: (3, 3),
+                pause: 1,
+                base: Some("one three".into()),
+            };
+            write_buffer_to(&daemon.edit_link.buffer, &buffer).unwrap();
+            append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev: 1 }).unwrap();
+            daemon.edit_handle_commands(&mut state).await;
+            assert_eq!(state.phase(), Some(Phase::Listening));
+            assert_eq!(link.last().unwrap().insert_at, point, "{resume_at:?}");
+            link.show("one three two");
+            assert_eq!(
+                daemon.edit_final_text(state.phase()).as_deref(),
+                Some(pasted),
+                "{resume_at:?}"
+            );
+            // The next pause freezes "two" there, and more speech goes on
+            // after it.
+            daemon.edit_toggle(&mut state).await;
+            let block = link.last().unwrap();
+            assert_eq!(block.frozen, pasted, "{resume_at:?}");
+            assert_eq!(block.insert_at, point.map(|_| "one two".len()));
+        }
     }
 
     #[tokio::test]

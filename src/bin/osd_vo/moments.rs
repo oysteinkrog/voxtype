@@ -310,6 +310,7 @@ impl Take {
             tail: String::new(),
             pause: 1,
             raw_words: self.files.preview.split_whitespace().count(),
+            insert_at: None,
         });
         self.files.live = Some(self.doc.clone());
         self.files_at(t);

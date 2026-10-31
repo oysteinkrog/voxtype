@@ -40,6 +40,11 @@ pub struct EditBlock {
     /// these.
     #[serde(default)]
     pub raw_words: usize,
+    /// With `[osd] edit_resume_at = "caret"`: the byte of `frozen` where
+    /// speech after the resume goes, the preview's words after `raw_words`
+    /// shown there. None for the end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub insert_at: Option<usize>,
 }
 
 /// `edit-buffer.json`: the popup's text while it owns it.
@@ -65,8 +70,8 @@ pub struct EditBuffer {
 /// saw its frozen text (`base`), added at the end as the popup adds a
 /// settled tail. `frozen` is the daemon's frozen text now.
 pub fn with_unseen(text: &str, base: Option<&str>, frozen: &str) -> String {
-    match base.and_then(|base| frozen.strip_prefix(base)) {
-        Some(added) => format!("{text}{added}"),
+    match base {
+        Some(base) => crate::osd::edit_doc::add_unseen(text, base, frozen, false).0,
         None => text.to_string(),
     }
 }
@@ -274,6 +279,7 @@ mod tests {
             tail: String::new(),
             pause: 2,
             raw_words: 0,
+            insert_at: None,
         };
         assert_eq!(
             serde_json::to_string(&block).unwrap(),

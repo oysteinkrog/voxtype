@@ -2239,6 +2239,10 @@ impl Popup {
                 let after = voxtype::osd::edit_doc::after_words(preview, b.raw_words).trim();
                 if after.is_empty() {
                     frozen.to_string()
+                } else if let Some(at) = b.insert_at.filter(|&at| frozen.is_char_boundary(at)) {
+                    // `edit_resume_at = "caret"`: the new words where the
+                    // caret was.
+                    voxtype::osd::edit_doc::insert(frozen, at, after).0
                 } else {
                     format!("{} {after}", frozen.trim_end())
                 }

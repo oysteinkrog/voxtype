@@ -615,6 +615,7 @@ pub(crate) mod edit_check {
             tail: String::new(),
             pause: 1,
             raw_words: text.split_whitespace().count(),
+            insert_at: None,
         }
     }
 

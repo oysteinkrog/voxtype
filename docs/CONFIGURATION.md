@@ -4122,6 +4122,7 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_EDIT_KEY` | string | `hotkey.edit_key` |
 | `VOXTYPE_EDIT_QUIET_MS` | integer | `hotkey.edit_quiet_ms` |
 | `VOXTYPE_OSD_KEYBOARD_EDIT` | bool | `osd.keyboard_edit` |
+| `VOXTYPE_OSD_EDIT_RESUME_AT` | string | `osd.edit_resume_at` |
 | `VOXTYPE_OSD_DOUBT_BELOW` | float | `osd.doubt_below` |
 
 **Whisper / Engine:**
@@ -4517,6 +4518,21 @@ With it off, nothing changes: the edit key's taps do nothing new, and dictation 
 [osd]
 frontend = "vo"
 keyboard_edit = true
+```
+
+### Speech after a keyboard edit
+
+**Type:** String, `end` or `caret` (`[osd] edit_resume_at`)
+**Default:** `"end"`
+**Required:** No
+**CLI:** `--osd-edit-resume-at` · **Env:** `VOXTYPE_OSD_EDIT_RESUME_AT`
+
+Where the words you say after a keyboard edit go. With `end`, they go after all the text. With `caret`, they go where the caret was when you resumed, so you can move the caret back, resume, and say a missing sentence there. With a selection, they go after it; the selected text stays. Only used with `keyboard_edit = true`.
+
+```toml
+[osd]
+keyboard_edit = true
+edit_resume_at = "caret"
 ```
 
 ### Unsure-word threshold

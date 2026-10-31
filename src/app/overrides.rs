@@ -151,6 +151,13 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if cli.osd_keyboard_edit {
         config.osd.keyboard_edit = true;
     }
+    if let Some(at) = cli
+        .osd_edit_resume_at
+        .as_deref()
+        .and_then(|a| a.parse().ok())
+    {
+        config.osd.edit_resume_at = at;
+    }
 
     // Whisper overrides
     if let Some(delay) = cli.pre_type_delay {

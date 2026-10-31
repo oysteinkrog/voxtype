@@ -1253,7 +1253,7 @@ When the pause starts, the microphone is muted and the last words still being de
 
 | Key | What it does |
 |---|---|
-| Edit key, one tap (or Esc) | Resume listening. New speech is added at the end. |
+| Edit key, one tap (or Esc) | Resume listening. New speech is added at the end, or at the caret with `[osd] edit_resume_at = "caret"`. |
 | Edit key, two taps | Stop and paste, without Enter |
 | Right Ctrl, two taps (the main key) | Stop, paste and press Enter |
 | Enter | Stop, paste and press Enter (on release) |
