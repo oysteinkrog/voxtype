@@ -100,6 +100,12 @@ const CHIP_GAP: f32 = 28.0;
 const CHIP_BOTTOM: f32 = 20.0;
 /// Seconds for the swirl to open, and for the mic to become a check.
 const OPEN_SECS: f64 = 0.45;
+/// Idle motion while listening: faint dots circle the text box at 10 degrees a
+/// second, each 20 to 60 px out, and fade out over the newest line.
+const IDLE_DOTS: u32 = 30;
+const IDLE_DEG_PER_S: f64 = 10.0;
+const IDLE_REACH: (f32, f32) = (20.0, 60.0);
+const IDLE_ALPHA: f32 = 0.25;
 /// MO-83: a word's letters drop 2 px straight down together and bounce. A centred line
 /// moves as it grows. On top of that, letters that came one after another, or nudged and
 /// drifted sideways, loosened a word's spacing past the reading line (10 % against 5 %),
@@ -364,6 +370,73 @@ impl StillSwirl {
             }
         }
     }
+}
+
+/// The idle dots round the text box, in the card's own space.
+#[derive(Clone, Copy, Debug)]
+struct IdleDots {
+    card: Size,
+    /// The text box and the newest line's band within it.
+    text: Rect,
+    newest: (f32, f32),
+    s: f32,
+    shown_at: f64,
+}
+
+impl IdleDots {
+    /// `card` is the card's place in the canvas.
+    fn draw(&self, t: f64, card: Rect, p: &mut Painter) {
+        let s = self.s;
+        let text = Rect::new(
+            card.x + self.text.x,
+            card.y + self.text.y,
+            self.text.w,
+            self.text.h,
+        );
+        let newest = (card.y + self.newest.0, card.y + self.newest.1);
+        let (cx, cy) = (text.x + text.w / 2.0, text.y + text.h / 2.0);
+        let turn = ((t - self.shown_at) * IDLE_DEG_PER_S).to_radians() as f32;
+        let hash = |i: u32, k: u32| {
+            let x = (i.wrapping_mul(0x9E37_79B9) ^ k).wrapping_mul(0x85EB_CA6B);
+            ((x >> 16) & 0xFFFF) as f32 / 65535.0
+        };
+        for i in 0..IDLE_DOTS {
+            let reach = (IDLE_REACH.0 + (IDLE_REACH.1 - IDLE_REACH.0) * hash(i, 1)) * s;
+            // Wider than tall, and kept inside the card.
+            let a = (text.w / 2.0 + 0.5 * reach).min(cx - card.x - 6.0 * s);
+            let b = (text.h / 2.0 + reach)
+                .min(cy - card.y - 8.0 * s)
+                .min(card.y + self.card.h - cy - 8.0 * s);
+            let angle =
+                i as f32 / IDLE_DOTS as f32 * std::f32::consts::TAU + 0.6 * hash(i, 2) + turn;
+            let (x, y) = (cx + a * angle.cos(), cy + b * angle.sin());
+            // Never over the newest line: a dot fades out as it nears its band, and
+            // is gone 2 px before it, so its soft edge stays out too.
+            let (n0, n1) = newest;
+            let off = (n0 - y).max(y - n1).max(0.0);
+            let fade = ((off - 2.0 * s) / (6.0 * s)).min(1.0);
+            if fade <= 0.0 {
+                continue;
+            }
+            let ramp = ((x - text.x) / text.w).clamp(0.0, 1.0);
+            let c = if ramp < 0.5 {
+                mix(hex(CYAN), hex(BLUE), 2.0 * ramp)
+            } else {
+                mix(hex(BLUE), hex(VIOLET), 2.0 * ramp - 1.0)
+            };
+            let alpha = IDLE_ALPHA * (0.5 + 0.5 * hash(i, 3)) * fade;
+            let r = 0.9 * s;
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(x - r, y - r, 2.0 * r, 2.0 * r), r),
+                Paint::solid(c.fade(alpha)),
+            ));
+        }
+    }
+}
+
+fn mix(a: Color, b: Color, k: f32) -> Color {
+    let l = |x: f32, y: f32| x + (y - x) * k;
+    Color::rgba(l(a.r, b.r), l(a.g, b.g), l(a.b, b.b), l(a.a, b.a))
 }
 
 /// One dotted ring round the button, as GPU particles.
@@ -658,7 +731,14 @@ impl Popup {
         // The swirl keeps to a band round the button, so its layer is no bigger than it needs.
         let band = Size::new(surface.w, 2.0 * SWIRL_HALF * s);
         let onsets: Arc<[f64]> = if l.on(showcase::PARTICLE_SOURCE) && !self.still() {
-            self.heard.onsets().iter().rev().take(8).rev().copied().collect()
+            self.heard
+                .onsets()
+                .iter()
+                .rev()
+                .take(8)
+                .rev()
+                .copied()
+                .collect()
         } else {
             Arc::from([])
         };
@@ -679,6 +759,7 @@ impl Popup {
             scrub: self.scrub(),
         };
         root.child(at(self.particles_card(card_h, bar), x0, y0))
+            .children(self.particles_idle(phase, card_h, x0, y0))
             .child(at(
                 self.particles_swirl(&swirl, band),
                 0.0,
@@ -721,6 +802,35 @@ impl Popup {
         } else {
             card
         }
+    }
+
+    /// The idle dots round the text box while listening; none under reduced motion.
+    fn particles_idle(&self, phase: Phase, card_h: f32, x0: f32, y0: f32) -> Option<Element<Msg>> {
+        if phase != Phase::Listening || self.still() || self.edit_view.is_some() {
+            return None;
+        }
+        let l = &self.look;
+        let s = scale(l);
+        let (tx, ty) = self.particles_text_at(x0, y0);
+        let lines = self.lines.max(1) as f32;
+        let text = Rect::new(tx - x0, ty - y0, TEXT_W * s, lines * TEXT_LINE * s);
+        let newest = (text.y + (lines - 1.0) * TEXT_LINE * s, text.y + text.h);
+        let dots = IdleDots {
+            card: Size::new(l.width, card_h),
+            text,
+            newest,
+            s,
+            shown_at: self.shown_at,
+        };
+        Some(at(
+            Element::canvas("idle-dots", f64::INFINITY, move |t, r, p| {
+                dots.draw(t, r, p)
+            })
+            .size(l.width, card_h)
+            .presence(Transition::fade(), Transition::fade()),
+            x0,
+            y0,
+        ))
     }
 
     /// The swirl as light: strands, rings and dust, in a band `surface`.
@@ -963,7 +1073,9 @@ impl Popup {
         // For a rewind the live text turns clear rather than fading: particle text that
         // fades scatters into dots.
         let words = if self.rewinding() {
-            words.color(Color::TRANSPARENT).motion(Prop::TextColor, Motion::Snap)
+            words
+                .color(Color::TRANSPARENT)
+                .motion(Prop::TextColor, Motion::Snap)
         } else {
             words
         };
