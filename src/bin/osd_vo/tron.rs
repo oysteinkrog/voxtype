@@ -13,6 +13,13 @@
 //! lands the whole border flares, the line glows flat and a check draws in
 //! the badge.
 //!
+//! While the popup is open it keeps a little idle life (ie8, RD-02): the
+//! head's trail is 40 px long and laps the border once every 6 s, and the
+//! badge's faint outer ring breathes between 50 % and 80 % alpha on a 3 s
+//! cycle (the redesign has no background grid to pulse, so the ring takes
+//! the grid's pulse). Under reduced motion the head, the ring's turning arc
+//! and the spinner stand still and the ring does not breathe.
+//!
 //! Geometry is laid out in the pixels of the concept image and scaled so the
 //! panel is as wide as the popup.
 
@@ -58,10 +65,14 @@ const STEP: f32 = 10.0;
 
 /// Seconds for the border to draw itself on.
 const OPEN_SECS: f64 = 0.55;
-/// Seconds for the light head to run once round the border.
-const LAP_SECS: f64 = 3.6;
-/// Length of the head's tail, as a fraction of the border.
-const TAIL: f32 = 0.16;
+/// Seconds for the light head to run once round the border (ie8: 6 s).
+const LAP_SECS: f64 = 6.0;
+/// Length of the head's trail in logical pixels (ie8).
+const TRAIL: f32 = 40.0;
+/// ie8: the outer badge ring's alpha breathes between these on this cycle.
+const RING_DIM: f32 = 0.5;
+const RING_BRIGHT: f32 = 0.8;
+const RING_SECS: f64 = 3.0;
 /// Seconds of level history from the middle of the line to each end.
 const HISTORY_SECS: f32 = 1.6;
 /// Seconds for the line to relax once the recording stops.
@@ -208,6 +219,15 @@ struct Lines {
     scrub: endings::Scrub,
     /// The light line under the newest word (MO-68).
     light: Option<LightLine>,
+    /// Reduced motion: no running head, no turning arc, no breathing ring.
+    still: bool,
+}
+
+/// ie8: the outer badge ring's alpha `s` seconds after the popup opened,
+/// from `RING_BRIGHT` down to `RING_DIM` and back every `RING_SECS`.
+fn ring_alpha(s: f64) -> f32 {
+    let u = (s / RING_SECS).rem_euclid(1.0) as f32;
+    RING_DIM + (RING_BRIGHT - RING_DIM) * (0.5 + 0.5 * (TAU * u).cos())
 }
 
 /// MO-68: the light head's trip from the border to the newest word and
@@ -297,7 +317,9 @@ impl Lines {
             / 8.0;
         let near = self.level_at(t, d * HISTORY_SECS * 0.5);
         let level = ((0.6 * mean + 0.4 * near) * 2.2).min(1.0);
-        let drift = t as f32 * 1.7;
+        // Under reduced motion the line does not travel; it only follows
+        // the level.
+        let drift = if self.still { 0.0 } else { t as f32 * 1.7 };
         let s = (TAU * (x * freq + phase) - drift).sin() * 0.7
             + (TAU * (x * freq * 2.3 + phase * 0.6) + drift * 1.3).sin() * 0.3;
         WAVE_AMP * window * level * calm * s
@@ -341,14 +363,15 @@ impl Lines {
                     );
                     self.head(p, &edge, len * f);
                 }
+                _ if self.still => {}
                 _ => {
                     let at = ((t - self.shown_at - OPEN_SECS) / LAP_SECS).rem_euclid(1.0) as f32;
                     let head = len * at;
                     let pieces = 10;
                     for i in 0..pieces {
                         let a = 1.0 - i as f32 / pieces as f32;
-                        let s1 = head - len * TAIL * i as f32 / pieces as f32;
-                        let s0 = head - len * TAIL * (i + 1) as f32 / pieces as f32;
+                        let s1 = head - TRAIL * i as f32 / pieces as f32;
+                        let s0 = head - TRAIL * (i + 1) as f32 / pieces as f32;
                         let seg =
                             |a0: f32, a1: f32| edge.trim(a0.rem_euclid(len), a1.rem_euclid(len));
                         if s0.rem_euclid(len) < s1.rem_euclid(len) {
@@ -378,11 +401,17 @@ impl Lines {
             &StrokeStyle::solid((2.4 + flare) * k, hex(CYAN, fade)).glow((6.0 + 6.0 * flare) * k),
         );
         let outer = make::ring(c, 59.0 * k);
+        let listening = self.relax_at.is_none() && self.final_at.is_none() && !self.ended;
+        let ring_a = if listening && !self.still {
+            ring_alpha(t - self.shown_at)
+        } else {
+            RING_BRIGHT
+        };
         p.stroke(
             &outer.trim(0.0, outer.length() * open),
-            &StrokeStyle::solid(1.0 * k, hex(DIM, 0.8 * fade)),
+            &StrokeStyle::solid(1.0 * k, hex(DIM, ring_a * fade)),
         );
-        let turn = if self.relax_at.is_none() {
+        let turn = if self.relax_at.is_none() && !self.still {
             (t - self.shown_at) as f32 * 0.6
         } else {
             0.0
@@ -570,6 +599,7 @@ impl Popup {
             rate: FRAME_HZ as f32,
             scrub: self.scrub(),
             light: self.tron_light(k),
+            still: self.still(),
         };
         let until = match (self.extra.final_at, self.tron.ended_at) {
             (Some(f), _) => f + FLARE_SECS + 0.1,
@@ -859,11 +889,14 @@ impl Popup {
                     icon_side * 0.2,
                 ))
         } else {
-            let still = self.tron.ended_at.is_some();
+            let ended = self.tron.ended_at.is_some();
+            let still = ended || self.still();
             Element::canvas(
                 "spinner",
                 if still { 0.0 } else { f64::INFINITY },
                 move |t, r, p| {
+                    // Under reduced motion the arc stands still.
+                    let t = if still && !ended { shown_at } else { t };
                     let c = Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
                     let rad = r.w * 0.38;
                     p.stroke(
@@ -939,6 +972,7 @@ mod tests {
             rate: 100.0,
             scrub: endings::Scrub::default(),
             light: None,
+            still: false,
         };
         assert_eq!(lines.wave_y(1.0, 0.0, 0.0, 5.0, 1.0), 0.0);
         let peak = (0..50)
@@ -971,6 +1005,14 @@ mod tests {
         assert!(l.away(1.2) && !l.away(3.0));
         // Reduced motion: the head never leaves the border.
         assert!(!LightLine { reduced: true, ..l }.away(1.2));
+    }
+
+    #[test]
+    fn the_outer_ring_breathes_between_50_and_80_percent_every_3_s() {
+        assert!((ring_alpha(0.0) - RING_BRIGHT).abs() < 1e-4);
+        assert!((ring_alpha(RING_SECS / 2.0) - RING_DIM).abs() < 1e-4);
+        assert!((ring_alpha(RING_SECS) - RING_BRIGHT).abs() < 1e-4);
+        assert!((0..100).all(|i| (RING_DIM..=RING_BRIGHT).contains(&ring_alpha(i as f64 * 0.07))));
     }
 }
 
