@@ -20,6 +20,23 @@
 //! the grid's pulse). Under reduced motion the head, the ring's turning arc
 //! and the spinner stand still and the ring does not breathe.
 //!
+//! Round 2 (R2-16) adds three opt-in features:
+//!
+//! - `ink-ripple`: each word drops a bead of light from the badge into the
+//!   waveform's band, which sends one flat ring out (at most 20 % alpha,
+//!   gone 1.6 s later). Closed-form rings, not the water simulation: the
+//!   band holds the waveform, so a simulated pool would have to reflect
+//!   it. Reduced motion: no rings.
+//! - `breathing-ribbon`: three faint strands (at most 22 % alpha) drift
+//!   across the waveform's band and swell with the voice. Reduced motion:
+//!   the strands stand still.
+//! - `luminous-typewriter`: a column right of the text with the last 8
+//!   words, the newest in a bright slot level with the first line, the
+//!   older ones stepping up one slot per word. The text wraps narrower to
+//!   make room and the waveform ends before the column. Live it shows only
+//!   words that came; the replay preview (EG-35) is not built yet.
+//!   Reduced motion: the words swap slots without gliding.
+//!
 //! Geometry is laid out in the pixels of the concept image and scaled so the
 //! panel is as wide as the popup.
 
@@ -32,7 +49,9 @@ use std::sync::OnceLock;
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::Point;
+use vo::scene::levels::{Levels as LevelTrack, Stops};
 use vo::scene::path::{icons, make, Contour, Morph, Outline, StrokeStyle};
+use vo::scene::ribbon::Ribbon;
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
 
@@ -89,6 +108,32 @@ const LIGHT_LEAVE: f64 = 0.18;
 const LIGHT_DRAW: f64 = 0.22;
 const LIGHT_HOLD: f64 = 0.2;
 const LIGHT_BACK: f64 = 0.25;
+
+/// R2-16-a: a ring in the waveform's band per word.
+pub(crate) const INK_RIPPLE: &str = "ink-ripple";
+/// Seconds for the bead to fall from the badge, and for its ring to spread
+/// and fade.
+const DROP_SECS: f64 = 0.15;
+const RIPPLE_SECS: f64 = 1.6;
+const RIPPLE_ALPHA: f32 = 0.2;
+/// Rings drawn at most: the newest words'.
+const RIPPLES: usize = 6;
+/// The ring's height over its width.
+const RIPPLE_FLAT: f32 = 0.1;
+
+/// R2-16-b: light strands across the waveform's band.
+pub(crate) const BREATHING_RIBBON: &str = "breathing-ribbon";
+/// Half the band's height, in concept pixels.
+const RIBBON_HALF: f32 = 40.0;
+
+/// R2-16-c: the column of the last words right of the text.
+pub(crate) const LUMINOUS_TYPEWRITER: &str = "luminous-typewriter";
+/// The column's width and the gap to the text, in concept pixels.
+const COLUMN_W: f32 = 118.0;
+const COLUMN_GAP: f32 = 14.0;
+const COLUMN_SLOTS: usize = 8;
+const SLOT: f32 = 19.0;
+const SLOT_PX: f32 = 16.0;
 
 const CYAN: u32 = 0x29d3ff;
 const BRIGHT: u32 = 0xb5f3ff;
@@ -221,6 +266,11 @@ struct Lines {
     light: Option<LightLine>,
     /// Reduced motion: no running head, no turning arc, no breathing ring.
     still: bool,
+    /// The waveform's right end in concept pixels: short of the word
+    /// column when it shows (R2-16-c).
+    wave_x1: f32,
+    /// R2-16-a: when each of the newest words came, oldest first.
+    ripples: Vec<f64>,
 }
 
 /// ie8: the outer badge ring's alpha `s` seconds after the popup opened,
@@ -228,6 +278,41 @@ struct Lines {
 fn ring_alpha(s: f64) -> f32 {
     let u = (s / RING_SECS).rem_euclid(1.0) as f32;
     RING_DIM + (RING_BRIGHT - RING_DIM) * (0.5 + 0.5 * (TAU * u).cos())
+}
+
+/// R2-16-a: where one word's splash is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Splash {
+    /// The bead falls from the badge, 0 to 1.
+    Fall(f32),
+    /// The ring spreads and fades, 0 to 1 of its life.
+    Ring(f32),
+}
+
+/// R2-16-a: the splash of a word that came at `born`, at `t`; `None`
+/// before it came and once its ring is gone.
+fn splash(born: f64, t: f64) -> Option<Splash> {
+    let s = t - born;
+    if s < 0.0 || s >= DROP_SECS + RIPPLE_SECS {
+        None
+    } else if s < DROP_SECS {
+        Some(Splash::Fall((s / DROP_SECS) as f32))
+    } else {
+        Some(Splash::Ring(((s - DROP_SECS) / RIPPLE_SECS) as f32))
+    }
+}
+
+/// R2-16-c: the words the column shows, oldest first: the last
+/// `COLUMN_SLOTS` on screen, which are words that came, never the ghost
+/// tail's guesses.
+fn column_words(shown: &[Word]) -> &[Word] {
+    &shown[shown.len().saturating_sub(COLUMN_SLOTS)..]
+}
+
+/// R2-16-a: a ring's alpha at `age`, 0 to 1 of its life: full at the
+/// splash, nothing at the end.
+fn ripple_alpha(age: f32) -> f32 {
+    RIPPLE_ALPHA * (1.0 - age.clamp(0.0, 1.0)).powf(1.5)
 }
 
 /// MO-68: the light head's trip from the border to the newest word and
@@ -421,6 +506,8 @@ impl Lines {
             &StrokeStyle::solid(1.6 * k, hex(CYAN, 0.9 * fade)).glow(4.0 * k),
         );
 
+        self.ripples(t, p);
+
         // The waveform: one luminous line and two fainter echoes.
         let calm = match self.relax_at {
             Some(r) => 1.0 - 0.9 * ease_out((t - r) / RELAX_SECS),
@@ -431,7 +518,7 @@ impl Lines {
             let pts: Vec<Point> = (0..=n)
                 .map(|i| {
                     let x = i as f32 / n as f32;
-                    let px = WAVE_X0 + (WAVE_X1 - WAVE_X0) * x;
+                    let px = WAVE_X0 + (self.wave_x1 - WAVE_X0) * x;
                     self.p(px, WAVE_Y - gain * self.wave_y(t, x, phase, freq, calm))
                 })
                 .collect();
@@ -457,6 +544,41 @@ impl Lines {
             if let Some(light) = self.light {
                 self.light_line(t, &light, &edge, p);
             }
+        }
+    }
+
+    /// R2-16-a: the bead falling from the badge and the flat ring each word
+    /// sends across the waveform's band, centred under the badge.
+    fn ripples(&self, t: f64, p: &mut Painter) {
+        let k = self.k;
+        let reach = (self.wave_x1 - BADGE_X).min(BADGE_X - WAVE_X0) - 10.0;
+        for &born in &self.ripples {
+            let age = match splash(born, t) {
+                None => continue,
+                Some(Splash::Fall(f)) => {
+                    let y0 = BADGE_Y + BADGE_R + 4.0;
+                    let y = y0 + (WAVE_Y - y0) * f * f;
+                    p.shape(ShapeInstance::circle(
+                        self.p(BADGE_X, y),
+                        2.2 * k,
+                        Paint::glow(hex(BRIGHT, 0.5), 4.0 * k, 1.0),
+                    ));
+                    continue;
+                }
+                Some(Splash::Ring(age)) => age,
+            };
+            let rx = 12.0 + (reach - 12.0) * ease_out(age as f64);
+            let a = ripple_alpha(age);
+            let pts: Vec<Point> = (0..=64)
+                .map(|i| {
+                    let u = TAU * i as f32 / 64.0;
+                    self.p(BADGE_X + rx * u.cos(), WAVE_Y + rx * RIPPLE_FLAT * u.sin())
+                })
+                .collect();
+            p.stroke(
+                &Contour::polyline(&pts, true),
+                &StrokeStyle::solid(1.2 * k, hex(CYAN, a)).glow(3.0 * k),
+            );
         }
     }
 
@@ -544,10 +666,20 @@ pub(crate) fn text_style(look: &Look) -> TextStyle {
     TextStyle::new(fonts(look).text, TEXT_PX * k, LINE * k)
 }
 
-/// Width the transcript wraps at.
+/// Width the transcript wraps at: narrower when the word column shows
+/// beside it (R2-16-c).
 pub(crate) fn text_width(look: &Look) -> f32 {
     let k = look.width / CONCEPT_W;
-    634.0 * k
+    if look.on(LUMINOUS_TYPEWRITER) {
+        (634.0 - COLUMN_W - COLUMN_GAP) * k
+    } else {
+        634.0 * k
+    }
+}
+
+/// The column's left edge in concept pixels (R2-16-c).
+fn column_x() -> f32 {
+    TEXT_X + 634.0 - COLUMN_W
 }
 
 impl Popup {
@@ -600,6 +732,12 @@ impl Popup {
             scrub: self.scrub(),
             light: self.tron_light(k),
             still: self.still(),
+            wave_x1: if self.look.on(LUMINOUS_TYPEWRITER) {
+                column_x() - COLUMN_GAP
+            } else {
+                WAVE_X1
+            },
+            ripples: self.tron_ripples(),
         };
         let until = match (self.extra.final_at, self.tron.ended_at) {
             (Some(f), _) => f + FLARE_SECS + 0.1,
@@ -625,6 +763,8 @@ impl Popup {
             .bloom(0.12, 5.0 * k)
             .presence(Transition::fade().opacity(1.0), exit)
             .child(canvas)
+            .children(self.tron_ribbon(&g, relax_at))
+            .children(self.tron_column(&g))
             .child(self.tron_badge(&g, &status))
             .children(self.tron_lattice(&g))
             .child(self.tron_text(&g))
@@ -642,6 +782,139 @@ impl Popup {
             .child(self.tron_rule(&g))
             .child(self.tron_status(&g, &status, bottom));
         root.child(panel)
+    }
+
+    /// R2-16-a: when each of the newest words came, for their rings. None
+    /// under reduced motion.
+    fn tron_ripples(&self) -> Vec<f64> {
+        if !self.look.on(INK_RIPPLE) || self.still() {
+            return Vec::new();
+        }
+        let from = self.shown.len().saturating_sub(RIPPLES);
+        self.shown[from..]
+            .iter()
+            .filter_map(|w| self.heard.word(w.id).map(|h| h.born))
+            .collect()
+    }
+
+    /// R2-16-b: three faint strands across the waveform's band that drift
+    /// and swell with the voice, and lie down when the recording stops.
+    fn tron_ribbon(&self, g: &Geo, relax_at: Option<f64>) -> Option<Element<Msg>> {
+        if !self.look.on(BREATHING_RIBBON) {
+            return None;
+        }
+        let k = g.k;
+        let x1 = if self.look.on(LUMINOUS_TYPEWRITER) {
+            column_x() - COLUMN_GAP
+        } else {
+            WAVE_X1
+        };
+        let mut ribbon = Ribbon {
+            levels: LevelTrack {
+                levels: self.wave.clone(),
+                newest_at: self.newest_at,
+                rate: FRAME_HZ as f32,
+                ..LevelTrack::default()
+            },
+            strands: 3,
+            cycles: 1.3,
+            speed: 0.12,
+            spread: 0.35,
+            gain: 0.9,
+            floor: 0.25,
+            belly: 0.5,
+            width: 6.0 * k,
+            alpha: 0.22,
+            glow: 8.0 * k,
+            left: Stops::new(&[(0.0, hex(CYAN, 1.0)), (1.0, hex(DIM, 1.0))]),
+            right: Stops::new(&[(0.0, hex(DETAIL, 1.0)), (1.0, hex(CYAN, 1.0))]),
+            core: None,
+            settle: relax_at.or(self.extra.final_at),
+            settle_secs: RELAX_SECS as f32,
+            run: 1024,
+            ..Ribbon::default()
+        };
+        if self.still() {
+            // The strands stand at their resting swing.
+            ribbon.speed = 0.0;
+            ribbon.levels = LevelTrack {
+                newest_at: self.shown_at,
+                ..LevelTrack::default()
+            };
+            ribbon.settle = None;
+        }
+        let (x, y) = (WAVE_X0 * k, (WAVE_Y - RIBBON_HALF) * k);
+        Some(
+            at(Element::ribbon("ribbon", ribbon), x, y)
+                .size((x1 - WAVE_X0) * k, 2.0 * RIBBON_HALF * k)
+                .presence(Transition::fade(), Transition::fade()),
+        )
+    }
+
+    /// R2-16-c: the last words in a column right of the text, the newest in
+    /// a bright slot level with the first line and each older one a slot
+    /// higher and fainter. A new word glides them all up one slot.
+    fn tron_column(&self, g: &Geo) -> Option<Element<Msg>> {
+        if !self.look.on(LUMINOUS_TYPEWRITER) {
+            return None;
+        }
+        let k = g.k;
+        let style = TextStyle::new(fonts(&self.look).text, SLOT_PX * k, SLOT * k);
+        let glide = if self.still() {
+            Motion::Snap
+        } else {
+            Spring::critical_to_98(0.25).into()
+        };
+        // Slot tops inside the column, newest (0) at the bottom, level with
+        // the first line's middle.
+        let top = TEXT_TOP + 0.5 * LINE + 0.5 * SLOT - COLUMN_SLOTS as f32 * SLOT;
+        let slot_y = |i: usize| (COLUMN_SLOTS - 1 - i) as f32 * SLOT * k;
+        let words = column_words(&self.shown);
+        let n = words.len();
+        // A word wider than the column is cut at its edge, not wrapped.
+        let mut col = at(Element::layer("column"), column_x() * k, top * k)
+            .size(COLUMN_W * k, COLUMN_SLOTS as f32 * SLOT * k)
+            .clip();
+        // The highlight: a short bright bar at the newest slot's left edge.
+        if n > 0 {
+            col = col.child(
+                at(
+                    Element::shape("column-mark", ShapeKind::RRect),
+                    0.0,
+                    slot_y(0) + 0.3 * SLOT * k,
+                )
+                .size(2.0 * k, 0.4 * SLOT * k)
+                .fill(hex(BRIGHT, 0.9))
+                .presence(Transition::fade(), Transition::fade()),
+            );
+        }
+        for (j, w) in words.iter().enumerate() {
+            let i = n - 1 - j;
+            let (color, halo) = if i == 0 {
+                (hex(BRIGHT, 1.0), hex(CYAN, 0.35))
+            } else {
+                (hex(TEXT, 0.55 - 0.06 * i as f32), hex(CYAN, 0.0))
+            };
+            col = col.child(
+                at(
+                    Element::label(format!("col-{}", w.id), w.text.as_str())
+                        .text_style(style)
+                        .color(color)
+                        .text_halo(halo, 3.0 * k)
+                        .width(self.measure.layout(&w.text, &style, None).size.w.ceil() + 2.0),
+                    8.0 * k,
+                    slot_y(i),
+                )
+                .motion(Prop::Position, glide)
+                .motion(Prop::Opacity, Spring::critical_to_98(0.25))
+                // The oldest leaves upward, out of the slot the next takes.
+                .presence(
+                    Transition::fade().offset(0.0, SLOT * k),
+                    Transition::fade().offset(0.0, -SLOT * k),
+                ),
+            );
+        }
+        Some(col)
     }
 
     /// MO-68: the light line for the newest word, in the canvas's pixels.
@@ -973,6 +1246,8 @@ mod tests {
             scrub: endings::Scrub::default(),
             light: None,
             still: false,
+            wave_x1: WAVE_X1,
+            ripples: Vec::new(),
         };
         assert_eq!(lines.wave_y(1.0, 0.0, 0.0, 5.0, 1.0), 0.0);
         let peak = (0..50)
@@ -1013,6 +1288,41 @@ mod tests {
         assert!((ring_alpha(RING_SECS / 2.0) - RING_DIM).abs() < 1e-4);
         assert!((ring_alpha(RING_SECS) - RING_BRIGHT).abs() < 1e-4);
         assert!((0..100).all(|i| (RING_DIM..=RING_BRIGHT).contains(&ring_alpha(i as f64 * 0.07))));
+    }
+
+    #[test]
+    fn each_word_sends_one_ring_that_is_gone_in_1_6_s() {
+        let born = [1.0, 1.4, 2.0];
+        let rings = |t: f64| {
+            born.iter()
+                .filter(|&&b| matches!(splash(b, t), Some(Splash::Ring(_))))
+                .count()
+        };
+        assert_eq!(rings(0.9), 0);
+        assert!(matches!(splash(1.0, 1.05), Some(Splash::Fall(f)) if (f - 1.0 / 3.0).abs() < 1e-4));
+        assert_eq!(rings(2.2), 3);
+        assert_eq!(rings(1.0 + DROP_SECS + RIPPLE_SECS + 0.01), 2);
+        assert_eq!(rings(2.0 + DROP_SECS + RIPPLE_SECS), 0);
+        for age in [0.0, 0.3, 0.7, 1.0] {
+            assert!(ripple_alpha(age) <= RIPPLE_ALPHA);
+        }
+        assert_eq!(ripple_alpha(1.0), 0.0);
+    }
+
+    #[test]
+    fn the_column_holds_the_last_eight_words_that_came() {
+        let words: Vec<Word> = (1..=11)
+            .map(|i| Word {
+                id: i,
+                text: format!("w{i}"),
+            })
+            .collect();
+        let col = column_words(&words);
+        assert_eq!(col.len(), COLUMN_SLOTS);
+        assert_eq!(col.first().unwrap().id, 4);
+        assert_eq!(col.last().unwrap().id, 11);
+        assert_eq!(column_words(&words[..3]).len(), 3);
+        assert!(column_words(&[]).is_empty());
     }
 }
 

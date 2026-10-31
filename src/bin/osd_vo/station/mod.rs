@@ -30,7 +30,8 @@ pub(crate) type ViewFn = fn(&Popup, &vo::Tokens) -> Element<Msg>;
 /// One exhibit: what a tile shows and how.
 #[derive(Clone)]
 pub(crate) struct Exhibit {
-    /// `MO-NN`, or `EG-NN` for an engine gap exhibit.
+    /// `MO-NN`, `EG-NN` for an engine gap exhibit, or `R2-NN-x` for a
+    /// round 2 idea.
     pub(crate) id: &'static str,
     /// The concept's name, as in the motion plan.
     pub(crate) name: &'static str,
@@ -96,12 +97,17 @@ impl Exhibit {
         }
     }
 
-    /// The MO number, for sorting and filters.
+    /// The MO number, for sorting and filters. A round 2 idea (`R2-16-a`)
+    /// takes its look's number, 16.
     fn number(&self) -> u32 {
-        self.id
+        let digits: String = self
+            .id
+            .trim_start_matches("R2-")
             .trim_start_matches(|c: char| !c.is_ascii_digit())
-            .parse()
-            .unwrap_or(u32::MAX)
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().unwrap_or(u32::MAX)
     }
 }
 
@@ -862,9 +868,11 @@ mod tests {
         let all = exhibits();
         assert!(!all.is_empty());
         for e in &all {
-            // Motion plan concepts are `MO-NN`; engine gap exhibits `EG-NN`.
+            // Motion plan concepts are `MO-NN`; engine gap exhibits `EG-NN`;
+            // round 2 ideas `R2-NN-x`.
             assert!(
-                (e.id.starts_with("MO-") || e.id.starts_with("EG-")) && e.number() < 100,
+                (e.id.starts_with("MO-") || e.id.starts_with("EG-") || e.id.starts_with("R2-"))
+                    && e.number() < 100,
                 "bad id {:?}",
                 e.id
             );
