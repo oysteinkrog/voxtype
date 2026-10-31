@@ -597,7 +597,8 @@ impl Popup {
             .collect();
         let shifted = |(x, top): (f32, f32), len: usize| {
             let i = laid.glyphs.iter().rposition(|g| (g.cluster as usize) < len);
-            (x + i.map_or(0.0, shift), top)
+            // No text yet: a centred line starts in the middle.
+            (x + i.map_or(k * width, shift), top)
         };
         // A tail that runs onto a line with no room yet ends, as far as the
         // screen goes, at the right edge of the last line there is.

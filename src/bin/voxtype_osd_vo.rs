@@ -987,6 +987,7 @@ impl Look {
             OsdTheme::Jarvis => Some(jarvis::newest_line_centre(self, lines)),
             OsdTheme::Particles => Some(particles::newest_line_centre(self, lines)),
             OsdTheme::River => Some(river::newest_line_centre(self, lines)),
+            OsdTheme::Hologram => Some(hologram::newest_line_centre(self, lines)),
             OsdTheme::Glass => Some(glass::newest_line_centre(self)),
             _ => None,
         }
@@ -1058,6 +1059,9 @@ impl Look {
         if self.theme == OsdTheme::River {
             return river::text_width(self);
         }
+        if self.theme == OsdTheme::Hologram {
+            return hologram::text_width(self);
+        }
         if self.theme == OsdTheme::Glass {
             return glass::text_width(self);
         }
@@ -1095,6 +1099,9 @@ impl Look {
         }
         if self.theme == OsdTheme::River {
             return river::max_lines();
+        }
+        if self.theme == OsdTheme::Hologram {
+            return hologram::max_lines();
         }
         if self.theme == OsdTheme::Glass {
             return glass::MAX_LINES;
@@ -1178,6 +1185,9 @@ impl Look {
         }
         if self.theme == OsdTheme::River {
             return river::text_style(self);
+        }
+        if self.theme == OsdTheme::Hologram {
+            return hologram::text_style(self);
         }
         if self.theme == OsdTheme::Glass {
             return glass::text_style(self);
@@ -1367,6 +1377,9 @@ impl Look {
         }
         if self.theme == OsdTheme::River {
             return river::surface(self);
+        }
+        if self.theme == OsdTheme::Hologram {
+            return hologram::surface(self);
         }
         if self.theme == OsdTheme::Glass {
             return glass::surface(self);
@@ -2696,6 +2709,7 @@ fn default_motion(look: &Look) -> Motion {
             | OsdTheme::Mecha
             | OsdTheme::Cyberpunk
             | OsdTheme::River
+            | OsdTheme::Hologram
             | OsdTheme::Glass
     ) {
         Motion::Spring(Spring::SOFT)
