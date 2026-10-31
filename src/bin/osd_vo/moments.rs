@@ -49,6 +49,12 @@ pub(crate) enum Moment {
     /// A keyboard edit (plan M7.6): a tap in a pause, the caret up two
     /// lines, a word typed, Enter.
     Edit,
+    /// A word every 0.3 s for 7.2 s with no pause, for the recording cost
+    /// of features that work per word (SW-09).
+    Cadence,
+    /// Words four at a time every 0.6 s for 7.2 s, as the engine sends
+    /// them after a stall, for the same.
+    WordBurst,
 }
 
 impl Moment {
@@ -74,6 +80,8 @@ impl Moment {
         Moment::Correction,
         Moment::Spell,
         Moment::Edit,
+        Moment::Cadence,
+        Moment::WordBurst,
     ];
 
     /// The name on the command line.
@@ -100,6 +108,8 @@ impl Moment {
             Moment::Correction => "correction",
             Moment::Spell => "spell",
             Moment::Edit => "edit",
+            Moment::Cadence => "cadence",
+            Moment::WordBurst => "word-burst",
         }
     }
 
@@ -692,6 +702,30 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
     let per = 0.32;
     match moment {
         Moment::Dictation => super::scenario(look, false),
+        Moment::Cadence => {
+            k.record(s0);
+            let t = k.speak(s0, &sentence_words(0, 24), 0.3);
+            k.stop(t);
+            let shown = k.finish(t, 0.6, &final_text(&sentence_words(0, 24)));
+            k.pump(t + 0.03, shown);
+            k.end(shown + 0.2, Outcome::Done);
+            k.scenario(look, shown + 1.4)
+        }
+        Moment::WordBurst => {
+            k.record(s0);
+            let groups = 12;
+            let end = s0 + 0.35 + groups as f64 * 0.6;
+            k.sound(s0, end, Sound::Speech);
+            for g in 0..groups {
+                let t = s0 + 0.35 + g as f64 * 0.6;
+                k.say(t, &sentence_words(0, 4 * (g + 1)).join(" "));
+            }
+            k.stop(end);
+            let shown = k.finish(end, 0.6, &final_text(&sentence_words(0, 4 * groups)));
+            k.pump(end + 0.03, shown);
+            k.end(shown + 0.2, Outcome::Done);
+            k.scenario(look, shown + 1.4)
+        }
         Moment::Cancel => {
             k.record(s0);
             let t = k.speak(s0, &sentence_words(0, 9), per);

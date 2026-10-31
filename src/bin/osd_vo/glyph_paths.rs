@@ -1379,7 +1379,7 @@ mod tests {
     #[test]
     fn a_word_that_moved_draws_no_wet_ink_away_from_itself() {
         let plasma = PlasmaTheme::default();
-        let fonts = load_fonts(&plasma).unwrap();
+        let fonts = super::super::swiss_look::edit_check::fonts();
         let cfg = OsdConfig {
             theme: OsdTheme::Type,
             ..OsdConfig::default()
@@ -1388,6 +1388,8 @@ mod tests {
         look.features = [WRITE, MORPH].iter().map(|f| f.to_string()).collect();
         let mut popup = Popup::new(look.clone(), &fonts);
         popup.scripted = true;
+        // The pen books are shared by popup key: one no other test uses.
+        popup.shown_at = 9092.5;
         let text = PathsText::of(&look);
         let words: Vec<Word> = ["one", "two", "three", "four"]
             .iter()
@@ -1416,6 +1418,47 @@ mod tests {
         popup.shown = words[1..].to_vec();
         let after = drawn(&mut popup, 1.06);
         assert!(after.is_empty(), "{after:?} where the words were");
+    }
+
+    /// SW-09: once every word is written and dry the pen leaves no canvas,
+    /// so it costs nothing while the popup idles.
+    #[test]
+    fn no_pen_canvas_is_left_once_the_ink_is_dry() {
+        let plasma = PlasmaTheme::default();
+        // The edit checks' registry: a look keeps the font ids of the first
+        // registry it sees, process-wide.
+        let fonts = super::super::swiss_look::edit_check::fonts();
+        for theme in [OsdTheme::Type, OsdTheme::Tron, OsdTheme::Phosphor] {
+            let cfg = OsdConfig {
+                theme,
+                ..OsdConfig::default()
+            };
+            let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+            look.features = [WRITE].iter().map(|f| f.to_string()).collect();
+            let mut popup = Popup::new(look.clone(), &fonts);
+            popup.scripted = true;
+            // The pen books are shared by popup key: one no other test uses.
+            popup.shown_at = 9091.5;
+            let text = PathsText::of(&look);
+            popup.shown = ["one", "two", "three"]
+                .iter()
+                .enumerate()
+                .map(|(i, w)| Word {
+                    id: i as u32 + 1,
+                    text: w.to_string(),
+                })
+                .collect();
+            let pen = |p: &mut Popup, t: f64| {
+                p.extra.now = t;
+                p.paths_overlays(&text)
+                    .iter()
+                    .filter(|e| e.key().to_string() == "stroke-write")
+                    .count()
+            };
+            assert_eq!(pen(&mut popup, 1.0), 1, "{theme:?} writes");
+            // Three words at most 0.26 s each, then the longest drying (0.6 s).
+            assert_eq!(pen(&mut popup, 3.0), 0, "{theme:?} after the ink dried");
+        }
     }
 
     #[test]
