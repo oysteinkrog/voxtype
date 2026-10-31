@@ -1048,6 +1048,7 @@ impl Look {
             OsdTheme::Particles => Some(particles::newest_line_centre(self, lines)),
             OsdTheme::River => Some(river::newest_line_centre(self, lines)),
             OsdTheme::Hologram => Some(hologram::newest_line_centre(self, lines)),
+            OsdTheme::Aurora => Some(aurora::newest_line_centre(self, lines)),
             OsdTheme::Glass => Some(glass::newest_line_centre(self)),
             OsdTheme::Chrome => Some(chrome::newest_line_centre(self, lines)),
             OsdTheme::Orb => Some(orb::newest_line_centre(self, lines)),
@@ -1124,6 +1125,9 @@ impl Look {
         if self.theme == OsdTheme::Hologram {
             return hologram::text_width(self);
         }
+        if self.theme == OsdTheme::Aurora {
+            return aurora::text_width(self);
+        }
         if self.theme == OsdTheme::Glass {
             return glass::text_width(self);
         }
@@ -1170,6 +1174,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Hologram {
             return hologram::max_lines();
+        }
+        if self.theme == OsdTheme::Aurora {
+            return aurora::max_lines();
         }
         if self.theme == OsdTheme::Glass {
             return glass::MAX_LINES;
@@ -1262,6 +1269,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Hologram {
             return hologram::text_style(self);
+        }
+        if self.theme == OsdTheme::Aurora {
+            return aurora::text_style(self);
         }
         if self.theme == OsdTheme::Glass {
             return glass::text_style(self);
@@ -1368,6 +1378,7 @@ impl Look {
             OsdTheme::Showcase => voxtype::osd::showcase::MARGIN_PX,
             OsdTheme::Jarvis => jarvis::panel_top(),
             OsdTheme::Glass => glass::panel_top(self),
+            OsdTheme::Aurora => aurora::panel_top(self),
             OsdTheme::Chrome => chrome::panel_top(self),
             OsdTheme::Orb => orb::panel_top(self),
             _ => 0.0,
@@ -1462,6 +1473,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Hologram {
             return hologram::surface(self);
+        }
+        if self.theme == OsdTheme::Aurora {
+            return aurora::surface(self);
         }
         if self.theme == OsdTheme::Glass {
             return glass::surface(self);
@@ -2813,6 +2827,7 @@ fn default_motion(look: &Look) -> Motion {
             | OsdTheme::Cyberpunk
             | OsdTheme::River
             | OsdTheme::Hologram
+            | OsdTheme::Aurora
             | OsdTheme::Glass
             | OsdTheme::Chrome
             | OsdTheme::Orb
