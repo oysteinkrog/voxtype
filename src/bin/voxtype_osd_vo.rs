@@ -2178,6 +2178,7 @@ impl App for Popup {
         self.arm_captions_tick(cx);
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
+        self.arm_hologram_tick(cx);
         self.arm_cyber_tick(cx);
         self.arm_dotmatrix_tick(cx);
     }
@@ -2339,6 +2340,7 @@ impl App for Popup {
         self.arm_captions_tick(cx);
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
+        self.arm_hologram_tick(cx);
         self.arm_jarvis_wake(cx);
         self.arm_cyber_tick(cx);
         self.arm_dotmatrix_tick(cx);

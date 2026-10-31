@@ -16,6 +16,7 @@ use super::kit::{at, hex, mix, Levels, Mode};
 use super::*;
 
 use vo::scene::canvas::Painter;
+use vo::scene::depth_stack::{DepthStack, Place, Sheet};
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect, Rect};
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
@@ -57,6 +58,8 @@ const WAVE_HALF: f32 = 30.0;
 const BARS: usize = 49;
 /// Seconds of audio between neighbouring bars, out from the middle.
 const BAR_SECS: f64 = 0.03;
+/// Levels under this are room tone and draw flat.
+const WAVE_GATE: f32 = 0.04;
 /// The ring pedestal, this far below the wave, and the status on it.
 const RING_GAP: f32 = 82.0;
 const RING_PAD: f32 = 40.0;
@@ -66,6 +69,14 @@ const STATUS_PX: f32 = 13.5;
 /// Scan lines in the column: their pitch and how fast they drift down.
 const SCAN_PITCH: f32 = 5.0;
 const SCAN_SPEED: f32 = 6.0;
+/// Idle: a brighter scan line passes down the column this often, and the
+/// older lines float a pixel up and down, each a half period apart.
+const SWEEP_SECS: f64 = 6.0;
+const SWEEP_ALPHA: f32 = 0.12;
+const FLOAT_SECS: f64 = 3.0;
+const FLOAT_PX: f32 = 1.0;
+/// Seconds a line that left the reading place waits before it floats.
+const FLOAT_AFTER_SECS: f64 = 2.0;
 const SETTLE_SECS: f64 = 0.35;
 
 fn scale(look: &Look) -> f32 {
@@ -208,6 +219,16 @@ impl Light {
             ));
             y += SCAN_PITCH * k;
         }
+        // Idle: one brighter scan line passes down the column every few
+        // seconds while the popup listens.
+        if !self.still && self.mode == Mode::Listening {
+            let u = ((t - self.shown_at) / SWEEP_SECS).fract() as f32;
+            let y = top + u * (ring - top);
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(x0 + 8.0 * k, y, x1 - x0 - 16.0 * k, 1.0), 0.0),
+                Paint::solid(tint(ICE).fade(SWEEP_ALPHA)),
+            ));
+        }
         // The ring pedestal: a glowing ellipse, a soft fill and a wider halo.
         let c = Point::new(r.x + r.w / 2.0, ring);
         let shimmer = if self.still || self.mode != Mode::Listening {
@@ -302,9 +323,12 @@ impl Wave {
             let d = i.abs_diff(mid);
             let reach = d as f32 / mid as f32;
             let at = t_eff - d as f64 * BAR_SECS;
+            // Room tone stays flat, so a silence holds still.
+            let raw = self.levels.at(at);
+            let raw = if raw < WAVE_GATE { 0.0 } else { raw };
             let jitter = 0.5 + 0.5 * noise((at / BAR_SECS).round() as i64 as u32);
             let taper = (1.0 - reach.powf(1.4)).max(0.0);
-            let level = (self.levels.at(at) * 2.2).min(1.0) * jitter * taper * height;
+            let level = (raw * 2.2).min(1.0) * jitter * taper * height;
             let half = (level * WAVE_HALF * k).max(1.0 * k);
             let x = r.x + i as f32 * pitch;
             let u = i as f32 / (BARS - 1) as f32;
@@ -339,6 +363,25 @@ fn noise(n: u32) -> f32 {
     x = x.wrapping_mul(0x2C1B_3C6D);
     x ^= x >> 12;
     (x & 0xFFFF) as f32 / 65535.0
+}
+
+/// MO-83 on a centred line, as on particles: the letters of a word drop
+/// 2 px together and bounce, with no sideways nudge, drift or stagger. A
+/// centred line moves as it grows, and those on top of it loosened the
+/// reading line's spacing past its limit.
+fn letters() -> wild_motion::LetterPhysics {
+    wild_motion::LetterPhysics {
+        nudge: 0.0,
+        drift: 0.0,
+        stagger: 0.0,
+        drop: 2.0,
+        ..wild_motion::LetterPhysics::default()
+    }
+}
+
+/// The words' colour, for effects that draw letters of their own.
+pub(crate) fn text_color() -> Color {
+    hex(TEXT)
 }
 
 /// The look's transcript for the outline features.
@@ -441,21 +484,16 @@ impl Popup {
     fn hologram_text(&self, mode: Mode, lines: u32) -> Element<Msg> {
         let l = &self.look;
         let k = scale(l);
-        let dim = if mode == Mode::Cancelled { 0.4 } else { 1.0 };
-        let words = Element::live_text("words", &self.shown)
-            .line_motion(&self.look)
-            .revision_motion(revision::motion(&self.look))
-            .word_revise(revision::revise(&self.look))
-            .text_style(l.text_style())
-            .color(hex(TEXT))
-            .text_halo(hex(HALO).fade(0.55), 9.0 * k)
-            .opacity(dim)
-            .motion(Prop::Opacity, Spring::critical_to_98(0.12))
-            .motion(Prop::Offset, Spring::POP)
-            .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, -8.0 * k)))
-            .wild_motion(self);
+        let stacking = l.on(wild_space::DEPTH_STACK);
         let paths = hologram_paths(l);
-        let words = self.typo_words_in(words, &paths);
+        let words = if stacking {
+            self.hologram_stack(mode, lines)
+        } else {
+            let words = self.hologram_words(&self.shown, mode).word_enter(
+                self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, -8.0 * k)),
+            );
+            self.typo_words_in(self.hologram_letters(words), &paths)
+        };
         let words = self.handoff_or(
             words,
             &l.text_style(),
@@ -479,8 +517,196 @@ impl Popup {
                 },
                 endings::Cancel::Unthread,
             ));
-        let text = self.signal_marks(text, &self.shown, l.text_width(), (0.0, 0.0), hex(TEXT));
+        // MO-87: a revised word flows into its correction over the words.
+        let text = self.letter_fx_layers(text, l.text_width());
+        // The depth stack lays its lines out on its own and carries the
+        // ghost tail on its reading line.
+        let text = if stacking {
+            text
+        } else {
+            self.signal_marks(text, &self.shown, l.text_width(), (0.0, 0.0), hex(TEXT))
+        };
         self.with_hearing(text, &l.text_style(), l.text_width(), hex(TEXT), hex(CYAN))
+    }
+
+    /// The live text of `words` in the look's projected type.
+    fn hologram_words(&self, words: &[Word], mode: Mode) -> Element<Msg> {
+        let l = &self.look;
+        let dim = if mode == Mode::Cancelled { 0.4 } else { 1.0 };
+        Element::live_text("words", words)
+            .line_motion(&self.look)
+            .revision_motion(revision::motion(&self.look))
+            .word_revise(revision::revise(&self.look))
+            .text_style(l.text_style())
+            .color(hex(TEXT))
+            .text_halo(hex(HALO).fade(0.55), 9.0 * scale(l))
+            .opacity(dim)
+            .motion(Prop::Opacity, Spring::critical_to_98(0.12))
+            .motion(Prop::Offset, Spring::POP)
+    }
+
+    /// The letter effects on the reading line's live text: the liquid
+    /// morph's swaps, and letter physics tuned for a centred line.
+    fn hologram_letters(&self, words: Element<Msg>) -> Element<Msg> {
+        let words = if self.look.on(wild_motion::LETTER_PHYSICS) {
+            // The letters' drop moves the glyphs: a revision swaps them at
+            // once, as on particles.
+            words.word_revise(vo::scene::flow::Revise::Swap)
+        } else {
+            words
+        };
+        self.letter_fx_words(words)
+            .wild_motion_with(self, letters())
+    }
+
+    /// Whether the older lines float: while the popup listens, not under
+    /// reduced motion, and only with older lines on the depth stack's
+    /// sheets to move. The flat text has one live text for all its lines,
+    /// so its older lines hold still.
+    fn hologram_floats(&self) -> bool {
+        self.look.theme == OsdTheme::Hologram
+            && self.look.on(wild_space::DEPTH_STACK)
+            && self.lines > 1
+            && !self.closing
+            && !self.still()
+            && self.kit_mode() == Mode::Listening
+    }
+
+    /// Idle: how far the line `d` places behind the reading line floats now,
+    /// a pixel up or down, each line a half period after the one in front.
+    /// The reading line never moves.
+    fn hologram_float(&self, d: usize) -> f32 {
+        if d == 0 || !self.hologram_floats() {
+            return 0.0;
+        }
+        // The line that just left the reading place settles first.
+        let settling = self
+            .jarvis
+            .hold
+            .as_ref()
+            .is_some_and(|h| self.extra.now - h.since < FLOAT_AFTER_SECS);
+        if d == 1 && settling {
+            return 0.0;
+        }
+        let half = FLOAT_SECS / 2.0;
+        let step = ((self.extra.now - self.shown_at) / half).floor() as i64;
+        let up = (step + d as i64) % 2 == 0;
+        let k = scale(&self.look);
+        if up {
+            -FLOAT_PX * k
+        } else {
+            FLOAT_PX * k
+        }
+    }
+
+    /// Wakes the view at each half period while the older lines float.
+    pub(crate) fn arm_hologram_tick(&mut self, cx: &mut Cx<Msg>) {
+        if self.extra.tick.is_some() || !self.hologram_floats() {
+            return;
+        }
+        let half = FLOAT_SECS / 2.0;
+        let next = half - (cx.t() - self.shown_at).rem_euclid(half);
+        self.extra.tick = Some(cx.after(next + 0.01, Msg::Tick));
+    }
+
+    /// MO-86: the transcript as a depth stack. The reading line lies flat
+    /// at the bottom row; older lines recede up and back on sheets of blue
+    /// glass, dimmer and softer with each place, and float while idle.
+    fn hologram_stack(&self, mode: Mode, lines: u32) -> Element<Msg> {
+        let l = &self.look;
+        let k = scale(l);
+        let style = l.text_style();
+        let w = l.text_width();
+        let line_h = style.line_height;
+        let reduced = self.wild_reduced();
+        // A little wider than the text, so a full line sits inside its sheet.
+        let sheet = Size::new(w + 12.0 * k, line_h + 8.0 * k);
+        let stack = DepthStack {
+            step_z: 90.0 * k,
+            step_rise: line_h * 0.82,
+            step_x: 0.0,
+            sheet: Some(Sheet {
+                fill: hex(ORB).fade(0.45),
+                edge: hex(CYAN).fade(0.35),
+                edge_width: 1.0,
+                radius: 6.0 * k,
+                pad: (0.0, 4.0 * k),
+            }),
+            ..DepthStack::default()
+        };
+        let all = &self.jarvis.lines;
+        let shown = &all[all.len().saturating_sub(lines as usize)..];
+        let keyed: Vec<(vo::scene::Key, &(Vec<Word>, f32))> = shown
+            .iter()
+            .map(|line| {
+                let first = line.0.first().map_or(0, |w| w.id);
+                (wild_space::depth_stack_key(first), line)
+            })
+            .collect();
+        let tail = |room: f32| model_signals::TailText {
+            style,
+            width: room,
+            rows: 1,
+        };
+        let content = |line: &&(Vec<Word>, f32), d: usize, p: &Place| {
+            let (words, width) = *line;
+            let lw = width.ceil() + 2.0;
+            // A word lands in place at full ink: the sheet of a new line
+            // already rises from 70 % ink (as on jarvis).
+            let live = self
+                .hologram_words(words, mode)
+                .text_blur(p.blur)
+                .motion(Prop::TextFx, stack.motion(d, reduced))
+                .size(lw, line_h);
+            let live = if d == 0 {
+                self.typo_words(self.hologram_letters(live))
+            } else {
+                live
+            };
+            let live = live
+                .word_enter(Transition::NONE)
+                .word_change(Transition::fade().opacity(0.7));
+            let line_e = Element::layer("line").size(lw, line_h).child(live);
+            let line_e = if d == 0 {
+                self.signal_marks_in(
+                    line_e,
+                    words,
+                    &tail((sheet.w + lw) / 2.0),
+                    (0.0, 0.0),
+                    hex(TEXT),
+                )
+            } else {
+                line_e
+            };
+            at(
+                line_e,
+                ((sheet.w - lw) / 2.0).max(0.0),
+                4.0 * k + self.hologram_float(d),
+            )
+            .motion(Prop::Position, Spring::SOFT)
+        };
+        let h = lines.max(1) as f32 * line_h;
+        let x = (w - sheet.w) / 2.0;
+        let view = at(
+            stack.view_at(
+                "depth-stack",
+                Size::new(sheet.w, h),
+                sheet,
+                &keyed,
+                content,
+                reduced,
+                self.jarvis.hold.as_ref(),
+                self.extra.now,
+            ),
+            x,
+            0.0,
+        );
+        let stack_box = Element::column("stack-box").size(w, h).child(view);
+        if !keyed.is_empty() {
+            return stack_box;
+        }
+        // No line yet: the forming cue where the first line lands.
+        self.signal_marks_in(stack_box, &[], &tail(w), (0.0, h - line_h), hex(TEXT))
     }
 
     /// The status, centred on the ring: a dot, the state word and the

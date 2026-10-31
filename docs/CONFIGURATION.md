@@ -4670,6 +4670,7 @@ default:
 | `mecha` | `hydraulic-chain`, `onset-joint`, `look-choice`, `broken-frame` |
 | `cyberpunk` | `look-choice`, `broken-frame`, `rewind` |
 | `river` | `kinetic-lattice`, `sound-sculpture`, `stroke-write` |
+| `hologram` | `depth-stack`, `letter-physics`, `liquid-morph`, `glyph-morph` |
 
 Some looks also have effects built in that no setting turns off. When you
 switch looks with the look chord, the new look's set applies at once.

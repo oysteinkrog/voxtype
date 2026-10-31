@@ -215,7 +215,7 @@ pub struct Extra {
     /// The transcript's words when `lines` were made.
     words: Vec<Word>,
     /// The newest lines of the transcript, each with its width.
-    lines: Vec<(Vec<Word>, f32)>,
+    pub(crate) lines: Vec<(Vec<Word>, f32)>,
     /// For each of `lines`, each word's id and the middle of the word from
     /// the line's left end. Shaped once when the lines change, so the ring's
     /// eye (MO-62) costs no text shaping per view.
@@ -701,9 +701,10 @@ impl Popup {
     }
 
     /// Notes when a dictation ended without a final text, and breaks the
-    /// transcript into lines when its words change.
+    /// transcript into lines when its words change. The hologram look's
+    /// depth stack uses the same lines and hold.
     pub(crate) fn sync_jarvis(&mut self, t: f64) {
-        if self.look.theme != OsdTheme::Jarvis {
+        if !matches!(self.look.theme, OsdTheme::Jarvis | OsdTheme::Hologram) {
             return;
         }
         // The recording stopped and nothing is being finished. That is a

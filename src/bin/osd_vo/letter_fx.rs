@@ -196,6 +196,8 @@ impl Popup {
                 g.font = style.font;
             }
         }
+        // Centred lines sit across the wrap width, as the live text puts them.
+        laid.align_in(style.align, width);
         if s.laid.len() >= 4 {
             s.laid.remove(0);
         }
@@ -221,7 +223,12 @@ impl Popup {
         if let Some((base, _)) = &breath {
             style.font = *base;
         }
-        let height = self.lines as f32 * l.text_line;
+        let height = self.lines as f32 * style.line_height;
+        // The letters' colour: the look's own text colour where it has one.
+        let letter_ink = match l.theme {
+            OsdTheme::Hologram => super::hologram::text_color(),
+            _ => l.foreground,
+        };
         let reduced = self.letter_fx_reduced();
         let (born, morphs) = self.letter_fx_sync();
         let t = self.extra.now;
@@ -238,7 +245,7 @@ impl Popup {
         }
         let word_of = |cluster: u32| starts.iter().rposition(|&s| s <= cluster as usize);
         let glyph = |g: &vo::scene::text::PlacedGlyph, start: f64| {
-            FxGlyph::new(g.font, g.glyph, g.pos, style.size, l.foreground, start)
+            FxGlyph::new(g.font, g.glyph, g.pos, style.size, letter_ink, start)
         };
         let fx = |effect, glyphs| {
             GlyphFx::new(effect, glyphs)
@@ -267,7 +274,7 @@ impl Popup {
                     .iter()
                     .map(|g| {
                         let pos = Point::new(g.pos.x, g.pos.y + dy);
-                        FxGlyph::new(g.font, g.glyph, pos, style.size, l.foreground, 0.0)
+                        FxGlyph::new(g.font, g.glyph, pos, style.size, letter_ink, 0.0)
                     })
                     .collect()
             } else {
@@ -314,6 +321,12 @@ impl Popup {
                 let Some(wi) = self.shown.iter().position(|w| w.id == *id) else {
                     continue;
                 };
+                // Under a depth stack only the reading line lies where the
+                // flat layout puts it; older lines sit on their sheets.
+                let stacked = l.on(super::wild_space::DEPTH_STACK);
+                if stacked && !self.stack_reading_line().iter().any(|w| w.id == *id) {
+                    continue;
+                }
                 let new: Vec<_> = laid
                     .glyphs
                     .iter()
@@ -327,7 +340,7 @@ impl Popup {
                     .iter()
                     .map(|g| {
                         let p = Point::new(g.pos.x + dx, first.pos.y);
-                        FxGlyph::new(g.font, g.glyph, p, style.size, l.foreground, *start)
+                        FxGlyph::new(g.font, g.glyph, p, style.size, letter_ink, *start)
                     })
                     .collect();
                 let news: Vec<FxGlyph> = new.iter().map(|g| glyph(g, *start)).collect();
