@@ -13,6 +13,19 @@
 //! the line flattens and the status turns green. A cancel greys the mesh
 //! and the rim and dims the words. Under reduced motion the mesh holds one
 //! still state.
+//!
+//! Round 2 (R2-19), each opt-in by its motion feature:
+//!
+//! - `prismatic-lens`: soft rainbow caustics flow round the card's rim,
+//!   only while the voice moves them; drawn, not refracted, since the popup
+//!   cannot see what is behind it. Reduced motion: still caustics.
+//! - `luminous-ink`: each word blooms a dye cloud behind it, swelling with
+//!   the voice; the dye thins out within 2 s of silence. Each cloud stays
+//!   at 10 % alpha or less. Reduced motion: a still wash.
+//! - `magnetic-type`: faint field lines (12 % alpha or less) run across
+//!   the card and curve with the voice; the older lines' letters ride the
+//!   same curve, 3 px at most, while the newest line stays flat. Reduced
+//!   motion: straight lines and still letters.
 
 use super::glyph_paths::PathsText;
 use super::kit::{at, ease_out, hex, mix, Levels, Mode};
@@ -20,10 +33,14 @@ use super::*;
 
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
+use vo::scene::flow::letter_motion::{self, LetterMotions};
 use vo::scene::geom::{Affine, Point, Rect};
 use vo::scene::material::Material;
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::{Loop, LoopProp};
+use vo_core::words::WordId;
+
+use std::collections::HashMap;
 
 /// Colours sampled from the redesign: the mesh's four blobs (bottom
 /// middle, upper right, middle, lower left), the line's stops from left to
@@ -93,6 +110,39 @@ const DRIFT_SECS: f64 = 40.0;
 const DRIFT_FPS: f64 = 6.0;
 const OVERHANG: f32 = 24.0;
 const SETTLE_SECS: f64 = 0.35;
+
+/// R2-19 round 2 features and their limits.
+pub(crate) const PRISMATIC_LENS: &str = "prismatic-lens";
+pub(crate) const LUMINOUS_INK: &str = "luminous-ink";
+pub(crate) const MAGNETIC_TYPE: &str = "magnetic-type";
+/// The caustics: how far in from the card's edge, how many pieces round
+/// it, their strongest alpha, and how fast the voice turns them.
+const LENS_INSET: f32 = 14.0;
+const LENS_SEGS: usize = 120;
+const LENS_ALPHA: f32 = 0.6;
+const LENS_FLOW: f32 = 1.4;
+/// The dye: a cloud per word for the newest `INK_WORDS` words, grown in
+/// `INK_GROW_SECS` to `INK_R`, thinned to `INK_LEFT` of itself within
+/// `INK_THIN_SECS` of silence.
+const INK_WORDS: usize = 10;
+const INK_R: f32 = 80.0;
+const INK_ALPHA: f32 = 0.1;
+const INK_GROW_SECS: f64 = 1.2;
+const INK_THIN_SECS: f64 = 2.0;
+const INK_LEFT: f32 = 0.15;
+/// Discs per cloud, stacked into a soft edge.
+const INK_DISCS: usize = 6;
+/// The field lines: how many, their alpha, and how far the voice bends
+/// them on top of the letters' wave.
+const FIELD_LINES: usize = 11;
+const FIELD_ALPHA: f32 = 0.12;
+const FIELD_BEND: f32 = 10.0;
+/// The older lines ride the wave only once the newest line has stood this
+/// long.
+const FIELD_SETTLE_SECS: f64 = 1.5;
+const _: () = assert!(FIELD_ALPHA <= 0.12 && 2.0 * INK_ALPHA <= 0.2);
+// Older letters ride the wave by at most 6 px.
+const _: () = assert!(letter_motion::WAVE_AMP <= 6.0);
 
 // The line sits under the microphone, the words between the line and the
 // status row, and the status row inside the card.
@@ -358,6 +408,237 @@ impl Wave {
     }
 }
 
+/// The voice above room tone summed up to each level frame, in
+/// level-seconds: the caustics' pace.
+fn voice_sums(levels: &[f32]) -> Arc<[f32]> {
+    let mut sum = 0.0;
+    levels
+        .iter()
+        .map(|&v| {
+            sum += (v - WAVE_GATE).clamp(0.0, 1.0) / FRAME_HZ as f32;
+            sum
+        })
+        .collect()
+}
+
+/// The running sum at time `t`, the newest frame shown at `newest_at`.
+fn voice_sum(sums: &[f32], newest_at: f64, t: f64) -> f32 {
+    let Some(last) = sums.len().checked_sub(1) else {
+        return 0.0;
+    };
+    let back = ((newest_at - t) * FRAME_HZ as f64).max(0.0);
+    sums[(last as f64 - back).max(0.0).floor() as usize]
+}
+
+/// When the voice was last above room tone.
+fn loud_until(levels: &Levels) -> f64 {
+    let quiet = levels
+        .levels
+        .iter()
+        .rev()
+        .take_while(|&&v| v <= WAVE_GATE)
+        .count();
+    levels.newest_at - quiet as f64 / FRAME_HZ as f64
+}
+
+/// R2-19-b: a word's dye cloud `age` seconds after the word, `quiet`
+/// seconds into a silence: its size as a share of `INK_R` and its alpha.
+fn ink_cloud(age: f64, quiet: f64) -> Option<(f32, f32)> {
+    if age < 0.0 {
+        return None;
+    }
+    let grow = ease_out(age / INK_GROW_SECS);
+    let thin = 1.0 - (1.0 - INK_LEFT) * (quiet / INK_THIN_SECS).clamp(0.0, 1.0) as f32;
+    let fade_in = (age / 0.15).min(1.0) as f32;
+    Some((0.35 + 0.65 * grow, INK_ALPHA * fade_in * thin))
+}
+
+/// The colour `u` of the way round the look's palette, wrapping.
+fn spectrum(u: f32) -> Color {
+    const RING: [u32; 5] = [ORANGE, PINK, VIOLET, BLUE, CYAN];
+    let x = u.rem_euclid(1.0) * RING.len() as f32;
+    let i = x.floor() as usize % RING.len();
+    mix(hex(RING[i]), hex(RING[(i + 1) % RING.len()]), x.fract())
+}
+
+/// A round 2 layer's drawing.
+type Draw = Box<dyn Fn(f64, Rect, &mut Painter) + Send + Sync>;
+
+/// R2-19-a: the caustics round the rim, in the card's space.
+struct Lens {
+    w: f32,
+    h: f32,
+    k: f32,
+    sums: Arc<[f32]>,
+    newest_at: f64,
+    loud_until: f64,
+    still: bool,
+}
+
+impl Lens {
+    fn until(&self) -> f64 {
+        if self.still {
+            f64::NEG_INFINITY
+        } else {
+            self.loud_until
+        }
+    }
+
+    /// The rim's point at `u` of the way round, a rounded square's
+    /// superellipse inset by `LENS_INSET`.
+    fn rim(&self, r: Rect, u: f32) -> Point {
+        let th = u * std::f32::consts::TAU;
+        let (a, b) = (
+            self.w / 2.0 - LENS_INSET * self.k,
+            self.h / 2.0 - LENS_INSET * self.k,
+        );
+        let e = |v: f32| v.signum() * v.abs().powf(2.0 / 7.0);
+        Point::new(
+            r.x + self.w / 2.0 + a * e(th.cos()),
+            r.y + self.h / 2.0 + b * e(th.sin()),
+        )
+    }
+
+    fn draw(&self, t: f64, r: Rect, p: &mut Painter) {
+        let k = self.k;
+        let flow = if self.still {
+            0.0
+        } else {
+            LENS_FLOW * voice_sum(&self.sums, self.newest_at, t.min(self.loud_until))
+        };
+        for i in 0..LENS_SEGS {
+            let u = i as f32 / LENS_SEGS as f32;
+            let v = (i + 1) as f32 / LENS_SEGS as f32;
+            let tau = std::f32::consts::TAU;
+            let a = (0.5 + 0.5 * (tau * 3.0 * u + 2.5 * flow).sin()).powi(2)
+                * (0.6 + 0.4 * (tau * 5.0 * u - 1.7 * flow + 1.0).sin());
+            let alpha = LENS_ALPHA * a;
+            if alpha < 0.01 {
+                continue;
+            }
+            let c = spectrum(2.0 * u + 0.3 * flow).fade(alpha);
+            p.stroke(
+                &Contour::polyline(&[self.rim(r, u), self.rim(r, v)], false),
+                &StrokeStyle::solid(4.0 * k, c).glow(9.0 * k),
+            );
+        }
+    }
+}
+
+/// R2-19-b: the dye behind the words, in the card's space.
+struct Ink {
+    /// Each cloud: its middle, when its word came and its colour.
+    clouds: Vec<(Point, f64, Color)>,
+    levels: Levels,
+    loud_until: f64,
+    k: f32,
+    still: bool,
+}
+
+impl Ink {
+    fn until(&self) -> f64 {
+        if self.still {
+            return f64::NEG_INFINITY;
+        }
+        let grown = self.clouds.iter().map(|c| c.1 + INK_GROW_SECS);
+        grown.fold(self.loud_until + INK_THIN_SECS, f64::max)
+    }
+
+    fn draw(&self, t: f64, r: Rect, p: &mut Painter) {
+        let k = self.k;
+        let swell = if self.still {
+            0.0
+        } else {
+            self.levels.at(t.min(self.loud_until)).clamp(0.0, 1.0)
+        };
+        for &(c, born, colour) in &self.clouds {
+            let (size, a) = if self.still {
+                (1.0, INK_ALPHA * 0.6)
+            } else {
+                let quiet = (t - self.loud_until).max(0.0);
+                match ink_cloud(t - born, quiet) {
+                    Some(v) => v,
+                    None => continue,
+                }
+            };
+            let rad = INK_R * k * size * (1.0 + 0.2 * swell);
+            let at = Point::new(r.x + c.x, r.y + c.y);
+            // Stacked faint discs, densest in the middle, so no edge shows
+            // on the mesh.
+            for i in 1..=INK_DISCS {
+                let f = i as f32 / INK_DISCS as f32;
+                p.shape(ShapeInstance::circle(
+                    at,
+                    rad * f,
+                    Paint::solid(colour.fade(a / INK_DISCS as f32)),
+                ));
+            }
+        }
+    }
+}
+
+/// R2-19-c: the field lines across the card, in the card's space.
+struct Field {
+    w: f32,
+    h: f32,
+    /// Where the text box starts, for the letters' wave.
+    text_x: f32,
+    k: f32,
+    levels: Levels,
+    loud_until: f64,
+    mode: Mode,
+    mode_at: f64,
+    still: bool,
+}
+
+impl Field {
+    fn until(&self) -> f64 {
+        match self.mode {
+            _ if self.still => f64::NEG_INFINITY,
+            Mode::Listening => f64::INFINITY,
+            _ => self.mode_at + SETTLE_SECS + 0.1,
+        }
+    }
+
+    fn draw(&self, t: f64, r: Rect, p: &mut Painter) {
+        let k = self.k;
+        // The curve while the popup listens, lying down once it stops.
+        let on = match self.mode {
+            _ if self.still => 0.0,
+            Mode::Listening => 1.0,
+            _ => 1.0 - change(t, self.mode_at, false),
+        };
+        let voice = self.levels.at(t.min(self.loud_until)).clamp(0.0, 1.0);
+        let n = 40;
+        for j in 0..FIELD_LINES {
+            let f = j as f32 / (FIELD_LINES - 1) as f32;
+            let y = r.y + self.h * (0.08 + 0.84 * f);
+            let pts: Vec<Point> = (0..=n)
+                .map(|i| {
+                    let u = i as f32 / n as f32;
+                    let x = self.w * u;
+                    let (wave, _) = letter_motion::wave(x - self.text_x, t);
+                    let bend = voice
+                        * FIELD_BEND
+                        * k
+                        * (std::f32::consts::PI * u).sin()
+                        * (1.6 * f + 2.0 * u + 0.4 * t as f32).sin();
+                    Point::new(r.x + x, y + on * (wave * k + bend))
+                })
+                .collect();
+            p.stroke(
+                &Contour::polyline(&pts, false),
+                &StrokeStyle::solid(1.0 * k, hex(CYAN).fade(FIELD_ALPHA)).linear(
+                    Point::new(r.x, y),
+                    hex(PINK).fade(FIELD_ALPHA * 0.5),
+                    Point::new(r.x + self.w, y),
+                    hex(CYAN).fade(FIELD_ALPHA),
+                ),
+            );
+        }
+    }
+}
+
 /// The look's transcript for the outline features.
 fn aurora_paths(look: &Look) -> PathsText {
     PathsText {
@@ -455,6 +736,7 @@ impl Popup {
             .size(w, h)
             .presence(Transition::fade().offset(0.0, 8.0).scale(0.98), exit)
             .child(self.aurora_mesh(mode, material.into(), w, h, k))
+            .children(self.aurora_round2(mode, mode_at, w, h, k))
             .child(at(
                 Element::canvas("frame", frame.until(), move |t, r, p| frame.draw(t, r, p))
                     .size(w + 2.0 * room, h + 2.0 * room),
@@ -507,6 +789,164 @@ impl Popup {
             .child(at(mesh, -o, -o))
     }
 
+    /// The round 2 layers between the mesh and the words, clipped to the
+    /// card: the field lines, the dye and the caustics, each when its
+    /// feature is on. None while editing or on a cancel.
+    fn aurora_round2(
+        &self,
+        mode: Mode,
+        mode_at: f64,
+        w: f32,
+        h: f32,
+        k: f32,
+    ) -> Option<Element<Msg>> {
+        let l = &self.look;
+        let any = [PRISMATIC_LENS, LUMINOUS_INK, MAGNETIC_TYPE]
+            .iter()
+            .any(|f| l.on(f));
+        if !any || self.edit_view.is_some() || mode == Mode::Cancelled {
+            return None;
+        }
+        let still = self.still();
+        let levels = Levels {
+            levels: self.exhale_levels(&self.kit_levels().levels),
+            newest_at: self.newest_at,
+        };
+        let loud = loud_until(&levels);
+        let layer = |key: &'static str, until: f64, draw: Draw| {
+            Element::canvas(key, until, move |t, r, p| draw(t, r, p))
+                .size(w, h)
+                .presence(Transition::fade(), Transition::fade())
+        };
+        let mut clip = Element::layer("round2")
+            .size(w, h)
+            .radius(RADIUS * k)
+            .clip();
+        if l.on(MAGNETIC_TYPE) {
+            let field = Field {
+                w,
+                h,
+                text_x: (CARD_W - TEXT_W) / 2.0 * k,
+                k,
+                levels: levels.clone(),
+                loud_until: loud,
+                mode,
+                mode_at,
+                still,
+            };
+            clip = clip.child(at(
+                layer(
+                    "field",
+                    field.until(),
+                    Box::new(move |t, r, p| field.draw(t, r, p)),
+                ),
+                0.0,
+                0.0,
+            ));
+        }
+        if l.on(LUMINOUS_INK) {
+            let ink = Ink {
+                clouds: self.aurora_clouds(k),
+                levels: levels.clone(),
+                loud_until: loud,
+                k,
+                still,
+            };
+            clip = clip.child(at(
+                layer(
+                    "ink",
+                    ink.until(),
+                    Box::new(move |t, r, p| ink.draw(t, r, p)),
+                ),
+                0.0,
+                0.0,
+            ));
+        }
+        if l.on(PRISMATIC_LENS) {
+            let lens = Lens {
+                w,
+                h,
+                k,
+                sums: voice_sums(&levels.levels),
+                newest_at: levels.newest_at,
+                loud_until: loud,
+                still,
+            };
+            clip = clip.child(at(
+                layer(
+                    "lens",
+                    lens.until(),
+                    Box::new(move |t, r, p| lens.draw(t, r, p)),
+                ),
+                0.0,
+                0.0,
+            ));
+        }
+        Some(at(clip, 0.0, 0.0))
+    }
+
+    /// R2-19-c: whether the newest line has stood long enough for the
+    /// older ones to ride the wave. While a line is cut or rewrapped the
+    /// line read can still be the one before the newest, which must stay
+    /// flat.
+    fn aurora_lines_settled(&self) -> bool {
+        let l = &self.look;
+        let (boxes, _) = sounding::word_boxes(
+            &self.measure,
+            &self.shown,
+            &l.text_style(),
+            Some(l.text_width()),
+        );
+        let Some(last) = boxes.last() else {
+            return false;
+        };
+        let started = boxes
+            .iter()
+            .filter(|b| b.line == last.line)
+            .filter_map(|b| self.heard.word(b.id).map(|h| h.born))
+            .fold(f64::INFINITY, f64::min);
+        self.extra.now - started >= FIELD_SETTLE_SECS
+    }
+
+    /// R2-19-b: a dye cloud at each of the newest words on the shown lines,
+    /// in the card's space, each word its own colour round the palette.
+    fn aurora_clouds(&self, k: f32) -> Vec<(Point, f64, Color)> {
+        let l = &self.look;
+        let tw = l.text_width();
+        let lines = self.lines.clamp(1, MAX_LINES) as usize;
+        let (boxes, total) =
+            sounding::word_boxes(&self.measure, &self.shown, &l.text_style(), Some(tw));
+        let first = total.saturating_sub(lines);
+        // The layout sets lines from the left; the live text centres each
+        // one in the column.
+        let mut ends: HashMap<usize, (f32, f32)> = HashMap::new();
+        for b in &boxes {
+            let e = ends.entry(b.line).or_insert((f32::MAX, f32::MIN));
+            e.0 = e.0.min(b.rect.x);
+            e.1 = e.1.max(b.rect.x + b.rect.w);
+        }
+        let x0 = (CARD_W - TEXT_W) / 2.0 * k;
+        let y0 = TEXT_TOP * k - first as f32 * TEXT_LINE * k;
+        let born = |id: WordId| self.heard.word(id).map_or(self.shown_at, |h| h.born);
+        let shown: Vec<_> = boxes.iter().filter(|b| b.line >= first).collect();
+        shown[shown.len().saturating_sub(INK_WORDS)..]
+            .iter()
+            .map(|b| {
+                let (a, z) = ends[&b.line];
+                let shift = x0 + (tw - (z - a)) / 2.0 - a;
+                let c = Point::new(
+                    b.rect.x + b.rect.w / 2.0 + shift,
+                    y0 + b.baseline - 0.3 * TEXT_PX * k,
+                );
+                (
+                    c,
+                    born(b.id),
+                    mix(spectrum(0.37 * b.id as f32), hex(INK), 0.3),
+                )
+            })
+            .collect()
+    }
+
     /// The words, clipped under the line of light, so a line that leaves on
     /// an overflow fades out before it reaches the line.
     fn aurora_text_clip(&self, mode: Mode, lines: u32, k: f32) -> Element<Msg> {
@@ -550,6 +990,20 @@ impl Popup {
         // at the end of the text only while it is spoken.
         let words = if mode == Mode::Listening {
             self.aurora_magnet(words.wild_motion(self))
+        } else {
+            words
+        };
+        // R2-19-c: the older lines ride the field's wave.
+        let words = if mode == Mode::Listening
+            && l.on(MAGNETIC_TYPE)
+            && !self.still()
+            && self.aurora_lines_settled()
+        {
+            words.letter_motion(LetterMotions {
+                tumble: l.on(wild_motion::LETTER_TUMBLE),
+                italic: l.on(wild_motion::ITALIC_ARRIVAL),
+                wave: true,
+            })
         } else {
             words
         };
@@ -734,5 +1188,47 @@ impl Popup {
             .height(STATUS_H * k)
             .justify(vo::scene::taffy::JustifyContent::CENTER)
             .child(row)
+    }
+}
+
+#[cfg(test)]
+mod round2_tests {
+    use super::*;
+
+    #[test]
+    fn the_dye_thins_within_2_s_of_silence() {
+        assert!(ink_cloud(-0.01, 0.0).is_none());
+        let (s0, a0) = ink_cloud(0.0, 0.0).unwrap();
+        let (s1, a1) = ink_cloud(INK_GROW_SECS, 0.0).unwrap();
+        assert!(s0 < s1 && s1 == 1.0 && a0 == 0.0 && a1 == INK_ALPHA);
+        let (_, thin) = ink_cloud(5.0, INK_THIN_SECS).unwrap();
+        assert!((thin - INK_ALPHA * INK_LEFT).abs() < 1e-6);
+        assert_eq!(ink_cloud(5.0, 9.0).unwrap().1, thin);
+        // The same moment gives the same dye.
+        assert_eq!(ink_cloud(0.7, 0.4), ink_cloud(0.7, 0.4));
+    }
+
+    #[test]
+    fn the_caustics_pace_is_the_voice_above_room_tone() {
+        let levels = [0.0, 0.5, 0.5, WAVE_GATE, 0.0];
+        let sums = voice_sums(&levels);
+        assert_eq!(sums[0], 0.0);
+        assert!(sums[2] > sums[1] && sums[3] == sums[2] && sums[4] == sums[2]);
+        let newest = 1.0;
+        assert_eq!(voice_sum(&sums, newest, newest), sums[4]);
+        assert_eq!(voice_sum(&sums, newest, -9.0), sums[0]);
+        assert_eq!(voice_sum(&[], newest, newest), 0.0);
+        let l = Levels {
+            levels: Arc::from(levels.as_slice()),
+            newest_at: newest,
+        };
+        let back = 2.0 / FRAME_HZ as f64;
+        assert!((loud_until(&l) - (newest - back)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_spectrum_wraps_round() {
+        assert_eq!(spectrum(0.0), spectrum(1.0));
+        assert_eq!(spectrum(0.0), hex(ORANGE));
     }
 }
