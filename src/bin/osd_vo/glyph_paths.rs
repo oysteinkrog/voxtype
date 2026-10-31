@@ -77,9 +77,9 @@ enum Source {
     Line,
 }
 
-/// Morphs by word id, text, place and source, shared by every popup: a
-/// view builds the same morph many times while it plays.
-type Key = (u32, String, i32, i32, u32, Source);
+/// Morphs by word id, text, place, font, size and source, shared by every
+/// popup: a view builds the same morph many times while it plays.
+type Key = (u32, String, i32, i32, u32, u32, Source);
 
 fn cache() -> &'static Mutex<HashMap<Key, Arc<GlyphMorph>>> {
     static C: std::sync::OnceLock<Mutex<HashMap<Key, Arc<GlyphMorph>>>> =
@@ -134,6 +134,28 @@ pub(crate) struct BrokenPen {
     pub(crate) label_y: f32,
 }
 
+/// The transcript the glyph paths follow (RD-10): the calling look's text
+/// style, the width its live text wraps at and its line pitch. The
+/// outlines and pen strokes are built from this style, so they sit on the
+/// look's own letters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PathsText {
+    pub(crate) style: TextStyle,
+    pub(crate) width: f32,
+    pub(crate) line: f32,
+}
+
+impl PathsText {
+    /// The look's transcript as `Look` describes it.
+    pub(crate) fn of(look: &Look) -> PathsText {
+        PathsText {
+            style: look.text_style(),
+            width: look.text_width(),
+            line: look.text_line,
+        }
+    }
+}
+
 impl Popup {
     /// Whether an outline feature plays over the live text, so new words
     /// come in at the reading-line ink without a rise.
@@ -145,20 +167,19 @@ impl Popup {
         kit::reduced() || self.look.on("reduced-motion")
     }
 
-    /// The shown words laid out as the live text lays them out.
-    fn paths_laid(&self) -> Vec<Laid> {
-        let l = &self.look;
-        let style = l.text_style();
-        let mut text = String::new();
+    /// The shown words laid out as the live text in `text` lays them out.
+    fn paths_laid(&self, text: &PathsText) -> Vec<Laid> {
+        let style = text.style;
+        let mut joined = String::new();
         let mut starts = Vec::with_capacity(self.shown.len());
         for (i, w) in self.shown.iter().enumerate() {
             if i > 0 {
-                text.push(' ');
+                joined.push(' ');
             }
-            starts.push(text.len() as u32);
-            text.push_str(&w.text);
+            starts.push(joined.len() as u32);
+            joined.push_str(&w.text);
         }
-        let shaped = self.measure.layout(&text, &style, Some(l.text_width()));
+        let shaped = self.measure.layout(&joined, &style, Some(text.width));
         let mut out: Vec<Laid> = Vec::new();
         for line in &shaped.lines {
             for g in &shaped.glyphs[line.glyphs.clone()] {
@@ -191,13 +212,14 @@ impl Popup {
     }
 
     /// The morph of a laid word from `source`, from the shared cache.
-    fn paths_morph(&self, w: &Laid, source: Source) -> Arc<GlyphMorph> {
-        let size = self.look.text_style().size;
+    fn paths_morph(&self, w: &Laid, style: &TextStyle, source: Source) -> Arc<GlyphMorph> {
+        let size = style.size;
         let key: Key = (
             w.id,
             w.text.clone(),
             (w.x.0 * 4.0) as i32,
             (w.baseline * 4.0) as i32,
+            style.font,
             size.to_bits(),
             source,
         );
@@ -226,7 +248,7 @@ impl Popup {
     }
 
     /// The morphs playing now or soon, for the overlay.
-    fn paths_plays(&self, laid: &[Laid]) -> Vec<Play> {
+    fn paths_plays(&self, laid: &[Laid], style: &TextStyle) -> Vec<Play> {
         let mut plays = Vec::new();
         if self.paths_reduced() {
             return plays;
@@ -240,7 +262,7 @@ impl Popup {
         for w in laid {
             if let (true, Some(at)) = (morph, cancelled_at) {
                 plays.push(Play {
-                    morph: self.paths_morph(w, Source::Line),
+                    morph: self.paths_morph(w, style, Source::Line),
                     start: at,
                     secs: 0.3,
                     hold: 0.3,
@@ -253,7 +275,7 @@ impl Popup {
             if breath && Some(w.id) == first && self.cut == 0 {
                 if let Some(at) = born {
                     plays.push(Play {
-                        morph: self.paths_morph(w, Source::Line),
+                        morph: self.paths_morph(w, style, Source::Line),
                         start: at,
                         secs: RISE_SECS,
                         hold: FILL_SECS,
@@ -267,14 +289,14 @@ impl Popup {
             }
             match (born, revised) {
                 (_, Some(at)) if born.is_none_or(|b| at > b) => plays.push(Play {
-                    morph: self.paths_morph(w, Source::Line),
+                    morph: self.paths_morph(w, style, Source::Line),
                     start: at,
                     secs: MORPH_SECS,
                     hold: 0.0,
                     back: false,
                 }),
                 (Some(at), _) => plays.push(Play {
-                    morph: self.paths_morph(w, Source::Dot),
+                    morph: self.paths_morph(w, style, Source::Dot),
                     start: at,
                     secs: MORPH_SECS,
                     hold: 0.0,
@@ -286,21 +308,21 @@ impl Popup {
         plays
     }
 
-    /// The overlays for the text column: the breath line under the reading
-    /// line and the outline morphs over the words, both in the text box's
-    /// space.
-    pub(crate) fn paths_overlays(&self) -> Vec<Element<Msg>> {
+    /// The overlays for the text column of `text`: the breath line under
+    /// the reading line and the outline morphs over the words, both in the
+    /// text box's space.
+    pub(crate) fn paths_overlays(&self, text: &PathsText) -> Vec<Element<Msg>> {
         if !self.paths_on() {
             return Vec::new();
         }
         let l = &self.look;
-        let laid = self.paths_laid();
-        let plays = self.paths_plays(&laid);
-        let w = l.text_width();
-        let h = self.lines as f32 * l.text_line;
+        let laid = self.paths_laid(text);
+        let plays = self.paths_plays(&laid, &text.style);
+        let w = text.width;
+        let h = self.lines as f32 * text.line;
         let mut out = Vec::new();
         if self.look.on(BREATH) {
-            out.push(kit::at(self.breath_line(&laid, w), 0.0, 0.0).size(w, h));
+            out.push(kit::at(self.breath_line(&laid, &text.style, w), 0.0, 0.0).size(w, h));
         }
         let now = self.extra.now;
         let until = plays
@@ -346,22 +368,21 @@ impl Popup {
             out.push(kit::at(Element::canvas("glyph-paths", until, draw), 0.0, 0.0).size(w, h));
         }
         if self.look.on(WRITE) {
-            out.extend(self.writing_overlay(&laid, w, h));
+            out.extend(self.writing_overlay(&laid, &text.style, w, h));
         }
         out
     }
 
     /// The breath line under the reading line: a hairline breathing with
     /// the level, kinked under the first word as it arrives.
-    fn breath_line(&self, laid: &[Laid], w: f32) -> Element<Msg> {
+    fn breath_line(&self, laid: &[Laid], style: &TextStyle, w: f32) -> Element<Msg> {
         let l = &self.look;
         let reduced = self.paths_reduced();
-        let style = l.text_style();
         // The reading line's baseline: the newest word's, or the first
         // line's before any word.
         let baseline = laid.last().map(|x| x.baseline).unwrap_or_else(|| {
             self.measure
-                .layout("H", &style, None)
+                .layout("H", style, None)
                 .lines
                 .first()
                 .map_or(style.size, |x| x.baseline)
@@ -629,7 +650,7 @@ impl Popup {
 }
 
 /// Pen writings by word id, text and place, shared like the morphs.
-type WriteKey = (u32, String, i32, i32, u32);
+type WriteKey = (u32, String, i32, i32, u32, u32);
 
 fn write_cache() -> &'static Mutex<HashMap<WriteKey, Arc<Writing>>> {
     static C: std::sync::OnceLock<Mutex<HashMap<WriteKey, Arc<Writing>>>> =
@@ -661,16 +682,22 @@ impl Popup {
     /// type 180 ms after the letter is done, with the dots, crossbars and
     /// marks written at the end of the word and only the nib light in the
     /// accent.
-    fn writing_overlay(&self, laid: &[Laid], w: f32, h: f32) -> Option<Element<Msg>> {
+    fn writing_overlay(
+        &self,
+        laid: &[Laid],
+        style: &TextStyle,
+        w: f32,
+        h: f32,
+    ) -> Option<Element<Msg>> {
         if self.paths_reduced() {
             return None;
         }
         let l = &self.look;
         let now = self.extra.now;
         let wet = WetInk::new(l.foreground, l.accent);
-        self.pen_prefetch();
+        self.pen_prefetch(style);
         let plays: Vec<(Arc<Writing>, PenSlot)> = self
-            .pen_slots(laid, |slot| wet.until(slot) >= now - 0.05)
+            .pen_slots(laid, style, |slot| wet.until(slot) >= now - 0.05)
             .into_iter()
             .map(|(_, writing, slot)| (writing, slot))
             .collect();
@@ -688,17 +715,17 @@ impl Popup {
         Some(kit::at(Element::canvas("stroke-write", until, draw), 0.0, 0.0).size(w, h))
     }
 
-    /// Each laid word's live fill while the pen writes it (SW-02), as fill
-    /// tracks for `Typos::fill_track`: the word's letters stay at the floor
-    /// until the pen reaches them and are full once it has written them.
-    /// Empty without `stroke-write` and under reduced motion.
-    pub(crate) fn pen_fills(&self) -> HashMap<u32, Vec<(f64, f32)>> {
+    /// Each word's live fill while the pen writes it (SW-02) in `text`, as
+    /// fill tracks for `Typos::fill_track`: the word's letters stay at the
+    /// floor until the pen reaches them and are full once it has written
+    /// them. Empty without `stroke-write` and under reduced motion.
+    pub(crate) fn pen_fills(&self, text: &PathsText) -> HashMap<u32, Vec<(f64, f32)>> {
         if !self.look.on(WRITE) || self.paths_reduced() {
             return HashMap::new();
         }
-        let laid = self.paths_laid();
+        let laid = self.paths_laid(text);
         let now = self.extra.now;
-        self.pen_slots(&laid, |slot| slot.end >= now - 0.05)
+        self.pen_slots(&laid, &text.style, |slot| slot.end >= now - 0.05)
             .into_iter()
             .map(|(id, writing, slot)| (id, fill_keys(&writing, &slot)))
             .collect()
@@ -710,9 +737,10 @@ impl Popup {
     fn pen_slots(
         &self,
         laid: &[Laid],
+        style: &TextStyle,
         keep: impl Fn(&PenSlot) -> bool,
     ) -> Vec<(u32, Arc<Writing>, PenSlot)> {
-        let size = self.look.text_style().size;
+        let size = style.size;
         let now = self.extra.now;
         let popup = self.paths_popup();
         let mut plays = Vec::new();
@@ -738,7 +766,7 @@ impl Popup {
             if known.is_some_and(|x| !keep(&x)) {
                 continue;
             }
-            let writing = self.writing(word, size);
+            let writing = self.writing(word, style);
             let slot = match known {
                 Some(x) => x,
                 None => {
@@ -758,9 +786,8 @@ impl Popup {
 
     /// Queues the pen strokes of the text face's common letters on the
     /// centre-line worker, once per face.
-    fn pen_prefetch(&self) {
+    fn pen_prefetch(&self, style: &TextStyle) {
         static DONE: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-        let style = self.look.text_style();
         {
             let mut done = DONE.lock().unwrap_or_else(|e| e.into_inner());
             if done.contains(&style.font) {
@@ -768,7 +795,7 @@ impl Popup {
             }
             done.push(style.font);
         }
-        let shaped = self.measure.layout(PEN_PREFETCH, &style, None);
+        let shaped = self.measure.layout(PEN_PREFETCH, style, None);
         let outline = WordOutline::new(self.measure.fonts(), &shaped, style.size, Point::ZERO);
         centreline::prefetch(self.measure.fonts(), &outline);
     }
@@ -778,12 +805,14 @@ impl Popup {
     /// outline and the writing is built again next frame; a scripted popup
     /// (offline renders, tests) analyses them at once, so its frames repeat
     /// exactly.
-    fn writing(&self, word: &Laid, size: f32) -> Arc<Writing> {
+    fn writing(&self, word: &Laid, style: &TextStyle) -> Arc<Writing> {
+        let size = style.size;
         let key: WriteKey = (
             word.id,
             word.text.clone(),
             (word.x.0 * 4.0) as i32,
             (word.baseline * 4.0) as i32,
+            style.font,
             size.to_bits(),
         );
         let mut c = write_cache().lock().unwrap_or_else(|e| e.into_inner());
@@ -1012,5 +1041,89 @@ mod tests {
             swept: true,
         };
         assert_eq!(fill_keys(&w, &slot), vec![(1.0, 0.0), (1.08, 1.0)]);
+    }
+
+    /// Bounds of the morph's glyph outlines at `t`, from their sampled points.
+    fn morph_bounds(m: &GlyphMorph, t: f32) -> [f32; 4] {
+        let mut b = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        for i in 0..m.word.glyphs.len() {
+            for part in m.sample(i, t) {
+                for seg in &part.contour.segs {
+                    for p in [seg.p0, seg.p2] {
+                        b = [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)];
+                    }
+                }
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn the_outlines_sit_on_the_letters_of_the_style_they_are_given() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Type,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        look.features = [MORPH].iter().map(|f| f.to_string()).collect();
+        let mut popup = Popup::new(look.clone(), &fonts);
+        popup.shown = vec![
+            Word {
+                id: 1,
+                text: "Quill".into(),
+            },
+            Word {
+                id: 2,
+                text: "ink".into(),
+            },
+        ];
+        let own = PathsText::of(&look);
+        let serif = fonts.asset("serif").unwrap();
+        assert_ne!(serif, own.style.font);
+        let other = PathsText {
+            style: TextStyle::new(serif, 1.6 * own.style.size, 1.6 * own.style.line_height),
+            ..own
+        };
+        let bounds = |text: &PathsText| {
+            let laid = popup.paths_laid(text);
+            let m = popup.paths_morph(&laid[0], &text.style, Source::Dot);
+            assert!(m.word.glyphs.iter().all(|g| g.font == text.style.font));
+            morph_bounds(&m, 1.0)
+        };
+        // The first word as the live text shapes it in the other style.
+        let joined = "Quill ink";
+        let shaped =
+            ShapedLayout::new(fonts.clone()).layout(joined, &other.style, Some(other.width));
+        let first = ShapedText {
+            glyphs: shaped
+                .glyphs
+                .iter()
+                .filter(|g| g.cluster < 5)
+                .copied()
+                .collect(),
+            ..Default::default()
+        };
+        let ink = WordOutline::new(&fonts, &first, other.style.size, Point::ZERO).ink;
+        let want = [ink.x, ink.y, ink.x + ink.w, ink.y + ink.h];
+        let got = bounds(&other);
+        for (g, w) in got.iter().zip(want) {
+            assert!(
+                (g - w).abs() <= 1.0,
+                "outline bounds {got:?}, shaped glyph bounds {want:?}"
+            );
+        }
+        // The look's own style lays the word elsewhere: the style is what moved it.
+        let mine = bounds(&own);
+        assert!(
+            mine.iter().zip(got).any(|(a, b)| (a - b).abs() > 1.0),
+            "{mine:?} {got:?}"
+        );
     }
 }

@@ -36,6 +36,7 @@ use super::*;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use super::glyph_paths::PathsText;
 use vo::scene::typo::{Typo, TypoMotion, Typos, WordTypo};
 use vo::scene::word_voice::{VoiceTypo, WordVoices};
 use vo_core::timeline::{spoken_offsets, SpokenFit};
@@ -159,7 +160,13 @@ impl Popup {
 
     /// The live text with the channels the look's features ask for.
     pub(crate) fn typo_words(&self, words: Element<Msg>) -> Element<Msg> {
-        match self.channel_typos() {
+        self.typo_words_in(words, &PathsText::of(&self.look))
+    }
+
+    /// As [`Popup::typo_words`], for live text set in `text` rather than
+    /// the look's own text style: the pen fills follow its letters (RD-10).
+    pub(crate) fn typo_words_in(&self, words: Element<Msg>, text: &PathsText) -> Element<Msg> {
+        match self.channel_typos_in(text) {
             Some(typos) => words.word_typo(typos),
             None => words,
         }
@@ -167,6 +174,11 @@ impl Popup {
 
     /// The channels of [`Popup::typo_words`], or `None` when the look asks for none.
     pub(crate) fn channel_typos(&self) -> Option<Typos> {
+        self.channel_typos_in(&PathsText::of(&self.look))
+    }
+
+    /// The channels of [`Popup::typo_words_in`].
+    pub(crate) fn channel_typos_in(&self, text: &PathsText) -> Option<Typos> {
         if !self.channels_on() {
             return None;
         }
@@ -191,7 +203,7 @@ impl Popup {
         );
         let newest = self.shown.last().map(|w| w.id);
         let still = self.status().finishing || self.ending().is_some();
-        let pen = self.pen_fills();
+        let pen = self.pen_fills(text);
         let mut typos = Typos::new();
         for w in &self.shown {
             let Some(seen) = seen.get(&w.id).copied() else { continue };

@@ -14,6 +14,7 @@
 
 use super::*;
 
+use super::glyph_paths::PathsText;
 use vo::scene::geom::Point;
 use vo::scene::path::{make, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
@@ -512,7 +513,8 @@ impl Popup {
         // While editing the glyphs stay at their laid-out places and doubt
         // no longer follows the model.
         let editing = self.edit_view.is_some();
-        for overlay in self.paths_overlays().into_iter().filter(|_| !editing) {
+        let overlays = self.paths_overlays(&PathsText::of(l));
+        for overlay in overlays.into_iter().filter(|_| !editing) {
             text = text.child(overlay);
         }
         for line in self.doubt_lines().into_iter().filter(|_| !editing) {
