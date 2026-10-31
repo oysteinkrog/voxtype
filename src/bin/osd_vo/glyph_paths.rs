@@ -24,6 +24,7 @@
 use super::*;
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Mutex;
 
 use vo::scene::canvas::Painter;
@@ -668,19 +669,60 @@ fn write_cache() -> &'static Mutex<HashMap<WriteKey, Arc<Writing>>> {
     C.get_or_init(Default::default)
 }
 
-/// One pen per popup (SW-01): its schedule and each word's slot in it, by
-/// popup (`Popup::paths_popup`). Words join as they are first seen, so a
-/// slot once given never changes.
+/// One pen per popup (SW-01): its schedule and each word on it, by popup
+/// (`Popup::paths_popup`). Words join as they are first seen, so a slot
+/// once given never changes; a revision queues a new one (SW-06).
 struct PenBook {
     schedule: PenSchedule,
-    slot: HashMap<u32, usize>,
-    /// Each word's voice when it joined the pen, 0 to 1, frozen for its
-    /// nib pressure (SW-05).
-    voice: HashMap<u32, f32>,
-    /// Where each word was laid out when it joined the pen.
-    place: HashMap<u32, (i32, i32)>,
+    words: HashMap<u32, PenWord>,
     used: f64,
 }
+
+/// A word on the pen.
+struct PenWord {
+    /// Its newest slot in the schedule.
+    slot: usize,
+    /// Its voice when it joined the pen, 0 to 1, frozen for its nib
+    /// pressure (SW-05).
+    voice: f32,
+    /// The text the pen last wrote for it.
+    text: String,
+    /// After a revision, the glyphs the newest slot rewrites and their
+    /// writing; `None` while the pen writes the whole word.
+    part: Option<(Range<usize>, Arc<Writing>)>,
+    /// Where it was laid out when it joined the pen or last changed.
+    place: (i32, i32),
+}
+
+/// A word's fill while the pen writes it: the fill track for
+/// `Typos::fill_track` and how many letters at its end stay full
+/// (`WordTypo::tail`), the unchanged end of a revised word.
+pub(crate) struct PenFill {
+    pub(crate) keys: Vec<(f64, f32)>,
+    pub(crate) tail: usize,
+}
+
+/// One word the pen writes now: its id, writing, slot and voice, and the
+/// glyphs the slot writes.
+struct PenPlay {
+    id: u32,
+    writing: Arc<Writing>,
+    slot: PenSlot,
+    voice: f32,
+    glyphs: Range<usize>,
+    /// The slot as first given, before a cancel swept it.
+    planned: PenSlot,
+    /// Whether the word's line has moved since it joined the pen or last
+    /// changed.
+    moved: bool,
+}
+
+/// A revision's letters are written again only with this long left
+/// before the popup closes; with less they show at once (SW-06).
+const REWRITE_MIN_SECS: f64 = 0.3;
+/// On a cancel the pen lifts and the letters it has not written sweep in
+/// over this long.
+const CANCEL_SWEEP_SECS: f64 = 0.08;
 
 fn pens() -> &'static Mutex<HashMap<u64, PenBook>> {
     static C: std::sync::OnceLock<Mutex<HashMap<u64, PenBook>>> = std::sync::OnceLock::new();
@@ -718,8 +760,8 @@ impl Popup {
         let plays: Vec<(Arc<Writing>, PenSlot, f32)> = self
             .pen_slots(laid, style, |slot| wet.until(slot) >= now - 0.05)
             .into_iter()
-            .filter(|p| !p.4)
-            .map(|(_, writing, slot, voice, _)| (writing, slot, voice))
+            .filter(|p| !p.moved)
+            .map(|p| (p.writing, p.slot, p.voice))
             .collect();
         if plays.is_empty() {
             return None;
@@ -735,11 +777,12 @@ impl Popup {
         Some(kit::at(Element::canvas("stroke-write", until, draw), 0.0, 0.0).size(w, h))
     }
 
-    /// Each word's live fill while the pen writes it (SW-02) in `text`, as
-    /// fill tracks for `Typos::fill_track`: the word's letters stay at the
-    /// floor until the pen reaches them and are full once it has written
-    /// them. Empty without `stroke-write` and under reduced motion.
-    pub(crate) fn pen_fills(&self, text: &PathsText) -> HashMap<u32, Vec<(f64, f32)>> {
+    /// Each word's live fill while the pen writes it (SW-02) in `text`: the
+    /// word's letters stay at the floor until the pen reaches them and are
+    /// full once it has written them. After a revision only the changed
+    /// letters wait (SW-06). Empty without `stroke-write` and under reduced
+    /// motion.
+    pub(crate) fn pen_fills(&self, text: &PathsText) -> HashMap<u32, PenFill> {
         if !self.look.on(WRITE) || self.paths_reduced() {
             return HashMap::new();
         }
@@ -747,23 +790,42 @@ impl Popup {
         let now = self.extra.now;
         self.pen_slots(&laid, &text.style, |slot| slot.end >= now - 0.05)
             .into_iter()
-            .map(|(id, writing, slot, _, _)| (id, fill_keys(&writing, &slot)))
+            .map(|p| {
+                let n = p.writing.word.glyphs.len();
+                let mut keys = fill_keys(&p.writing, &p.planned, p.glyphs.clone());
+                if p.slot != p.planned {
+                    // Swept on a cancel: from where the fill stood, to full.
+                    let from = keys_at(&keys, p.slot.start);
+                    keys = vec![(p.slot.start, from), (p.slot.end, 1.0)];
+                }
+                let fill = PenFill {
+                    keys,
+                    tail: n.saturating_sub(p.glyphs.end),
+                };
+                (p.id, fill)
+            })
             .collect()
     }
 
-    /// The laid words' writings, their slots with the popup's pen, their
-    /// voices and whether they have moved since they joined the pen, for
-    /// the slots `keep` takes. A word seen for the first time joins the pen
-    /// here, so its slot and voice are the same whichever asks first.
+    /// The laid words the pen writes, for the slots `keep` takes. A word
+    /// seen for the first time joins the pen here, so its slot and voice are
+    /// the same whichever asks first. A word whose text changed since the
+    /// pen wrote it queues only its changed glyphs (SW-06): the whole word
+    /// when its writing has not ended, nothing when no glyph changed or too
+    /// little time is left. On a cancel the pen lifts and every word it has
+    /// not finished sweeps in.
     fn pen_slots(
         &self,
         laid: &[Laid],
         style: &TextStyle,
         keep: impl Fn(&PenSlot) -> bool,
-    ) -> Vec<(u32, Arc<Writing>, PenSlot, f32, bool)> {
+    ) -> Vec<PenPlay> {
         let size = style.size;
         let now = self.extra.now;
         let popup = self.paths_popup();
+        let cancelled = (self.ending() == Some(Ending::Cancelled))
+            .then_some(self.ended_at)
+            .flatten();
         let mut plays = Vec::new();
         let mut books = pens().lock().unwrap_or_else(|e| e.into_inner());
         if books.len() > 64 {
@@ -774,41 +836,100 @@ impl Popup {
                 speed: PEN_SPEED * size,
                 ..PenParams::default()
             }),
-            slot: HashMap::new(),
-            voice: HashMap::new(),
-            place: HashMap::new(),
+            words: HashMap::new(),
             used: now,
         });
         book.used = now;
         for word in laid {
-            let known = book
-                .slot
+            let revised = book
+                .words
                 .get(&word.id)
-                .and_then(|&i| book.schedule.slot(i))
+                .is_some_and(|e| e.text != word.text && cancelled.is_none());
+            let known = book
+                .words
+                .get(&word.id)
+                .and_then(|e| book.schedule.slot(e.slot))
                 .copied();
-            if known.is_some_and(|x| !keep(&x)) {
+            if !revised && known.is_some_and(|x| !keep(&x)) {
                 continue;
             }
             let writing = self.writing(word, style);
-            let slot = match known {
-                Some(x) => x,
+            let n = writing.word.glyphs.len();
+            match book.words.get_mut(&word.id) {
                 None => {
                     let born = self.paths_times(word).0;
                     let i = book.schedule.push(born, writing.length());
-                    book.slot.insert(word.id, i);
-                    book.voice.insert(word.id, self.pen_voice());
-                    book.place.insert(word.id, place(word));
-                    book.schedule.slots()[i]
+                    let voice = self.pen_voice();
+                    let text = word.text.clone();
+                    book.words.insert(
+                        word.id,
+                        PenWord {
+                            slot: i,
+                            voice,
+                            text,
+                            part: None,
+                            place: place(word),
+                        },
+                    );
                 }
+                Some(e) if revised => {
+                    let at = self.paths_times(word).1.unwrap_or(now);
+                    let writing_now = known.is_some_and(|x| x.end > at);
+                    let glyphs = if writing_now {
+                        0..n
+                    } else {
+                        changed_glyphs(&e.text, &word.text, &writing)
+                    };
+                    e.text = word.text.clone();
+                    e.place = place(word);
+                    if glyphs.is_empty() || self.pen_snaps(at) {
+                        // Nothing to write: the word stands at full ink.
+                        e.part = Some((n..n, writing.clone()));
+                        continue;
+                    }
+                    let part = Arc::new(writing.glyphs(glyphs.clone()));
+                    e.slot = book.schedule.push(at, part.length());
+                    e.part = Some((glyphs, part));
+                }
+                Some(_) => {}
+            }
+            let e = &book.words[&word.id];
+            let planned = book.schedule.slots()[e.slot];
+            let (glyphs, writing) = match &e.part {
+                Some((g, _)) if g.is_empty() => continue,
+                Some((g, part)) => (g.clone(), part.clone()),
+                None => (0..n, writing),
+            };
+            let slot = match cancelled {
+                Some(at) if planned.end > at => PenSlot {
+                    start: at,
+                    end: at + CANCEL_SWEEP_SECS,
+                    swept: true,
+                    ..planned
+                },
+                _ => planned,
             };
             if !keep(&slot) {
                 continue;
             }
-            let voice = book.voice.get(&word.id).copied().unwrap_or(0.5);
-            let moved = book.place.get(&word.id) != Some(&place(word));
-            plays.push((word.id, writing, slot, voice, moved));
+            plays.push(PenPlay {
+                id: word.id,
+                writing,
+                slot,
+                voice: e.voice,
+                glyphs,
+                planned,
+                moved: e.place != place(word),
+            });
         }
         plays
+    }
+
+    /// Whether a revision at `at` shows at once instead of being written:
+    /// the popup closes within `REWRITE_MIN_SECS`.
+    fn pen_snaps(&self, at: f64) -> bool {
+        self.ending().is_some()
+            && self.linger_secs() - self.ended_for(at).unwrap_or(0.0) < REWRITE_MIN_SECS
     }
 
     /// The voice a word joins the pen with: the level as it arrives, the
@@ -900,11 +1021,16 @@ fn place(word: &Laid) -> (i32, i32) {
 /// dries into it; the fill's front is the sum of those letter shares. Pen
 /// distance maps to time as the pen schedule shares it out. A swept word
 /// fills evenly over its sweep.
-fn fill_keys(writing: &Writing, slot: &PenSlot) -> Vec<(f64, f32)> {
+///
+/// `glyphs` are the glyphs the slot writes (SW-06): those before them
+/// count as written from the start, and those after are left out of the
+/// front, for the word's tail to keep full.
+fn fill_keys(writing: &Writing, slot: &PenSlot, glyphs: Range<usize>) -> Vec<(f64, f32)> {
     let n = writing.word.glyphs.len();
     let total = writing.length();
     if n == 0 || slot.swept || total <= 0.0 {
-        return vec![(slot.start, 0.0), (slot.end, 1.0)];
+        let from = glyphs.start.min(n) as f32 / n.max(1) as f32;
+        return vec![(slot.start, from), (slot.end, 1.0)];
     }
     // Each glyph's first stroke start, last base stroke end, last end.
     let mut span = vec![(f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY); n];
@@ -934,7 +1060,7 @@ fn fill_keys(writing: &Writing, slot: &PenSlot) -> Vec<(f64, f32)> {
         })
         .collect();
     let front = |d: f32| -> f32 {
-        spans
+        spans[..glyphs.end.min(n)]
             .iter()
             .map(|&(b, e)| {
                 if e > b {
@@ -1020,6 +1146,48 @@ impl Popup {
     }
 }
 
+/// The fill `keys` give at `t`: straight between keys, held past the ends.
+fn keys_at(keys: &[(f64, f32)], t: f64) -> f32 {
+    let (Some(first), Some(last)) = (keys.first(), keys.last()) else {
+        return 1.0;
+    };
+    if t <= first.0 {
+        return first.1;
+    }
+    if t >= last.0 {
+        return last.1;
+    }
+    let i = keys.partition_point(|k| k.0 <= t);
+    let (a, b) = (keys[i - 1], keys[i]);
+    let k = ((t - a.0) / (b.0 - a.0).max(1e-9)) as f32;
+    a.1 + (b.1 - a.1) * k
+}
+
+/// The glyphs of `writing` (the word `new` shaped) that a revision from
+/// `old` changed: all but the common start and the common end of the two
+/// texts. Empty when only letters were taken out.
+fn changed_glyphs(old: &str, new: &str, writing: &Writing) -> Range<usize> {
+    let same = |a: std::str::Chars, b: std::str::Chars| -> usize {
+        a.zip(b)
+            .take_while(|(x, y)| x == y)
+            .map(|(_, y)| y.len_utf8())
+            .sum()
+    };
+    let head = same(old.chars(), new.chars());
+    let tail: usize = old[head.min(old.len())..]
+        .chars()
+        .rev()
+        .zip(new[head..].chars().rev())
+        .take_while(|(x, y)| x == y)
+        .map(|(_, y)| y.len_utf8())
+        .sum();
+    let (lo, hi) = (head as u32, (new.len() - tail) as u32);
+    let glyphs = &writing.word.glyphs;
+    let start = glyphs.partition_point(|g| g.cluster < lo);
+    let end = glyphs.partition_point(|g| g.cluster < hi);
+    start..end.max(start)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1045,7 +1213,7 @@ mod tests {
             end: 1.35,
             swept: false,
         };
-        let keys = fill_keys(&w, &slot);
+        let keys = fill_keys(&w, &slot, 0..n);
         // Empty before the pen, full when it is done, only rising between.
         assert_eq!(keys.first().copied(), Some((1.1, 0.0)));
         let last = *keys.last().unwrap();
@@ -1097,7 +1265,10 @@ mod tests {
             end: 1.08,
             swept: true,
         };
-        assert_eq!(fill_keys(&w, &slot), vec![(1.0, 0.0), (1.08, 1.0)]);
+        assert_eq!(
+            fill_keys(&w, &slot, 0..w.word.glyphs.len()),
+            vec![(1.0, 0.0), (1.08, 1.0)]
+        );
     }
 
     /// Bounds of the morph's glyph outlines at `t`, from their sampled points.
@@ -1230,5 +1401,36 @@ mod tests {
         popup.shown = words[1..].to_vec();
         let after = drawn(&mut popup, 1.06);
         assert!(after.is_empty(), "{after:?} where the words were");
+    }
+
+    #[test]
+    fn a_revision_queues_only_the_glyphs_that_changed() {
+        assert_eq!(changed_glyphs("swish", "swiss", &writing("swiss")), 4..5);
+        let long = writing("configuration");
+        let g = changed_glyphs("confi", "configuration", &long);
+        assert_eq!(g.len(), 8, "{g:?}");
+        assert_eq!(changed_glyphs("their", "there", &writing("there")), 3..5);
+        // A changed middle keeps the common end: only the "u" is new.
+        assert_eq!(changed_glyphs("forth", "fourth", &writing("fourth")), 2..3);
+        assert_eq!(changed_glyphs("colour", "color", &writing("color")), 4..4);
+        assert_eq!(changed_glyphs("same", "same", &writing("same")), 4..4);
+    }
+
+    #[test]
+    fn a_partial_fill_starts_after_the_kept_glyphs_and_leaves_the_tail() {
+        let w = writing("their");
+        let part = w.glyphs(3..4);
+        let slot = PenSlot {
+            arrive: 1.0,
+            start: 1.0,
+            end: 1.2,
+            swept: false,
+        };
+        let keys = fill_keys(&part, &slot, 3..4);
+        // Three letters full from the start, the fourth filling, the last
+        // left to the tail.
+        assert!((keys[0].1 - 0.6).abs() < 1e-6, "{keys:?}");
+        assert!((keys.last().unwrap().1 - 0.8).abs() < 1e-6, "{keys:?}");
+        assert!((keys_at(&keys, 1.1) - 0.7).abs() < 0.1);
     }
 }

@@ -262,10 +262,11 @@ impl Popup {
                 }
                 wt = wt.delay(seen.delay);
             }
-            if let Some(keys) = pen.get(&w.id) {
-                // Letters ahead of the pen keep the reading-line ink.
-                wt = wt.floor(glyph_paths::PEN_FLOOR);
-                typos.set_fill_track(w.id, keys.clone());
+            if let Some(fill) = pen.get(&w.id) {
+                // Letters ahead of the pen keep the reading-line ink, and the
+                // unchanged end of a revised word stays full (SW-06).
+                wt = wt.floor(glyph_paths::PEN_FLOOR).tail(fill.tail);
+                typos.set_fill_track(w.id, fill.keys.clone());
             }
             typos.set(w.id, wt);
         }
