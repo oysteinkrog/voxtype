@@ -44,6 +44,10 @@ struct WorkerResponse {
     /// The final engine's text of each spoken correction (live worker).
     #[serde(default)]
     corrections: Vec<crate::osd::correction::FinalClip>,
+    /// The final engine's text of the audio after a keyboard edit's last
+    /// resume (live worker).
+    #[serde(default)]
+    resumed: Option<String>,
 }
 
 /// A prepared worker process ready to receive audio
@@ -1235,6 +1239,7 @@ impl StreamingTranscriber for SubprocessTranscriber {
                         answered = true;
                         // Before the text, which the daemon corrects with them.
                         crate::osd::correction::final_clips(r.corrections);
+                        crate::osd::edit_ipc::set_engine_resumed(r.resumed);
                         let text = r.text.unwrap_or_default();
                         if !text.trim().is_empty() {
                             send(StreamingEvent::Final {

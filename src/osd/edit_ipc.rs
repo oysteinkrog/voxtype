@@ -9,6 +9,9 @@
 //!   per change while it owns the text.
 //! - `edit-cmd`: the popup's commands, one stamped JSON line each
 //!   ([`EditCmdLine`]), appended.
+//! - `edit-resume.json` ([`ResumeMark`]): where the last resume began, for
+//!   the live worker, which runs the final engine on the audio after it
+//!   alone.
 //!
 //! A command that names a revision is acted on only once the buffer file
 //! holds that revision, so the daemon never takes text older than the
@@ -117,6 +120,43 @@ pub fn buffer_path() -> PathBuf {
 
 pub fn cmd_path() -> PathBuf {
     crate::config::Config::runtime_dir().join("edit-cmd")
+}
+
+pub fn resume_path() -> PathBuf {
+    crate::config::Config::runtime_dir().join("edit-resume.json")
+}
+
+/// `edit-resume.json`: the last resume of a keyboard edit.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResumeMark {
+    /// Seconds of audio sent to the live worker before the resume, the
+    /// silence pads included: the worker's own clock.
+    pub at: f32,
+}
+
+pub fn write_resume_to(path: &std::path::Path, mark: ResumeMark) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(&mark)?)?;
+    std::fs::rename(&tmp, path)
+}
+
+pub fn read_resume_from(path: &std::path::Path) -> Option<ResumeMark> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// The final engine's text of the audio after the last resume, from the
+/// live worker's response; None when it sent none.
+static ENGINE_RESUMED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_engine_resumed(text: Option<String>) {
+    *ENGINE_RESUMED.lock().unwrap_or_else(|e| e.into_inner()) = text;
+}
+
+pub fn engine_resumed() -> Option<String> {
+    ENGINE_RESUMED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// Write the buffer: a temp file renamed over the old one, so a reader
@@ -252,6 +292,8 @@ pub fn accept(cmd: EditCmd, session: u64, buffer: Option<&EditBuffer>) -> Option
 pub fn clear() {
     let _ = std::fs::remove_file(buffer_path());
     let _ = std::fs::remove_file(cmd_path());
+    let _ = std::fs::remove_file(resume_path());
+    set_engine_resumed(None);
 }
 
 #[cfg(test)]
@@ -308,6 +350,16 @@ mod tests {
         let old: EditBuffer =
             serde_json::from_str(r#"{"session":1,"rev":2,"text":"hi","sel":[2,2]}"#).unwrap();
         assert_eq!(old.pause, 0);
+    }
+
+    #[test]
+    fn the_resume_mark_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("edit-resume.json");
+        assert_eq!(read_resume_from(&path), None);
+        write_resume_to(&path, ResumeMark { at: 3.5 }).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"at":3.5}"#);
+        assert_eq!(read_resume_from(&path), Some(ResumeMark { at: 3.5 }));
     }
 
     #[test]

@@ -39,6 +39,8 @@ pub struct EditDoc {
     /// Where speech after the last resume goes: a byte offset into the
     /// frozen region, or None for its end.
     insert_at: Option<usize>,
+    /// Seconds of audio sent to the live worker before the last resume.
+    resumed_at: Option<f32>,
 }
 
 impl EditDoc {
@@ -98,6 +100,25 @@ impl EditDoc {
     /// Raw live text after the freeze boundary.
     pub fn live_text(&self) -> &str {
         &self.live
+    }
+
+    /// The last resume came after `at` seconds of audio.
+    pub fn resumed(&mut self, at: f32) {
+        self.resumed_at = Some(at);
+    }
+
+    pub fn resumed_at(&self) -> Option<f32> {
+        self.resumed_at
+    }
+
+    /// The final engine's text of the audio after the last resume stands
+    /// in for the live text after the boundary (engine mode, M9.2). Only
+    /// when there is live text: speech after the resume that a pause froze
+    /// is in the frozen region already.
+    pub fn engine_live(&mut self, text: &str) {
+        if !self.live.is_empty() && !text.trim().is_empty() {
+            self.live = text.trim().to_string();
+        }
     }
 
     /// A new live preview text (the whole recording's). The part after the

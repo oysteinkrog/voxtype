@@ -1259,6 +1259,8 @@ When the pause starts, the microphone is muted and the last words still being de
 | Enter | Stop, paste and press Enter (on release) |
 | Cancel key, two taps (Right Alt) | Discard. The text is kept for 60 s. |
 
+When you stop while listening after a resume, the words said since the resume come from the engine model (`live_preview_final = "engine"`, the default), as in a dictation without an edit. Only those words can change; text you paused on or typed is pasted as it was.
+
 A spoken correction (holding the correction key) works again once you resume, but it never changes text you already paused on or typed. If the words it hears only fit there, the popup says "Not changed: frozen text". Holding the key while editing does nothing.
 
 **Focus.** While you edit, the popup has the keyboard. If you click another window, Alt+Tab, lock the screen or the popup's screen goes away, the popup lets go and shows "paused · Shift to edit". Your text and caret are kept, and the recording stays paused. One tap of the edit key takes you back. With focus-follows-mouse, moving the pointer over another window for about 300 ms has the same effect.

@@ -323,6 +323,12 @@ struct EditLink {
     freeze: Box<dyn Fn(f32) + Send + Sync>,
     buffer: PathBuf,
     cmds: PathBuf,
+    /// Where the last resume began, for the live worker.
+    resume: PathBuf,
+    /// The final engine's text of the audio after the last resume.
+    engine_resumed: Box<dyn Fn() -> Option<String> + Send + Sync>,
+    /// That text with the spoken corrections made after the given second.
+    correct_after: CorrectAfter,
     /// Where a finish says how the recording was stopped (`hotkey-last`).
     hotkey_last: PathBuf,
     /// Where a discarded edited dictation is kept for a minute.
@@ -334,6 +340,8 @@ struct EditLink {
     /// false when one is still held.
     keys_up: KeysUp,
 }
+
+type CorrectAfter = Box<dyn Fn(&str, f32) -> String + Send + Sync>;
 
 type KeysUp = Box<dyn Fn(Duration) -> futures_util::future::BoxFuture<'static, bool> + Send + Sync>;
 
@@ -350,6 +358,9 @@ impl Default for EditLink {
             }),
             buffer: crate::osd::edit_ipc::buffer_path(),
             cmds: crate::osd::edit_ipc::cmd_path(),
+            resume: crate::osd::edit_ipc::resume_path(),
+            engine_resumed: Box::new(crate::osd::edit_ipc::engine_resumed),
+            correct_after: Box::new(crate::osd::correction::apply_final_after),
             hotkey_last: Config::runtime_dir().join("hotkey-last"),
             discarded: crate::osd::edit_journal::discarded_path(),
             reader: Default::default(),
@@ -2324,9 +2335,22 @@ impl Daemon {
     }
 
     /// Pass mic audio again; new speech goes after the edited text. The
-    /// caller has taken the popup's text.
+    /// caller has taken the popup's text. The live worker learns where the
+    /// audio after the resume starts, for the final engine (M9.2).
     async fn edit_resume(&mut self, state: &mut State) {
-        self.with_gate(|g| g.resume());
+        let mut clock = 0;
+        self.with_gate(|g| {
+            g.resume();
+            clock = g.clock();
+        });
+        let at = clock as f32 / 16000.0;
+        if let Some(doc) = self.edit_doc.as_mut() {
+            doc.resumed(at);
+        }
+        let mark = crate::osd::edit_ipc::ResumeMark { at };
+        if let Err(e) = crate::osd::edit_ipc::write_resume_to(&self.edit_link.resume, mark) {
+            tracing::warn!("Could not write the edit resume mark: {}", e);
+        }
         if let Some(tracker) = &self.silence_tracker {
             tracker.resume().await;
         }
@@ -2402,6 +2426,14 @@ impl Daemon {
             doc.replace_frozen(&text);
         }
         doc.live(&shown);
+        // Engine mode: the engine's text of the audio after the last resume
+        // replaces the live words there, and nothing before it (M9.2).
+        let engine = self.config.live_preview_final != "preview";
+        if let (true, Some(at), Some(text)) =
+            (engine, doc.resumed_at(), (self.edit_link.engine_resumed)())
+        {
+            doc.engine_live(&(self.edit_link.correct_after)(&text, at));
+        }
         Some(doc.final_text(|t| output::normalize_quotes(&tp.process(t)).into_owned()))
     }
 
@@ -6835,6 +6867,8 @@ mod tests {
         published: Arc<std::sync::Mutex<Vec<Option<crate::osd::edit_ipc::EditBlock>>>>,
         /// The audio times the spoken corrections were frozen at.
         frozen_at: Arc<std::sync::Mutex<Vec<f32>>>,
+        /// What the worker said of the audio after the last resume.
+        engine: Arc<std::sync::Mutex<Option<String>>>,
     }
 
     impl TestLink {
@@ -6852,13 +6886,19 @@ mod tests {
         let shown = Arc::new(std::sync::Mutex::new(String::new()));
         let published = Arc::new(std::sync::Mutex::new(Vec::new()));
         let frozen_at = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine = Arc::new(std::sync::Mutex::new(None));
         let (s, p, f) = (shown.clone(), published.clone(), frozen_at.clone());
+        let e = engine.clone();
         daemon.edit_link = EditLink {
             publish: Box::new(move |b| p.lock().unwrap().push(b)),
             shown: Box::new(move || s.lock().unwrap().clone()),
             freeze: Box::new(move |t| f.lock().unwrap().push(t)),
             buffer: dir.path().join("edit-buffer.json"),
             cmds: dir.path().join("edit-cmd"),
+            resume: dir.path().join("edit-resume.json"),
+            engine_resumed: Box::new(move || e.lock().unwrap().clone()),
+            // Marks a corrected text, with the second it was counted from.
+            correct_after: Box::new(|t, at| format!("{t} [{at}]")),
             hotkey_last: dir.path().join("hotkey-last"),
             discarded: dir.path().join("discarded.json"),
             reader: Default::default(),
@@ -6870,6 +6910,7 @@ mod tests {
             shown,
             published,
             frozen_at,
+            engine,
         }
     }
 
@@ -7096,6 +7137,61 @@ mod tests {
             (block.phase.as_str(), block.frozen.as_str()),
             ("listening", "hello world!")
         );
+    }
+
+    /// M9.2: in engine mode, the final engine's text of the audio after the
+    /// last resume replaces the live words there, with the spoken
+    /// corrections made after the resume; the frozen and edited text never
+    /// changes. In preview mode, and when a pause froze the words after the
+    /// resume, the live words stand.
+    #[tokio::test]
+    async fn the_engine_changes_only_the_words_after_the_last_resume() {
+        use crate::osd::edit_ipc::{append_cmd_to, read_resume_from, write_buffer_to};
+        use crate::osd::edit_ipc::{EditBuffer, EditCmd};
+        for final_from in ["engine", "preview"] {
+            let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+            daemon.config.live_preview_final = final_from.into();
+            link.show("one two");
+            mic(&daemon, 0.1);
+            daemon.edit_toggle(&mut state).await;
+            daemon
+                .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+                .await;
+            let session = daemon.edit_doc.as_ref().unwrap().session();
+            let buffer = EditBuffer {
+                session,
+                rev: 1,
+                text: "One two.".into(),
+                sel: (8, 8),
+                pause: 1,
+                base: Some("one two".into()),
+            };
+            write_buffer_to(&daemon.edit_link.buffer, &buffer).unwrap();
+            append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev: 1 }).unwrap();
+            daemon.edit_handle_commands(&mut state).await;
+            assert_eq!(state.phase(), Some(Phase::Listening));
+            // The worker learns where the audio after the resume starts:
+            // after the mic chunk and the silence pad.
+            let mark = read_resume_from(&daemon.edit_link.resume).unwrap();
+            let pad = daemon.edit_pad_samples();
+            assert_eq!(mark.at, (160 + pad) as f32 / 16000.0);
+            link.show("one too three for");
+            // The engine's text of the whole clip would also change "too";
+            // its text after the resume only has the words said there.
+            *link.engine.lock().unwrap() = Some("Three, four.".into());
+            let want = match final_from {
+                "engine" => format!("One two. Three, four. [{}]", mark.at),
+                _ => "One two. three for".to_string(),
+            };
+            assert_eq!(daemon.edit_final_text(state.phase()), Some(want));
+            // A pause froze the words after the resume: the engine's text
+            // of them is not used.
+            daemon.edit_toggle(&mut state).await;
+            assert_eq!(
+                daemon.edit_final_text(state.phase()).as_deref(),
+                Some("One two. three for")
+            );
+        }
     }
 
     /// R23 v2: with `edit_resume_at = "caret"`, speech after a resume goes
