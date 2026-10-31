@@ -19,7 +19,7 @@ use super::*;
 use std::sync::OnceLock;
 
 use std::f32::consts::TAU;
-use vo::scene::ambient::{Loop, LoopProp};
+use vo::scene::ambient::{Loop, LoopProp, Wave};
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::Point;
@@ -492,22 +492,35 @@ impl Hud {
 }
 
 /// The segment groups that turn and their speeds in degrees a second;
-/// clockwise is positive.
-const SEGMENT_SPEEDS: [i32; 3] = [12, -8, 5];
+/// clockwise is positive. Slow and counter-turning, so the open HUD feels
+/// alive without drawing the eye.
+const SEGMENT_SPEEDS: [i32; 3] = [4, -3, 2];
 
 /// Bright segments: radius, from and to in degrees, width, the speed of the
 /// group they turn with, colour.
 const SEGMENTS: [(f32, f32, f32, f32, i32, u32); 5] = [
-    (180.0, -73.0, -36.0, 5.0, 12, CYAN),
-    (165.0, 102.0, 162.0, 3.0, -8, CYAN),
-    (190.0, 29.0, 45.0, 6.0, 12, CYAN),
-    (188.0, -118.0, -90.0, 2.0, 5, BRIGHT),
-    (170.0, -8.0, 14.0, 2.0, -8, CYAN),
+    (180.0, -73.0, -36.0, 5.0, 4, CYAN),
+    (165.0, 102.0, 162.0, 3.0, -3, CYAN),
+    (190.0, 29.0, 45.0, 6.0, 4, CYAN),
+    (188.0, -118.0, -90.0, 2.0, 2, BRIGHT),
+    (170.0, -8.0, 14.0, 2.0, -3, CYAN),
 ];
 
-/// The tick ring's turn and the dotted ring's, degrees a second.
-const TICKS_SPEED: f64 = -3.0;
+/// The tick ring's crawl along its arc, logical pixels a second
+/// (anticlockwise), and the dotted ring's turn, degrees a second.
+const TICKS_CRAWL_PX: f32 = 10.0;
 const DOTS_SPEED: f64 = 6.0;
+/// Radius of the tick ring, in concept pixels.
+const TICKS_R: f32 = 215.0;
+
+/// The tick ring's turn in degrees a second for a crawl of
+/// [`TICKS_CRAWL_PX`] along it at scale `k`.
+fn ticks_speed(k: f32) -> f64 {
+    -((TICKS_CRAWL_PX / (TICKS_R * k)) as f64).to_degrees()
+}
+
+/// Seconds for the scan line to pass over the frame once.
+const SCAN_SECS: f64 = 8.0;
 
 /// A steady turn at `deg_per_s`, as an ambient loop on rotation. It comes to
 /// rest by itself when the view stops declaring it, and holds still under
@@ -830,13 +843,13 @@ impl Popup {
                 format!("ticks{i}"),
                 2.0 * half,
                 2.0 * half,
-                215.0 * g.k,
+                TICKS_R * g.k,
                 start.to_radians(),
                 100f32.to_radians(),
             )
             .ticks(ticks)
             .presence(draw_on, Transition::fade());
-            layer = layer.child(turn(square(e), TICKS_SPEED));
+            layer = layer.child(turn(square(e), ticks_speed(g.k)));
         }
         // The dotted ring: dot-long ticks.
         let dots = Element::polar("dots", 2.0 * half, 2.0 * half, 142.0 * g.k, 0.0, TAU)
@@ -1406,11 +1419,53 @@ impl Popup {
                     ),
             );
         }
-        at(Element::column("frame-box"), MARGIN, g.frame_top)
+        let frame_box = at(Element::column("frame-box"), MARGIN, g.frame_top)
             .size(g.w, h)
             .motion(Prop::Size, Spring::SNAP)
             .child(frame)
-            .child(column)
+            .child(column);
+        match self.jarvis_scan(g, status, rows, h) {
+            Some(scan) => frame_box.child(scan),
+            None => frame_box,
+        }
+    }
+
+    /// A faint scan line that passes down the frame every [`SCAN_SECS`]
+    /// while the popup listens, hidden over the newest line's band so the
+    /// line being read never changes. None once the recording stops, and
+    /// under reduced motion.
+    fn jarvis_scan(&self, g: &Geo, status: &StatusLine, rows: u32, h: f32) -> Option<Element<Msg>> {
+        let listening = self.extra.finish_at.is_none()
+            && self.jarvis.ended_at.is_none()
+            && self.extra.final_at.is_none()
+            && !(status.finishing && !status.loading);
+        if !listening || self.still() || self.edit_view.is_some() {
+            return None;
+        }
+        let k = g.k;
+        let band = (FRAME_PAD_TOP + (rows - 1) as f32 * LINE) * k;
+        let (from, to) = ((band - 1.0) / h, (band + LINE * k + 1.0) / h);
+        let inset = FRAME_CHAMFER * k;
+        let scan = Element::panel("scan")
+            .fill(hex(CYAN, 0.1))
+            .ambient(
+                LoopProp::OffsetY,
+                Loop::new(Wave::Ramp, h as f64, SCAN_SECS).fps(IDLE_FPS),
+            )
+            .ambient(
+                LoopProp::Opacity,
+                Loop::new(
+                    Wave::Gate {
+                        from: from as f64,
+                        to: to as f64,
+                    },
+                    -1.0,
+                    SCAN_SECS,
+                )
+                .fps(IDLE_FPS),
+            )
+            .presence(Transition::fade(), Transition::NONE);
+        Some(at(scan, inset, 0.0).size(g.w - 2.0 * inset, 1.0))
     }
 
     /// The status pill under the frame: icon, state and detail.
