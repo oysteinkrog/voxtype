@@ -1878,10 +1878,11 @@ impl Popup {
             && !self.closing
             && t - self.loud_at >= ROOM_TONE_AFTER_LOUD_SECS
             && t - self.event_at >= ROOM_TONE_AFTER_EVENT_SECS;
-        // Chrome's raymarched blob costs more a frame; its slow idle
-        // sway reads the same at a lower pace.
+        // The raymarched blob and orb cost more a frame; their slow idle
+        // motion reads the same at a lower pace.
         let fps = match self.look.theme {
             OsdTheme::Chrome => chrome::ROOM_TONE_FPS,
+            OsdTheme::Orb => orb::ROOM_TONE_FPS,
             _ => ROOM_TONE_FPS,
         };
         quiet.then_some(fps)

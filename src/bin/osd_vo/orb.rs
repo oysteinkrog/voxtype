@@ -11,6 +11,7 @@
 //! A cancel greys the orb and dims the words. Under reduced motion the orb
 //! rests, the bars hold still and nothing flies.
 
+use std::f32::consts::TAU;
 use std::fmt;
 
 use super::kit::{at, ease_out, hex, mix, Levels, Mode};
@@ -76,6 +77,13 @@ const STATUS_Y: f32 = 200.0;
 const STATUS_H: f32 = 20.0;
 const PROGRESS_W: f32 = 200.0;
 const PROGRESS_GAP: f32 = 16.0;
+/// Idle (RD-02): the aurora's turns a second and the rim highlight's
+/// period.
+const SWIRL_TURNS_S: f32 = 0.1;
+const RIM_PERIOD_S: f32 = 7.0;
+/// The frame pace while the popup records room tone (RD-11): the swirl
+/// turns 4.5 degrees a frame at this pace.
+pub(crate) const ROOM_TONE_FPS: f64 = 8.0;
 /// How long the hairline flies once the text lands.
 const SEND_SECS: f64 = 0.7;
 
@@ -87,6 +95,25 @@ const _: () = assert!(TEXT_TOP > WAVE_Y + WAVE_HALF_H + 4.0);
 const _: () = assert!(TEXT_TOP + MAX_LINES as f32 * TEXT_LINE < STATUS_Y - PROGRESS_GAP);
 const _: () = assert!(STATUS_Y + STATUS_H / 2.0 < PILL_H - 20.0);
 const _: () = assert!(COL_X + TEXT_W < PILL_W - 36.0);
+
+/// MO-84 in orb: a cool light with the look's cyan as its accent, and
+/// soft shadows and caustics on the dark violet glass. The light adds its
+/// colour (alpha is not read), so it is dimmed toward black, and its glow
+/// is a small spot: the text box is a line or two tall, and a wide glow
+/// lights the whole box as a grey strip past the words.
+pub(crate) fn letter_light() -> vo_3d::glyph_fx::Light {
+    vo_3d::glyph_fx::Light {
+        color: mix(Color::BLACK, hex(INK), 0.25),
+        accent: hex(CYAN),
+        shadow_len: 14.0,
+        shadow: 0.15,
+        caustics: 0.3,
+        falloff: 100.0,
+        sheen: 0.35,
+        edge_fade: 40.0,
+        ..vo_3d::glyph_fx::Light::default()
+    }
+}
 
 fn scale(look: &Look) -> f32 {
     look.width / DESIGN_W
@@ -188,7 +215,8 @@ impl HeroSource for Orb {
             stretch: [ORB_REST + 0.05 * voice; 3],
             wobble: (0.05 + 0.3 * voice) * calm,
             phase: 0.6 * phase,
-            spin: 0.3 * phase,
+            // Idle (RD-02): the aurora swirls a tenth of a turn a second.
+            spin: TAU * SWIRL_TURNS_S * phase,
             steps: ORB_STEPS,
             // Curtains of aurora folding inside a thin glass skin.
             inside: Some(HeroInside {
@@ -478,7 +506,14 @@ impl Popup {
             .glass(glass)
             .border(Color::hex(RIM, 0.55), 1.2 * k)
             .glow(hex(VIOLET).fade(0.35), 16.0 * k, 0.6)
-            .rim(hex(CYAN).fade(0.7), 1.6 * k, 0.25, -0.3, 0.0)
+            // Idle (RD-02): a highlight runs round the rim every 7 s.
+            .rim(
+                hex(CYAN).fade(0.7),
+                1.6 * k,
+                0.25,
+                -0.3,
+                if still { 0.0 } else { RIM_PERIOD_S },
+            )
             .presence(Transition::fade().offset(0.0, 8.0).scale(0.98), exit)
             .child(at(
                 Element::canvas("ring", mode_at + 0.1, move |_, r, p| ring.draw(r, p))
@@ -531,7 +566,10 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0)));
-        let words = self.typo_words(words);
+        // MO-84 light through the letters, then MO-81 breath last.
+        let words = self
+            .letter_fx_words(self.typo_words(words))
+            .wild_motion(self);
         let words = self.handoff_or(words, &l.text_style(), Some(tw), hex(INK), hex(CYAN));
         let text = Element::column("text")
             .width(tw)
@@ -548,6 +586,7 @@ impl Popup {
                 endings::Cancel::Unthread,
             ));
         let text = self.typo_marks(text, tw);
+        let text = self.letter_fx_layers(text, tw);
         let text = self.signal_marks(text, &self.shown, tw, (0.0, 0.0), hex(INK));
         at(
             self.with_hearing(text, &l.text_style(), tw, hex(INK), hex(CYAN)),

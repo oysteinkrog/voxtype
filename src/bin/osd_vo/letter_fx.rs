@@ -297,6 +297,7 @@ impl Popup {
             };
             let light = match l.theme {
                 OsdTheme::Glass => super::glass::letter_light(),
+                OsdTheme::Orb => super::orb::letter_light(),
                 _ => Light {
                     accent: l.accent,
                     ..Light::default()
