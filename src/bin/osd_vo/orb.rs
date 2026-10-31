@@ -87,6 +87,97 @@ pub(crate) const ROOM_TONE_FPS: f64 = 8.0;
 /// How long the hairline flies once the text lands.
 const SEND_SECS: f64 = 0.7;
 
+/// R2-01-a Sonic ripple: a thin ring per new word grows from the orb's rim
+/// across the glass behind the words and fades within `RIPPLE_SECS`; its
+/// alpha follows the word's peak level. Under reduced motion the orb's
+/// ring brightens once per word instead.
+pub(crate) const SONIC_RIPPLE: &str = "sonic-ripple";
+const RIPPLE_SECS: f64 = 1.2;
+const MAX_RIPPLES: usize = 3;
+const RIPPLE_ALPHA: f32 = 0.15;
+const RIPPLE_REACH: f32 = 560.0;
+/// R2-01-b Magnetic type: tiny copies of the new word's letters stream
+/// from the orb along a lane just under the newest line and fade as they
+/// reach their letter, all within `STREAM_SECS`. The word shows at
+/// `STREAM_INK` from its first frame. Under reduced motion no stream.
+pub(crate) const MAGNETIC_TYPE: &str = "magnetic-type";
+const STREAM_SECS: f64 = 0.4;
+const STREAM_STAGGER: f64 = 0.12;
+const STREAM_MIN: usize = 20;
+const STREAM_MAX: usize = 40;
+const STREAM_ALPHA: f32 = 0.3;
+const STREAM_SCALE: f32 = 0.3;
+const STREAM_LANE: f32 = 9.0;
+const STREAM_INK: f32 = 0.7;
+/// A word that opens a line waits for the line to scroll or grow in.
+const LINE_WAIT: f64 = 0.45;
+/// R2-01-c Breathing light: the aurora inside the orb grows from 0.95 to
+/// 1.05 and brightens with the voice, smoothed with `BREATH_ATTACK` and
+/// `BREATH_RELEASE`; a faint light spills behind the newest line. Under
+/// reduced motion the brightness only.
+pub(crate) const BREATHING_LIGHT: &str = "breathing-light";
+const BREATH_ATTACK: f64 = 0.08;
+const BREATH_RELEASE: f64 = 0.6;
+const BREATH_TICK: f64 = 1.0 / 60.0;
+const BREATH_LOOK_BACK: f64 = 2.0;
+const SPILL_ALPHA: f32 = 0.08;
+const SPILL_W: f32 = 240.0;
+
+const _: () = assert!(RIPPLE_ALPHA <= 0.15 && STREAM_ALPHA <= 0.3 && SPILL_ALPHA < 0.1);
+const _: () = assert!(STREAM_STAGGER < STREAM_SECS);
+
+/// R2-01-c: the voice, 0 to 1, from `level` (the raw RMS).
+fn voice(level: f32) -> f32 {
+    (level * 1.6).min(1.0)
+}
+
+/// R2-01-c: the voice at `t` smoothed with a fast attack and a slow
+/// release, stepped at a fixed tick over the last `BREATH_LOOK_BACK`
+/// seconds: a pure function of the levels and `t`.
+fn breath(levels: &Levels, t: f64) -> f32 {
+    let up = 1.0 - (-BREATH_TICK / BREATH_ATTACK).exp() as f32;
+    let down = 1.0 - (-BREATH_TICK / BREATH_RELEASE).exp() as f32;
+    let n = (BREATH_LOOK_BACK / BREATH_TICK) as i32;
+    let mut env = 0.0f32;
+    for i in (0..=n).rev() {
+        let v = voice(levels.at(t - i as f64 * BREATH_TICK));
+        let rate = if v > env { up } else { down };
+        env += (v - env) * rate;
+    }
+    env
+}
+
+/// R2-01-c: the aurora's size for a smoothed voice `env`.
+fn aurora_scale(env: f32) -> f32 {
+    0.95 + 0.1 * env.clamp(0.0, 1.0)
+}
+
+/// R2-01-a: the rings alive at `t` for words born at `times` (oldest
+/// first), each with how far it has run (0 to 1). At most `MAX_RIPPLES`,
+/// the newest.
+fn ripples(t: f64, times: &[f64]) -> Vec<(usize, f32)> {
+    let alive: Vec<(usize, f32)> = times
+        .iter()
+        .enumerate()
+        .filter(|(_, &at)| t >= at && t - at < RIPPLE_SECS)
+        .map(|(i, &at)| (i, ((t - at) / RIPPLE_SECS) as f32))
+        .collect();
+    let skip = alive.len().saturating_sub(MAX_RIPPLES);
+    alive[skip..].to_vec()
+}
+
+/// R2-01-b: copy `j` of `n` at `age` seconds after the word: how far along
+/// its path (0 to 1) and its alpha; `None` before it leaves or once it
+/// has arrived.
+fn stream(age: f64, j: usize, n: usize) -> Option<(f32, f32)> {
+    let start = STREAM_STAGGER * j as f64 / (n.max(2) - 1) as f64;
+    let u = ((age - start) / (STREAM_SECS - STREAM_STAGGER)) as f32;
+    if !(0.0..1.0).contains(&u) {
+        return None;
+    }
+    Some((u, STREAM_ALPHA * (5.0 * u).min(1.0) * (1.0 - u)))
+}
+
 // The orb and its ring sit in the pill left of the column; the words sit
 // between the waveform and the status row, inside the pill.
 const _: () = assert!(ORB_X + RING_R + 20.0 < COL_X);
@@ -161,6 +252,8 @@ struct Orb {
     mode: Mode,
     mode_at: f64,
     still: bool,
+    /// R2-01-c: the aurora breathes with the smoothed voice.
+    breathing: bool,
 }
 
 impl fmt::Debug for Orb {
@@ -195,9 +288,23 @@ impl HeroSource for Orb {
             ((end - self.shown_at) as f32, calm)
         };
         let voice = if self.mode == Mode::Listening && !self.still {
-            (self.levels.at(t) * 1.6).min(1.0)
+            voice(self.levels.at(t))
         } else {
             0.0
+        };
+        // R2-01-c: the smoothed voice sizes and lights the aurora; under
+        // reduced motion it lights it only.
+        let env = if self.breathing && self.mode == Mode::Listening {
+            breath(&self.levels, t)
+        } else {
+            0.0
+        };
+        let (fog_scale, fog_lift) = if !self.breathing {
+            (1.2, 1.0 * voice)
+        } else if self.still {
+            (1.2, 1.6 * env)
+        } else {
+            (1.2 / aurora_scale(env), 1.6 * env)
         };
         let grey = self.mode == Mode::Cancelled;
         let c = |c: u32| if grey { hex(ORB_GREY) } else { hex(c) };
@@ -225,15 +332,17 @@ impl HeroSource for Orb {
                 core_glow: 0.0,
                 fog_a: c(ORB_C),
                 fog_b: c(ORB_B),
-                fog: if grey { 0.6 } else { 1.5 + 1.0 * voice },
-                fog_scale: 1.2,
+                fog: if grey { 0.6 } else { 1.5 + fog_lift },
+                fog_scale,
                 fog_steps: MAX_FOG_STEPS,
             }),
         }
     }
 
     fn until(&self) -> f64 {
-        if self.moving() {
+        // Reduced motion with the breathing light: a still orb whose aurora
+        // still brightens with the voice.
+        if self.moving() || (self.breathing && self.still && self.mode == Mode::Listening) {
             f64::INFINITY
         } else {
             self.mode_at + Self::SETTLE_SECS + 0.05
@@ -498,6 +607,7 @@ impl Popup {
             mode,
             mode_at,
             still,
+            breathing: l.on(BREATHING_LIGHT),
         };
         let d = ORB_BOX * k;
         Element::panel("pill")
@@ -526,6 +636,9 @@ impl Popup {
                 ORB_X * k - d / 2.0,
                 h / 2.0 - d / 2.0,
             ))
+            .children(self.orb_ripples(mode, Size::new(w, h), k))
+            .children(self.orb_spill(mode, Size::new(w, h), k))
+            .children(self.orb_stream(mode, Size::new(w, h), k))
             .child(at(
                 Element::canvas("wave", until, move |t, r, p| {
                     wave.draw(t, Rect::new(r.x, r.y, WAVE_W * k, r.h), p)
@@ -565,7 +678,12 @@ impl Popup {
             .width(tw)
             .motion(Prop::Opacity, Spring::critical_to_98(0.12))
             .motion(Prop::Offset, Spring::POP)
-            .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0)));
+            .word_enter(self.ghost_enter(if l.on(MAGNETIC_TYPE) {
+                // R2-01-b: the word is legible from its first frame.
+                Transition::fade().opacity(STREAM_INK)
+            } else {
+                Transition::fade().opacity(0.0).offset(0.0, 6.0)
+            }));
         // MO-84 light through the letters, then MO-81 breath last.
         let words = self
             .letter_fx_words(self.typo_words(words))
@@ -593,6 +711,191 @@ impl Popup {
             COL_X * k,
             TEXT_TOP * k,
         )
+    }
+
+    /// The newest word's box in the pill, its baseline, and when its
+    /// effects start.
+    fn orb_newest(&self, k: f32) -> Option<(Rect, f32, f64)> {
+        let l = &self.look;
+        let style = l.text_style();
+        let rows = self.wrap_lines(&self.shown, &style, text_width(l));
+        let row = rows.len().min(MAX_LINES as usize).checked_sub(1)?;
+        let last = rows.last()?;
+        let newest = last.last()?;
+        let mut born = self.heard.word(newest.id)?.born;
+        if rows.len() > 1 && last.len() == 1 {
+            born += LINE_WAIT;
+        }
+        let (boxes, _) = sounding::word_boxes(&self.measure, last, &style, None);
+        let b = boxes.iter().find(|b| b.id == newest.id)?;
+        let top = (TEXT_TOP + row as f32 * TEXT_LINE) * k;
+        let rect = Rect::new(COL_X * k + b.rect.x, top + b.rect.y, b.rect.w, b.rect.h);
+        Some((rect, top + b.baseline, born))
+    }
+
+    /// R2-01-a: a ring per new word from the orb's rim across the glass,
+    /// behind the words and clipped to the pill. Under reduced motion the
+    /// orb's ring brightens once per word.
+    fn orb_ripples(&self, mode: Mode, size: Size, k: f32) -> Option<Element<Msg>> {
+        if !self.look.on(SONIC_RIPPLE) || mode != Mode::Listening || self.edit_view.is_some() {
+            return None;
+        }
+        let levels = self.kit_raw_levels();
+        let words: Vec<(f64, f32)> = self
+            .shown
+            .iter()
+            .rev()
+            .take(6)
+            .rev()
+            .filter_map(|w| {
+                let h = self.heard.word(w.id)?;
+                let (s0, s1) = if h.sound.1 > h.sound.0 {
+                    h.sound
+                } else {
+                    (h.born - 0.3, h.born)
+                };
+                let n = ((s1 - s0) / 0.02).ceil().max(1.0) as usize;
+                let peak = (0..=n)
+                    .map(|i| voice(levels.at(s0 + (s1 - s0) * i as f64 / n as f64)))
+                    .fold(0.0f32, f32::max);
+                Some((h.born, 0.35 + 0.65 * peak))
+            })
+            .collect();
+        let newest = words.iter().map(|w| w.0).fold(f64::NEG_INFINITY, f64::max);
+        if self.extra.now - newest >= RIPPLE_SECS {
+            return None;
+        }
+        let still = self.still();
+        let times: Vec<f64> = words.iter().map(|w| w.0).collect();
+        let centre = Point::new(ORB_X * k, size.h / 2.0);
+        let canvas = Element::canvas("ripples", newest + RIPPLE_SECS, move |t, r, p| {
+            let c = Point::new(r.x + centre.x, r.y + centre.y);
+            for (i, u) in ripples(t, &times) {
+                let a = RIPPLE_ALPHA * words[i].1 * (1.0 - u).powf(1.5);
+                if still {
+                    let edge = StrokeStyle::solid(1.4 * k, hex(CYAN).fade(a)).glow(4.0 * k);
+                    p.stroke(&make::ring(c, RING_R * k), &edge);
+                    continue;
+                }
+                let rad = (ORB_R + (RIPPLE_REACH - ORB_R) * ease_out(u as f64)) * k;
+                let edge = StrokeStyle::solid(1.0 * k, hex(CYAN).fade(a))
+                    .linear(
+                        Point::new(c.x, c.y - rad),
+                        hex(CYAN).fade(a),
+                        Point::new(c.x + rad, c.y),
+                        hex(VIOLET).fade(a),
+                    )
+                    .glow(2.0 * k);
+                p.stroke(&make::ring(c, rad), &edge);
+            }
+        });
+        let layer = Element::layer("ripples-clip")
+            .size(size.w, size.h)
+            .radius(size.h / 2.0)
+            .clip()
+            .child(at(canvas.size(size.w, size.h), 0.0, 0.0));
+        Some(at(layer, 0.0, 0.0))
+    }
+
+    /// R2-01-c: the aurora's light spilling faintly behind the newest line,
+    /// as bright as the smoothed voice.
+    fn orb_spill(&self, mode: Mode, size: Size, k: f32) -> Option<Element<Msg>> {
+        if !self.look.on(BREATHING_LIGHT) || mode != Mode::Listening || self.edit_view.is_some() {
+            return None;
+        }
+        let levels = self.kit_raw_levels();
+        let lines = self.lines.clamp(1, MAX_LINES) as f32;
+        let mid = (TEXT_TOP + (lines - 0.5) * TEXT_LINE) * k;
+        // The light has died down a few release times after the last level.
+        let until = self.newest_at + 6.0 * BREATH_RELEASE;
+        let canvas = Element::canvas("spill", until, move |t, r, p| {
+            let a = SPILL_ALPHA * breath(&levels, t);
+            if a < 0.003 {
+                return;
+            }
+            // Soft pools of light fading out along the line from the orb's
+            // side: no edge to read as a mark.
+            let rad = TEXT_LINE * k;
+            for i in 0..4 {
+                let x = r.x + (COL_X - 30.0 + i as f32 * SPILL_W / 4.0) * k;
+                let fade = 1.0 - i as f32 / 4.0;
+                p.shape(ShapeInstance::circle(
+                    Point::new(x, r.y + mid),
+                    rad,
+                    Paint::glow(hex(ORB_C).fade(a * fade), rad, 0.5),
+                ));
+            }
+        });
+        Some(at(canvas.size(size.w, size.h), 0.0, 0.0))
+    }
+
+    /// R2-01-b: tiny copies of the new word's letters stream from the orb
+    /// along a lane under the newest line and fade as they reach their
+    /// letter. Behind the words; none under reduced motion.
+    fn orb_stream(&self, mode: Mode, size: Size, k: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(MAGNETIC_TYPE)
+            || mode != Mode::Listening
+            || self.still()
+            || self.edit_view.is_some()
+        {
+            return None;
+        }
+        let (rect, baseline, born) = self.orb_newest(k)?;
+        if self.extra.now - born >= STREAM_SECS {
+            return None;
+        }
+        let word = self.shown.last()?;
+        let style = l.text_style();
+        let shaped = self.measure.layout(&word.text, &style, None);
+        let outline = vo::scene::glyph_morph::WordOutline::new(
+            self.measure.fonts(),
+            &shaped,
+            style.size,
+            Point::ZERO,
+        );
+        let letters: Arc<[(f32, Arc<[Contour]>)]> = outline
+            .glyphs
+            .iter()
+            .filter(|g| g.ink.h > 0.0)
+            .map(|g| {
+                let (cx, cy) = (g.ink.x + g.ink.w / 2.0, g.ink.y + g.ink.h / 2.0);
+                let m = Affine::translate(-cx, -cy).then(&Affine::scale(STREAM_SCALE));
+                let ink: Arc<[Contour]> =
+                    g.outline.contours.iter().map(|c| c.transform(&m)).collect();
+                (cx, ink)
+            })
+            .collect();
+        if letters.is_empty() {
+            return None;
+        }
+        let n = (letters.len() * 5).clamp(STREAM_MIN, STREAM_MAX);
+        let lane = baseline + STREAM_LANE * k;
+        let orb = Point::new(ORB_X * k, size.h / 2.0);
+        let canvas = Element::canvas("stream", born + STREAM_SECS, move |t, r, p| {
+            let age = t - born;
+            for j in 0..n {
+                let Some((u, a)) = stream(age, j, n) else {
+                    continue;
+                };
+                let (x, ink) = &letters[j % letters.len()];
+                // Leave the orb's rim fanned a little, sweep into the lane
+                // under the line, then rise to just under the letter.
+                let fan = 0.5 * (j as f32 / (n - 1) as f32 - 0.5);
+                let from = Point::new(orb.x + ORB_R * k * fan.cos(), orb.y + ORB_R * k * fan.sin());
+                let to = Point::new(rect.x + x, baseline + 5.0 * k);
+                let bend = Point::new(COL_X * k, lane);
+                let v = ease_out(u as f64);
+                let q = |a: f32, b: f32, c: f32| {
+                    (1.0 - v) * (1.0 - v) * a + 2.0 * (1.0 - v) * v * b + v * v * c
+                };
+                let pos = Point::new(r.x + q(from.x, bend.x, to.x), r.y + q(from.y, lane, to.y));
+                let m = Affine::translate(pos.x, pos.y);
+                let moved: Vec<Contour> = ink.iter().map(|c| c.transform(&m)).collect();
+                p.fill(&moved, &StrokeStyle::solid(1.0, hex(INK).fade(a)));
+            }
+        });
+        Some(at(canvas.size(size.w, size.h), 0.0, 0.0))
     }
 
     /// A thin line over the status while a model loads or the final text
@@ -733,5 +1036,73 @@ impl Popup {
                     .word_enter(Transition::fade())
                     .word_change(Transition::fade().opacity(0.2)),
             )
+    }
+}
+
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+
+    fn levels(v: f32, secs: f64) -> Levels {
+        let n = (secs * FRAME_HZ as f64) as usize;
+        Levels {
+            levels: vec![v; n].into(),
+            newest_at: secs,
+        }
+    }
+
+    #[test]
+    fn one_ring_per_word_and_none_after_its_time() {
+        let times = [1.0, 1.1, 1.2, 1.3];
+        let alive = ripples(1.35, &times);
+        assert_eq!(alive.len(), MAX_RIPPLES);
+        assert_eq!(alive.last().map(|r| r.0), Some(3));
+        assert_eq!(ripples(1.05, &times).len(), 1);
+        assert!(ripples(0.9, &times).is_empty());
+        assert!(ripples(1.3 + RIPPLE_SECS, &times).is_empty());
+    }
+
+    #[test]
+    fn the_letters_are_gone_after_their_time() {
+        for n in [STREAM_MIN, STREAM_MAX] {
+            for j in 0..n {
+                assert!(stream(STREAM_SECS, j, n).is_none());
+                assert!(stream(-0.01, j, n).is_none());
+                if let Some((_, a)) = stream(0.2, j, n) {
+                    assert!(a <= STREAM_ALPHA);
+                }
+            }
+            // Every copy leaves, and the last one is near zero as it lands.
+            let (_, a) = stream(STREAM_SECS - 1e-3, n - 1, n).unwrap();
+            assert!(a < 0.01);
+        }
+    }
+
+    #[test]
+    fn the_aurora_follows_the_smoothed_voice_only() {
+        let quiet = levels(0.0, 3.0);
+        let loud = levels(1.0, 3.0);
+        assert_eq!(breath(&quiet, 3.0), 0.0);
+        assert_eq!(breath(&loud, 3.0), breath(&loud, 3.0));
+        assert!(breath(&loud, 3.0) > 0.99);
+        assert_eq!(aurora_scale(0.0), 0.95);
+        assert!((aurora_scale(breath(&loud, 3.0)) - 1.05).abs() < 1e-3);
+        // Fast up, slow down: 0.2 s into a sound it is most of the way up,
+        // and 0.2 s after one, most of it is still there.
+        let hz = FRAME_HZ as usize;
+        let start = Levels {
+            levels: [vec![0.0; 27 * hz / 10], vec![1.0; 3 * hz / 10]]
+                .concat()
+                .into(),
+            newest_at: 3.0,
+        };
+        assert!(breath(&start, 2.9) > 0.8);
+        let stop = Levels {
+            levels: [vec![1.0; 27 * hz / 10], vec![0.0; 3 * hz / 10]]
+                .concat()
+                .into(),
+            newest_at: 3.0,
+        };
+        assert!(breath(&stop, 2.9) > 0.6);
     }
 }
