@@ -20,7 +20,6 @@ use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::roll::digit_roll;
-use vo::scene::flow::{Revise, ROLL_WORD_EMS};
 use vo::scene::taffy;
 use vo::scene::Insets;
 use vo::scene::taffy::prelude::{auto, length};
@@ -99,8 +98,6 @@ const GROW_SECS: f64 = 0.15;
 /// A glitch burst, and the least time between two from revisions.
 const BURST_SECS: f64 = 0.14;
 const BURST_GAP: f64 = 0.4;
-/// Seconds a revised word's old text takes to roll up and out.
-const ROLL_SECS: f64 = 0.22;
 /// The open's glitch.
 const OPEN_GLITCH_SECS: f64 = 0.24;
 /// Ticks while something is being typed or grown.
@@ -251,9 +248,6 @@ pub struct State {
     revised: Option<WordId>,
     /// The words on screen at the last sync.
     words: Vec<Word>,
-    /// Revised words' old text rolling up and out: the word, its old
-    /// text and when it was revised.
-    rolls: Vec<(WordId, String, f64)>,
 }
 
 impl Default for State {
@@ -269,7 +263,6 @@ impl Default for State {
             revised_at: f64::NEG_INFINITY,
             revised: None,
             words: Vec::new(),
-            rolls: Vec::new(),
         }
     }
 }
@@ -353,18 +346,24 @@ impl Geo {
         ]
     }
 
+    /// The top edge, the first piece: over the tag, then up a step to the
+    /// top right corner. MO-53 snaps it open on a failure.
+    fn top_edge(&self) -> Vec<(f32, f32)> {
+        vec![
+            (38.0, 32.0),
+            (384.0, 32.0),
+            (412.0, 3.0),
+            (self.r(560.0), 3.0),
+        ]
+    }
+
     /// Stroked pieces, each drawn on from its first point: points, width,
     /// colour key and draw-on order.
     fn pieces(&self, tag_r: f32) -> Vec<Piece> {
         let (h, r) = (self.h, |x| self.r(x));
         let sy = self.status_y();
         vec![
-            Piece::new(
-                &[(38.0, 32.0), (384.0, 32.0), (412.0, 3.0), (r(560.0), 3.0)],
-                3.0,
-                Hue::Yellow,
-                0,
-            ),
+            Piece::new(&self.top_edge(), TOP_EDGE_W, Hue::Yellow, 0),
             Piece::new(
                 &[
                     (38.0, 32.0),
@@ -514,6 +513,14 @@ const SLICES: [(u8, f32, f32, f32, f32, u32); 16] = [
     (1, 0.810, -12.0, 26.0, 2.0, RED),
 ];
 
+/// The top edge's stroke width.
+const TOP_EDGE_W: f32 = 3.0;
+/// MO-53: where the top edge snaps on a failure, along its length from its
+/// left end: right of the tag, under the gap before the step.
+const BREAK_AT: f32 = 292.0;
+/// MO-53: the stage label's top, under the inner echo line right of the tag.
+const BREAK_LABEL_Y: f32 = 44.0;
+
 /// How far the decoration canvas draws past the surface: the right slices
 /// reach 24 px past the frame and a burst shakes them 15 px more, frame
 /// pieces jitter 14 px, and the frame's 2 px glow fades out over about 12 px.
@@ -545,6 +552,8 @@ struct Deco {
     progress: Option<f32>,
     /// The revised word's box in panel space and when it was revised.
     mark: Option<(f64, Rect)>,
+    /// MO-53: the top edge is drawn snapped open by `paths_broken_frame_at`.
+    broken: bool,
 }
 
 impl Deco {
@@ -632,7 +641,10 @@ impl Deco {
         };
         // The frame draws on from its corners.
         let tag_r = self.tag_r(t);
-        for piece in g.pieces(tag_r) {
+        for (i, piece) in g.pieces(tag_r).into_iter().enumerate() {
+            if self.broken && i == 0 {
+                continue;
+            }
             let k = if reduced() {
                 1.0
             } else {
@@ -1161,7 +1173,7 @@ impl Popup {
             c.lines_at = t;
         }
         // A word whose text changed, other than by growing, is a revision.
-        // An edit is not one: no glitch burst and no roll while editing.
+        // An edit is not one: no glitch burst while editing.
         let editing = self.edit_view.is_some();
         if !editing && self.extra.final_at.is_none() && t - c.revised_at > BURST_GAP {
             let bare = |w: &str| w.trim_start_matches('…').to_string();
@@ -1178,13 +1190,6 @@ impl Popup {
                 c.revised = Some(w.id);
             }
         }
-        // Every changed word rolls its old text up and out.
-        c.rolls.retain(|r| t < r.2 + ROLL_SECS);
-        for w in self.shown.iter().filter(|_| !editing) {
-            if let Some(o) = c.words.iter().find(|o| o.id == w.id && o.text != w.text) {
-                c.rolls.push((w.id, o.text.clone(), t));
-            }
-        }
         c.words.clone_from(&self.shown);
     }
 
@@ -1199,7 +1204,6 @@ impl Popup {
                 || t < typing
                 || t < c.lines_at + GROW_SECS
                 || t < c.revised_at + BURST_SECS
-                || c.rolls.iter().any(|r| t < r.2 + ROLL_SECS)
                 || t < c.mode_at + 0.25)
     }
 
@@ -1280,6 +1284,7 @@ impl Popup {
                 .revised
                 .and_then(|id| self.cyber_word_box(id))
                 .map(|b| (c.revised_at, b)),
+            broken: self.paths_broken(),
         };
         // The panel's top moves down by what it lacks of its full height.
         let dy = tall_h() - deco.h(t);
@@ -1350,10 +1355,45 @@ impl Popup {
             );
         panel
             .child(deco)
+            .children(self.cyber_broken_frame(size))
             .child(body)
             .child(text)
             .child(self.cyber_status(mode, &status, ox, oy + sy))
             .child(self.cyber_count(mode, ox + w - 84.0, oy + sy + 17.0))
+    }
+
+    /// MO-53: on a failure the top edge snaps open right of the tag, its
+    /// ends lit in yellow, with the stage that failed under it.
+    fn cyber_broken_frame(&self, size: Size) -> Option<Element<Msg>> {
+        if !self.paths_broken() {
+            return None;
+        }
+        let h = panel_h(self.cyber.lines as f32);
+        let o = Point::new(MARGIN_X, MARGIN_Y + tall_h() - h);
+        let g = Geo {
+            w: width(&self.look),
+            h,
+        };
+        let pts: Vec<Point> = g
+            .top_edge()
+            .iter()
+            .map(|&(x, y)| Point::new(o.x + x, o.y + y))
+            .collect();
+        let pen = glyph_paths::BrokenPen {
+            width: TOP_EDGE_W,
+            glow: 2.0,
+            line: hex(RED),
+            accent: hex(YELLOW),
+            label: TextStyle::new(fonts(&self.look.fonts).tag, 10.0, 12.0).tracking(0.6),
+            label_y: o.y + BREAK_LABEL_Y,
+        };
+        self.paths_broken_frame_at(
+            &Contour::polyline(&pts, false),
+            BREAK_AT,
+            size.w,
+            size.h,
+            pen,
+        )
     }
 
     /// The tag's icon and its typed text with the block cursor.
@@ -1465,9 +1505,9 @@ impl Popup {
         } else {
             hex(PAPER)
         };
-        // New words rise into place. A revised word's replacement is there
-        // at once, at full ink on the reading line, while its old text rolls
-        // up and out above it (`cyber_rolls`).
+        // New words rise into place. A revised word changes by the
+        // palimpsest (MO-20): letters that stay stay, removed ones sink into
+        // a faint ghost, while a glitch burst shakes the panel.
         let words = Element::live_text("words", &self.shown)
             .line_motion(&self.look)
             .text_style(l.text_style())
@@ -1476,7 +1516,7 @@ impl Popup {
             .motion(Prop::Opacity, Spring::critical_to_98(0.10))
             .motion(Prop::Offset, Spring::POP)
             .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 6.0)))
-            .word_revise(Revise::Swap)
+            .word_revise(revision::revise(l))
             .text_halo(Color::WHITE.fade(if cancelled { 0.0 } else { 0.12 }), 3.0);
         let words = self.handoff_or(
             words,
@@ -1509,9 +1549,6 @@ impl Popup {
             true,
         ))
         .children(self.cyber_rewind());
-        if !rewinding {
-            text = text.children(self.cyber_rolls(colour));
-        }
         if cancelled && !rewinding {
             // A red strike through each line, drawn on.
             for (i, (y, w)) in self.cyber_line_extents().into_iter().enumerate() {
@@ -1534,45 +1571,6 @@ impl Popup {
             }
         }
         self.signal_marks(text, &self.shown, l.text_width(), (0.0, 0.0), colour)
-    }
-
-    /// Each revised word's old text, rolling up out of its slot and fading,
-    /// its letters spreading to the new word's width. In the text column's
-    /// space.
-    fn cyber_rolls(&self, colour: Color) -> Vec<Element<Msg>> {
-        let t = self.extra.now;
-        let style = self.look.text_style();
-        let travel = if reduced() {
-            0.0
-        } else {
-            ROLL_WORD_EMS * style.size
-        };
-        let mut out = Vec::new();
-        for (i, (id, old, at_t)) in self.cyber.rolls.iter().enumerate() {
-            let k = ease_out((t - at_t) / ROLL_SECS);
-            if k >= 1.0 {
-                continue;
-            }
-            let Some(b) = self.cyber_word_box(*id) else {
-                continue;
-            };
-            let new = self
-                .shown
-                .iter()
-                .find(|w| w.id == *id)
-                .map_or("", |w| w.text.as_str());
-            let width = |s: &str| self.measure.layout(s, &style, None).size.w;
-            let gaps = old.chars().count().saturating_sub(1).max(1) as f32;
-            let spread = (width(new) - width(old)) / gaps * k;
-            let roll = Element::label(format!("roll{i}"), old.clone())
-                .text_style(style.tracking(style.tracking + spread))
-                .color(colour)
-                .opacity(1.0 - k)
-                .motion(Prop::Position, Motion::Snap)
-                .motion(Prop::Opacity, Motion::Snap);
-            out.push(at(roll, b.x - TEXT_X, b.y - TEXT_TOP - travel * k));
-        }
-        out
     }
 
     /// MO-50: a cancel takes the words back into the caret.
@@ -1668,7 +1666,11 @@ impl Popup {
                     app.map_or("text sent".into(), |a| format!("sent to {a}")),
                 )
             }
-            Mode::Cancelled => ("Cancelled".into(), "nothing was typed".into()),
+            Mode::Cancelled => match self.ending() {
+                Some(Ending::Failed) => ("Failed".into(), "nothing was typed".into()),
+                Some(Ending::Empty) => (Ending::Empty.label().into(), String::new()),
+                _ => ("Cancelled".into(), "nothing was typed".into()),
+            },
             Mode::Listening => ("Listening".into(), status.detail.clone()),
             _ => (status.state.clone(), status.detail.clone()),
         };
@@ -1785,7 +1787,7 @@ mod edit_tests {
     use super::{hex, sounding, YELLOW};
     use voxtype::osd::config::OsdTheme;
 
-    /// M7.L4: Cyberpunk edits in its own layout, its yellow caret as the edit caret, its glitch bursts, rolls and joint ticks off. With the caret on the
+    /// M7.L4: Cyberpunk edits in its own layout, its yellow caret as the edit caret, its glitch bursts and joint ticks off. With the caret on the
     /// newest, a middle and the top line, at both widths: the caret on its
     /// glyph within 1 px in every frame, the popup's size unchanged, and the
     /// golden `tests/fixtures/osd-vo/edit-cyberpunk.txt`.
