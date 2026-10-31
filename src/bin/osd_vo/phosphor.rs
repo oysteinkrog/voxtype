@@ -721,7 +721,16 @@ impl Popup {
         }
         let g = Geo::new(&self.look);
         let k = g.k;
-        let (x, y) = if self.shown.is_empty() {
+        // After the ghost tail when there is one, so the block never covers
+        // the first ghost word (s3th). The same tail `signal_marks` lays.
+        let tail = model_signals::TailText {
+            style: self.look.text_style(),
+            width: self.look.text_width(),
+            rows: self.lines,
+        };
+        let (x, y) = if let Some((x, top)) = self.ghost_tail_end(&self.shown, &tail) {
+            (x + 8.0 * k, top)
+        } else if self.shown.is_empty() {
             (0.0, 0.0)
         } else {
             let (shaped, starts) = self.phosphor_shaped();
@@ -1352,6 +1361,57 @@ impl edit_site::EditSite for PhosphorSite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// s3th: with the ghost tail on, the block caret stands after the last
+    /// drawn ghost word, not over the first one.
+    #[test]
+    fn the_caret_stands_after_the_ghost_tail() {
+        use voxtype::osd::live::{ModelSignals, TailToken};
+        let fonts = super::super::swiss_look::edit_check::fonts();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Phosphor,
+            motion: OsdMotion::Names(vec![model_signals::GHOST_TAIL.into()]),
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &PlasmaTheme::default(), String::new(), &fonts);
+        look.set_motion(&cfg.motion);
+        let mut popup = Popup::new(look.clone(), &fonts);
+        let committed = "This is a longer test";
+        popup.files.recording = true;
+        popup.files.preview = committed.into();
+        popup.shown = committed
+            .split(' ')
+            .enumerate()
+            .map(|(i, w)| Word {
+                id: i as u32 + 1,
+                text: w.into(),
+            })
+            .collect();
+        let caret = |p: &Popup| p.phosphor_caret_target().expect("a caret").x;
+        let before = caret(&popup);
+        let tok = |text: &str, edge| TailToken {
+            text: text.into(),
+            start: 0.0,
+            end: 0.08,
+            edge,
+            conf: 0.9,
+            detail: None,
+        };
+        popup.model_signals = Some(ModelSignals {
+            tail: vec![tok(" of", 5), tok(" voice", 3)],
+            with_tail: format!("{committed} of voice"),
+            ..ModelSignals::default()
+        });
+        let after = caret(&popup);
+        let style = look.text_style();
+        let width = |t: &str| popup.measure.layout(t, &style, None).size.w;
+        let want = width(&format!("{committed} of voice")) - width(committed);
+        assert!(
+            (after - before - want).abs() < 2.0,
+            "moved {} for {want}",
+            after - before
+        );
+    }
 
     fn screen(wave: &[f32]) -> Screen {
         Screen {
