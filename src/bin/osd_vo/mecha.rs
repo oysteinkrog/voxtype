@@ -11,6 +11,24 @@
 //!
 //! The drawing is in the units of the concept it was made from, 980 by 630,
 //! scaled to the popup's width.
+//!
+//! Round 2 (R2-23), each an opt-in motion feature:
+//!
+//! - `magnetic-ink`: when a word comes, faint particles flow in from the
+//!   panel's left edge along a curling path, gather behind the word in
+//!   300 ms and disperse in 500 ms. The word itself is at 70 % ink or more
+//!   from its first frame. Reduced motion: no particles.
+//! - `glass-prism`: the text panel is a glass slab (EG-06, shaped to the
+//!   panel, no refraction), and each new word sends one spectral band
+//!   across it, left to right, in 600 ms, at 15 % or less over the text.
+//!   Reduced motion: the slab and no sweep.
+//! - `breathing-grid`: faint contour lines behind the text rise round the
+//!   newest word by up to 4 px and settle in 800 ms, and ripple with the
+//!   voice. Reduced motion: still lines.
+//!
+//! The grid is drawn on a canvas from the word boxes, not with the EG-31
+//! text field, which needs an app material and host support the popup
+//! does not have.
 
 use super::*;
 
@@ -18,8 +36,10 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use vo::scene::canvas::Painter;
-use vo::scene::display::{GlyphInstance, Paint, ShapeInstance, NO_WORD};
+use vo::scene::display::{BlendMode, GlyphInstance, Paint, ShapeInstance, NO_WORD};
+use vo::scene::frame::Corner;
 use vo::scene::geom::{Affine, Point, RRect};
+use vo::scene::glass::{Glass, GlassShape};
 use vo::scene::path::{icons, Contour, Outline, StrokeStyle};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
@@ -81,6 +101,36 @@ const JITTER_HZ: f64 = 6.0;
 /// many pixels and back on this cycle, as a hydraulic pair breathing.
 const BREATHE_PX: f32 = 2.0;
 const BREATHE_SECS: f64 = 3.0;
+
+/// R2-23-a: particles per word at a quiet and a loud word, their alpha,
+/// the seconds they take to flow in and to disperse, how far they curl off
+/// the straight path and how far they drift apart (concept units).
+pub(crate) const MAGNETIC_INK: &str = "magnetic-ink";
+const INK_DOTS: (f32, f32) = (40.0, 110.0);
+const INK_ALPHA: f32 = 0.3;
+const INK_IN: f64 = 0.3;
+const INK_OUT: f64 = 0.5;
+const INK_CURL: f32 = 40.0;
+const INK_DRIFT: f32 = 46.0;
+/// R2-23-b: the band's crossing time, its alpha, width (concept units) and
+/// colours, left to right.
+pub(crate) const GLASS_PRISM: &str = "glass-prism";
+const SWEEP_SECS: f64 = 0.6;
+const SWEEP_ALPHA: f32 = 0.15;
+const SWEEP_W: f32 = 120.0;
+const SWEEP_COLOURS: [u32; 5] = [0xff4d6d, 0xffb340, 0xfff06a, 0x5cf0c8, 0x6f9bff];
+/// R2-23-c: the contour lines' pitch (concept units) and alpha, the
+/// newest word's lift (pixels) and its time to settle, how far round the
+/// word the lift reaches (concept units), and the voice's ripple (pixels).
+pub(crate) const BREATHING_GRID: &str = "breathing-grid";
+const GRID_PITCH: f32 = 16.0;
+const GRID_ALPHA: f32 = 0.12;
+const GRID_LIFT: f32 = 4.0;
+const GRID_SECS: f64 = 0.8;
+const GRID_REACH: f32 = 70.0;
+const GRID_WAVE: f32 = 1.5;
+/// Room tone counts as no voice.
+const VOICE_GATE: f32 = 0.04;
 
 /// The fonts of the look.
 #[derive(Clone, Copy, Debug)]
@@ -234,6 +284,113 @@ fn noise(i: i64) -> f32 {
     x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
     x ^= x >> 31;
     (x >> 40) as f32 / (1u64 << 24) as f32
+}
+
+/// R2-23-a: particle `i` of a word at `age` seconds: where it is and its
+/// alpha, or none once it has dispersed. It flows from `from` to `to`
+/// along a curl, then drifts off. `seed` picks its curl and drift; `k` is
+/// the concept-to-pixel scale.
+fn ink_dot(age: f64, from: Point, to: Point, seed: i64, k: f32) -> Option<(Point, f32)> {
+    if age < 0.0 || age >= INK_IN + INK_OUT {
+        return None;
+    }
+    let (a, b) = (noise(seed) - 0.5, noise(seed + 7919) - 0.5);
+    if age < INK_IN {
+        let u = (age / INK_IN) as f32;
+        let e = 1.0 - (1.0 - u) * (1.0 - u);
+        // A curl off the straight path that closes at both ends.
+        let bend = INK_CURL * k * (std::f32::consts::PI * e).sin();
+        let p = Point::new(
+            from.x + (to.x - from.x) * e + 0.3 * bend * b,
+            from.y + (to.y - from.y) * e + bend * a,
+        );
+        return Some((p, INK_ALPHA * smooth((u / 0.25).min(1.0))));
+    }
+    let v = ((age - INK_IN) / INK_OUT) as f32;
+    let drift = INK_DRIFT * k * ease_out(v);
+    let p = Point::new(to.x + drift * b * 2.0, to.y + drift * a * 2.0);
+    Some((p, INK_ALPHA * (1.0 - v).powf(1.5)))
+}
+
+/// R2-23-b: where the band's middle is across the panel at `age`, 0 at the
+/// left edge to 1 at the right, and its alpha; none once it has crossed.
+fn sweep(age: f64) -> Option<(f32, f32)> {
+    if !(0.0..SWEEP_SECS).contains(&age) {
+        return None;
+    }
+    let u = (age / SWEEP_SECS) as f32;
+    Some((smooth(u), SWEEP_ALPHA * (std::f32::consts::PI * u).sin()))
+}
+
+/// R2-23-c: how much of the lift the newest word has at `age`: up in
+/// 120 ms, settled to none at `GRID_SECS`.
+fn grid_lift(age: f64) -> f32 {
+    if age <= 0.0 || age >= GRID_SECS {
+        return 0.0;
+    }
+    let up = smooth((age / 0.12).min(1.0) as f32);
+    let down = 1.0 - smooth(((age - 0.12) / (GRID_SECS - 0.12)).max(0.0) as f32);
+    up * down
+}
+
+/// R2-23-b: the glass slab's outline, 4 units inside the text panel's
+/// border (concept units, clockwise on screen).
+const SLAB: [(f32, f32); 8] = [
+    (97.6, 304.0),
+    (908.4, 304.0),
+    (930.0, 325.6),
+    (930.0, 489.4),
+    (889.4, 530.0),
+    (151.6, 530.0),
+    (76.0, 454.4),
+    (76.0, 325.6),
+];
+
+/// R2-23-b: `poly` clipped to the convex polygon `clip`, which runs
+/// clockwise on screen (Sutherland-Hodgman).
+fn clip_convex(poly: &[(f32, f32)], clip: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let mut out = poly.to_vec();
+    for (i, &a) in clip.iter().enumerate() {
+        let b = clip[(i + 1) % clip.len()];
+        // Inside is on the right of a to b, with y down.
+        let side = |p: (f32, f32)| (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+        let input = std::mem::take(&mut out);
+        for (j, &p) in input.iter().enumerate() {
+            let q = input[(j + 1) % input.len()];
+            let (sp, sq) = (side(p), side(q));
+            if sp >= 0.0 {
+                out.push(p);
+            }
+            if (sp >= 0.0) != (sq >= 0.0) {
+                let k = sp / (sp - sq);
+                out.push((p.0 + (q.0 - p.0) * k, p.1 + (q.1 - p.1) * k));
+            }
+        }
+        if out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// R2-23-c: the text panel's inside at concept height `y`, left and right,
+/// `inset` in from its border.
+fn panel_span(y: f32, inset: f32) -> (f32, f32) {
+    let left = if y < 324.0 {
+        96.0 - (y - 300.0)
+    } else if y < 456.0 {
+        72.0
+    } else {
+        72.0 + (y - 456.0)
+    };
+    let right = if y < 324.0 {
+        910.0 + (y - 300.0)
+    } else if y < 490.0 {
+        934.0
+    } else {
+        934.0 - (y - 490.0) * 42.0 / 44.0
+    };
+    (left + inset, right - inset)
 }
 
 /// MO-53: where the text panel's border snaps, along it from its top left
@@ -1478,8 +1635,10 @@ impl Popup {
             .presence(Transition::fade().opacity(0.0), exit)
             .child(at(canvas, 0.0, 0.0))
             .children(self.mecha_broken_frame(size))
+            .children(self.mecha_behind_text(phase))
             .child(at(chain.element(), TEXT_X * s, TEXT_Y * s))
-            .child(text);
+            .child(text)
+            .children(self.mecha_sweep(phase));
         if phase == Phase::Cancelled {
             // Strike lines over the words, as wide as each line.
             let style = text_style(l);
@@ -1763,6 +1922,227 @@ impl Popup {
     }
 }
 
+impl Popup {
+    /// R2-23: the words on screen in the text box's space, each with when
+    /// it came and the voice it came at, oldest first.
+    fn mecha_box_words(&self) -> Vec<(f64, Rect, f32)> {
+        let l = &self.look;
+        let s = scale(l);
+        let style = text_style(l);
+        let (boxes, lines) =
+            sounding::word_boxes(&self.measure, &self.shown, &style, Some(text_width(l)));
+        let box_h = MAX_LINES as f32 * TEXT_LINE * s;
+        // The text sits at the bottom of its box.
+        let y0 = box_h - lines.max(1).min(MAX_LINES as usize) as f32 * style.line_height;
+        let levels = self.kit_levels();
+        let mut words: Vec<(f64, Rect, f32)> = boxes
+            .iter()
+            .filter_map(|b| {
+                let born = self.heard.word(b.id)?.born;
+                let r = Rect::new(b.rect.x, y0 + b.rect.y, b.rect.w, b.rect.h);
+                Some((born, r, levels.at(born)))
+            })
+            .collect();
+        words.sort_by(|a, b| a.0.total_cmp(&b.0));
+        words
+    }
+
+    /// R2-23-a, R2-23-b and R2-23-c behind the text: the glass slab, the
+    /// contour grid and the ink particles, while listening.
+    fn mecha_behind_text(&self, phase: Phase) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        let (prism, grid, ink) = (l.on(GLASS_PRISM), l.on(BREATHING_GRID), l.on(MAGNETIC_INK));
+        let mut out = Vec::new();
+        if !(prism || grid || ink) || self.edit_view.is_some() || phase == Phase::Cancelled {
+            return out;
+        }
+        let s = scale(l);
+        let still = kit::reduced() || l.on("reduced-motion");
+        if prism {
+            // The slab lies just inside the panel's border, its corners cut
+            // as the panel's are.
+            let inset = 4.0;
+            let corners = [24.0, 24.0, 43.0, 78.0].map(|c| Corner::Chamfer((c - inset * 0.6) * s));
+            let glass = Glass {
+                tint: hex(PANEL).fade(0.35),
+                accent: hex(ORANGE),
+                rim: 0.35,
+                bevel: 10.0 * s,
+                shadow: [0.0; 3],
+                blur_behind: false,
+                ..Glass::dark()
+            }
+            .with_shape(GlassShape::Corners(corners));
+            let glass = if still { glass.still() } else { glass };
+            let slab = Element::panel("glass-slab")
+                .size((862.0 - 2.0 * inset) * s, (234.0 - 2.0 * inset) * s)
+                .glass(glass)
+                .presence(Transition::fade(), Transition::fade());
+            out.push(at(slab, (72.0 + inset) * s, (300.0 + inset) * s));
+        }
+        if phase != Phase::Listening {
+            return out;
+        }
+        let words = self.mecha_box_words();
+        let newest = words.last().copied();
+        // The canvases cover the panel; their origin is the text box's.
+        let (ox, oy) = (TEXT_X * s, TEXT_Y * s);
+        let panel = Size::new(980.0 * s, 630.0 * s);
+        if grid {
+            let levels = self.kit_levels();
+            let until = if still { 0.0 } else { f64::INFINITY };
+            let canvas = Element::canvas("breathing-grid", until, move |t, r, p| {
+                let rms = if still {
+                    0.0
+                } else {
+                    let v = levels.at(t);
+                    if v < VOICE_GATE {
+                        0.0
+                    } else {
+                        (v * 2.2).min(1.0)
+                    }
+                };
+                let mut y = 300.0 + GRID_PITCH;
+                let mut i = 0;
+                while y < 534.0 - GRID_PITCH * 0.5 {
+                    let (x0, x1) = panel_span(y, 14.0);
+                    let pts: Vec<Point> = (0..=60)
+                        .map(|j| {
+                            let x = x0 + (x1 - x0) * j as f32 / 60.0;
+                            // In the text box's space, pixels.
+                            let (bx, by) = ((x - TEXT_X) * s, (y - TEXT_Y) * s);
+                            let mut lift = 0.0;
+                            if let (Some((born, w, _)), false) = (newest, still) {
+                                let k = grid_lift(t - born);
+                                if k > 0.0 {
+                                    let dx = (w.x - bx).max(bx - (w.x + w.w)).max(0.0);
+                                    let dy = (w.y - by).max(by - (w.y + w.h)).max(0.0);
+                                    let d = (dx * dx + dy * dy).sqrt() / (GRID_REACH * s);
+                                    lift = GRID_LIFT * k * (-d * d).exp();
+                                }
+                            }
+                            let wave = GRID_WAVE
+                                * rms
+                                * (0.035 * x - 3.0 * t as f32 + 0.9 * i as f32).sin();
+                            Point::new(r.x + ox + bx, r.y + oy + by - lift + wave)
+                        })
+                        .collect();
+                    p.stroke(
+                        &Contour::polyline(&pts, false),
+                        &StrokeStyle::solid(1.0, hex(ORANGE).fade(GRID_ALPHA)),
+                    );
+                    y += GRID_PITCH;
+                    i += 1;
+                }
+            })
+            .size(panel.w, panel.h);
+            out.push(at(canvas, 0.0, 0.0));
+        }
+        if ink && !still {
+            let last = words.last().map_or(0.0, |w| w.0);
+            let canvas =
+                Element::canvas("magnetic-ink", last + INK_IN + INK_OUT, move |t, r, p| {
+                    for (wi, &(born, w, level)) in words.iter().enumerate().rev() {
+                        let age = t - born;
+                        if age >= INK_IN + INK_OUT {
+                            break;
+                        }
+                        if age < 0.0 {
+                            continue;
+                        }
+                        let n =
+                            INK_DOTS.0 + (INK_DOTS.1 - INK_DOTS.0) * (level * 2.2).clamp(0.0, 1.0);
+                        let seed = (born * 1000.0) as i64 * 131 + wi as i64;
+                        for i in 0..n as i64 {
+                            let (a, b) = (noise(seed * 977 + i), noise(seed * 977 + i + 4001));
+                            let to = Point::new(w.x + a * w.w, w.y + 0.15 * w.h + b * 0.7 * w.h);
+                            // From the panel's left edge, near the word's line.
+                            let from = Point::new((82.0 - TEXT_X) * s, to.y + (b - 0.5) * 60.0 * s);
+                            let Some((d, alpha)) = ink_dot(age, from, to, seed * 977 + i, s) else {
+                                continue;
+                            };
+                            let rad = (0.9 + 0.8 * a) * s.max(0.6);
+                            let c = mix(hex(ORANGE), hex(YELLOW), b);
+                            let rr = RRect::new(
+                                Rect::new(
+                                    r.x + ox + d.x - rad,
+                                    r.y + oy + d.y - rad,
+                                    2.0 * rad,
+                                    2.0 * rad,
+                                ),
+                                rad,
+                            );
+                            p.shape(ShapeInstance::rrect(rr, Paint::solid(c.fade(alpha))));
+                        }
+                    }
+                })
+                .size(panel.w, panel.h);
+            out.push(at(canvas, 0.0, 0.0));
+        }
+        out
+    }
+
+    /// R2-23-b: a spectral band across the glass slab for each new word,
+    /// over the text, additive, while listening.
+    fn mecha_sweep(&self, phase: Phase) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(GLASS_PRISM)
+            || phase != Phase::Listening
+            || self.edit_view.is_some()
+            || kit::reduced()
+            || l.on("reduced-motion")
+        {
+            return None;
+        }
+        let s = scale(l);
+        let borns: Vec<f64> = self.mecha_box_words().iter().map(|w| w.0).collect();
+        let last = *borns.last()?;
+        let canvas = Element::canvas("prism-sweep", last + SWEEP_SECS, move |t, r, p| {
+            // Only the newest word's band, so two never add up.
+            let Some((u, alpha)) = borns.iter().rev().find_map(|&born| sweep(t - born)) else {
+                return;
+            };
+            // The band's middle runs from the panel's left edge to its
+            // right: the colours blend into each other and fade out at both
+            // sides.
+            let (x0, x1) = (72.0 - SWEEP_W / 2.0, 934.0 + SWEEP_W / 2.0);
+            let left = x0 + (x1 - x0) * u - SWEEP_W / 2.0;
+            let n = SWEEP_COLOURS.len();
+            let stops: Vec<Color> = std::iter::once(hex(SWEEP_COLOURS[0]).fade(0.0))
+                .chain(SWEEP_COLOURS.iter().map(|&c| hex(c).fade(alpha)))
+                .chain(std::iter::once(hex(SWEEP_COLOURS[n - 1]).fade(0.0)))
+                .collect();
+            let step = SWEEP_W / (stops.len() - 1) as f32;
+            for (i, pair) in stops.windows(2).enumerate() {
+                let a = left + step * i as f32;
+                let b = a + step;
+                // Clipped to the slab.
+                let quad = [(a, 300.0), (b, 300.0), (b, 534.0), (a, 534.0)];
+                let pts: Vec<Point> = clip_convex(&quad, &SLAB)
+                    .into_iter()
+                    .map(|(x, y)| Point::new(r.x + x * s, r.y + y * s))
+                    .collect();
+                if pts.len() < 3 {
+                    continue;
+                }
+                let mid = r.y + 417.0 * s;
+                p.fill(
+                    [&Contour::polyline(&pts, true)],
+                    &StrokeStyle::solid(1.0, pair[0]).linear(
+                        Point::new(r.x + a * s, mid),
+                        pair[0],
+                        Point::new(r.x + b * s, mid),
+                        pair[1],
+                    ),
+                );
+            }
+        })
+        .size(980.0 * s, 630.0 * s)
+        .blend(BlendMode::Add);
+        Some(at(canvas, 0.0, 0.0))
+    }
+}
+
 #[cfg(test)]
 mod edit_tests {
     use super::super::swiss_look::edit_check::{envelope, Rig};
@@ -1812,5 +2192,87 @@ mod edit_tests {
         r.enter(1.0);
         let chain = r.p.mecha_chain(Phase::Listening);
         assert!(!chain.caret && chain.plates.is_empty() && chain.targets.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod round2_tests {
+    use super::*;
+
+    #[test]
+    fn the_particles_are_gone_500_ms_after_they_gather() {
+        let (from, to) = (Point::new(0.0, 50.0), Point::new(200.0, 40.0));
+        for seed in 0..40 {
+            assert!(ink_dot(-0.01, from, to, seed, 1.0).is_none());
+            assert!(ink_dot(INK_IN + INK_OUT, from, to, seed, 1.0).is_none());
+            for i in 0..80 {
+                let age = i as f64 * 0.01;
+                if let Some((_, a)) = ink_dot(age, from, to, seed, 1.0) {
+                    assert!((0.0..=INK_ALPHA).contains(&a), "{a}");
+                }
+            }
+            // Gathered at the word once they have flowed in.
+            let (p, _) = ink_dot(INK_IN, from, to, seed, 1.0).unwrap();
+            assert!((p.x - to.x).abs() < 1e-3 && (p.y - to.y).abs() < 1e-3);
+        }
+        assert_eq!(
+            ink_dot(0.42, from, to, 9, 1.0),
+            ink_dot(0.42, from, to, 9, 1.0)
+        );
+    }
+
+    #[test]
+    fn the_sweep_stays_within_15_percent_and_crosses_once() {
+        assert!(sweep(-0.01).is_none());
+        assert!(sweep(SWEEP_SECS).is_none());
+        let mut last = -1.0;
+        for i in 0..60 {
+            let (u, a) = sweep(i as f64 * 0.01).unwrap();
+            assert!(a <= 0.15 && a >= 0.0);
+            assert!(u >= last);
+            last = u;
+        }
+    }
+
+    #[test]
+    fn the_lift_is_gone_after_800_ms() {
+        assert_eq!(grid_lift(-0.1), 0.0);
+        assert!(grid_lift(0.12) > 0.99);
+        assert_eq!(grid_lift(GRID_SECS), 0.0);
+        assert_eq!(grid_lift(GRID_SECS + 1.0), 0.0);
+        for i in 0..90 {
+            let k = grid_lift(i as f64 * 0.01);
+            assert!((0.0..=1.0).contains(&k));
+            assert!(GRID_LIFT * k <= 4.0);
+        }
+    }
+
+    #[test]
+    fn a_band_is_clipped_to_the_slab() {
+        // Inside: unchanged. Outside: nothing. Across the left chamfer: cut.
+        let inside = [
+            (300.0, 350.0),
+            (320.0, 350.0),
+            (320.0, 400.0),
+            (300.0, 400.0),
+        ];
+        assert_eq!(clip_convex(&inside, &SLAB).len(), 4);
+        let outside = [(0.0, 350.0), (20.0, 350.0), (20.0, 400.0), (0.0, 400.0)];
+        assert!(clip_convex(&outside, &SLAB).is_empty());
+        let cut = clip_convex(
+            &[(60.0, 300.0), (130.0, 300.0), (130.0, 534.0), (60.0, 534.0)],
+            &SLAB,
+        );
+        assert!(cut
+            .iter()
+            .all(|&(x, y)| x >= 76.0 - 1e-3 && (300.0..=534.0).contains(&y)));
+        assert!(cut.len() >= 4);
+    }
+
+    #[test]
+    fn the_panel_span_follows_the_border() {
+        assert_eq!(panel_span(300.0, 0.0), (96.0, 910.0));
+        assert_eq!(panel_span(400.0, 0.0), (72.0, 934.0));
+        assert_eq!(panel_span(534.0, 0.0), (150.0, 892.0));
     }
 }
