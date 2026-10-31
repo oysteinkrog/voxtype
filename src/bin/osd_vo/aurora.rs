@@ -23,6 +23,7 @@ use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, Rect};
 use vo::scene::material::Material;
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
+use vo::scene::{Loop, LoopProp};
 
 /// Colours sampled from the redesign: the mesh's four blobs (bottom
 /// middle, upper right, middle, lower left), the line's stops from left to
@@ -83,6 +84,14 @@ const STATUS_PX: f32 = 14.0;
 /// The mesh's energy at rest, and how much the voice adds.
 const CALM: f32 = 0.25;
 const SWELL: f32 = 0.6;
+/// Idle (RD-02): while the popup listens the mesh glides round a loop
+/// `DRIFT_PX` across every `DRIFT_SECS`, about 3 px a second, in steps
+/// `DRIFT_FPS` times a second; it overhangs the card by `OVERHANG`. Its
+/// blobs keep their places in it, so the drift never jumps.
+const DRIFT_PX: f64 = 20.0;
+const DRIFT_SECS: f64 = 40.0;
+const DRIFT_FPS: f64 = 8.0;
+const OVERHANG: f32 = 24.0;
 const SETTLE_SECS: f64 = 0.35;
 
 // The line sits under the microphone, the words between the line and the
@@ -141,6 +150,28 @@ pub(crate) fn panel_top(look: &Look) -> f32 {
 /// downward from the top of the text box.
 pub(crate) fn newest_line_centre(look: &Look, lines: u32) -> f32 {
     (ROOM + TEXT_TOP + (lines.clamp(1, MAX_LINES) as f32 - 0.5) * TEXT_LINE) * scale(look)
+}
+
+/// The words' colour, for effects that draw letters of their own.
+pub(crate) fn text_color() -> Color {
+    hex(INK)
+}
+
+/// MO-84: a warm light through the letters, cyan where it is brightest.
+/// No shadows and a faint sheen: the lit letters stand where the words
+/// come to rest, and on the bright mesh they read as a second copy of the
+/// words while a centred line still glides there.
+pub(crate) fn letter_light() -> vo_3d::glyph_fx::Light {
+    vo_3d::glyph_fx::Light {
+        color: hex(PINK).fade(0.3),
+        accent: hex(CYAN),
+        shadow_len: 0.0,
+        shadow: 0.0,
+        caustics: 0.15,
+        sheen: 0.2,
+        edge_fade: 40.0,
+        ..vo_3d::glyph_fx::Light::default()
+    }
 }
 
 /// How far a change of state has gone, 0 to 1.
@@ -423,13 +454,7 @@ impl Popup {
         Element::layer("card")
             .size(w, h)
             .presence(Transition::fade().offset(0.0, 8.0).scale(0.98), exit)
-            .child(
-                Element::panel("mesh")
-                    .size(w, h)
-                    .radius(RADIUS * k)
-                    .fill_gradient(hex(PLAIN_TOP), hex(PLAIN_BOTTOM))
-                    .material(material),
-            )
+            .child(self.aurora_mesh(mode, material.into(), w, h, k))
             .child(at(
                 Element::canvas("frame", frame.until(), move |t, r, p| frame.draw(t, r, p))
                     .size(w + 2.0 * room, h + 2.0 * room),
@@ -448,12 +473,38 @@ impl Popup {
                 hex(INK).fade(0.55),
                 hex(CYAN),
             ))
+            .children(self.aurora_sculpture(mode, Size::new(w, h), k))
             .child(self.aurora_text_clip(mode, lines, k))
             .child(at(
                 self.aurora_status(mode, mode_at, k, w),
                 0.0,
                 (STATUS_Y - STATUS_H / 2.0) * k,
             ))
+    }
+
+    /// The mesh in the card's rounded box, a little larger than the card
+    /// so it can drift while the popup listens. Reduced motion holds the
+    /// loops at rest, and they settle there when the dictation stops.
+    fn aurora_mesh(&self, mode: Mode, material: Material, w: f32, h: f32, k: f32) -> Element<Msg> {
+        let o = OVERHANG * k;
+        let mut mesh = Element::panel("mesh")
+            .size(w + 2.0 * o, h + 2.0 * o)
+            .fill_gradient(hex(PLAIN_TOP), hex(PLAIN_BOTTOM))
+            .material(material);
+        if mode == Mode::Listening && !self.still() {
+            let d = DRIFT_PX * k as f64 / 2.0;
+            mesh = mesh
+                .ambient(LoopProp::OffsetX, Loop::bob(d, DRIFT_SECS).fps(DRIFT_FPS))
+                .ambient(
+                    LoopProp::OffsetY,
+                    Loop::bob(0.7 * d, DRIFT_SECS).phase(0.25).fps(DRIFT_FPS),
+                );
+        }
+        Element::layer("mesh-clip")
+            .size(w, h)
+            .radius(RADIUS * k)
+            .clip()
+            .child(at(mesh, -o, -o))
     }
 
     /// The words, clipped under the line of light, so a line that leaves on
@@ -494,7 +545,14 @@ impl Popup {
             .motion(Prop::Offset, Spring::POP)
             .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k)));
         let paths = aurora_paths(l);
-        let words = self.typo_words_in(words, &paths);
+        let words = self.letter_fx_words(self.typo_words_in(words, &paths));
+        // MO-81 and MO-89: the type breathes and the magnetic caret stands
+        // at the end of the text only while it is spoken.
+        let words = if mode == Mode::Listening {
+            words.wild_motion(self)
+        } else {
+            words
+        };
         let words = self.handoff_or(words, &l.text_style(), Some(tw), hex(INK), hex(CYAN));
         let editing = self.edit_view.is_some();
         let text = Element::column("text")
@@ -513,8 +571,42 @@ impl Popup {
                 },
                 endings::Cancel::Unthread,
             ));
+        // MO-84: light through the newest line's letters.
+        let text = self.letter_fx_layers(text, tw);
         let text = self.signal_marks(text, &self.shown, tw, (0.0, 0.0), hex(INK));
         self.with_hearing(text, &l.text_style(), tw, hex(INK), hex(CYAN))
+    }
+
+    /// MO-88: with `sound-sculpture`, letter bodies behind the words, as
+    /// deep as each word was loud, each line centred as the words are;
+    /// they lie flat once the dictation stops.
+    fn aurora_sculpture(&self, mode: Mode, size: Size, k: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(wild_space::SOUND_SCULPTURE) || self.edit_view.is_some() {
+            return None;
+        }
+        let style = l.text_style();
+        let tw = l.text_width();
+        let lines = self.wrap_lines(&self.shown, &style, tw);
+        let skip = lines.len().saturating_sub(MAX_LINES as usize);
+        let x0 = (CARD_W - TEXT_W) / 2.0 * k;
+        let rows: Vec<(Vec<Word>, Point)> = lines
+            .into_iter()
+            .skip(skip)
+            .enumerate()
+            .map(|(i, ws)| {
+                let text = ws
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let lw = self.measure.layout(&text, &style, None).size.w;
+                let x = x0 + ((tw - lw) / 2.0).max(0.0);
+                (ws, Point::new(x, (TEXT_TOP + i as f32 * TEXT_LINE) * k))
+            })
+            .collect();
+        let done = mode != Mode::Listening || self.still();
+        self.sculpture_element(&rows, &style, size, Spring::POP, done)
     }
 
     /// The status row, centred: a dot, the state word and the detail or

@@ -52,6 +52,7 @@ pub(crate) fn defaults(theme: OsdTheme) -> &'static [&'static str] {
         Glass => &["depth-stack", "light-letters", "magnetic-caret"],
         Chrome => &["liquid-morph", "ink-diffusion", "sound-sculpture"],
         Orb => &["pre-echo", "variable-breath", "light-letters"],
+        Aurora => &["light-letters", "variable-breath", "sound-sculpture", "magnetic-caret"],
         // New looks (RD-03) start with no set; each look's FX bead adds its row.
         #[allow(unreachable_patterns)]
         _ => &[],
@@ -272,10 +273,7 @@ mod tests {
     fn every_vo_look_has_a_set() {
         // The new looks' slots (RD-03) get their sets from their effects
         // beads; each one leaves this list when its row lands.
-        const SLOTS: [OsdTheme; 2] = [
-            OsdTheme::Biolume,
-            OsdTheme::Aurora,
-        ];
+        const SLOTS: [OsdTheme; 1] = [OsdTheme::Biolume];
         for t in OsdTheme::VO_LOOKS {
             assert!(SLOTS.contains(&t) || !defaults(t).is_empty(), "{t:?}");
         }

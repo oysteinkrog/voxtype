@@ -235,6 +235,7 @@ impl Popup {
         let letter_ink = match l.theme {
             OsdTheme::Hologram => super::hologram::text_color(),
             OsdTheme::Chrome => super::chrome::text_color(),
+            OsdTheme::Aurora => super::aurora::text_color(),
             _ => l.foreground,
         };
         let reduced = self.letter_fx_reduced();
@@ -314,6 +315,7 @@ impl Popup {
             let light = match l.theme {
                 OsdTheme::Glass => super::glass::letter_light(),
                 OsdTheme::Orb => super::orb::letter_light(),
+                OsdTheme::Aurora => super::aurora::letter_light(),
                 _ => Light {
                     accent: l.accent,
                     ..Light::default()
