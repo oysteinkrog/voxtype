@@ -30,7 +30,7 @@ pub(crate) type ViewFn = fn(&Popup, &vo::Tokens) -> Element<Msg>;
 /// One exhibit: what a tile shows and how.
 #[derive(Clone)]
 pub(crate) struct Exhibit {
-    /// `MO-NN`.
+    /// `MO-NN`, or `EG-NN` for an engine gap exhibit.
     pub(crate) id: &'static str,
     /// The concept's name, as in the motion plan.
     pub(crate) name: &'static str,
@@ -862,8 +862,9 @@ mod tests {
         let all = exhibits();
         assert!(!all.is_empty());
         for e in &all {
+            // Motion plan concepts are `MO-NN`; engine gap exhibits `EG-NN`.
             assert!(
-                e.id.starts_with("MO-") && e.number() < 100,
+                (e.id.starts_with("MO-") || e.id.starts_with("EG-")) && e.number() < 100,
                 "bad id {:?}",
                 e.id
             );
