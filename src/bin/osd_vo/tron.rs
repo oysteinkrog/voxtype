@@ -16,6 +16,7 @@
 //! Geometry is laid out in the pixels of the concept image and scaled so the
 //! panel is as wide as the popup.
 
+use super::glyph_paths::PathsText;
 use super::*;
 
 use std::f32::consts::TAU;
@@ -730,9 +731,18 @@ impl Popup {
             hex(CYAN, 1.0),
         );
         let (style, width) = (self.look.text_style(), self.look.text_width());
-        let text = Element::layer("text")
+        let mut text = Element::layer("text")
             .size(width, self.lines.max(1) as f32 * style.line_height)
             .child(words.rewind_hide(self.rewinding()));
+        // MO-80: the light pen over the words while they are being written.
+        if self.edit_view.is_none() {
+            let paths = PathsText {
+                ink: hex(TEXT, 1.0),
+                nib: hex(CYAN, 1.0),
+                ..PathsText::of(&self.look)
+            };
+            text = text.children(self.paths_overlays(&paths));
+        }
         let text = self.signal_marks(text, &self.shown, width, (0.0, 0.0), hex(TEXT, 1.0));
         // A line that leaves on an overflow stays inside the text box, off
         // the rule; the margin keeps the halo and the word entry whole.

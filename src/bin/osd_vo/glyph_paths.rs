@@ -33,7 +33,7 @@ use vo::scene::geom::{Affine, Point};
 use vo::scene::glyph_morph::{GlyphMorph, MorphFrom, MorphStyle, WordOutline};
 use vo::scene::path::{Contour, StrokeStyle};
 use vo::scene::snap::{snapped, Snap};
-use vo::scene::stroke_write::{PenParams, PenSchedule, PenSlot, StrokeSource, WetInk, Writing};
+use vo::scene::stroke_write::{Pen, PenParams, PenSchedule, PenSlot, StrokeSource, Writing};
 use vo::scene::text::ShapedText;
 
 pub(crate) const MORPH: &str = "glyph-morph";
@@ -660,8 +660,9 @@ impl Popup {
     }
 }
 
-/// Pen writings by word id, text and place, shared like the morphs.
-type WriteKey = (u32, String, i32, i32, u32, u32);
+/// Pen writings by script or not, word id, text and place, shared like
+/// the morphs.
+type WriteKey = (bool, u32, String, i32, i32, u32, u32);
 
 fn write_cache() -> &'static Mutex<HashMap<WriteKey, Arc<Writing>>> {
     static C: std::sync::OnceLock<Mutex<HashMap<WriteKey, Arc<Writing>>>> =
@@ -751,7 +752,7 @@ impl Popup {
         }
         let style = &text.style;
         let now = self.extra.now;
-        let wet = WetInk::new(text.ink, text.nib);
+        let wet = self.paths_pen().wet(text.ink, text.nib);
         self.pen_prefetch(style);
         // A word whose line has moved since the pen took it (a scroll, a
         // rewrap) glides there with the live text, while the overlay draws
@@ -932,6 +933,16 @@ impl Popup {
             && self.linger_secs() - self.ended_for(at).unwrap_or(0.0) < REWRITE_MIN_SECS
     }
 
+    /// The look's pen (SW-08): a light for Tron, the beam for Phosphor, wet
+    /// ink for the rest.
+    fn paths_pen(&self) -> Pen {
+        match self.look.theme {
+            OsdTheme::Tron => Pen::Light,
+            OsdTheme::Phosphor => Pen::Phosphor,
+            _ => Pen::Ink,
+        }
+    }
+
     /// The voice a word joins the pen with: the level as it arrives, the
     /// loudest of the last six frames, 0 to 1.
     fn pen_voice(&self) -> f32 {
@@ -967,7 +978,9 @@ impl Popup {
     /// exactly.
     fn writing(&self, word: &Laid, style: &TextStyle) -> Arc<Writing> {
         let size = style.size;
+        let script = self.paths_pen().script();
         let key: WriteKey = (
+            script,
             word.id,
             word.text.clone(),
             (word.x.0 * 4.0) as i32,
@@ -989,7 +1002,9 @@ impl Popup {
         for g in &mut outline.glyphs {
             g.cluster -= base;
         }
-        let source = if self.scripted {
+        let source = if script {
+            StrokeSource::Hershey
+        } else if self.scripted {
             StrokeSource::FontNow
         } else {
             StrokeSource::Font
