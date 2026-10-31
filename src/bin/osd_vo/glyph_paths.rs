@@ -185,7 +185,9 @@ impl Popup {
             starts.push(joined.len() as u32);
             joined.push_str(&w.text);
         }
-        let shaped = self.measure.layout(&joined, &style, Some(text.width));
+        let mut shaped = self.measure.layout(&joined, &style, Some(text.width));
+        // Centred lines sit across the wrap width, as the live text puts them.
+        shaped.align_in(style.align, text.width);
         let mut out: Vec<Laid> = Vec::new();
         for line in &shaped.lines {
             for g in &shaped.glyphs[line.glyphs.clone()] {

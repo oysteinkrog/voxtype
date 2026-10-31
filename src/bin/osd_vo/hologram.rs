@@ -45,7 +45,7 @@ const BEAM_TOP: f32 = 140.0;
 const CAP_RY: f32 = 16.0;
 /// The words: centred in this width from this top, the wave and the ring
 /// below the last line, so the projection grows down as lines come.
-const TEXT_W: f32 = 480.0;
+const TEXT_W: f32 = 420.0;
 const TEXT_PX: f32 = 31.0;
 const TEXT_LINE: f32 = 40.0;
 const TEXT_TOP: f32 = 168.0;
@@ -447,12 +447,17 @@ impl Popup {
                 0.0,
                 0.0,
             ))
-            .child(at(
-                Element::canvas("wave", wave_until, move |t, r, p| wave.draw(t, r, p))
-                    .size((WAVE_X1 - WAVE_X0) * k, 2.0 * WAVE_HALF * k),
-                WAVE_X0 * k,
-                (wave_y(lines) - WAVE_HALF) * k,
-            ))
+            .child(
+                at(
+                    Element::canvas("wave", wave_until, move |t, r, p| wave.draw(t, r, p))
+                        .size((WAVE_X1 - WAVE_X0) * k, 2.0 * WAVE_HALF * k),
+                    WAVE_X0 * k,
+                    (wave_y(lines) - WAVE_HALF) * k,
+                )
+                // The wave and the ring move down with a new line at once, so
+                // the line never draws under them.
+                .motion(Prop::Position, Motion::Snap),
+            )
             .children(self.limit_line(
                 Point::new(text_x, text_top),
                 size,
@@ -470,15 +475,19 @@ impl Popup {
     /// The words, clipped to the column under the orb, so a line that
     /// leaves on an overflow fades out inside the light.
     fn hologram_text_clip(&self, mode: Mode, lines: u32, k: f32, text_x: f32) -> Element<Msg> {
+        // Across the whole projection: a centred line that grows slides to
+        // its new middle, and a new word rides along past the text box
+        // until it gets there.
         let m = 10.0 * k;
         let top = BEAM_TOP + 6.0;
         let y = (TEXT_TOP - top) * k;
         let h = y + lines as f32 * TEXT_LINE * k + m;
         let clip = Element::layer("text-clip")
-            .size(self.look.text_width() + 2.0 * m, h)
+            .size(DESIGN_W * k, h)
             .clip()
-            .child(at(self.hologram_text(mode, lines), m, y));
-        at(clip, text_x - m, top * k)
+            .motion(Prop::Size, Motion::Snap)
+            .child(at(self.hologram_text(mode, lines), text_x, y));
+        at(clip, 0.0, top * k)
     }
 
     fn hologram_text(&self, mode: Mode, lines: u32) -> Element<Msg> {
