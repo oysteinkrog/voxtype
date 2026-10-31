@@ -320,6 +320,8 @@ struct TailLayout {
     committed_end: (f32, f32),
     /// The same after the tail.
     tail_end: (f32, f32),
+    /// After the last tail word drawn (x, line top), None when none is.
+    drawn_end: Option<(f32, f32)>,
     /// The text's line height and how many lines it has room for.
     line_h: f32,
     /// With `breathing-stop`: the likeliest full stop in the tail, which is
@@ -418,6 +420,19 @@ impl Popup {
             rows: self.lines,
         };
         self.signal_marks_in(text, words, &tail, origin, ink)
+    }
+
+    /// Where the drawn ghost words after `words` end (x, line top, in
+    /// `tail`'s layout), when any are drawn. A look's caret or pen head
+    /// that stands after the text goes here, so it never covers a ghost.
+    pub(crate) fn ghost_tail_end(&self, words: &[Word], tail: &TailText) -> Option<(f32, f32)> {
+        let l = &self.look;
+        if !(l.on(GHOST_TAIL) || l.on(THREE_TIER)) {
+            return None;
+        }
+        let s = self.live_signals()?;
+        let laid = self.tail_layout(s, words, tail)?;
+        laid.drawn_end
     }
 
     /// [`Popup::signal_marks`] for live text that is not the look's own text
@@ -574,6 +589,7 @@ impl Popup {
             };
             k * (width - w).max(0.0)
         };
+        let mut drawn_end = None;
         let at = ranges
             .iter()
             .map(|range| {
@@ -592,7 +608,11 @@ impl Popup {
                 // A guess that would open a line the text has no room for
                 // yet, or run past the edge of centred text, waits until the
                 // text gets there.
-                (top < room && end <= width + 0.5).then_some((x, top))
+                let fits = top < room && end <= width + 0.5;
+                if fits {
+                    drawn_end = Some((end, top));
+                }
+                fits.then_some((x, top))
             })
             .collect();
         let shifted = |(x, top): (f32, f32), len: usize| {
@@ -611,6 +631,7 @@ impl Popup {
             at,
             committed_end: shifted(committed_end, committed_len),
             tail_end,
+            drawn_end,
             line_h,
             stop,
             style,
@@ -1298,6 +1319,52 @@ mod tests {
             conf: 0.9,
             detail: None,
         }
+    }
+
+    /// s3th: a caret or pen head that stands after the text goes after the
+    /// drawn ghost words, not over the first one.
+    #[test]
+    fn the_tail_end_is_after_the_last_drawn_ghost() {
+        let fonts = super::super::swiss_look::edit_check::fonts();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Scope,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &PlasmaTheme::default(), String::new(), &fonts);
+        look.set_motion(&cfg.motion);
+        assert!(look.on(GHOST_TAIL));
+        let mut popup = Popup::new(look.clone(), &fonts);
+        let committed = "This is a longer test";
+        popup.files.recording = true;
+        popup.files.preview = committed.into();
+        popup.model_signals = Some(ModelSignals {
+            tail: vec![tok(" of", 5), tok(" voice", 3)],
+            with_tail: format!("{committed} of voice"),
+            ..ModelSignals::default()
+        });
+        let words: Vec<Word> = committed
+            .split(' ')
+            .enumerate()
+            .map(|(i, w)| Word {
+                id: i as u32 + 1,
+                text: w.into(),
+            })
+            .collect();
+        let style = look.text_style();
+        let text = TailText {
+            style,
+            width: 2000.0,
+            rows: 1,
+        };
+        let width = |t: &str| popup.measure.layout(t, &style, None).size.w;
+        let (x, top) = popup.ghost_tail_end(&words, &text).expect("ghosts drawn");
+        assert_eq!(top, 0.0);
+        let want = width(&format!("{committed} of voice"));
+        assert!((x - want).abs() < 2.0, "{x} for {want}");
+        assert!(x > width(&format!("{committed} of")) + 1.0);
+        // With no tail there is nothing to stand after.
+        popup.model_signals = None;
+        assert!(popup.ghost_tail_end(&words, &text).is_none());
     }
 
     #[test]

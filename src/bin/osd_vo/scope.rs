@@ -910,6 +910,11 @@ impl Popup {
             let (row, w) = lines
                 .last()
                 .map_or((0usize, 0.0), |(_, w)| (lines.len() - 1, *w));
+            // After the ghost tail when there is one, so the block never
+            // covers the first ghost word (s3th).
+            let tail = model_signals::TailText { style, width: WRAP, rows: 1 };
+            let newest = lines.last().map_or(&[][..], |(w, _)| w.as_slice());
+            let w = self.ghost_tail_end(newest, &tail).map_or(w, |(x, _)| x.max(w));
             (
                 Point::new(TEXT_X + w + 8.0, TEXT_TOP + row as f32 * LINE + LINE * 0.18),
                 s.word_at,
