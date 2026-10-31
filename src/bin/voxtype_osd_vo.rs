@@ -1049,6 +1049,7 @@ impl Look {
             OsdTheme::River => Some(river::newest_line_centre(self, lines)),
             OsdTheme::Hologram => Some(hologram::newest_line_centre(self, lines)),
             OsdTheme::Aurora => Some(aurora::newest_line_centre(self, lines)),
+            OsdTheme::Biolume => Some(biolume::newest_line_centre(self, lines)),
             OsdTheme::Glass => Some(glass::newest_line_centre(self)),
             OsdTheme::Chrome => Some(chrome::newest_line_centre(self, lines)),
             OsdTheme::Orb => Some(orb::newest_line_centre(self, lines)),
@@ -1128,6 +1129,9 @@ impl Look {
         if self.theme == OsdTheme::Aurora {
             return aurora::text_width(self);
         }
+        if self.theme == OsdTheme::Biolume {
+            return biolume::text_width(self);
+        }
         if self.theme == OsdTheme::Glass {
             return glass::text_width(self);
         }
@@ -1178,6 +1182,9 @@ impl Look {
         if self.theme == OsdTheme::Aurora {
             return aurora::max_lines();
         }
+        if self.theme == OsdTheme::Biolume {
+            return biolume::max_lines();
+        }
         if self.theme == OsdTheme::Glass {
             return glass::MAX_LINES;
         }
@@ -1201,8 +1208,8 @@ impl Look {
 
     /// Whether the "…" before cut text hangs in the left margin, so it never
     /// changes where the lines break. The other looks put it on the word.
-    /// Aurora's centred lines draw no "…": its text clip shows the cut line
-    /// leaving, and a cut is a one-line scroll with no rewrap.
+    /// Aurora's and Biolume's centred lines draw no "…": the text clip shows
+    /// the cut line leaving, and a cut is a one-line scroll with no rewrap.
     fn margin_ellipsis(&self) -> bool {
         matches!(
             self.theme,
@@ -1212,6 +1219,7 @@ impl Look {
                 | OsdTheme::Dotmatrix
                 | OsdTheme::Palette
                 | OsdTheme::Aurora
+                | OsdTheme::Biolume
         )
     }
 
@@ -1275,6 +1283,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Aurora {
             return aurora::text_style(self);
+        }
+        if self.theme == OsdTheme::Biolume {
+            return biolume::text_style(self);
         }
         if self.theme == OsdTheme::Glass {
             return glass::text_style(self);
@@ -1368,6 +1379,7 @@ impl Look {
         match self.theme {
             OsdTheme::Radial => radial::panel_middle(self),
             OsdTheme::Particles => particles::panel_middle(self),
+            OsdTheme::Biolume => biolume::panel_middle(self),
             _ => self.surface().h / 2.0,
         }
     }
@@ -1479,6 +1491,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Aurora {
             return aurora::surface(self);
+        }
+        if self.theme == OsdTheme::Biolume {
+            return biolume::surface(self);
         }
         if self.theme == OsdTheme::Glass {
             return glass::surface(self);
@@ -2831,6 +2846,7 @@ fn default_motion(look: &Look) -> Motion {
             | OsdTheme::River
             | OsdTheme::Hologram
             | OsdTheme::Aurora
+            | OsdTheme::Biolume
             | OsdTheme::Glass
             | OsdTheme::Chrome
             | OsdTheme::Orb

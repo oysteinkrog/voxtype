@@ -239,7 +239,7 @@ impl Popup {
             OsdTheme::Particles => Some(text.style.size * 0.8),
             OsdTheme::Mecha => Some(text.style.size * 0.6),
             OsdTheme::Synthwave => Some(text.style.size * 0.8),
-            OsdTheme::Aurora => Some(text.style.size * 0.6),
+            OsdTheme::Aurora | OsdTheme::Biolume => Some(text.style.size * 0.6),
             _ => None,
         };
         let landing = reach.map(|reach| {
