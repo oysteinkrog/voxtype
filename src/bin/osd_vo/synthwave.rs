@@ -1139,14 +1139,17 @@ impl Popup {
                 .width(l.width)
                 .height(style.line_height)
                 .motion(Prop::Position, Spring::critical_to_98(GROW_SECS));
-            // On a cut the top row leaves upward with the rows below it;
-            // any other row that goes fades where it is. The edit window's
-            // rows change in place.
+            // On a cut the top row leaves upward with the rows below it.
+            // Any other row that goes, on a re-wrap, goes at once, as does
+            // the cut row under reduced motion: a fade in place would show
+            // the old layout over the new one. The edit window's rows change
+            // in place.
             let row = if edited.is_none() {
-                let leave = if i == 0 && lines.len() >= swiss::MAX_LINES as usize {
+                let cut = i == 0 && lines.len() >= swiss::MAX_LINES as usize;
+                let leave = if cut && !self.still() {
                     Transition::fade().offset(0.0, -style.line_height)
                 } else {
-                    Transition::fade()
+                    Transition::NONE
                 };
                 row.motion(Prop::Offset, Spring::critical_to_98(GROW_SECS))
                     .presence(Transition::NONE, leave)
