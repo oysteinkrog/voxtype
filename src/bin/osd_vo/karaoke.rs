@@ -597,6 +597,35 @@ impl Popup {
         (lines.len() > 1).then_some(LINE_WAIT)
     }
 
+    /// Whether the newest line, `lw` wide, would hang past the card's inner
+    /// margin in the first frame after its newest word came (rwwv). The line
+    /// re-centres with a spring from where it stood, centred without that
+    /// word, so a long word on a short line starts out too far right; with
+    /// spoken-tracking the word also arrives spaced out.
+    fn karaoke_overhangs(&self, words: &[Word], lw: f32, style: &TextStyle) -> bool {
+        let Some((newest, before)) = words.split_last() else {
+            return false;
+        };
+        if before.is_empty() {
+            return false;
+        }
+        let joined = before
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let was = self.measure.layout(&joined, style, None).size.w;
+        let spaced = if self.look.on(channels::TRACKING) {
+            0.3 * (self.measure.layout(&newest.text, style, None).size.w + 4.0)
+        } else {
+            0.0
+        };
+        // In the line box, which sits centred in the card: the card's
+        // right edge less 8 px.
+        let edge = LINE_BOX + (CARD_W - LINE_BOX) / 2.0 - 8.0;
+        (LINE_BOX - was) / 2.0 + lw + spaced > edge
+    }
+
     /// Whether the newest line's words still wait for the lines above to roll up.
     fn karaoke_waits(&self, first: vo_core::words::WordId, lines: usize) -> bool {
         lines > 1
@@ -1115,8 +1144,9 @@ impl Popup {
                 // the box, so it holds still while you type.
                 inline = at(inline, ((LINE_BOX - lw) / 2.0).max(0.0), 0.0);
             }
-            if hidden {
-                // Re-centres at once while hidden, so it does not slide when it shows.
+            // Re-centres at once while hidden, so it does not slide when it
+            // shows, and when the slide would start past the card's edge.
+            if hidden || (age == 0 && !editing && self.karaoke_overhangs(words, *lw, &style)) {
                 inline = inline.motion(Prop::Position, Motion::Snap);
             }
             if !hot.is_empty() {
@@ -1337,6 +1367,64 @@ mod roll_tests {
             },
         );
         (longest, farthest)
+    }
+
+    /// rwwv: the rightmost glyph origin (plus half an em) of any word in
+    /// any frame of `moment`, from the card's left edge.
+    fn rightmost_ink(moment: Moment) -> f32 {
+        let reg = test_fonts();
+        let plasma = PlasmaTheme::default();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Karaoke,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &plasma, String::new(), &reg);
+        look.set_motion(&cfg.motion);
+        assert!(look.on(channels::TRACKING));
+        let options = Options {
+            fonts: reg.clone(),
+            default_motion: default_motion(&look),
+            ..Options::default()
+        };
+        let mut right = 0.0f32;
+        vo::envelope::sample_scenario(
+            Popup::new(look.clone(), &reg),
+            &scenario(&look, moment),
+            30.0,
+            options,
+            &mut |_, _, dl| {
+                for l in &dl.layers {
+                    for item in &dl.items[l.items.start as usize..l.items.end as usize] {
+                        if item.kind != ItemKind::Glyphs {
+                            continue;
+                        }
+                        for gi in item.start..item.start + item.len {
+                            let g = &dl.glyphs[gi as usize];
+                            if g.word == NO_WORD || g.color.a * l.opacity < 0.05 {
+                                continue;
+                            }
+                            let at = Point::new(g.pos.x + 0.5 * g.size, g.pos.y);
+                            right = right.max(l.transform.apply(at).x - MARGIN);
+                        }
+                    }
+                }
+            },
+        );
+        right
+    }
+
+    /// rwwv: a long word on a short line does not hang past the card's
+    /// right edge while the line re-centres, spoken-tracking on (the
+    /// default set). Karaoke's card has one size at every width.
+    #[test]
+    fn no_word_hangs_past_the_card_while_its_line_re_centres() {
+        for moment in [Moment::Wrap, Moment::Dictation] {
+            let right = rightmost_ink(moment);
+            assert!(
+                right < CARD_W - 8.0,
+                "{moment:?}: ink to {right} of {CARD_W}"
+            );
+        }
     }
 
     /// orxv: under the reduced-motion feature a wrap cuts the lines to their
