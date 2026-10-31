@@ -53,7 +53,7 @@ pub(crate) fn defaults(theme: OsdTheme) -> &'static [&'static str] {
         Chrome => &["liquid-morph", "ink-diffusion", "sound-sculpture"],
         Orb => &["pre-echo", "variable-breath", "light-letters"],
         Aurora => &["light-letters", "variable-breath", "sound-sculpture", "magnetic-caret"],
-        Biolume => &["breath-line", "exhale", "variable-breath"],
+        Biolume => &["breath-line", "exhale", "variable-breath", "ink-diffusion"],
         // New looks (RD-03) start with no set; each look's FX bead adds its row.
         #[allow(unreachable_patterns)]
         _ => &[],
