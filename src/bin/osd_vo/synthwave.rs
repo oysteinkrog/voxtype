@@ -104,6 +104,24 @@ pub(crate) const ROOM_TONE_FPS: f64 = 10.0;
 const POWER_DOWN_SECS: f64 = 0.45;
 /// How far the lit tube's brightness wanders while it hums.
 const HUM: f32 = 0.03;
+/// Idle motion (RD-02). Once the road has been empty of onset rows for a
+/// while, faint rows drift toward the viewer at this speed (logical pixels
+/// a second, at the nearest row shown), at this share of a row's light, and
+/// the gaps between them breathe by this many pixels on this cycle. They
+/// stop above the transcript's first row.
+const IDLE_SCROLL_PX: f32 = 8.0;
+const IDLE_ROW_ALPHA: f32 = 0.5;
+const IDLE_GAP_PX: f32 = 1.0;
+const IDLE_GAP_SECS: f64 = 3.0;
+const IDLE_ROW_LIFT: f32 = 12.0;
+/// Seconds for the idle rows to fade in after the road clears, and out
+/// when an onset sends a row.
+const IDLE_IN_SECS: f32 = 1.0;
+const IDLE_OUT_SECS: f32 = 0.3;
+/// Idle motion: the tube dips to this brightness for one step of the room
+/// tone pace (0.1 s), once every this many seconds.
+const DIP_TO: f64 = 0.7;
+const DIP_EVERY: f64 = 8.0;
 /// Seconds per cycle of the "..." after "Loading".
 const DOTS_SECS: f64 = 1.2;
 /// When the title first tracks in, after the tube has started drawing, and
@@ -175,6 +193,27 @@ fn onset_depths(onsets: &[f64], t: f64, still: f64, run_at: impl Fn(f64) -> f64)
             ROW_FAR - (ROW_FAR - ROW_NEAR) * (age / ONSET_TRAVEL_SECS) as f32
         })
         .collect()
+}
+
+/// How much of the idle rows show at `t`: none while onset rows cross the
+/// road, fading in once it has been empty for a row's whole crossing, and
+/// fading out when an onset sends a new row.
+fn idle_share(onsets: &[f64], t: f64, shown: f64) -> f32 {
+    let (mut last, mut before) = (None, shown - ONSET_TRAVEL_SECS + 0.5);
+    for o in onsets.iter().copied().filter(|&o| o <= t) {
+        if let Some(l) = last {
+            before = l;
+        }
+        last = Some(o);
+    }
+    let fade_in = |gap: f64| smoothstep(0.0, IDLE_IN_SECS, (gap - ONSET_TRAVEL_SECS) as f32);
+    match last {
+        None => fade_in(t - before),
+        Some(o) => {
+            let was = fade_in(o - before);
+            was * (1.0 - smoothstep(0.0, IDLE_OUT_SECS, (t - o) as f32)) + fade_in(t - o)
+        }
+    }
 }
 
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
@@ -613,6 +652,21 @@ impl Popup {
             }
         })
         .size(surface.w, surface.h);
+        // Idle motion: now and then the tube dips, as a real one does.
+        let lit = self.now() >= self.shown_at + DRAW_SECS + FLICKER_SECS;
+        let dips = lit
+            && !self.cancelled()
+            && self.extra.finish_at.is_none()
+            && !self.look.on("reduced-motion");
+        let draw = if dips {
+            let step = 1.0 / ROOM_TONE_FPS / DIP_EVERY;
+            let gate = Loop::gate(0.5 - step / 2.0, 0.5 + step / 2.0, DIP_EVERY);
+            let mut dip = gate.fps(ROOM_TONE_FPS);
+            dip.amp = DIP_TO - 1.0;
+            draw.ambient(LoopProp::Opacity, dip)
+        } else {
+            draw
+        };
         let layer = Element::layer("tube-light")
             .size(surface.w, surface.h)
             .blend(BlendMode::Add)
@@ -621,7 +675,6 @@ impl Popup {
             .child(draw);
         // Once the tube is on and until a cancel, it hums: its brightness and
         // its bloom wander a little, as a real neon tube's do.
-        let lit = self.now() >= self.shown_at + DRAW_SECS + FLICKER_SECS;
         if lit && !self.cancelled() {
             layer
                 .ambient(LoopProp::Opacity, Loop::drift(HUM as f64, 0.11, 7))
@@ -655,6 +708,8 @@ impl Popup {
         } else {
             std::sync::Arc::from([])
         };
+        let idle_rows = onset_rows && !reduced;
+        let row_limit = (HEAD - IDLE_ROW_LIFT) * s;
         let grid = Element::canvas("grid", grid_until, move |t, rect, p| {
             // Rows scroll toward the viewer and coast to a stop after the stop.
             let run_at = |t: f64| {
@@ -699,6 +754,45 @@ impl Popup {
             } else {
                 (0..10).map(|n| 1.0 + (n as f32 - phase) * ROW_STEP).collect()
             };
+            // Idle motion: faint rows drift in once the road is empty.
+            let quiet = if idle_rows {
+                idle_share(&onsets, t, shown)
+            } else {
+                0.0
+            };
+            if quiet > 0.0 {
+                let reach = span * 0.92;
+                let near = reach / (row_limit - horizon);
+                let rate = IDLE_SCROLL_PX * s * near * near / (reach * ROW_STEP);
+                let breathe = (std::f64::consts::TAU * t / IDLE_GAP_SECS).sin() as f32;
+                let step = ROW_STEP + 0.5 * IDLE_GAP_PX * s * near * near / reach * breathe;
+                let phase = (run * rate as f64).fract() as f32;
+                for n in 0..12 {
+                    let z = near + (n as f32 + 1.0 - phase) * step;
+                    let y = y0 + reach / z;
+                    let depth = (y - y0) / span;
+                    let a = open
+                        * 0.55
+                        * IDLE_ROW_ALPHA
+                        * quiet
+                        * (1.0 - depth).powf(0.8)
+                        * smoothstep(0.02, 0.12, depth)
+                        * smoothstep(row_limit, row_limit - 20.0 * s, y - rect.y);
+                    if a <= 0.0 {
+                        continue;
+                    }
+                    let style = StrokeStyle::solid(1.0, hex(VIOLET)).linear(
+                        Point::new(x0, y),
+                        hex(MAGENTA).fade(a),
+                        Point::new(x0 + w, y),
+                        hex(CYAN).fade(a),
+                    );
+                    p.stroke(
+                        &Contour::polyline(&[Point::new(x0, y), Point::new(x0 + w, y)], false),
+                        &style,
+                    );
+                }
+            }
             for z in depths {
                 if z < ROW_NEAR {
                     continue;
@@ -1485,6 +1579,22 @@ mod tests {
         // Silence: no onsets, an empty road; old rows have left it.
         assert!(onset_depths(&[], 9.0, 9.0, run).is_empty());
         assert!(onset_depths(&[1.0], 9.0, 9.0, run)[0] < ROW_NEAR);
+    }
+
+    #[test]
+    fn idle_rows_wait_for_an_empty_road() {
+        // Open with no speech: in after a moment.
+        assert_eq!(idle_share(&[], 0.2, 0.0), 0.0);
+        assert_eq!(idle_share(&[], 3.0, 0.0), 1.0);
+        // Speech: out within the fade, back once the last row has crossed.
+        let o = [1.0, 1.5];
+        assert!(idle_share(&o, 1.6, 0.0) < 0.05);
+        assert_eq!(idle_share(&o, 1.5 + ONSET_TRAVEL_SECS, 0.0), 0.0);
+        assert_eq!(idle_share(&o, 1.5 + ONSET_TRAVEL_SECS + 1.0, 0.0), 1.0);
+        // An onset after a long silence fades the rows out, not at once.
+        let late = [10.0];
+        assert!(idle_share(&late, 10.1, 0.0) > 0.3);
+        assert_eq!(idle_share(&late, 10.4, 0.0), 0.0);
     }
 
     #[test]
