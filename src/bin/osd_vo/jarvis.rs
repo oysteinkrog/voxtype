@@ -1096,11 +1096,11 @@ impl Popup {
 
     /// R2-02-a: the glass bubble over the inner ring, in a layer that
     /// captures what the popup drew under it. Its ripple is the voice's
-    /// level now; under reduced motion it is still.
+    /// level now; under reduced motion and after the end it is still.
     fn jarvis_lens(&self, g: &Geo) -> Element<Msg> {
         let r = LENS_R * g.k;
         let level = Self::jarvis_level(&self.kit_levels(), self.extra.now);
-        let (bend, wobble) = lens_bend(level, self.still());
+        let (bend, wobble) = lens_bend(level, self.still() || self.ended());
         let glass = Glass {
             sheen: false,
             shadow: [0.0; 3],
