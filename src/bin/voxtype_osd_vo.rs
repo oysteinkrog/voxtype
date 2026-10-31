@@ -1143,7 +1143,7 @@ impl Look {
     /// Transcript lines the look has room for.
     fn max_lines(&self) -> u32 {
         if self.theme == OsdTheme::Scope {
-            return scope::MAX_LINES;
+            return scope::max_lines(self);
         }
         if self.theme == OsdTheme::Captions {
             return captions::MAX_LINES;
