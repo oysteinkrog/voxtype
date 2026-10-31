@@ -339,7 +339,7 @@ struct Args {
     offline: Option<PathBuf>,
 
     /// Frames per second for `--offline`, `--envelope` and `--exit-check`.
-    /// `--envelope` needs at least 15.
+    /// `--envelope` needs at least 30, the rate its limits are given at.
     #[arg(long, default_value = "30")]
     fps: f64,
 
