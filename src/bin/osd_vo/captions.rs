@@ -589,9 +589,13 @@ impl Popup {
                     // A new row comes in through its words' own entry: a fade
                     // and rise of the whole row put the newest words 10 px low
                     // at 4 % ink, past the reading-line envelope (RD-09).
+                    // Rows only roll up while listening. After the stop the
+                    // final text re-keys every row in place, so the old rows
+                    // go at once: rising as they faded, they drew over the
+                    // final rows.
                     .presence(
                         Transition::NONE,
-                        if tapped {
+                        if tapped || !matches!(mode, Mode::Listening | Mode::Loading) {
                             Transition::NONE
                         } else {
                             Transition::fade().offset(0.0, -18.0)
