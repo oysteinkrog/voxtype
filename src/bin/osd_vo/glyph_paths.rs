@@ -277,6 +277,11 @@ impl Popup {
             }
             let (born, revised) = self.paths_times(w);
             let born = Some(born);
+            // An outline drawn at the new layout while the live word glides
+            // there would be a second copy of it away from it.
+            if self.paths_moved(w) {
+                continue;
+            }
             if breath && Some(w.id) == first && self.cut == 0 {
                 if let Some(at) = born {
                     plays.push(Play {
@@ -672,6 +677,8 @@ struct PenBook {
     /// Each word's voice when it joined the pen, 0 to 1, frozen for its
     /// nib pressure (SW-05).
     voice: HashMap<u32, f32>,
+    /// Where each word was laid out when it joined the pen.
+    place: HashMap<u32, (i32, i32)>,
     used: f64,
 }
 
@@ -704,10 +711,15 @@ impl Popup {
         let now = self.extra.now;
         let wet = WetInk::new(text.ink, text.nib);
         self.pen_prefetch(style);
+        // A word whose line has moved since the pen took it (a scroll, a
+        // rewrap) glides there with the live text, while the overlay draws
+        // at the new layout at once: its wet ink would be a second copy of
+        // the word away from it, so it stops, and the word's fill carries on.
         let plays: Vec<(Arc<Writing>, PenSlot, f32)> = self
             .pen_slots(laid, style, |slot| wet.until(slot) >= now - 0.05)
             .into_iter()
-            .map(|(_, writing, slot, voice)| (writing, slot, voice))
+            .filter(|p| !p.4)
+            .map(|(_, writing, slot, voice, _)| (writing, slot, voice))
             .collect();
         if plays.is_empty() {
             return None;
@@ -735,20 +747,20 @@ impl Popup {
         let now = self.extra.now;
         self.pen_slots(&laid, &text.style, |slot| slot.end >= now - 0.05)
             .into_iter()
-            .map(|(id, writing, slot, _)| (id, fill_keys(&writing, &slot)))
+            .map(|(id, writing, slot, _, _)| (id, fill_keys(&writing, &slot)))
             .collect()
     }
 
-    /// The laid words' writings, their slots with the popup's pen and
-    /// their voices, for the slots `keep` takes. A word seen for the first
-    /// time joins the pen here, so its slot and voice are the same whichever
-    /// asks first.
+    /// The laid words' writings, their slots with the popup's pen, their
+    /// voices and whether they have moved since they joined the pen, for
+    /// the slots `keep` takes. A word seen for the first time joins the pen
+    /// here, so its slot and voice are the same whichever asks first.
     fn pen_slots(
         &self,
         laid: &[Laid],
         style: &TextStyle,
         keep: impl Fn(&PenSlot) -> bool,
-    ) -> Vec<(u32, Arc<Writing>, PenSlot, f32)> {
+    ) -> Vec<(u32, Arc<Writing>, PenSlot, f32, bool)> {
         let size = style.size;
         let now = self.extra.now;
         let popup = self.paths_popup();
@@ -764,6 +776,7 @@ impl Popup {
             }),
             slot: HashMap::new(),
             voice: HashMap::new(),
+            place: HashMap::new(),
             used: now,
         });
         book.used = now;
@@ -784,6 +797,7 @@ impl Popup {
                     let i = book.schedule.push(born, writing.length());
                     book.slot.insert(word.id, i);
                     book.voice.insert(word.id, self.pen_voice());
+                    book.place.insert(word.id, place(word));
                     book.schedule.slots()[i]
                 }
             };
@@ -791,7 +805,8 @@ impl Popup {
                 continue;
             }
             let voice = book.voice.get(&word.id).copied().unwrap_or(0.5);
-            plays.push((word.id, writing, slot, voice));
+            let moved = book.place.get(&word.id) != Some(&place(word));
+            plays.push((word.id, writing, slot, voice, moved));
         }
         plays
     }
@@ -872,6 +887,12 @@ impl Popup {
     }
 }
 
+/// Where `word` is laid out, in quarter pixels: its pen box's left end and
+/// its baseline.
+fn place(word: &Laid) -> (i32, i32) {
+    ((word.x.0 * 4.0) as i32, (word.baseline * 4.0) as i32)
+}
+
 /// A word's fill over scene time while the pen writes it in `slot`
 /// (SW-02), as `(t, fill)` keys. Each letter's ink rises over the pen
 /// distance from its first stroke to the end of its last base stroke (its
@@ -949,6 +970,8 @@ struct Seen {
     text: String,
     born: f64,
     changed: Option<f64>,
+    /// Where the word was laid out when it came or last changed.
+    place: (i32, i32),
 }
 
 fn seen() -> &'static Mutex<HashMap<SeenKey, Seen>> {
@@ -966,6 +989,14 @@ impl Popup {
         )
     }
 
+    /// Whether `w` is laid out somewhere else than when it came or last
+    /// changed: its line moved, and the live text glides it there.
+    fn paths_moved(&self, w: &Laid) -> bool {
+        let map = seen().lock().unwrap_or_else(|e| e.into_inner());
+        map.get(&(self.paths_popup(), w.id))
+            .is_some_and(|s| s.place != place(w))
+    }
+
     /// When `w` came and when its text last changed after that.
     fn paths_times(&self, w: &Laid) -> (f64, Option<f64>) {
         let now = self.extra.now;
@@ -978,10 +1009,12 @@ impl Popup {
             text: w.text.clone(),
             born: now,
             changed: None,
+            place: place(w),
         });
         if s.text != w.text {
             s.text = w.text.clone();
             s.changed = Some(now);
+            s.place = place(w);
         }
         (s.born, s.changed)
     }
@@ -1149,5 +1182,53 @@ mod tests {
             mine.iter().zip(got).any(|(a, b)| (a - b).abs() > 1.0),
             "{mine:?} {got:?}"
         );
+    }
+
+    /// Regression (type with stroke-write): when the cap drops the first
+    /// line, the live words glide to their new rows while the overlay draws
+    /// at the new layout at once, and the drying wet ink of the newest
+    /// words was a second copy of them a row away, over the line above. A
+    /// word whose place changed since the pen took it draws no wet ink, and
+    /// no outline morph (`glyph-morph`) either.
+    #[test]
+    fn a_word_that_moved_draws_no_wet_ink_away_from_itself() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Type,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        look.features = [WRITE, MORPH].iter().map(|f| f.to_string()).collect();
+        let mut popup = Popup::new(look.clone(), &fonts);
+        popup.scripted = true;
+        let text = PathsText::of(&look);
+        let words: Vec<Word> = ["one", "two", "three", "four"]
+            .iter()
+            .enumerate()
+            .map(|(i, w)| Word {
+                id: i as u32 + 1,
+                text: w.to_string(),
+            })
+            .collect();
+        let drawn = |p: &mut Popup, t: f64| -> Vec<String> {
+            p.extra.now = t;
+            p.paths_overlays(&text)
+                .iter()
+                .map(|e| e.key().to_string())
+                .filter(|k| k == "stroke-write" || k == "glyph-paths")
+                .collect()
+        };
+        popup.shown = words.clone();
+        assert_eq!(drawn(&mut popup, 1.0).len(), 2);
+        assert_eq!(
+            drawn(&mut popup, 1.05).len(),
+            2,
+            "drawn while the words stay"
+        );
+        // The first word goes: the others move along the line.
+        popup.shown = words[1..].to_vec();
+        let after = drawn(&mut popup, 1.06);
+        assert!(after.is_empty(), "{after:?} where the words were");
     }
 }
