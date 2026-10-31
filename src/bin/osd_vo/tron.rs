@@ -720,6 +720,13 @@ impl Popup {
             .motion(Prop::Offset, Spring::critical_to_98(0.22))
             .motion(Prop::TextFx, Spring::critical_to_98(0.22))
             .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 5.0 * k).blur(3.0 * k)));
+        // MO-34: the spine's ticks in tron's cyan, not the config's accent.
+        if let Some(s) = self.look.spine() {
+            words = words.overflow_spine(Spine {
+                color: hex(CYAN, 0.9),
+                ..s
+            });
+        }
         if self.tron.ended_at.is_some() {
             words = words.opacity(0.35);
         }
