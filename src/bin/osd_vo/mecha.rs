@@ -2228,7 +2228,7 @@ mod round2_tests {
         let mut last = -1.0;
         for i in 0..60 {
             let (u, a) = sweep(i as f64 * 0.01).unwrap();
-            assert!(a <= 0.15 && a >= 0.0);
+            assert!((0.0..=0.15).contains(&a));
             assert!(u >= last);
             last = u;
         }
