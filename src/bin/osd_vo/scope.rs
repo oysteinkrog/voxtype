@@ -1220,6 +1220,22 @@ fn echo_alpha(age: f64) -> f32 {
     ECHO_ALPHA * (1.0 - (age / ECHO_SECS) as f32).powf(1.5)
 }
 
+/// R2-18-a: where the reflection of a line whose top is at `line_top`
+/// hangs, as its mirror axis and the box it is clipped to, inside `inner`.
+/// Just under the descenders on its own; with the lattice, under the
+/// newest line's gutter, so it never shares space with a strand or a
+/// pause label. `None` when no room is left above the frame.
+fn echo_band(line_top: f32, inner: Rect, lattice: bool) -> Option<(f32, Rect)> {
+    let top = if lattice {
+        line_top + LINE + LATTICE_GUTTER + 1.0
+    } else {
+        inner.y
+    };
+    let axis = if lattice { top } else { line_top + LINE * 0.95 };
+    let bottom = inner.y + inner.h;
+    (bottom - axis > 2.0).then(|| (axis, Rect::new(inner.x, top, inner.w, bottom - top)))
+}
+
 /// R2-18-c: the tile scales and their centres' x, newest first, for tiles
 /// of `widths` (newest first) whose newest right edge is at `right`.
 fn tile_slots(widths: &[f32], right: f32, gap: f32) -> Vec<(f32, f32)> {
@@ -1279,8 +1295,9 @@ impl Popup {
         let inner = scaled(INNER);
         let inner = Rect::new(o + inner.x, o + inner.y, inner.w, inner.h);
 
+        let band = echo_band(line_at.y, inner, l.on(wild_space::KINETIC_LATTICE));
         if l.on(TYPEWRITER_ECHO) && listening && !newest.is_empty() {
-            if let Some(at) = newest.last().and_then(born) {
+            if let (Some(at), Some((axis, clip))) = (newest.last().and_then(born), band) {
                 let text = newest
                     .iter()
                     .map(|w| w.text.as_str())
@@ -1298,9 +1315,8 @@ impl Popup {
                     .iter()
                     .map(|g| (g.pos.x, g.outline.contours.clone()))
                     .collect();
-                // The mirror line: just under the descenders.
-                let axis = line_at.y + LINE * 0.95;
-                let (x0, y0) = (inner.x, inner.y);
+                // The line mirrors just under its descenders, and hangs from `axis`.
+                let (x0, y0) = (clip.x, clip.y);
                 let canvas = Element::canvas("echo", at + ECHO_SECS, move |t, _r, p| {
                     let a = echo_alpha(t - at);
                     if a <= 0.0 {
@@ -1314,7 +1330,7 @@ impl Popup {
                                 * (std::f32::consts::TAU * (0.9 * t as f32 + gx * 0.02)).sin()
                         };
                         // Mirror at the axis, squashed, in the clip box's space.
-                        let flip = Affine::translate(0.0, -(axis - line_at.y))
+                        let flip = Affine::translate(0.0, -LINE * 0.95)
                             .then(&Affine {
                                 a: 1.0,
                                 b: 0.0,
@@ -1329,7 +1345,7 @@ impl Popup {
                         p.fill(&mirrored, &StrokeStyle::solid(1.0, hex(TEXT).fade(a)));
                     }
                 });
-                out.push(at_clip("echo-clip", inner, canvas));
+                out.push(at_clip("echo-clip", clip, canvas));
             }
         }
 
@@ -1503,6 +1519,25 @@ mod sentence_tests {
         assert_eq!(echo_alpha(0.0), ECHO_ALPHA);
         assert!(echo_alpha(1.0) > 0.0 && echo_alpha(1.0) < ECHO_ALPHA);
         assert_eq!(echo_alpha(ECHO_SECS), 0.0);
+    }
+
+    #[test]
+    fn with_the_lattice_the_echo_hangs_under_the_pause_labels_or_not_at_all() {
+        let inner = scaled(INNER);
+        for row in 0..MAX_LINES {
+            let top = TEXT_TOP + row as f32 * LINE;
+            // The lattice's newest strip, labels included, ends here.
+            let lattice_bottom = top + LINE + LATTICE_GUTTER;
+            match echo_band(top, inner, true) {
+                Some((axis, clip)) => {
+                    assert!(clip.y > lattice_bottom && axis >= clip.y, "row {row}");
+                    assert!(clip.y + clip.h <= inner.y + inner.h, "row {row}");
+                }
+                None => assert_eq!(row, MAX_LINES - 1, "only the last row has no room"),
+            }
+            let (axis, clip) = echo_band(top, inner, false).expect("room without the lattice");
+            assert_eq!((axis, clip), (top + LINE * 0.95, inner), "row {row}");
+        }
     }
 
     #[test]
