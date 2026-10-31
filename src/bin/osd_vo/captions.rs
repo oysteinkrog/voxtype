@@ -1268,7 +1268,7 @@ mod idle_tests {
         };
         assert_eq!(fan.until(3.0), 3.25);
         // Within the subtle limits of the bead.
-        assert!(ECHO_ALPHA <= 0.2 && FAN_ALPHA <= 0.25 && SKY_H <= 40.0);
+        const { assert!(ECHO_ALPHA <= 0.2 && FAN_ALPHA <= 0.25 && SKY_H <= 40.0) };
     }
 
     #[test]

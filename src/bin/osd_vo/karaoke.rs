@@ -1419,11 +1419,13 @@ mod tests {
             RIBBON_Y - 3.0 > line_bottom,
             "the head reaches the newest line"
         );
-        assert!(
-            RIBBON_Y + RIBBON_H + 3.0 < WAVE_Y - WAVE_HALF,
-            "the ribbon reaches the wave"
-        );
-        assert!(RIBBON_X0 >= MARGIN && RIBBON_X1 <= CARD_W - MARGIN);
+        const {
+            assert!(
+                RIBBON_Y + RIBBON_H + 3.0 < WAVE_Y - WAVE_HALF,
+                "the ribbon reaches the wave"
+            )
+        };
+        const { assert!(RIBBON_X0 >= MARGIN && RIBBON_X1 <= CARD_W - MARGIN) };
     }
 }
 

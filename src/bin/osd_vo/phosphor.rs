@@ -1727,7 +1727,7 @@ mod tests {
         }
         // The band runs from under the header rule to the meter's base,
         // which is above the text.
-        assert!(RULE_Y + 16.0 < METER_BASE && METER_BASE < TEXT_TOP);
+        const { assert!(RULE_Y + 16.0 < METER_BASE && METER_BASE < TEXT_TOP) };
     }
 
     #[test]
