@@ -989,6 +989,7 @@ impl Look {
             OsdTheme::River => Some(river::newest_line_centre(self, lines)),
             OsdTheme::Hologram => Some(hologram::newest_line_centre(self, lines)),
             OsdTheme::Glass => Some(glass::newest_line_centre(self)),
+            OsdTheme::Chrome => Some(chrome::newest_line_centre(self, lines)),
             _ => None,
         }
     }
@@ -1065,6 +1066,9 @@ impl Look {
         if self.theme == OsdTheme::Glass {
             return glass::text_width(self);
         }
+        if self.theme == OsdTheme::Chrome {
+            return chrome::text_width(self);
+        }
         self.width - swiss::PANEL_INSET_PX as f32
     }
 
@@ -1105,6 +1109,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Glass {
             return glass::MAX_LINES;
+        }
+        if self.theme == OsdTheme::Chrome {
+            return chrome::MAX_LINES;
         }
         swiss::MAX_LINES as u32
     }
@@ -1191,6 +1198,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Glass {
             return glass::text_style(self);
+        }
+        if self.theme == OsdTheme::Chrome {
+            return chrome::text_style(self);
         }
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
@@ -1288,6 +1298,7 @@ impl Look {
             OsdTheme::Showcase => voxtype::osd::showcase::MARGIN_PX,
             OsdTheme::Jarvis => jarvis::panel_top(),
             OsdTheme::Glass => glass::panel_top(self),
+            OsdTheme::Chrome => chrome::panel_top(self),
             _ => 0.0,
         }
     }
@@ -1383,6 +1394,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Glass {
             return glass::surface(self);
+        }
+        if self.theme == OsdTheme::Chrome {
+            return chrome::surface(self);
         }
         Size::new(
             self.width.ceil(),
@@ -2718,6 +2732,7 @@ fn default_motion(look: &Look) -> Motion {
             | OsdTheme::River
             | OsdTheme::Hologram
             | OsdTheme::Glass
+            | OsdTheme::Chrome
     ) {
         Motion::Spring(Spring::SOFT)
     } else {
