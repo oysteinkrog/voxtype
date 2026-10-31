@@ -24,6 +24,26 @@
 //! glow breathes between 85 % and 100 % on a 4 s cycle. None of it reaches
 //! the card, and under reduced motion all of it is off.
 //!
+//! Round 2 (R2-10) adds three opt-in features, all round the ring:
+//!
+//! - `liquid-ripple`: a thin membrane just outside the badge, swelling a
+//!   little with the voice. Each word raises two bumps of at most 4 px at
+//!   the bottom, toward the text, that travel round both ways and fade as
+//!   they meet at the top 1 s later. Reduced motion: the membrane stands
+//!   still and brightens for 1 s per word.
+//! - `typewriter-ribbon`: a woven ribbon arc between the badge and the bars
+//!   steps 12 degrees round per word, and the bar at its head strikes out
+//!   for 120 ms like a typebar. The newest word enters at 70 % ink and
+//!   reaches full ink in 150 ms. The design's paper card and typewriter
+//!   face are left out: they would change the look's card and type.
+//!   Reduced motion: the ribbon jumps a step and the word enters at full
+//!   ink.
+//! - `breathing-halo`: three layered petal rings behind the bars, at most
+//!   25 % alpha, grow and shrink with the voice. When a phrase ends (no
+//!   word for 0.6 s) 20 motes drift out from the ring and are gone 1 s
+//!   later. Reduced motion: the petals keep their size and only brighten,
+//!   and no motes.
+//!
 //! Geometry is laid out in the pixels of the concept image, from the card's
 //! left edge and the top of the image, and scaled so the card is as wide as
 //! the popup.
@@ -93,6 +113,38 @@ const SHIMMER_SECS: f64 = 0.3;
 const SHIMMER_GAIN: f32 = 0.3;
 const BREATH_LOW: f32 = 0.85;
 const BREATH_SECS: f64 = 4.0;
+/// R2-10-a: the membrane's radius, its swell at full voice and its bumps'
+/// height in logical pixels, their width in radians and their life.
+pub(crate) const LIQUID_RIPPLE: &str = "liquid-ripple";
+const MEMBRANE_R: f32 = 94.0;
+const MEMBRANE_SWELL: f32 = 1.5;
+const BUMP_PX: f32 = 4.0;
+const BUMP_WIDTH: f32 = 0.35;
+const BUMP_SECS: f64 = 1.0;
+/// R2-10-b: the ribbon's radius and width in concept pixels, its sweep and
+/// step in degrees, how long a step and a typebar strike take, and the
+/// newest word's entry.
+pub(crate) const TYPEWRITER_RIBBON: &str = "typewriter-ribbon";
+const RIBBON_R: f32 = 99.0;
+const RIBBON_W: f32 = 6.0;
+const RIBBON_SWEEP: f32 = 110.0;
+const RIBBON_STEP: f32 = 12.0;
+const STEP_SECS: f64 = 0.18;
+const STRIKE_SECS: f64 = 0.12;
+const ENTRY_INK: f32 = 0.7;
+const ENTRY_SECS: f64 = 0.15;
+/// R2-10-c: the petals' rest radius and reach at full voice in concept
+/// pixels, their alpha, the quiet that ends a phrase, the motes and their
+/// life.
+pub(crate) const BREATHING_HALO: &str = "breathing-halo";
+const PETAL_R: f32 = 112.0;
+const PETAL_REACH: f32 = 34.0;
+const PETAL_ALPHA: f32 = 0.25;
+const PHRASE_GAP: f64 = 0.6;
+const MOTES: usize = 20;
+const MOTE_SECS: f64 = 1.0;
+const MOTE_REACH: f32 = 46.0;
+
 /// How fast the bands follow the voice, per second, up and down.
 const ATTACK: f32 = 30.0;
 const RELEASE: f32 = 7.0;
@@ -266,6 +318,68 @@ fn breath(s: f64) -> f32 {
     BREATH_LOW + (1.0 - BREATH_LOW) * (0.5 + 0.5 * (TAU * u).cos())
 }
 
+/// R2-10-a: the height of one word's bumps at `age` seconds, 0 to 1 of
+/// `BUMP_PX`; 0 before the word and from 1 s on.
+fn bump(age: f64) -> f32 {
+    if !(0.0..BUMP_SECS).contains(&age) {
+        return 0.0;
+    }
+    let u = (age / BUMP_SECS) as f32;
+    // A quick rise, then a fade to nothing as the two meet at the top.
+    (u / 0.12).min(1.0) * (1.0 - u) * (1.0 - u)
+}
+
+/// R2-10-a: where a word's two bumps are `age` seconds after it came, in
+/// radians from the bottom of the ring, either way: they reach the top
+/// as they fade.
+fn bump_angle(age: f64) -> f32 {
+    PI * ease_out(age / BUMP_SECS)
+}
+
+/// R2-10-b: the ribbon's start angle in degrees after `steps` words, the
+/// newest `since` seconds ago; it eases a step, or jumps under reduced
+/// motion.
+fn ribbon_angle(steps: usize, since: f64, reduced: bool) -> f32 {
+    let base = -90.0 - 0.5 * RIBBON_SWEEP;
+    let k = if reduced {
+        1.0
+    } else {
+        ease_out(since / STEP_SECS)
+    };
+    base + RIBBON_STEP * (steps as f32 - 1.0 + k).max(0.0)
+}
+
+/// R2-10-c: the phrase ends among words that came at `born`, oldest
+/// first: 0.6 s after each word no word followed within 0.6 s.
+fn phrase_ends(born: &[f64]) -> Vec<f64> {
+    born.iter()
+        .enumerate()
+        .filter(|&(i, &b)| born.get(i + 1).is_none_or(|&n| n - b > PHRASE_GAP))
+        .map(|(_, &b)| b + PHRASE_GAP)
+        .collect()
+}
+
+/// R2-10-c: the motes of a phrase end `age` seconds ago: how far out they
+/// are, 0 to 1, and their alpha; `None` before it and from 1 s on.
+fn motes(age: f64) -> Option<(f32, f32)> {
+    if !(0.0..MOTE_SECS).contains(&age) {
+        return None;
+    }
+    let u = age / MOTE_SECS;
+    Some((ease_out(u * 1.6), 0.6 * (1.0 - u as f32).powi(2)))
+}
+
+/// The round 2 features' recorded events, for one view.
+#[derive(Clone, Debug, Default)]
+struct Round2 {
+    /// R2-10-a: when each of the newest words came.
+    ripples: Option<Vec<f64>>,
+    /// R2-10-b: words so far, and when the newest came.
+    ribbon: Option<(usize, f64)>,
+    /// R2-10-c: the phrase ends so far.
+    halo: Option<Vec<f64>>,
+}
+
 /// What the canvas draws, fixed for one view.
 struct Ring {
     k: f32,
@@ -290,6 +404,8 @@ struct Ring {
     idle: bool,
     /// Reduced motion: the bars follow the voice with no wobble of their own.
     still: bool,
+    /// R2-10: the round 2 features that are on.
+    r2: Round2,
 }
 
 impl Ring {
@@ -400,6 +516,19 @@ impl Ring {
             0.0
         };
         let shine = shimmer(since).filter(|_| self.idle);
+        if self.sink_at.is_none() && self.final_at.is_none() {
+            self.draw_halo(t, open, p);
+        }
+        // R2-10-b: the bar at the ribbon's head strikes out per word.
+        let strike = self.r2.ribbon.and_then(|(steps, at)| {
+            let s = t - at;
+            (!self.still && (0.0..STRIKE_SECS).contains(&s)).then(|| {
+                let head = ribbon_angle(steps, s, self.still) + RIBBON_SWEEP;
+                let i = ((head.to_radians() + PI / 2.0 - turn) / TAU * BARS as f32).round();
+                let i = i.rem_euclid(BARS as f32) as usize % BARS;
+                (i, (1.0 - (s / STRIKE_SECS) as f32) * 30.0)
+            })
+        });
         for i in 0..BARS {
             let a = i as f32 / BARS as f32 * TAU - PI / 2.0 + turn;
             // 0 at the top, 1 at the bottom, the same on both sides.
@@ -417,6 +546,9 @@ impl Ring {
                 }
                 None => live * (1.0 - sink) + BAR_MIN * sink,
             };
+            if let Some((_, extra)) = strike.filter(|&(j, _)| j == i) {
+                len += extra;
+            }
             len *= open.max(0.05);
             let mut alpha = 1.0;
             if self.loading && self.sink_at.is_none() {
@@ -480,6 +612,157 @@ impl Ring {
         }
         if let Some(eye) = self.eye.filter(|_| !self.ended) {
             self.draw_eye(t, &eye, open, p);
+        }
+        if self.sink_at.is_none() && self.final_at.is_none() {
+            self.draw_membrane(t, open, p);
+            self.draw_ribbon(t, open, p);
+        }
+    }
+
+    /// The smoothed voice, 0 to 1: the mean over the last half second.
+    fn voice(&self, t: f64) -> f32 {
+        let mean = (0..6)
+            .map(|i| self.level_at(t, i as f32 * 0.1))
+            .sum::<f32>()
+            / 6.0;
+        (mean * 4.0).min(1.0)
+    }
+
+    /// R2-10-a: the membrane just outside the badge with each word's two
+    /// bumps travelling round from the bottom.
+    fn draw_membrane(&self, t: f64, open: f32, p: &mut Painter) {
+        let Some(born) = &self.r2.ripples else {
+            return;
+        };
+        let k = self.k;
+        let c = self.p(RING_X, RING_Y);
+        if self.still {
+            let lift = born.iter().map(|&b| bump(t - b)).fold(0.0, f32::max);
+            p.stroke(
+                &make::ring(c, MEMBRANE_R * k),
+                &StrokeStyle::solid(1.4 * k, hex(ICE, (0.3 + 0.4 * lift) * open)).glow(4.0 * k),
+            );
+            return;
+        }
+        let swell = MEMBRANE_SWELL * self.voice(t);
+        let n = 120;
+        let pts: Vec<Point> = (0..=n)
+            .map(|j| {
+                let a = j as f32 / n as f32 * TAU;
+                // Angle from the bottom of the ring, -PI to PI.
+                let from_bottom = (a - PI / 2.0 + PI).rem_euclid(TAU) - PI;
+                let mut r = MEMBRANE_R * k + swell;
+                for &b in born {
+                    let h = bump(t - b);
+                    if h > 0.0 {
+                        let at = bump_angle(t - b);
+                        for side in [at, -at] {
+                            let d = (from_bottom - side) / BUMP_WIDTH;
+                            r += BUMP_PX * h * (-d * d).exp();
+                        }
+                    }
+                }
+                Point::new(c.x + r * a.cos(), c.y + r * a.sin())
+            })
+            .collect();
+        p.stroke(
+            &Contour::polyline(&pts, true),
+            &StrokeStyle::solid(1.4 * k, hex(ICE, 0.45 * open)).glow(4.0 * k),
+        );
+    }
+
+    /// R2-10-b: the woven ribbon arc between the badge and the bars.
+    fn draw_ribbon(&self, t: f64, open: f32, p: &mut Painter) {
+        let Some((steps, at)) = self.r2.ribbon else {
+            return;
+        };
+        let k = self.k;
+        let c = self.p(RING_X, RING_Y);
+        let a0 = ribbon_angle(steps, t - at, self.still).to_radians();
+        let sweep = RIBBON_SWEEP.to_radians();
+        let mid = a0 + 0.5 * sweep;
+        let band = make::arc(c, RIBBON_R * k, a0, sweep);
+        p.stroke(
+            &band,
+            &StrokeStyle::solid(RIBBON_W * k, ramp(mid.cos() + mid.sin(), 0.32 * open)),
+        );
+        // The weave: short darker threads across the band.
+        let threads = 36;
+        for j in 0..threads {
+            let a = a0 + sweep * (j as f32 + 0.5) / threads as f32;
+            let (ca, sa) = (a.cos(), a.sin());
+            let (r0, r1) = (
+                (RIBBON_R - 0.4 * RIBBON_W) * k,
+                (RIBBON_R + 0.4 * RIBBON_W) * k,
+            );
+            p.stroke(
+                &Contour::polyline(
+                    &[
+                        Point::new(c.x + ca * r0, c.y + sa * r0),
+                        Point::new(c.x + ca * r1, c.y + sa * r1),
+                    ],
+                    false,
+                ),
+                &StrokeStyle::solid(0.8 * k, hex(CARD_LO, 0.35 * open)),
+            );
+        }
+    }
+
+    /// R2-10-c: three petal rings behind the bars that breathe with the
+    /// voice, and the motes of each phrase end.
+    fn draw_halo(&self, t: f64, open: f32, p: &mut Painter) {
+        let Some(ends) = &self.r2.halo else {
+            return;
+        };
+        let k = self.k;
+        let c = self.p(RING_X, RING_Y);
+        let v = self.voice(t);
+        let spin = if self.still {
+            0.0
+        } else {
+            (t - self.shown_at) as f32 * 0.15
+        };
+        for layer in 0..3 {
+            let f = layer as f32 / 2.0;
+            let reach = if self.still {
+                0.0
+            } else {
+                PETAL_REACH * v * (1.0 - 0.3 * f)
+            };
+            let base = (PETAL_R + 10.0 * f + reach) * k;
+            let phase = spin * (1.0 + 0.5 * f) + f * 0.9;
+            let n = 144;
+            let pts: Vec<Point> = (0..=n)
+                .map(|j| {
+                    let a = j as f32 / n as f32 * TAU;
+                    let r = base * (1.0 + 0.07 * (6.0 * a + phase).cos());
+                    Point::new(c.x + r * a.cos(), c.y + r * a.sin())
+                })
+                .collect();
+            let a = PETAL_ALPHA * (0.35 + 0.65 * v) * (1.0 - 0.3 * f) * open;
+            let petal = Contour::polyline(&pts, true);
+            p.fill([&petal], &StrokeStyle::solid(1.0, ramp(0.6 - f, 0.25 * a)));
+            p.stroke(
+                &petal,
+                &StrokeStyle::solid(1.0 * k, ramp(0.6 - f, a)).glow(3.0 * k),
+            );
+        }
+        if self.still {
+            return;
+        }
+        for &end in ends {
+            let Some((out, a)) = motes(t - end) else {
+                continue;
+            };
+            for m in 0..MOTES {
+                let ang = seed(m * 7 + 3) * TAU;
+                let r = (PETAL_R + 6.0 + MOTE_REACH * out * (0.6 + 0.4 * seed(m + 51))) * k;
+                p.shape(ShapeInstance::circle(
+                    Point::new(c.x + r * ang.cos(), c.y + r * ang.sin()),
+                    (1.2 + seed(m + 90)) * k,
+                    Paint::glow(ramp(ang.cos() + ang.sin(), a), 3.0 * k, 1.0),
+                ));
+            }
         }
     }
 
@@ -608,6 +891,7 @@ impl Popup {
             eye: self.radial_eye(k),
             idle: sink_at.is_none() && !done && !status.loading && !self.still(),
             still: self.still(),
+            r2: self.radial_round2(),
         };
         let until = match (self.extra.final_at, self.radial.ended_at) {
             (Some(f), _) => f + BURST_SECS + 0.1,
@@ -645,6 +929,28 @@ impl Popup {
             ))
             .child(self.radial_status(&g, &status, bottom));
         root.child(panel)
+    }
+
+    /// R2-10: the recorded events the round 2 features that are on draw from.
+    fn radial_round2(&self) -> Round2 {
+        let on = |f: &str| self.look.on(f);
+        if !(on(LIQUID_RIPPLE) || on(TYPEWRITER_RIBBON) || on(BREATHING_HALO)) {
+            return Round2::default();
+        }
+        let born: Vec<f64> = self
+            .shown
+            .iter()
+            .filter_map(|w| self.heard.word(w.id).map(|h| h.born))
+            .collect();
+        let newest = born.last().copied().unwrap_or(f64::NEG_INFINITY);
+        Round2 {
+            ripples: on(LIQUID_RIPPLE).then(|| born[born.len().saturating_sub(4)..].to_vec()),
+            ribbon: on(TYPEWRITER_RIBBON).then_some((born.len(), newest)),
+            halo: on(BREATHING_HALO).then(|| {
+                let ends = phrase_ends(&born);
+                ends[ends.len().saturating_sub(2)..].to_vec()
+            }),
+        }
     }
 
     /// MO-62: where the eye looks, from the words on screen, in the
@@ -769,10 +1075,24 @@ impl Popup {
             .text_style(self.look.text_style())
             .color(hex(TEXT, 1.0))
             .width(self.look.text_width())
-            .motion(Prop::Opacity, Spring::critical_to_98(0.2))
             .motion(Prop::Offset, Spring::critical_to_98(0.25))
-            .motion(Prop::TextFx, Spring::critical_to_98(0.22))
-            .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 7.0 * k)));
+            .motion(Prop::TextFx, Spring::critical_to_98(0.22));
+        words = if self.look.on(TYPEWRITER_RIBBON) {
+            // R2-10-b: in place at 70 % ink, full in 150 ms; reduced
+            // motion shows it at full ink.
+            let enter = if self.still() {
+                Transition::NONE
+            } else {
+                Transition::fade().opacity(ENTRY_INK)
+            };
+            words
+                .motion(Prop::Opacity, Spring::critical_to_98(ENTRY_SECS))
+                .word_enter(self.ghost_enter(enter))
+        } else {
+            words
+                .motion(Prop::Opacity, Spring::critical_to_98(0.2))
+                .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 7.0 * k)))
+        };
         if self.radial.ended_at.is_some() {
             words = words.opacity(0.4);
         }
@@ -989,6 +1309,7 @@ mod tests {
             eye: None,
             idle: false,
             still: false,
+            r2: Round2::default(),
         }
     }
 
@@ -1064,6 +1385,37 @@ mod tests {
         assert_eq!(low.reach(1.0, BARS / 2, 1.0), 0.0);
         assert_eq!(band_level(0), 0.0);
         assert_eq!(band_level(255), 1.0);
+    }
+
+    #[test]
+    fn a_word_bumps_the_membrane_at_most_4_px_and_is_gone_in_1_s() {
+        assert_eq!(bump(-0.01), 0.0);
+        let peak = (0..100).map(|i| bump(i as f64 * 0.01)).fold(0.0, f32::max);
+        assert!(peak > 0.5 && peak <= 1.0, "{peak}");
+        assert!(BUMP_PX * peak <= 4.0);
+        assert_eq!(bump(BUMP_SECS), 0.0);
+        assert_eq!(bump(1.5), 0.0);
+        assert_eq!(bump_angle(0.0), 0.0);
+        assert!((bump_angle(BUMP_SECS) - PI).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_ribbon_steps_once_per_word_and_jumps_under_reduced_motion() {
+        let start = ribbon_angle(1, 10.0, false);
+        assert_eq!(ribbon_angle(2, 10.0, false) - start, RIBBON_STEP);
+        assert!(ribbon_angle(2, 0.05, false) < ribbon_angle(2, 10.0, false));
+        assert_eq!(ribbon_angle(2, 0.0, true), ribbon_angle(2, 10.0, false));
+    }
+
+    #[test]
+    fn a_phrase_ends_after_0_6_s_without_a_word_and_its_motes_are_gone_in_1_s() {
+        let ends = phrase_ends(&[1.0, 1.3, 1.5, 3.0, 3.2]);
+        assert_eq!(ends.len(), 2);
+        assert!((ends[0] - 2.1).abs() < 1e-9 && (ends[1] - 3.8).abs() < 1e-9);
+        assert!(motes(-0.01).is_none());
+        let (out, a) = motes(0.5).unwrap();
+        assert!(out > 0.0 && a > 0.0);
+        assert!(motes(MOTE_SECS).is_none());
     }
 }
 
