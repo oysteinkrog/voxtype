@@ -17,6 +17,22 @@
 //! 3 px/s in the side margins. The band keeps out of the newest line's box
 //! and the motes out of the text. Under reduced motion all of it is off.
 //!
+//! Round 2 (R2-07) adds three opt-in features:
+//!
+//! - `magnetic-ink`: the waveform is a band of fine particles, at most
+//!   30 % alpha. When a word comes, particles gather behind it from round
+//!   its box and drift apart again within 500 ms; the word itself enters
+//!   in place at 70 % ink. Reduced motion: no gathering, and the band is a
+//!   still line.
+//! - `typewriter-ribbon`: a glowing head glides along a faint textured band in
+//!   the gap under the text to the newest word's left edge in 200 ms, and
+//!   the stretch it ran leaves a trail that fades in 800 ms. Reduced
+//!   motion: the head jumps and leaves no trail.
+//! - `lens-ripple`: two flat rings grow and fade in 900 ms in the
+//!   waveform's band above each new word, brighter when the voice is loud.
+//!   The word arrives sharp and nothing crosses the text. Reduced motion:
+//!   one ring flashes at a fixed size.
+//!
 //! Geometry is laid out in the pixels of the concept image and scaled so the
 //! image is as wide as the popup.
 
@@ -94,6 +110,26 @@ const BAND_PASS: f64 = 3.0;
 const MOTES: usize = 4;
 const MOTE_SPEED: f32 = 3.0;
 const MOTE_ALPHA: f32 = 0.15;
+
+/// R2-07-a: the particle band and the word gathering: particles per bar,
+/// their alpha, how many gather behind a word and for how long.
+pub(crate) const MAGNETIC_INK: &str = "magnetic-ink";
+const BAND_DOTS: usize = 3;
+const DOT_ALPHA: f32 = 0.3;
+const GATHER_DOTS: usize = 36;
+const GATHER_SECS: f64 = 0.5;
+const ENTRY_INK: f32 = 0.7;
+/// R2-07-b: the band under the text, the head's glide and the trail's life.
+pub(crate) const RIBBON_HEAD: &str = "typewriter-ribbon";
+const HEAD_SECS: f64 = 0.2;
+const TRAIL_SECS: f64 = 0.8;
+/// R2-07-c: the rings round a new word, their life and reach in concept
+/// pixels, and their alpha at full voice.
+pub(crate) const LENS_RIPPLE: &str = "lens-ripple";
+const LENS_RINGS: usize = 2;
+const LENS_SECS: f64 = 0.9;
+const LENS_REACH: f32 = 60.0;
+const LENS_ALPHA: f32 = 0.22;
 
 const AMBER: u32 = 0xff9a2e;
 const HOT: u32 = 0xffd59a;
@@ -236,6 +272,87 @@ struct Panel {
     newest: (f32, f32),
     /// Reduced motion: the bars follow the level with no ripple of their own.
     still: bool,
+    /// R2-07: the round 2 features that are on, with their events.
+    r2: Round2,
+}
+
+/// R2-07: a word's box in the canvas's logical pixels and when it came.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Landed {
+    rect: Rect,
+    born: f64,
+}
+
+/// R2-07: what the round 2 features draw, for one view.
+#[derive(Clone, Debug, Default)]
+struct Round2 {
+    /// R2-07-a: the particle band is on, and the newest word.
+    ink: Option<Option<Landed>>,
+    /// R2-07-b: the band's y and ends, the word the head came from and the
+    /// newest, in logical pixels.
+    head: Option<Head>,
+    /// R2-07-c: the newest words.
+    lens: Option<Vec<Landed>>,
+}
+
+/// R2-07-b: the head's run to the newest word.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Head {
+    y: f32,
+    x0: f32,
+    x1: f32,
+    from: f32,
+    to: f32,
+    born: f64,
+}
+
+impl Head {
+    /// The head's x at `t`: from the last word's left edge to the newest's
+    /// in `HEAD_SECS`; at once under reduced motion.
+    fn x(&self, t: f64, reduced: bool) -> f32 {
+        if reduced {
+            return self.to;
+        }
+        self.from + (self.to - self.from) * ease_out((t - self.born) / HEAD_SECS)
+    }
+
+    /// The trail's alpha at `t`, 1 when the word came and 0 after
+    /// `TRAIL_SECS`.
+    fn trail(&self, t: f64) -> f32 {
+        let u = (t - self.born) / TRAIL_SECS;
+        if (0.0..1.0).contains(&u) {
+            (1.0 - u as f32).powi(2)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// R2-07-a: where gathering dot `i` of a word is `age` seconds after it
+/// came, as a share of the way from its scatter point to its place in the
+/// word (1 is gathered), and its alpha; `None` outside 0 to 500 ms.
+fn gather(age: f64) -> Option<(f32, f32)> {
+    if !(0.0..GATHER_SECS).contains(&age) {
+        return None;
+    }
+    let u = (age / GATHER_SECS) as f32;
+    // In over the first 40 %, then apart again as they fade.
+    let pull = if u < 0.4 {
+        ease_out(u as f64 / 0.4)
+    } else {
+        1.0 - 0.6 * (u - 0.4) / 0.6
+    };
+    Some((pull, DOT_ALPHA * (1.0 - u)))
+}
+
+/// R2-07-c: ring `n`'s radius as a share of its reach and its alpha
+/// `age` seconds after its word came; `None` once it has faded.
+fn lens_ring(age: f64, n: usize) -> Option<(f32, f32)> {
+    let u = (age - n as f64 * 0.12) / LENS_SECS;
+    if !(0.0..1.0).contains(&u) {
+        return None;
+    }
+    Some((ease_out(u), (1.0 - u as f32).powf(1.5)))
 }
 
 /// rgl: how much darker the glass is `s` seconds after the popup opened,
@@ -293,6 +410,139 @@ impl Panel {
         let drift = if self.still { 0.0 } else { t as f32 * 3.0 };
         let ripple = 0.55 + 0.45 * (TAU * (x * 9.0 + s * 0.3) - drift).sin().abs();
         WAVE_AMP * window * level * (0.35 + 0.65 * s) * ripple
+    }
+
+    /// R2-07-a: bar `i` as a few fine particles spread over its height,
+    /// drifting along the band; a still dotted line under reduced motion.
+    fn dots(&self, t: f64, x: f32, half: f32, i: usize, a: f32, p: &mut Painter) {
+        let k = self.k;
+        for j in 0..BAND_DOTS {
+            let s = seed(i * 7 + j * 131 + 5);
+            let (dx, y) = if self.still {
+                (0.0, 0.0)
+            } else {
+                let phase = TAU * s + t as f32 * (0.8 + s);
+                (
+                    2.5 * phase.sin(),
+                    half * (2.0 * s - 1.0) * (0.6 + 0.4 * phase.cos()),
+                )
+            };
+            p.shape(ShapeInstance::circle(
+                self.p(x + dx, WAVE_Y + y),
+                (0.8 + 0.5 * s) * k,
+                Paint::solid(hex(HOT, DOT_ALPHA * a)),
+            ));
+        }
+    }
+
+    /// R2-07: the gathering behind the newest word, the ribbon head and the
+    /// lens rings, all behind the text.
+    fn draw_round2(&self, t: f64, p: &mut Painter) {
+        let k = self.k;
+        if let Some(Some(w)) = self.r2.ink.filter(|_| !self.still) {
+            if let Some((pull, a)) = gather(t - w.born) {
+                for i in 0..GATHER_DOTS {
+                    let (u, v) = (seed(i + 300), seed(i + 700));
+                    let home = Point::new(
+                        w.rect.x + u * w.rect.w,
+                        w.rect.y + (0.25 + 0.6 * v) * w.rect.h,
+                    );
+                    let ang = TAU * seed(i + 900);
+                    let r = (18.0 + 22.0 * seed(i + 1100)) * k;
+                    let from = Point::new(home.x + r * ang.cos(), home.y + 0.5 * r * ang.sin());
+                    let at = Point::new(
+                        from.x + (home.x - from.x) * pull,
+                        from.y + (home.y - from.y) * pull,
+                    );
+                    p.shape(ShapeInstance::circle(
+                        at,
+                        1.1 * k,
+                        Paint::solid(hex(HOT, a)),
+                    ));
+                }
+            }
+        }
+        if let Some(h) = self.r2.head {
+            // The band: a faint strip with a fixed grain of short dashes.
+            p.shape(ShapeInstance::line(
+                Point::new(h.x0, h.y),
+                Point::new(h.x1, h.y),
+                3.0 * k,
+                Paint::solid(hex(DEEP, 0.18)),
+            ));
+            let n = ((h.x1 - h.x0) / (6.0 * k)) as usize;
+            for i in 0..n {
+                let x = h.x0 + i as f32 * 6.0 * k + 3.0 * k * seed(i + 40);
+                p.shape(ShapeInstance::line(
+                    Point::new(x, h.y - 1.0 * k),
+                    Point::new(x + 2.0 * k, h.y + 1.0 * k),
+                    0.6 * k,
+                    Paint::solid(hex(AMBER, 0.08 + 0.08 * seed(i + 77))),
+                ));
+            }
+            let x = h.x(t, self.still);
+            let trail = if self.still { 0.0 } else { h.trail(t) };
+            if trail > 0.0 && (x - h.from).abs() > 0.5 {
+                p.stroke(
+                    &Contour::polyline(&[Point::new(h.from, h.y), Point::new(x, h.y)], false),
+                    &StrokeStyle::solid(1.6 * k, hex(AMBER, 0.6 * trail)).glow(3.0 * k),
+                );
+            }
+            p.shape(ShapeInstance::circle(
+                Point::new(x, h.y),
+                5.0 * k,
+                Paint::glow(hex(AMBER, 0.8), 7.0 * k, 1.2),
+            ));
+            p.shape(ShapeInstance::circle(
+                Point::new(x, h.y),
+                1.8 * k,
+                Paint::solid(hex(HOT, 1.0)),
+            ));
+        }
+        if let Some(words) = &self.r2.lens {
+            let voice = (self.level_at(t, 0.0) * 4.0).min(1.0);
+            for w in words {
+                // In the waveform's band, above the word: the text is left
+                // alone.
+                let c = Point::new(w.rect.x + 0.5 * w.rect.w, WAVE_Y * k);
+                let age = t - w.born;
+                if self.still {
+                    if (0.0..0.3).contains(&age) {
+                        p.stroke(
+                            &make::ring(c, 20.0 * k),
+                            &StrokeStyle::solid(
+                                1.0 * k,
+                                hex(AMBER, LENS_ALPHA * (1.0 - (age / 0.3) as f32)),
+                            ),
+                        );
+                    }
+                    continue;
+                }
+                for n in 0..LENS_RINGS {
+                    if let Some((r, a)) = lens_ring(age, n) {
+                        // Flat, so a ring stays inside the band.
+                        // Inside the waveform's ends, clear of the side labels.
+                        let room = (c.x - WAVE_X0 * k).min(WAVE_X1 * k - c.x);
+                        let rx = (0.5 * w.rect.w + LENS_REACH * r * k).min(room.max(4.0 * k));
+                        let ry = (8.0 + 32.0 * r) * k;
+                        let pts: Vec<Point> = (0..=48)
+                            .map(|j| {
+                                let u = TAU * j as f32 / 48.0;
+                                Point::new(c.x + rx * u.cos(), c.y + ry * u.sin())
+                            })
+                            .collect();
+                        p.stroke(
+                            &Contour::polyline(&pts, true),
+                            &StrokeStyle::solid(
+                                1.0 * k,
+                                hex(AMBER, LENS_ALPHA * (0.5 + 0.5 * voice) * a),
+                            )
+                            .glow(2.5 * k),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// rgl: the rolling band, clear of the newest line's box, and the dust
@@ -505,12 +755,19 @@ impl Panel {
                 a = if u <= lit { 1.0 } else { 0.4 };
             }
             let col = if tall > 0.55 { HOT } else { AMBER };
+            if self.r2.ink.is_some() && self.sink_at.is_none() && self.final_at.is_none() {
+                self.dots(t, x, half, i, a, p);
+                continue;
+            }
             p.shape(ShapeInstance::line(
                 self.p(x, WAVE_Y - half),
                 self.p(x, WAVE_Y + half),
                 (1.6 + 0.6 * tall) * k,
                 Paint::solid(hex(col, a * fade)),
             ));
+        }
+        if self.sink_at.is_none() && self.final_at.is_none() {
+            self.draw_round2(t, p);
         }
         if join > 0.0 {
             // The line grows from the middle out to both ends.
@@ -595,6 +852,7 @@ impl Popup {
                 (TEXT_TOP + lines.max(1) as f32 * LINE) * k,
             ),
             still: self.still(),
+            r2: self.amber_round2(k),
         };
         let until = match (self.extra.final_at, self.amber.ended_at) {
             (Some(f), _) => f + JOIN_SECS + 0.1,
@@ -644,6 +902,57 @@ impl Popup {
             ))
             .child(self.amber_status(&g, &status));
         root.child(layer)
+    }
+
+    /// R2-07: the events the round 2 features that are on draw from, in the
+    /// canvas's logical pixels.
+    fn amber_round2(&self, k: f32) -> Round2 {
+        let on = |f: &str| self.look.on(f);
+        if !(on(MAGNETIC_INK) || on(RIBBON_HEAD) || on(LENS_RIPPLE)) {
+            return Round2::default();
+        }
+        let (style, width) = (self.look.text_style(), self.look.text_width());
+        let (boxes, _) = sounding::word_boxes(&self.measure, &self.shown, &style, Some(width));
+        let landed = |b: &sounding::WordBox| {
+            self.heard.word(b.id).map(|h| Landed {
+                rect: Rect::new(
+                    TEXT_X * k + b.rect.x,
+                    TEXT_TOP * k + b.rect.y,
+                    b.rect.w,
+                    b.rect.h,
+                ),
+                born: h.born,
+            })
+        };
+        let newest = boxes.last().and_then(landed);
+        let head = on(RIBBON_HEAD)
+            .then(|| {
+                let w = newest?;
+                let from = boxes
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|i| landed(&boxes[i]))
+                    .map_or(w.rect.x, |l| l.rect.x);
+                // In the gap between the last line and the lower rule.
+                let y = (TEXT_TOP + self.lines.max(1) as f32 * LINE + 0.45 * RULE2_GAP) * k;
+                Some(Head {
+                    y,
+                    x0: TEXT_X * k,
+                    x1: TEXT_X * k + width,
+                    from,
+                    to: w.rect.x,
+                    born: w.born,
+                })
+            })
+            .flatten();
+        Round2 {
+            ink: on(MAGNETIC_INK).then_some(newest),
+            head,
+            lens: on(LENS_RIPPLE).then(|| {
+                let from = boxes.len().saturating_sub(3);
+                boxes[from..].iter().filter_map(landed).collect()
+            }),
+        }
     }
 
     /// The microphone and the spaced-out title.
@@ -733,7 +1042,12 @@ impl Popup {
             .width(self.look.text_width())
             .motion(Prop::Opacity, Spring::critical_to_98(0.22))
             .motion(Prop::Offset, Spring::critical_to_98(0.22))
-            .word_enter(self.ghost_enter(Transition::fade().wipe(1.0)));
+            .word_enter(self.ghost_enter(if self.look.on(MAGNETIC_INK) {
+                // R2-07-a: in place at 70 % ink while the particles gather.
+                Transition::fade().opacity(ENTRY_INK)
+            } else {
+                Transition::fade().wipe(1.0)
+            }));
         if self.amber.ended_at.is_some() {
             words = words.opacity(0.4);
         }
@@ -944,7 +1258,49 @@ mod tests {
             idle: false,
             newest: (0.0, 0.0),
             still: false,
+            r2: Round2::default(),
         }
+    }
+
+    #[test]
+    fn the_head_reaches_the_new_word_in_200_ms_and_its_trail_is_gone_in_800() {
+        let h = Head {
+            y: 0.0,
+            x0: 0.0,
+            x1: 500.0,
+            from: 40.0,
+            to: 300.0,
+            born: 1.0,
+        };
+        assert_eq!(h.x(1.0, false), 40.0);
+        assert!(h.x(1.1, false) > 40.0 && h.x(1.1, false) < 300.0);
+        assert_eq!(h.x(1.0 + HEAD_SECS, false), 300.0);
+        assert_eq!(h.x(1.0, true), 300.0);
+        assert_eq!(h.trail(1.0), 1.0);
+        assert!(h.trail(1.5) > 0.0);
+        assert_eq!(h.trail(1.0 + TRAIL_SECS), 0.0);
+    }
+
+    #[test]
+    fn the_particles_gather_and_part_within_500_ms_at_most_30_percent() {
+        assert!(gather(-0.01).is_none());
+        let (pull, a) = gather(0.2).unwrap();
+        assert!(pull > 0.9 && a <= DOT_ALPHA);
+        let (apart, _) = gather(0.45).unwrap();
+        assert!(apart < pull);
+        assert!(gather(GATHER_SECS).is_none());
+    }
+
+    #[test]
+    fn each_word_sends_two_lens_rings_gone_in_900_ms() {
+        let live = |age: f64| {
+            (0..LENS_RINGS)
+                .filter(|&n| lens_ring(age, n).is_some())
+                .count()
+        };
+        assert_eq!(live(0.2), 2);
+        assert!(lens_ring(0.0, 1).is_none());
+        assert_eq!(live(LENS_SECS + 0.2), 0);
     }
 
     #[test]
