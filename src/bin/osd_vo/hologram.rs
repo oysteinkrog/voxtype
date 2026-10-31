@@ -515,7 +515,13 @@ impl Popup {
             .width(l.text_width())
             .height(lines as f32 * TEXT_LINE * k)
             .child(words)
-            .children(self.paths_overlays(&paths).into_iter().filter(|_| !editing))
+            // The pen draws at the flat layout's places, which the depth
+            // stack does not use: with the stack it drew loose outlines.
+            .children(
+                self.paths_overlays(&paths)
+                    .into_iter()
+                    .filter(|_| !editing && !stacking),
+            )
             .children(self.line_marks(
                 l.text_style(),
                 l.text_width(),
@@ -632,7 +638,14 @@ impl Popup {
         let sheet = Size::new(w + 12.0 * k, line_h + 8.0 * k);
         let stack = DepthStack {
             step_z: 90.0 * k,
-            step_rise: line_h * 0.82,
+            // A little over a line pitch per place, the same at every place:
+            // the stack's perspective draws each rise smaller, and with less
+            // the lines further back sit on the ones in front.
+            step_rise: line_h * 1.15,
+            parallax: vec![1.0],
+            // Every sheet moves on one spring: a deeper sheet that lagged was
+            // still in its old place when the one in front rose into it.
+            slowdown: 0.0,
             step_x: 0.0,
             sheet: Some(Sheet {
                 fill: hex(ORB).fade(0.45),
