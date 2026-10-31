@@ -10,6 +10,13 @@
 //! final pass's progress. When the text lands the dots join into one solid
 //! line and a check takes the place of the level light.
 //!
+//! While listening it keeps a little idle life (rgl, RD-02): the smoked
+//! glass (not the text) flickers by at most 2 % in random steps of 80 to
+//! 200 ms, a 24 px band a little brighter than the glass rolls down the
+//! panel once every 9 s behind the text, and four 1 px dust motes drift at
+//! 3 px/s in the side margins. The band keeps out of the newest line's box
+//! and the motes out of the text. Under reduced motion all of it is off.
+//!
 //! Geometry is laid out in the pixels of the concept image and scaled so the
 //! image is as wide as the popup.
 
@@ -71,6 +78,22 @@ const SINK_SECS: f64 = 0.45;
 const JOIN_SECS: f64 = 0.5;
 /// Seconds for the margin bell (MO-31) to tighten or relax the newest line.
 const BELL_SECS: f64 = 0.12;
+/// rgl: the glass's flicker, at most this much darker, a new level every
+/// `FLICKER_STEP` seconds give or take `FLICKER_JITTER` (80 to 200 ms).
+const FLICKER: f32 = 0.02;
+const FLICKER_STEP: f64 = 0.14;
+const FLICKER_JITTER: f64 = 0.03;
+/// rgl: the rolling band's height in logical pixels, its alpha (blending is
+/// in linear light, so 0.5 % of amber lifts the dark glass from about 18 to
+/// 28 of 255, 4 % of full scale), its period and the seconds one pass takes.
+const BAND_H: f32 = 24.0;
+const BAND_ALPHA: f32 = 0.005;
+const BAND_EVERY: f64 = 9.0;
+const BAND_PASS: f64 = 3.0;
+/// rgl: the dust motes, their speed in logical pixels a second and alpha.
+const MOTES: usize = 4;
+const MOTE_SPEED: f32 = 3.0;
+const MOTE_ALPHA: f32 = 0.15;
 
 const AMBER: u32 = 0xff9a2e;
 const HOT: u32 = 0xffd59a;
@@ -206,6 +229,35 @@ struct Panel {
     /// The outer frame's stroke width in concept pixels, thinner as the
     /// chrome exhales (MO-12).
     frame_w: f32,
+    /// rgl: the idle motion runs (listening, not reduced), and the newest
+    /// line's box (top and bottom) in logical pixels, which the band keeps
+    /// out of.
+    idle: bool,
+    newest: (f32, f32),
+    /// Reduced motion: the bars follow the level with no ripple of their own.
+    still: bool,
+}
+
+/// rgl: how much darker the glass is `s` seconds after the popup opened,
+/// 0 to `FLICKER`. Step `n` starts at `n * FLICKER_STEP` moved by up to
+/// `FLICKER_JITTER` either way, so steps last 80 to 200 ms.
+fn flicker_at(s: f64) -> f32 {
+    let start =
+        |n: i64| n as f64 * FLICKER_STEP + FLICKER_JITTER * (2.0 * seed(n as usize) as f64 - 1.0);
+    let mut n = (s / FLICKER_STEP).floor() as i64;
+    if s < start(n) {
+        n -= 1;
+    } else if s >= start(n + 1) {
+        n += 1;
+    }
+    FLICKER * seed(n.rem_euclid(1 << 20) as usize + 4099)
+}
+
+/// rgl: the rolling band's top as a share of its run `s` seconds after the
+/// popup opened, or `None` between passes.
+fn band_at(s: f64) -> Option<f32> {
+    let u = s.rem_euclid(BAND_EVERY) / BAND_PASS;
+    (s >= 0.0 && u < 1.0).then_some(u as f32)
 }
 
 impl Panel {
@@ -238,8 +290,94 @@ impl Panel {
         let window = (1.0 - d * d).max(0.0).powf(1.2);
         let level = (self.level_at(t, d * HISTORY_SECS) * 4.0).min(1.0);
         let s = seed(i);
-        let ripple = 0.55 + 0.45 * (TAU * (x * 9.0 + s * 0.3) - t as f32 * 3.0).sin().abs();
+        let drift = if self.still { 0.0 } else { t as f32 * 3.0 };
+        let ripple = 0.55 + 0.45 * (TAU * (x * 9.0 + s * 0.3) - drift).sin().abs();
         WAVE_AMP * window * level * (0.35 + 0.65 * s) * ripple
+    }
+
+    /// rgl: the rolling band, clear of the newest line's box, and the dust
+    /// motes in the side margins, over the glass and under everything else.
+    fn draw_idle(&self, t: f64, bottom: f32, p: &mut Painter) {
+        let k = self.k;
+        let s = t - self.shown_at;
+        let (lt, lb) = self.newest;
+        // The flicker: the glass inside the frame darkens a little, round
+        // the newest line's box (black over it would show at its edges).
+        let dim = flicker_at(s);
+        if dim > 0.0 {
+            let (x0, x1) = ((FRAME + 2.0) * k, (CONCEPT_W - FRAME - 2.0) * k);
+            let (y0, y1) = ((FRAME + 12.0) * k, (bottom - 2.0) * k);
+            let shade = Paint::solid(Color::hex(0x000000, dim));
+            for r in [
+                Rect::new(x0, y0, x1 - x0, lt - y0),
+                Rect::new(x0, lb, x1 - x0, y1 - lb),
+            ] {
+                if r.h > 0.0 {
+                    p.shape(ShapeInstance::rrect(
+                        vo::scene::geom::RRect::new(r, 0.0),
+                        shade,
+                    ));
+                }
+            }
+        }
+        let glow = |r: Rect| {
+            ShapeInstance::rrect(
+                vo::scene::geom::RRect::new(r, 0.0),
+                Paint::solid(hex(AMBER, BAND_ALPHA)),
+            )
+        };
+        if let Some(u) = band_at(s) {
+            let (x0, x1) = ((FRAME + 2.0) * k, (CONCEPT_W - FRAME - 2.0) * k);
+            let (top, low) = ((FRAME + 12.0) * k, (bottom - 4.0) * k - BAND_H);
+            let y0 = top + u * (low - top);
+            let y1 = y0 + BAND_H;
+            let (tx0, tx1) = ((TEXT_X - 6.0) * k, (TEXT_X + 585.0 + 6.0) * k);
+            if y1 <= lt || y0 >= lb {
+                p.shape(glow(Rect::new(x0, y0, x1 - x0, BAND_H)));
+            } else {
+                // Beside the text the band runs whole; over it, only the
+                // parts above and below the newest line's box.
+                p.shape(glow(Rect::new(x0, y0, tx0 - x0, BAND_H)));
+                p.shape(glow(Rect::new(tx1, y0, x1 - tx1, BAND_H)));
+                if y0 < lt {
+                    p.shape(glow(Rect::new(tx0, y0, tx1 - tx0, lt - y0)));
+                }
+                if y1 > lb {
+                    p.shape(glow(Rect::new(tx0, lb, tx1 - tx0, y1 - lb)));
+                }
+            }
+        }
+        // The motes: two in each side margin, each on its own slow loop.
+        let (mt, mb) = ((RULE_Y + 12.0) * k, (bottom - 20.0) * k);
+        for i in 0..MOTES {
+            let (l, r) = if i % 2 == 0 {
+                ((FRAME + 6.0) * k, (TEXT_X - 34.0) * k)
+            } else {
+                ((CONCEPT_W - 28.0) * k, (CONCEPT_W - FRAME - 6.0) * k)
+            };
+            let (w, h) = (r - l, mb - mt);
+            if w <= 2.0 || h <= 2.0 {
+                continue;
+            }
+            // A slow walk round the margin's box: up its height and across
+            // its width at `MOTE_SPEED`, from a start of its own.
+            let walk = 2.0 * (w + h);
+            let d = (seed(i + 211) * walk + s as f32 * MOTE_SPEED).rem_euclid(walk);
+            let (x, y) = if d < h {
+                (l + seed(i + 3) * w * 0.3, mb - d)
+            } else if d < h + w {
+                (l + (d - h), mt + seed(i + 7) * h * 0.2)
+            } else if d < 2.0 * h + w {
+                (r - seed(i + 5) * w * 0.3, mt + (d - h - w))
+            } else {
+                (r - (d - 2.0 * h - w), mb - seed(i + 9) * h * 0.2)
+            };
+            p.shape(ShapeInstance::circle(
+                Point::new(x, y),
+                0.5,
+                Paint::solid(hex(HOT, MOTE_ALPHA)),
+            ));
+        }
     }
 
     fn draw(&self, t: f64, p: &mut Painter) {
@@ -256,6 +394,9 @@ impl Panel {
         // The smoked glass and the outer frame, drawn on from the top left.
         let edge = frame(bottom).transform(&vo::scene::geom::Affine::scale(k));
         p.fill([&edge], &StrokeStyle::solid(1.0, hex(GLASS, 0.88 * open)));
+        if self.idle {
+            self.draw_idle(t, bottom, p);
+        }
         let len = edge.length();
         p.stroke(
             &edge.trim(0.0, len * open),
@@ -448,6 +589,12 @@ impl Popup {
             rate: FRAME_HZ as f32,
             scrub: self.scrub(),
             frame_w: self.exhale_width(FRAME_W),
+            idle: sink_at.is_none() && !done && !status.loading && !self.still(),
+            newest: (
+                (TEXT_TOP + (lines.max(1) - 1) as f32 * LINE) * k,
+                (TEXT_TOP + lines.max(1) as f32 * LINE) * k,
+            ),
+            still: self.still(),
         };
         let until = match (self.extra.final_at, self.amber.ended_at) {
             (Some(f), _) => f + JOIN_SECS + 0.1,
@@ -472,7 +619,6 @@ impl Popup {
         let layer = at(Element::layer("amber"), MARGIN, MARGIN)
             .size(g.w, bottom * k)
             .scanlines(0.12, 3.0 * k)
-            .flicker(0.02)
             .bloom(0.22, 6.0 * k)
             .presence(Transition::fade().opacity(1.0), exit)
             .child(canvas)
@@ -795,7 +941,40 @@ mod tests {
             rate: 100.0,
             scrub: endings::Scrub::default(),
             frame_w: FRAME_W,
+            idle: false,
+            newest: (0.0, 0.0),
+            still: false,
         }
+    }
+
+    #[test]
+    fn the_glass_flickers_at_most_2_percent_in_steps_of_80_to_200_ms() {
+        let mut last = flicker_at(0.0);
+        let mut since = 0.0;
+        let mut steps = Vec::new();
+        for i in 1..40_000 {
+            let s = i as f64 * 0.0005;
+            let f = flicker_at(s);
+            assert!((0.0..=FLICKER).contains(&f));
+            if f != last {
+                steps.push(s - since);
+                since = s;
+                last = f;
+            }
+        }
+        assert!(steps.len() > 50);
+        // The first step starts at an arbitrary point; the rest are whole.
+        for d in &steps[1..] {
+            assert!((0.0795..=0.2005).contains(d), "step {d}");
+        }
+    }
+
+    #[test]
+    fn the_band_rolls_down_once_every_9_s() {
+        assert_eq!(band_at(0.0), Some(0.0));
+        assert!((band_at(BAND_PASS / 2.0).unwrap() - 0.5).abs() < 1e-4);
+        assert!(band_at(BAND_PASS + 0.1).is_none());
+        assert_eq!(band_at(BAND_EVERY), Some(0.0));
     }
 
     #[test]
