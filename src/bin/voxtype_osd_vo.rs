@@ -714,6 +714,42 @@ fn centred(cfg: &OsdConfig) -> bool {
     )
 }
 
+/// The colours a look draws in. Swiss (and the default look it draws)
+/// follows the desktop's Plasma colours; every other look keeps the palette
+/// it was designed in, whatever the desktop theme.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Palette {
+    background: Color,
+    foreground: Color,
+    inactive: Color,
+    accent: Color,
+    border: Color,
+    /// Waveform colours while recording: left, centre, right.
+    hues: (Color, Color, Color),
+}
+
+impl Palette {
+    /// `theme`'s colours, the background at `opacity`.
+    fn of(theme: &PlasmaTheme, opacity: f32) -> Palette {
+        let mut background = color(theme.background);
+        background.a = opacity.clamp(0.0, 1.0);
+        let (l, c, r) = wave_hues(theme.accent);
+        Palette {
+            background,
+            foreground: color(theme.foreground),
+            inactive: color(theme.inactive),
+            accent: color(theme.accent),
+            border: color(theme.border),
+            hues: (color(l), color(c), color(r)),
+        }
+    }
+
+    /// Whether `theme` takes the desktop's colours rather than its own.
+    fn follows_desktop(theme: OsdTheme) -> bool {
+        matches!(theme, OsdTheme::Swiss | OsdTheme::Default)
+    }
+}
+
 /// The live surface's layout (`Look::live_frame`).
 struct LiveFrame {
     /// Room above and left of the look.
@@ -788,6 +824,10 @@ struct Look {
     /// Features switched off while a keyboard edit is pending or under way
     /// (`edit_site::quiet_list`); empty otherwise.
     quiet: Arc<[&'static str]>,
+    /// The desktop's colours and the looks' own (`PlasmaTheme::default`,
+    /// the palette the looks were designed in). `set_theme` picks one.
+    desktop: Palette,
+    own: Palette,
 }
 
 /// Letter spacing of a full newest line under type's margin bell (MO-31).
@@ -820,10 +860,9 @@ impl Look {
     fn new(cfg: &OsdConfig, theme: &PlasmaTheme, stop_hint: String, fonts: &FontRegistry) -> Look {
         let k = px_per_pt();
         let text_px = cfg.preview_font_pt.unwrap_or(swiss::TEXT_PT) * k;
-        let mut background = color(theme.background);
-        background.a = cfg.opacity.clamp(0.0, 1.0);
-        let (l, c, r) = wave_hues(theme.accent);
-        Look {
+        let desktop = Palette::of(theme, cfg.opacity);
+        let own = Palette::of(&PlasmaTheme::default(), cfg.opacity);
+        let mut look = Look {
             width: cfg.width_px as f32,
             caption_px: CAPTION_PT * k,
             caption_small_px: CAPTION_SMALL_PT * k,
@@ -834,12 +873,12 @@ impl Look {
             gain: cfg.waveform_gain as f64,
             fonts: fonts.clone(),
             window: cfg.waveform_window_secs.max(0.1) as f64,
-            background,
-            foreground: color(theme.foreground),
-            inactive: color(theme.inactive),
-            accent: color(theme.accent),
-            border: color(theme.border),
-            hues: (color(l), color(c), color(r)),
+            background: own.background,
+            foreground: own.foreground,
+            inactive: own.inactive,
+            accent: own.accent,
+            border: own.border,
+            hues: own.hues,
             stop_hint,
             word_fade: cfg.word_fade,
             badge: cfg.look_badge,
@@ -855,7 +894,28 @@ impl Look {
             features: Arc::from([]),
             look_set: false,
             quiet: Arc::from([]),
-        }
+            desktop,
+            own,
+        };
+        look.set_theme(cfg.theme);
+        look
+    }
+
+    /// Switches to `theme` and to its colours: the desktop's for swiss,
+    /// the look's own for the rest.
+    fn set_theme(&mut self, theme: OsdTheme) {
+        self.theme = theme;
+        let p = if Palette::follows_desktop(theme) {
+            self.desktop
+        } else {
+            self.own
+        };
+        self.background = p.background;
+        self.foreground = p.foreground;
+        self.inactive = p.inactive;
+        self.accent = p.accent;
+        self.border = p.border;
+        self.hues = p.hues;
     }
 
     /// Takes the resolved motion setting: `[osd] motion`, or `--motion` /
@@ -2621,7 +2681,7 @@ impl Popup {
         }
         let theme = look_step::step(&OsdTheme::VO_LOOKS, self.look.theme, forward);
         tracing::info!(from = ?self.look.theme, to = ?theme, "look chord");
-        self.look.theme = theme;
+        self.look.set_theme(theme);
         // Only the live popup keeps the pick for later popups.
         if self.osd.is_some() {
             look_step::save(theme);
@@ -3130,7 +3190,7 @@ fn main() -> anyhow::Result<()> {
 
     // The look picked with the look chord wins over the config and --theme.
     if let Some(theme) = look_step::saved() {
-        look.theme = theme;
+        look.set_theme(theme);
     }
     // The display connection, GPU device and renderer stay warm between
     // dictations, so every popup after the first draws on the GPU at once.
@@ -3215,7 +3275,7 @@ fn main() -> anyhow::Result<()> {
         drop(boost);
         // The popup may have picked a look with the look chord.
         if let Some(theme) = look_step::saved() {
-            look.theme = theme;
+            look.set_theme(theme);
         }
         shared.0.lock().unwrap().proxy = None;
         if args.diag {
@@ -3775,6 +3835,53 @@ fn cut_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only swiss (and the default look) take the desktop's colours; every
+    /// other look keeps its own, also after a look switch.
+    #[test]
+    fn only_swiss_follows_the_desktop_colours() {
+        let warm = PlasmaTheme {
+            accent: OsdColor::rgb(0.84, 0.36, 0.05),
+            background: OsdColor::rgb(0.16, 0.16, 0.13),
+            foreground: OsdColor::rgb(0.92, 0.86, 0.70),
+            ..PlasmaTheme::default()
+        };
+        let plain = PlasmaTheme::default();
+        let fonts = load_fonts(&plain).unwrap();
+        let colours = |l: &Look| {
+            (
+                l.background,
+                l.foreground,
+                l.inactive,
+                l.accent,
+                l.border,
+                l.hues,
+            )
+        };
+        for &theme in OsdTheme::VO_LOOKS.iter() {
+            let cfg = OsdConfig {
+                theme,
+                ..OsdConfig::default()
+            };
+            let on_warm = Look::new(&cfg, &warm, String::new(), &fonts);
+            let on_plain = Look::new(&cfg, &plain, String::new(), &fonts);
+            if Palette::follows_desktop(theme) {
+                assert_eq!(on_warm.accent, color(warm.accent), "{theme:?}");
+            } else {
+                assert_eq!(colours(&on_warm), colours(&on_plain), "{theme:?}");
+            }
+        }
+        // A switch from swiss to tron drops the desktop's accent, and back.
+        let cfg = OsdConfig {
+            theme: OsdTheme::Swiss,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &warm, String::new(), &fonts);
+        look.set_theme(OsdTheme::Tron);
+        assert_eq!(look.accent, color(plain.accent));
+        look.set_theme(OsdTheme::Swiss);
+        assert_eq!(look.accent, color(warm.accent));
+    }
 
     /// A word is unsure below `[osd] doubt_below`: at the measured default
     /// 0.45 a 0.5 word is not, at the old 0.6 it is.
