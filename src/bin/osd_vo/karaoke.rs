@@ -12,6 +12,13 @@
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
 //!
+//! While the popup is open it keeps a little idle life (6r7, RD-02): the
+//! round mic badge bobs 2 px on a 1.2 s cycle while no word comes, and a
+//! soft stage light (at most 8 % alpha) sweeps the stage under the newest
+//! line once every 10 s. Both are drawn by the card's canvas in steps of 15
+//! a second, outside the newest line's box; neither runs once the popup
+//! closes or under reduced motion.
+//!
 //! While editing ([`KaraokeSite`]) the three large slots hold the edit
 //! window and the two small ones the two lines above it, which the caret
 //! never enters. The lit word is off, and a line keeps its left edge while
@@ -221,6 +228,47 @@ impl Default for State {
     }
 }
 
+/// 6r7: the idle motion's pace (RD-02's slow-loop cap); the badge's bob
+/// and its period; the stage light's alpha at its centre, how often it
+/// sweeps, how long one sweep takes, when the first comes after the popup
+/// opens, the beam's half width and slant, and the stage it lights (card
+/// y), below the newest line's box (`SLOTS[0]` plus half a `LINE`).
+const IDLE_FPS: f64 = 15.0;
+const BOB_PX: f32 = 2.0;
+const BOB_SECS: f64 = 1.2;
+const LIGHT_ALPHA: f32 = 0.08;
+const LIGHT_EVERY: f64 = 10.0;
+const LIGHT_PASS: f64 = 3.0;
+const LIGHT_FIRST: f64 = 2.0;
+const LIGHT_HALF: f32 = 70.0;
+const LIGHT_SLANT: f32 = 30.0;
+const STAGE_TOP: f32 = 352.0;
+
+/// 6r7: `t` held to the start of its idle step.
+fn idle_step(t: f64) -> f64 {
+    (t * IDLE_FPS).floor() / IDLE_FPS
+}
+
+/// 6r7: the badge's offset `s` seconds into a quiet spell, from 0 so it
+/// starts without a jump.
+fn badge_bob(s: f64) -> f32 {
+    if s < 0.0 {
+        return 0.0;
+    }
+    -BOB_PX * (std::f64::consts::TAU * s / BOB_SECS).sin() as f32
+}
+
+/// 6r7: the stage light's centre x on the card `s` seconds after the popup
+/// opened, or `None` between sweeps. It crosses from one beam width left
+/// of the card to one right of it.
+fn light_x(s: f64) -> Option<f32> {
+    let u = (s - LIGHT_FIRST).rem_euclid(LIGHT_EVERY) / LIGHT_PASS;
+    if s < LIGHT_FIRST || u >= 1.0 {
+        return None;
+    }
+    Some(-2.0 * LIGHT_HALF + u as f32 * (CARD_W + 4.0 * LIGHT_HALF))
+}
+
 /// What the canvas draws.
 #[derive(Clone)]
 struct Scene {
@@ -236,6 +284,10 @@ struct Scene {
     final_at: Option<f64>,
     /// The status ring's centre, relative to the card.
     ring: Point,
+    /// 6r7: the idle motion runs (open, working, not reduced), and when the
+    /// words last stopped coming, which starts the badge's bob.
+    idle: bool,
+    quiet_from: f64,
 }
 
 impl Scene {
@@ -298,17 +350,45 @@ impl Scene {
             40.0,
             Paint::glow(hex(VIOLET).fade(0.10), 40.0, 0.5),
         ));
+        if self.idle {
+            self.draw_light(t, p);
+        }
         p.layer(Affine::translate(o.x, o.y), 1.0, |p| {
-            self.draw_badge(p);
+            self.draw_badge(t, p);
             self.draw_close(p);
             self.draw_wave(t, p);
             self.draw_ring(t, p);
         });
     }
 
-    /// The round blue badge with the microphone.
-    fn draw_badge(&self, p: &mut Painter) {
-        let c = Point::new(43.0, 39.0);
+    /// 6r7: the stage light, a soft slanted beam across the stage under
+    /// the newest line.
+    fn draw_light(&self, t: f64, p: &mut Painter) {
+        let Some(x) = light_x(idle_step(t) - self.shown_at) else {
+            return;
+        };
+        let o = self.origin;
+        let stage = Rect::new(o.x, o.y + STAGE_TOP, CARD_W, CARD_H - STAGE_TOP);
+        let light = hex(WHITE).fade(LIGHT_ALPHA);
+        p.shape(ShapeInstance::rrect(
+            RRect::new(stage, RADIUS),
+            Paint::sheen(
+                Point::new(o.x + x, o.y + STAGE_TOP),
+                Point::new(LIGHT_HALF, -LIGHT_SLANT),
+                light,
+                light.fade(0.0),
+            ),
+        ));
+    }
+
+    /// The round blue badge with the microphone. While idle it bobs (6r7).
+    fn draw_badge(&self, t: f64, p: &mut Painter) {
+        let bob = if self.idle {
+            badge_bob(idle_step(t) - self.quiet_from)
+        } else {
+            0.0
+        };
+        let c = Point::new(43.0, 39.0 + bob);
         let r = 17.5;
         p.shape(ShapeInstance::circle(
             c,
@@ -612,6 +692,11 @@ impl Popup {
             finish_at: self.extra.finish_at,
             final_at: self.extra.final_at,
             ring: Point::new(row_x + 9.0, STATUS_Y),
+            idle: !self.closing
+                && matches!(mode, Mode::Loading | Mode::Listening)
+                && !reduced()
+                && !l.on("reduced-motion"),
+            quiet_from: self.event_at + ROOM_TONE_AFTER_EVENT_SECS,
         };
         let until = scene.until(self.extra.now);
         let canvas = at(
@@ -1237,4 +1322,42 @@ mod edit_tests {
     fn karaoke_edit_moment_keeps_the_envelope() {
         check_edit_envelope(OsdTheme::Karaoke, &[0, 1, 2]);
     }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn the_badge_bobs_2_px_on_a_1_2_s_cycle_from_rest() {
+        assert_eq!(badge_bob(-0.5), 0.0);
+        assert_eq!(badge_bob(0.0), 0.0);
+        let mut lo = 0.0f32;
+        let mut hi = 0.0f32;
+        for i in 0..240 {
+            let v = badge_bob(i as f64 / 100.0);
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        assert!(
+            (hi - BOB_PX).abs() < 0.01 && (lo + BOB_PX).abs() < 0.01,
+            "{lo} {hi}"
+        );
+        assert!((badge_bob(0.3) - badge_bob(0.3 + BOB_SECS)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_stage_light_sweeps_once_every_10_s() {
+        assert!(light_x(0.0).is_none(), "no sweep as the popup opens");
+        for k in 0..3 {
+            let t0 = LIGHT_FIRST + k as f64 * LIGHT_EVERY;
+            assert!(light_x(t0 - 0.1).is_none(), "before sweep {k}");
+            let mid = light_x(t0 + LIGHT_PASS / 2.0).expect("mid sweep");
+            assert!((mid - CARD_W / 2.0).abs() < 1.0, "{mid}");
+            assert!(light_x(t0 + LIGHT_PASS + 0.1).is_none(), "after sweep {k}");
+        }
+    }
+
+    // The stage light stays below the newest line and at most 8 % alpha.
+    const _: () = assert!(STAGE_TOP > SLOTS[0].0 + LINE / 2.0 && LIGHT_ALPHA <= 0.08);
 }
