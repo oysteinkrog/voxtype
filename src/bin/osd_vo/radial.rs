@@ -11,6 +11,13 @@
 //! When the text lands the bars spring out into an even sunburst and a check
 //! draws in the badge.
 //!
+//! The redesign's four effects (concept 10): with `ring-reads` (MO-62) a
+//! light head inside the badge ring looks toward the newest word, springs
+//! from word to word and sweeps the text once with the final pass; with
+//! `acoustic-receipts` (MO-71) and `onset-joint` (MO-73) the shared receipts
+//! and joint ticks mark the transcript; with `audio-ruler` (MO-41) the
+//! seconds of audio left show as a ruler at the end of the status row.
+//!
 //! Geometry is laid out in the pixels of the concept image, from the card's
 //! left edge and the top of the image, and scaled so the card is as wide as
 //! the popup.
@@ -65,6 +72,12 @@ const OPEN_SECS: f64 = 0.5;
 const SINK_SECS: f64 = 0.45;
 /// Seconds for the sunburst when the text lands.
 const BURST_SECS: f64 = 0.7;
+/// MO-62: the eye's orbit inside the badge ring, in concept pixels from the
+/// centre, half the arc it draws either side of its head in degrees, and
+/// how long it takes to settle on a new word.
+const EYE_R: f32 = 76.0;
+const EYE_HALF: f32 = 9.0;
+const EYE_SETTLE: f64 = 0.35;
 /// How fast the bands follow the voice, per second, up and down.
 const ATTACK: f32 = 30.0;
 const RELEASE: f32 = 7.0;
@@ -181,6 +194,39 @@ fn band_level(b: u8) -> f32 {
     ((db + 60.0) / 45.0).clamp(0.0, 1.0)
 }
 
+/// MO-62: where the eye looks, as angles in degrees round the ring's
+/// centre (0 is to the right, 90 straight down).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Eye {
+    /// The word looked at before the newest one, and the newest.
+    from: f32,
+    to: f32,
+    /// When the newest word came: the spring starts.
+    at: f64,
+    /// While the final pass runs: the first and last word and how far the
+    /// pass has got, 0 to 1.
+    sweep: Option<(f32, f32, f32)>,
+    /// Reduced motion: the eye is at the newest word, with no spring.
+    reduced: bool,
+}
+
+impl Eye {
+    /// The eye's angle at `t`.
+    fn angle(&self, t: f64) -> f32 {
+        if let Some((a, b, f)) = self.sweep {
+            return a + (b - a) * f.clamp(0.0, 1.0);
+        }
+        if self.reduced || t > self.at + 2.0 * EYE_SETTLE {
+            return self.to;
+        }
+        if t <= self.at {
+            return self.from;
+        }
+        let (y, _) = Spring::critical_to_98(EYE_SETTLE).eval(1.0, 0.0, t - self.at);
+        self.to + (self.from - self.to) * y as f32
+    }
+}
+
 /// What the canvas draws, fixed for one view.
 struct Ring {
     k: f32,
@@ -199,6 +245,8 @@ struct Ring {
     wave: Arc<[f32]>,
     newest_at: f64,
     rate: f32,
+    /// MO-62: the eye inside the badge ring.
+    eye: Option<Eye>,
 }
 
 impl Ring {
@@ -364,6 +412,38 @@ impl Ring {
             let a = 1.0 - b;
             p.stroke(&ring, &paint(3.0, a).glow(12.0 * k));
         }
+        if let Some(eye) = self.eye.filter(|_| !self.ended) {
+            self.draw_eye(t, &eye, open, p);
+        }
+    }
+
+    /// MO-62: the eye, a bright head with a short arc either side, on its
+    /// orbit inside the badge ring where it looks.
+    fn draw_eye(&self, t: f64, eye: &Eye, open: f32, p: &mut Painter) {
+        let k = self.k;
+        let c = self.p(RING_X, RING_Y);
+        let a = eye.angle(t);
+        let r = a.to_radians();
+        p.stroke(
+            &make::arc(
+                c,
+                EYE_R * k,
+                (a - EYE_HALF).to_radians(),
+                (2.0 * EYE_HALF).to_radians(),
+            ),
+            &StrokeStyle::solid(2.2 * k, ramp(r.cos() + r.sin(), 0.8 * open)).glow(5.0 * k),
+        );
+        let head = Point::new(c.x + EYE_R * k * r.cos(), c.y + EYE_R * k * r.sin());
+        p.shape(ShapeInstance::circle(
+            head,
+            5.5 * k,
+            Paint::glow(hex(ICE, 0.85 * open), 9.0 * k, 1.2),
+        ));
+        p.shape(ShapeInstance::circle(
+            head,
+            2.4 * k,
+            Paint::solid(hex(0xffffff, open)),
+        ));
     }
 }
 
@@ -459,6 +539,7 @@ impl Popup {
             wave: self.wave.clone(),
             newest_at: self.newest_at,
             rate: FRAME_HZ as f32,
+            eye: self.radial_eye(k),
         };
         let until = match (self.extra.final_at, self.radial.ended_at) {
             (Some(f), _) => f + BURST_SECS + 0.1,
@@ -486,6 +567,7 @@ impl Popup {
             .child(canvas)
             .child(self.radial_badge(&g, &status))
             .child(self.radial_text(&g))
+            .children(self.radial_marks(&g))
             .children(self.score_beside(
                 TEXT_X * g.k,
                 TEXT_TOP * g.k,
@@ -495,6 +577,70 @@ impl Popup {
             ))
             .child(self.radial_status(&g, &status, bottom));
         root.child(panel)
+    }
+
+    /// MO-62: where the eye looks, from the words on screen, in the
+    /// canvas's pixels round the ring's centre.
+    fn radial_eye(&self, k: f32) -> Option<Eye> {
+        if !self.look.on(super::jarvis::RING_READS)
+            || self.extra.final_at.is_some()
+            || self.edit_view.is_some()
+        {
+            return None;
+        }
+        let style = self.look.text_style();
+        let (boxes, _) = sounding::word_boxes(
+            &self.measure,
+            &self.shown,
+            &style,
+            Some(self.look.text_width()),
+        );
+        let deg = |b: &sounding::WordBox| {
+            let x = TEXT_X * k + b.rect.x + b.rect.w / 2.0;
+            let y = TEXT_TOP * k + b.rect.y + b.rect.h / 2.0;
+            (y - RING_Y * k).atan2(x - RING_X * k).to_degrees()
+        };
+        let newest = boxes.last()?;
+        let to = deg(newest);
+        let reduced = self.still();
+        if self.extra.finish_at.is_some() {
+            let f = self.files.fraction.unwrap_or(0.0) as f32;
+            return Some(Eye {
+                from: to,
+                to,
+                at: 0.0,
+                sweep: Some((deg(&boxes[0]), to, f)),
+                reduced,
+            });
+        }
+        let from = boxes.len().checked_sub(2).map_or(to, |i| deg(&boxes[i]));
+        let at = self
+            .heard
+            .word(newest.id)
+            .map_or(f64::NEG_INFINITY, |h| h.born);
+        Some(Eye {
+            from,
+            to,
+            at,
+            sweep: None,
+            reduced,
+        })
+    }
+
+    /// MO-71 and MO-73: the receipts and the joint ticks under the words,
+    /// in the badge's ice. Off while editing: they mark sound the edit has
+    /// not got.
+    fn radial_marks(&self, g: &Geo) -> Vec<Element<Msg>> {
+        if self.edit_view.is_some() {
+            return Vec::new();
+        }
+        let (style, width) = (self.look.text_style(), self.look.text_width());
+        let (x, y) = (TEXT_X * g.k, TEXT_TOP * g.k);
+        let ink = hex(ICE, 1.0);
+        self.receipts_element("radial", &self.shown, &style, x, y, width, ink)
+            .into_iter()
+            .chain(self.joint_ticks_element("radial", &self.shown, &style, x, y, width, ink, true))
+            .collect()
     }
 
     /// The microphone, the stop square, the check or the cross in the badge.
@@ -701,6 +847,18 @@ impl Popup {
             })
             .size(icon_w, icon_h)
         };
+        // MO-41: the seconds of audio left as a ruler after the detail, in
+        // the room the row leaves before the card's right edge.
+        let used =
+            icon_w + 3.0 * 12.0 * k + wid(&state, &state_style) + wid(&detail, &detail_style);
+        let room = (g.w - 2.0 * 42.0 * k - used).min(150.0 * k);
+        let ruler = self
+            .audio_ruler(hex(BLUE, 1.0), hex(0x3a4280, 0.9))
+            .filter(|_| room >= 40.0 * k)
+            .map(|r| {
+                r.width(room)
+                    .presence(Transition::fade(), Transition::fade())
+            });
         let row = Element::row("status")
             .align_items(AlignItems::CENTER)
             .gap(12.0 * k)
@@ -722,7 +880,8 @@ impl Popup {
                     // Its x follows the state word's width.
                     .motion(Prop::Position, Motion::Snap)
                     .presence(Transition::fade().offset(0.0, 6.0 * k), Transition::fade()),
-            );
+            )
+            .children(ruler);
         let y = (bottom - BOTTOM_GAP) * k - icon_h / 2.0;
         // The row snaps to a new line count, as the canvas's rule does: on a
         // spring it slid down across the rule above it.
@@ -753,7 +912,34 @@ mod tests {
             wave: Arc::from([0.0f32; 200].as_slice()),
             newest_at: 1.0,
             rate: 100.0,
+            eye: None,
         }
+    }
+
+    #[test]
+    fn the_eye_springs_from_word_to_word_and_sweeps_with_the_final_pass() {
+        let eye = Eye {
+            from: 60.0,
+            to: 100.0,
+            at: 1.0,
+            sweep: None,
+            reduced: false,
+        };
+        assert_eq!(eye.angle(0.9), 60.0);
+        let mid = eye.angle(1.1);
+        assert!(mid > 60.0 && mid < 100.0);
+        assert_eq!(eye.angle(1.0 + 3.0 * EYE_SETTLE), 100.0);
+        // Reduced motion: at the newest word at once.
+        let reduced = Eye {
+            reduced: true,
+            ..eye
+        };
+        assert_eq!(reduced.angle(1.05), 100.0);
+        let sweep = Eye {
+            sweep: Some((50.0, 130.0, 0.5)),
+            ..eye
+        };
+        assert_eq!(sweep.angle(5.0), 90.0);
     }
 
     #[test]
