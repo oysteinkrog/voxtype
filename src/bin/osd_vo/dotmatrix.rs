@@ -19,7 +19,8 @@ use super::*;
 
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
-use vo::scene::geom::Point;
+use vo::scene::geom::{Point, RRect};
+use vo::scene::path::{Contour, StrokeStyle};
 use vo::scene::roll::digit_roll;
 
 /// Colours sampled from the mock-up.
@@ -98,6 +99,24 @@ const TWINKLE_SHARE: f32 = 0.02;
 const TWINKLE_INK: f32 = 0.12;
 const TWINKLE_SECS: f64 = 0.4;
 const DRIFT_SECS: f64 = 2.0;
+/// R2-21-a: each new word strikes the newest columns with an ink bloom
+/// that travels left with its audio and fades over `INK_SECS`, leaving
+/// grain of alpha `GRAIN_ALPHA` at most.
+pub(crate) const TYPEWRITER_INK: &str = "typewriter-ink";
+const INK_SECS: f64 = 1.5;
+const BLOOM_SECS: f64 = 0.3;
+const GRAIN_ALPHA: f32 = 0.1;
+/// R2-21-b: the meter becomes a glass ribbon whose thickness follows the
+/// level through a critically damped spring of rate `GLASS_RATE`.
+pub(crate) const LIQUID_GLASS_FLOW: &str = "liquid-glass-flow";
+const GLASS_RATE: f64 = 12.0;
+const GLASS_TAPS: usize = 32;
+/// R2-21-c: a dot with rings on the meter's line for each of the last
+/// `ORBIT_DOTS` words; older ones drift left and fade over `ORBIT_SECS`.
+pub(crate) const ORBITAL_WORD_RINGS: &str = "orbital-word-rings";
+const ORBIT_DOTS: usize = 8;
+const ORBIT_SECS: f64 = 8.0;
+const ORBIT_DRIFT: f32 = 6.0;
 
 /// feo: `t` held to the start of its idle step.
 fn idle_step(t: f64) -> f64 {
@@ -239,6 +258,10 @@ struct Columns {
     /// feo: this copy draws only the twinkles, in a canvas of their own, so
     /// the meter's canvas stays the same from frame to frame on room tone.
     twinkles: bool,
+    /// R2-21-b: draw the meter as a glass ribbon over its baseline dots.
+    glass: bool,
+    /// Reduced motion.
+    still: bool,
 }
 
 impl Columns {
@@ -349,6 +372,9 @@ impl Columns {
                 base_r * k.min(1.0),
                 Paint::solid(base_c),
             ));
+            if self.glass {
+                continue;
+            }
             for row in 1..=rows {
                 let u = row as f32 / ROWS as f32;
                 let rr = DOT_R * (1.0 - 0.3 * u) * k.min(1.0);
@@ -365,7 +391,96 @@ impl Columns {
                 ));
             }
         }
+        if self.glass && !self.twinkles && self.mode != Mode::Loading {
+            self.draw_glass(t_eff, drain, Rect::new(x0, cy, x1 - x0, r.h / 2.0), k, p);
+        }
     }
+
+    /// R2-21-b: the glass ribbon along `band` (its x span, the centre line
+    /// as y and the half height as h). Each column's half thickness is the
+    /// level through a critically damped spring, so it swells and narrows
+    /// like a slow fluid; under reduced motion it is one still band whose
+    /// thickness steps with the level.
+    fn draw_glass(&self, t: f64, drain: f32, band: Rect, k: f32, p: &mut Painter) {
+        let n = 64;
+        let reach = band.h * 0.62;
+        let half = |at: f64| -> f32 {
+            let v = if self.still {
+                (self.levels.at(t) * 4.0).round() / 4.0
+            } else {
+                damped_level(&self.levels, at)
+            };
+            ((v - 0.2) / 0.55).clamp(0.0, 1.0) * drain
+        };
+        let mut top = Vec::with_capacity(n + 1);
+        let mut bottom = Vec::with_capacity(n + 1);
+        for i in 0..=n {
+            let u = i as f32 / n as f32;
+            let x = band.x + u * band.w;
+            // The ends taper to the baseline dots.
+            let taper = (std::f32::consts::PI * u).sin().powf(0.6);
+            let at = if self.still {
+                t
+            } else {
+                t - (1.0 - u as f64) * n as f64 * COL_SECS * 0.85
+            };
+            let h = (1.2 + reach * half(at)) * taper;
+            let wob = if self.still {
+                0.0
+            } else {
+                0.18 * h * ((u * 9.0) as f64 - t * 1.3).sin() as f32
+            };
+            top.push(Point::new(x, band.y - h + wob));
+            bottom.push(Point::new(x, band.y + h + wob));
+        }
+        let mut outline = top.clone();
+        outline.extend(bottom.iter().rev().copied());
+        let glass = StrokeStyle::solid(1.0, Color::WHITE).linear(
+            Point::new(0.0, band.y - reach),
+            Color::hex(0xA9C8FF, 0.32),
+            Point::new(0.0, band.y + reach),
+            Color::hex(0x5B7BE8, 0.12),
+        );
+        p.fill(&[Contour::polyline(&outline, true)], &glass);
+        let edge = StrokeStyle::solid(1.0 * k.min(1.0), Color::hex(0xD8E6FF, 0.55)).glow(4.0);
+        p.stroke(&Contour::polyline(&top, false), &edge);
+        p.stroke(
+            &Contour::polyline(&bottom, false),
+            &StrokeStyle::solid(0.8, Color::hex(0x9DB4F0, 0.35)),
+        );
+    }
+}
+
+/// R2-21-b: the level at `at` through a critically damped spring of rate
+/// `GLASS_RATE`: the level convolved with the spring's step response
+/// kernel, `w(s) = r^2 s e^(-r s)`, over the last second.
+fn damped_level(levels: &Levels, at: f64) -> f32 {
+    let dt = 1.0 / GLASS_TAPS as f64;
+    let r = GLASS_RATE;
+    let mut sum = 0.0;
+    let mut norm = 0.0;
+    for j in 0..GLASS_TAPS {
+        let s = (j as f64 + 0.5) * dt;
+        let w = r * r * s * (-r * s).exp() * dt;
+        sum += w * levels.at(at - s) as f64;
+        norm += w;
+    }
+    (sum / norm.max(1e-6)) as f32
+}
+
+/// R2-21-a: a strike's bloom and grain alpha `age` seconds after its word:
+/// the bloom flashes and is gone after `BLOOM_SECS`, the grain fades to 0
+/// at `INK_SECS`. Under reduced motion only a short brightness step.
+fn ink_alpha(age: f64, still: bool) -> (f32, f32) {
+    if !(0.0..INK_SECS).contains(&age) {
+        return (0.0, 0.0);
+    }
+    if still {
+        return (if age < BLOOM_SECS { 0.25 } else { 0.0 }, 0.0);
+    }
+    let bloom = (1.0 - age / BLOOM_SECS).max(0.0) as f32;
+    let grain = GRAIN_ALPHA * (1.0 - (age / INK_SECS) as f32);
+    (0.3 * bloom * bloom, grain)
 }
 
 /// feo: the twinkling dots of column `i`, whose baseline is at `base`,
@@ -563,6 +678,8 @@ impl Popup {
             taken,
             idle: !self.closing && !reduced() && !l.on("reduced-motion"),
             twinkles: false,
+            glass: l.on(LIQUID_GLASS_FLOW),
+            still: self.still(),
         };
         let until = columns.until();
         let twinkle = columns.idle.then(|| {
@@ -596,6 +713,8 @@ impl Popup {
             ))
             .child(wave)
             .children(twinkle)
+            .children(self.dotmatrix_ink(mode))
+            .children(self.dotmatrix_orbits(mode))
             .child(self.dotmatrix_text(mode))
             .child(self.dotmatrix_status(mode, mode_at))
             .child(
@@ -606,6 +725,163 @@ impl Popup {
                 )
                 .size(l.width, panel_h(self.lines.min(MAX_LINES))),
             )
+    }
+
+    /// The words on screen that came while listening, newest last, with
+    /// when each came and the level then.
+    fn dotmatrix_arrivals(&self, n: usize) -> Vec<(f64, f32)> {
+        let levels = self.kit_raw_levels();
+        let mut out: Vec<(f64, f32)> = self
+            .shown
+            .iter()
+            .filter_map(|w| self.heard.word(w.id).map(|h| h.born))
+            .map(|born| (born, levels.at(born)))
+            .collect();
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let skip = out.len().saturating_sub(n);
+        out.split_off(skip)
+    }
+
+    /// R2-21-a: each new word strikes the newest columns: an ink bloom on
+    /// their dots that travels left with its audio, then faint grain that
+    /// fades over `INK_SECS`.
+    fn dotmatrix_ink(&self, mode: Mode) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(TYPEWRITER_INK) || !matches!(mode, Mode::Listening | Mode::Finishing) {
+            return None;
+        }
+        let now = self.extra.now;
+        let strikes: Vec<(f64, f32)> = self
+            .dotmatrix_arrivals(16)
+            .into_iter()
+            .filter(|(born, _)| now - born < INK_SECS)
+            .collect();
+        if strikes.is_empty() {
+            return None;
+        }
+        let until = strikes
+            .iter()
+            .map(|s| s.0 + INK_SECS)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let still = self.still();
+        let canvas = Element::canvas("ink", until, move |t, r, p| {
+            let k = r.w / DESIGN_W;
+            let cy = r.y + r.h / 2.0;
+            let right = r.x + COL_X1 * k;
+            for &(born, level) in &strikes {
+                let age = t - born;
+                let (bloom, grain) = ink_alpha(age, still);
+                if bloom <= 0.0 && grain <= 0.0 {
+                    continue;
+                }
+                // The strike rides with its audio, one column per COL_SECS.
+                let x = if still {
+                    right
+                } else {
+                    right - (age / COL_SECS) as f32 * COL_PITCH * k
+                };
+                if x < r.x + COL_X0 * k {
+                    continue;
+                }
+                let reach = (0.35 + 0.65 * (level * 1.8).min(1.0)) * r.h * 0.42;
+                if bloom > 0.0 {
+                    p.shape(ShapeInstance::rrect(
+                        RRect::new(
+                            Rect::new(x - 3.0 * k, cy - reach, 6.0 * k, 2.0 * reach),
+                            3.0 * k,
+                        ),
+                        Paint::glow(hex(INK).fade(bloom), 4.0 * k, 0.4),
+                    ));
+                }
+                let seed = (born * 1000.0) as u32;
+                for g in 0..14u32 {
+                    let gx = x + (noise(seed + g * 3) - 0.5) * 3.0 * COL_PITCH * k;
+                    let gy = cy + (noise(seed + g * 3 + 1) - 0.5) * 2.0 * reach;
+                    let a = grain * (0.4 + 0.6 * noise(seed + g * 3 + 2));
+                    p.shape(ShapeInstance::circle(
+                        Point::new(gx, gy),
+                        0.7 * k.min(1.0),
+                        Paint::solid(hex(INK).fade(a)),
+                    ));
+                }
+            }
+        });
+        Some(at(canvas, 0.0, WAVE_TOP).size(l.width, WAVE_H))
+    }
+
+    /// R2-21-c: a dot with rings on the meter's line for each of the last
+    /// `ORBIT_DOTS` words, the rings as wide as the word was loud. The
+    /// newest glows; older ones drift left and fade. Under reduced motion
+    /// still dots without rings.
+    fn dotmatrix_orbits(&self, mode: Mode) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(ORBITAL_WORD_RINGS) || !matches!(mode, Mode::Listening | Mode::Finishing) {
+            return None;
+        }
+        let words = self.dotmatrix_arrivals(ORBIT_DOTS);
+        if words.is_empty() {
+            return None;
+        }
+        let still = self.still();
+        let live = mode == Mode::Listening;
+        let until = if still || !live {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        let canvas = Element::canvas("orbits", until, move |t, r, p| {
+            let k = r.w / DESIGN_W;
+            let cy = r.y + r.h / 2.0;
+            let (x0, x1) = (r.x + COL_X0 * k, r.x + COL_X1 * k);
+            let n = words.len();
+            for (i, &(born, level)) in words.iter().enumerate() {
+                let newest = i + 1 == n;
+                let age = (t - born).max(0.0);
+                let fade = (1.0 - age / ORBIT_SECS).max(0.15) as f32;
+                // Each word sits a slot left of the next; the slots drift
+                // left as the words age.
+                let back = (n - 1 - i) as f32;
+                let x = if still {
+                    x1 - (back + 0.5) * (x1 - x0) / ORBIT_DOTS as f32
+                } else {
+                    x1 - 18.0 * k - back * 52.0 * k - ORBIT_DRIFT * k * age as f32
+                };
+                if x < x0 {
+                    continue;
+                }
+                let c = Point::new(x, cy);
+                let core = if newest { 3.2 } else { 2.2 } * k.min(1.0);
+                if newest && !still {
+                    let glow = (1.0 - age / 1.2).max(0.35) as f32;
+                    p.shape(ShapeInstance::circle(
+                        c,
+                        core * 3.0,
+                        Paint::glow(Color::hex(0xF4D9A0, 0.5 * glow), 8.0 * k, 0.6),
+                    ));
+                }
+                p.shape(ShapeInstance::circle(
+                    c,
+                    core,
+                    Paint::solid(Color::hex(0xF7E4BC, 0.9 * fade)),
+                ));
+                if still {
+                    continue;
+                }
+                let rings = 1 + (level * 4.0).min(2.0) as u32;
+                let reach = 8.0 + 22.0 * (level * 1.8).min(1.0);
+                for j in 0..rings {
+                    let grow = ease_out(age / 0.6);
+                    let rad = (reach * (j + 1) as f32 / rings as f32 + 2.0 * age.min(3.0) as f32)
+                        * grow
+                        * k.min(1.0);
+                    let mut ring = ShapeInstance::circle(c, rad.max(0.5), Paint::NONE);
+                    ring.stroke = Paint::solid(Color::hex(0xE9C98E, 0.32 * fade / (j + 1) as f32));
+                    ring.stroke_width = 0.8;
+                    p.shape(ring);
+                }
+            }
+        });
+        Some(at(canvas, 0.0, WAVE_TOP).size(l.width, WAVE_H))
     }
 
     /// The transcript's top left in the panel.
@@ -1068,5 +1344,53 @@ mod idle_tests {
         assert_eq!(drift_cells(4.5), 0.0);
         assert_eq!(drift_cells(6.5), 1.0);
         assert_eq!(idle_step(1.0 / IDLE_FPS * 3.5), 3.0 / IDLE_FPS);
+    }
+}
+
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn the_ink_grain_stays_faint_and_is_gone_after_1_5_s() {
+        for still in [false, true] {
+            for i in 0..=200 {
+                let age = i as f64 * 0.01;
+                let (bloom, grain) = ink_alpha(age, still);
+                assert!(
+                    bloom <= 0.3 && grain <= GRAIN_ALPHA,
+                    "{age}: {bloom} {grain}"
+                );
+                if age >= BLOOM_SECS {
+                    assert_eq!(bloom, 0.0, "{age}");
+                }
+                if age >= INK_SECS {
+                    assert_eq!((bloom, grain), (0.0, 0.0), "{age}");
+                }
+            }
+        }
+        assert_eq!(ink_alpha(0.5, true).1, 0.0);
+    }
+
+    #[test]
+    fn the_glass_level_stays_in_range_and_settles() {
+        let n = 3 * FRAME_HZ as usize;
+        let step: Vec<f32> = (0..n)
+            .map(|i| if i < FRAME_HZ as usize { 0.0 } else { 0.8 })
+            .collect();
+        let levels = Levels {
+            levels: Arc::from(step),
+            newest_at: 3.0,
+        };
+        let mut prev = 0.0;
+        for i in 0..=60 {
+            let v = damped_level(&levels, 1.0 + i as f64 / 30.0);
+            assert!((0.0..=0.8 + 1e-4).contains(&v), "{v}");
+            // A critically damped spring never overshoots: it only rises.
+            assert!(v >= prev - 1e-4, "{v} after {prev}");
+            prev = v;
+        }
+        assert!(prev > 0.79, "settled at {prev}");
     }
 }
