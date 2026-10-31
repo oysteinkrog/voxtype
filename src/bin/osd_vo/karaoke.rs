@@ -369,7 +369,8 @@ impl Scene {
         };
         let o = self.origin;
         let stage = Rect::new(o.x, o.y + STAGE_TOP, CARD_W, CARD_H - STAGE_TOP);
-        let light = hex(WHITE).fade(LIGHT_ALPHA);
+        // In the look's warm accent: white read as a grey smear.
+        let light = hex(MAGENTA).fade(LIGHT_ALPHA);
         p.shape(ShapeInstance::rrect(
             RRect::new(stage, RADIUS),
             Paint::sheen(
