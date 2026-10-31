@@ -467,6 +467,10 @@ impl Popup {
     /// The depth stack's reading line (MO-86): the light of MO-84 shines
     /// through it alone.
     pub(crate) fn stack_reading_line(&self) -> &[Word] {
+        // The hologram look's stack takes its lines from jarvis's.
+        if self.look.theme == OsdTheme::Hologram {
+            return self.jarvis.lines.last().map_or(&[], |l| l.0.as_slice());
+        }
         self.extra.stack_lines.last().map_or(&[], |l| l.as_slice())
     }
 
