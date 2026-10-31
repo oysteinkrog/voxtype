@@ -39,7 +39,7 @@ use vo::scene::flow::letter_motion::LetterMotions;
 pub(crate) use vo::scene::flow::letter_physics::LetterPhysics;
 use vo::scene::flow::magnet::Magnet;
 use vo::scene::flow::Caret;
-use vo::scene::font::var_axes::Axes;
+use vo::scene::font::var_axes::{breathe, Axes, Breath};
 use vo::scene::word_voice::WordVoices;
 use vo_core::signals::Sig;
 use vo_core::words::WordId;
@@ -109,8 +109,8 @@ impl<M> WildMotion for Element<M> {
         }
         if look.on(VARIABLE_BREATH) {
             let style = look.text_style();
-            if let Some((_, fonts)) = popup.breath_fonts(style.size, false) {
-                words = words.word_fonts_in_place(fonts);
+            if let Some((_, breaths)) = popup.breath(style.size, false) {
+                words = words.word_breath_in_place(breaths);
             }
         }
         words
@@ -119,7 +119,8 @@ impl<M> WildMotion for Element<M> {
 
 impl Popup {
     /// Each shown word's axes now, from its voice reading, and the newest word's mixed with
-    /// the live voice. Within the reading-line envelope unless `free`.
+    /// the live voice. Within the reading-line envelope unless `free`. Not quantised:
+    /// `breathe` draws them smoothly on top of the nearest instance (EG-23).
     fn breath_axes(&self, size: f32, free: bool) -> Vec<(WordId, Axes)> {
         let t = self.extra.now;
         let bus = self.signals.get();
@@ -155,21 +156,30 @@ impl Popup {
                 } else {
                     said
                 };
-                (w.id, if free { a } else { a.reading() }.quantized())
+                (w.id, if free { a } else { a.reading() })
             })
             .collect()
     }
 
-    /// The flex font and each shown word's instance of it.
-    pub(crate) fn breath_fonts(&self, size: f32, free: bool) -> Option<(u32, Vec<(WordId, u32)>)> {
+    /// The flex font and each shown word's breath in it: its nearest
+    /// quantised instance and what lies between that and its axes (EG-23).
+    pub(crate) fn breath(&self, size: f32, free: bool) -> Option<(u32, Vec<(WordId, Breath)>)> {
         let fonts = &self.look.fonts;
         let base = fonts.asset("flex").ok()?;
+        let axes = self.breath_axes(size, free);
         let words = self
-            .breath_axes(size, free)
-            .into_iter()
-            .map(|(id, a)| (id, fonts.add_instance(base, &a.settings()).unwrap_or(base)))
+            .shown
+            .iter()
+            .zip(axes)
+            .map(|(w, (id, a))| (id, breathe(fonts, base, &w.text, a).unwrap_or(Breath::plain(base))))
             .collect();
         Some((base, words))
+    }
+
+    /// The flex font and each shown word's instance of it (`breath`'s fonts).
+    pub(crate) fn breath_fonts(&self, size: f32, free: bool) -> Option<(u32, Vec<(WordId, u32)>)> {
+        let (base, breaths) = self.breath(size, free)?;
+        Some((base, breaths.into_iter().map(|(id, b)| (id, b.font)).collect()))
     }
 }
 
@@ -196,7 +206,9 @@ pub(crate) fn breath_specimen(p: &Popup, _: &vo::Tokens) -> Element<Msg> {
         .text_style(TextStyle::new(base, big, 1.2 * big))
         .color(paper)
         .width(0.62 * inner)
-        .word_fonts(shown.iter().map(|w| (w.id, instance(now))).collect());
+        .word_breath(
+            shown.iter().map(|w| (w.id, breathe(fonts, base, &w.text, now).unwrap_or(Breath::plain(base)))).collect(),
+        );
     let readout = [
         ("WGHT", format!("{:.0}", now.wght), "loudness", (now.wght - 300.0) / 600.0),
         ("WDTH", format!("{:.0}", now.wdth), "tempo", (now.wdth - 75.0) / 50.0),
