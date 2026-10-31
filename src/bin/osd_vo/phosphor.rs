@@ -13,6 +13,17 @@
 //! out to both sides; once the recording stops they sink to a row of dots
 //! and an ASCII progress bar counts up the final pass.
 //!
+//! The redesign's other three effects play in the same material (d6x).
+//! With `stroke-write` the pen writes each new word in green wet ink with a
+//! pale nib light, and the beam keeps to revisions, sweeping only the
+//! changed letters; without the pen the beam writes new words as above.
+//! With `confidence-ink` a tentative word sits at 75 % ink over a row of
+//! green phosphor dots with a gap, which fills and fades once the word
+//! sets. With `broken-frame` a failure snaps the screen's green border open
+//! on its top edge, the ends lit pale, with the failed stage beside the
+//! break. Under reduced motion there is no beam and no pen, the seam stays
+//! and the broken frame is a still mark.
+//!
 //! Geometry is laid out in the pixels of the concept image and scaled so the
 //! screen is as wide as the popup.
 
@@ -23,7 +34,9 @@ use std::sync::OnceLock;
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
-use vo::scene::path::{icons, Outline, StrokeStyle};
+use vo::scene::path::{icons, make, Outline, StrokeStyle};
+
+use super::glyph_paths::{BrokenPen, PathsText};
 use vo::scene::roll::digit_roll;
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
@@ -648,11 +661,16 @@ impl Popup {
         } else {
             Transition::fade().scale(0.97)
         };
+        // On a failure the border is drawn snapped open (MO-53) instead.
+        let broken = self.phosphor_broken(&g, h);
         let screen = at(Element::layer("crt"), MARGIN, MARGIN)
             .size(g.w, h)
             .radius(RADIUS * k)
             .fill_gradient(hex(SCREEN, 0.94), hex(DEEP, 0.96))
-            .border(hex(GREEN, 0.95), 1.8 * k)
+            .border(
+                hex(GREEN, if broken.is_some() { 0.0 } else { 0.95 }),
+                1.8 * k,
+            )
             .glow(hex(GREEN, 0.8), 8.0 * k, 0.35)
             // The screen snaps to a new line count, as its canvas rule and the
             // status row do: on a spring it left the status row over its edge.
@@ -667,8 +685,52 @@ impl Popup {
             .child(self.phosphor_header(&g, &status))
             .child(self.phosphor_progress(&g, &status))
             .child(self.phosphor_text(&g))
-            .child(self.phosphor_status(&g, &status, h));
+            .child(self.phosphor_status(&g, &status, h))
+            .children(broken);
         root.child(screen)
+    }
+
+    /// MO-53: the screen's border snapped open on its top edge, in the
+    /// border's green with the ends lit pale, or `None` when nothing failed.
+    fn phosphor_broken(&self, g: &Geo, h: f32) -> Option<Element<Msg>> {
+        if !self.paths_broken() {
+            return None;
+        }
+        let k = g.k;
+        let bw = 1.8 * k;
+        let border = make::panel(bw / 2.0, bw / 2.0, g.w - bw, h - bw, RADIUS * k);
+        let pen = BrokenPen {
+            width: bw,
+            glow: 2.0,
+            line: hex(GREEN, 0.95),
+            accent: hex(HOT, 1.0),
+            label: TextStyle::new(fonts(&self.look).caption, 11.0 * k, 14.0 * k).tracking(0.6 * k),
+            label_y: 8.0 * k,
+        };
+        // Break on the top edge, a little left of the middle, as type does.
+        let len = border.length();
+        let top = (0..512)
+            .map(|i| len * i as f32 / 512.0)
+            .filter_map(|s| border.at(s).map(|(p, _)| (s, p)))
+            .filter(|(_, p)| p.y < bw + 0.5)
+            .min_by(|a, b| {
+                (a.1.x - 0.45 * g.w)
+                    .abs()
+                    .total_cmp(&(b.1.x - 0.45 * g.w).abs())
+            })
+            .map_or(0.0, |x| x.0);
+        self.paths_broken_frame_at(&border, top, g.w, h, pen)
+    }
+
+    /// The transcript as the glyph paths and channels follow it (RD-10):
+    /// phosphor's own type and pitch, the pen in its green and pale light.
+    fn phosphor_paths_text(&self, g: &Geo) -> PathsText {
+        PathsText {
+            line: LINE * g.k,
+            ink: hex(GREEN, 1.0),
+            nib: hex(HOT, 1.0),
+            ..PathsText::of(&self.look)
+        }
     }
 
     fn phosphor_canvas(&self, g: &Geo, status: &StatusLine, h: f32) -> Element<Msg> {
@@ -893,9 +955,13 @@ impl Popup {
         let style = self.look.text_style();
         let width = self.look.text_width();
         let keep = BEAM_SECS + BEAM_TAIL + 0.3;
+        // With the pen on, the pen writes new words and the beam only
+        // rewrites changed letters: two writers on one word drew it twice.
+        let pen = self.motion("stroke-write");
         let mut sweeps: Vec<Sweep> = self
             .tally_arrivals(&style, width, keep)
             .into_iter()
+            .filter(|_| !pen)
             .map(|(b, at)| Sweep {
                 line: b.rect,
                 x0: b.rect.x,
@@ -956,7 +1022,13 @@ impl Popup {
         // word stays as it is: it is already being read, and a wipe from 1
         // would hide it (RD-09).
         let beam = self.phosphor_beam(g);
-        words = if beam.is_some() {
+        let paths = self.phosphor_paths_text(g);
+        words = if self.motion("stroke-write") {
+            // The pen's fill brings each letter up (SW-02).
+            words
+                .word_enter(self.ghost_enter(self.paths_word_enter(Transition::NONE)))
+                .word_change(Transition::NONE)
+        } else if beam.is_some() {
             words
                 .word_enter(Transition::NONE)
                 .word_change(Transition::NONE)
@@ -968,6 +1040,8 @@ impl Popup {
         if self.phos.ended_at.is_some() {
             words = words.opacity(0.35);
         }
+        // MO-24 and the pen's letter fills.
+        let words = self.typo_words_in(words, &paths);
         let words = self.handoff_or(
             words,
             &style,
@@ -983,6 +1057,10 @@ impl Popup {
             .size(size.w, size.h)
             .child(words.rewind_hide(self.rewinding()))
             .children(self.phosphor_rewind(&style, size));
+        // The pen over the words while they are being written (MO-80).
+        if self.edit_view.is_none() {
+            layer = layer.children(self.paths_overlays(&paths));
+        }
         if let Some(beam) = beam {
             layer = layer.child(
                 at(
@@ -1006,6 +1084,17 @@ impl Popup {
                 .presence(Transition::fade().scale(0.0), Transition::fade()),
             );
         }
+        // The open seam under a tentative word, in phosphor dots (MO-24).
+        let layer = self.typo_marks_in(
+            layer,
+            &self.shown,
+            self.look.text_width(),
+            channels::Seam::Dots {
+                pitch: 4.0 * k,
+                r: 1.1 * k,
+                color: hex(GREEN, 1.0),
+            },
+        );
         self.signal_marks(layer, &self.shown, self.look.text_width(), (0.0, 0.0), hex(GREEN, 1.0))
     }
 
