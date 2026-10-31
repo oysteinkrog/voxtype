@@ -1121,10 +1121,10 @@ impl Popup {
         // changes (an edit reflowed it) swaps to its new node at once, so no
         // word shows twice.
         let tapped = self.edit_tapped();
-        let (enter, exit) = if tapped {
-            (Transition::NONE, Transition::NONE)
+        let enter = if tapped {
+            Transition::NONE
         } else {
-            (self.ghost_enter(Transition::fade()), Transition::fade())
+            self.ghost_enter(Transition::fade())
         };
         for (i, (words, _)) in lines.iter().enumerate() {
             panel = panel.child(
@@ -1137,12 +1137,16 @@ impl Popup {
                     o + TEXT_X,
                     o + TEXT_TOP + i as f32 * LINE,
                 )
-                .motion(Prop::Position, Spring::critical_to_98(0.12))
+                // A roll is a cut: the newest line comes in where the line
+                // before it stood, so that line may not slide up through
+                // it, and the line leaving the top goes at once rather than
+                // fading under the line taking its place.
+                .motion(Prop::Position, Motion::Snap)
                 .rewind_hide(rw)
                 // A new line comes in through its words' own entry: a fade
                 // of the whole line from 0 put its first word under the
                 // reading line's 70 % ink floor (RD-09).
-                .presence(Transition::NONE, exit),
+                .presence(Transition::NONE, Transition::NONE),
             );
         }
         // The ghost tail after the newest line, which it does not wrap past.
