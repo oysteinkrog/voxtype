@@ -231,7 +231,7 @@ pub struct Extra {
     pub(crate) hold: Option<vo::scene::depth_stack::Hold>,
     /// When the new reading line shows behind a gliding held line: the
     /// view is built again then, even with no message in between.
-    stack_wake: Option<f64>,
+    pub(crate) stack_wake: Option<f64>,
 }
 
 /// Words laid out at most, from a start that only moves in steps of half
@@ -1818,6 +1818,54 @@ mod edit_tests {
             popup.files.outcome = Some(outcome);
             popup.sync_jarvis(2.0);
             assert_eq!(popup.jarvis.ended_at.is_some(), dimmed, "{outcome:?}");
+        }
+    }
+
+    /// When a line leaves the reading place of the depth stack, the hold
+    /// stores a wake at the moment the new reading line shows
+    /// (`DepthStack::newest_shows_at`), for showcase and jarvis, so the
+    /// view is built again then even with no message in between.
+    #[test]
+    fn a_stack_hold_wakes_the_view_when_the_new_line_shows() {
+        use super::super::swiss_look::edit_check::{dictation, fonts};
+        use vo::scene::depth_stack::DepthStack;
+        let fonts = fonts();
+        for theme in [OsdTheme::Showcase, OsdTheme::Jarvis] {
+            let cfg = OsdConfig {
+                theme,
+                width_px: 600,
+                ..OsdConfig::default()
+            };
+            let mut look = Look::new(&cfg, &PlasmaTheme::default(), String::new(), &fonts);
+            look.set_motion(&cfg.motion);
+            assert!(look.on(wild_space::DEPTH_STACK), "{theme:?}");
+            let mut popup = Popup::new(look, &fonts);
+            let mut woke = None;
+            for n in 1..200 {
+                let t = n as f64 * 0.1;
+                popup.text(&dictation(n));
+                popup.sync_showcase(t);
+                popup.sync_jarvis(t);
+                let (wake, hold) = if theme == OsdTheme::Showcase {
+                    (
+                        popup.extra.stack_wake.take(),
+                        popup.extra.stack_hold.clone(),
+                    )
+                } else {
+                    (popup.jarvis.stack_wake.take(), popup.jarvis.hold.clone())
+                };
+                if let (Some(at), Some(hold)) = (wake, hold) {
+                    woke = Some((at, hold));
+                    break;
+                }
+            }
+            let (at, hold) = woke.unwrap_or_else(|| panic!("{theme:?}: no line left"));
+            assert_eq!(
+                at,
+                DepthStack::default().newest_shows_at(&hold),
+                "{theme:?}"
+            );
+            assert!(at >= hold.since, "{theme:?}");
         }
     }
 }

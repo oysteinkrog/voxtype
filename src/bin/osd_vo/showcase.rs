@@ -117,10 +117,10 @@ pub struct Extra {
     /// The reading line's first word and the strip's rows then.
     stack_newest: Option<(vo_core::words::WordId, u32)>,
     /// The line that just left the reading place, held flat for a moment.
-    stack_hold: Option<Hold>,
+    pub(crate) stack_hold: Option<Hold>,
     /// When the new reading line shows behind a gliding held line: the
     /// view is built again then, even with no message in between.
-    stack_wake: Option<f64>,
+    pub(crate) stack_wake: Option<f64>,
     /// The shown words and their boxes in the strip at a width (MO-69).
     boxes: std::sync::Mutex<Option<ShownBoxes>>,
 }
