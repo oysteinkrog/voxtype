@@ -1612,19 +1612,18 @@ impl Popup {
             // A new line comes in through its words' own entry: a fade of
             // the whole line from 0 put its first word under the reading
             // line's 70 % ink floor (RD-09).
-            let (enter, exit) = if tapped {
-                (Transition::NONE, Transition::NONE)
+            let enter = if tapped {
+                Transition::NONE
+            } else if self.look.on(TYPEWRITER_APPROACH) {
+                self.ghost_enter(approach_enter())
             } else {
-                let enter = if self.look.on(TYPEWRITER_APPROACH) {
-                    approach_enter()
-                } else {
-                    Transition::fade().opacity(0.0).offset(0.0, 6.0 * k)
-                };
-                (self.ghost_enter(enter), Transition::fade())
+                self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0 * k))
             };
+            // A line goes at once: the top line fading where it was when the
+            // text scrolled drew the line below over it as it moved up.
             let line = Element::layer(format!("line{key}"))
                 .size(text_w, style.line_height)
-                .presence(Transition::NONE, exit)
+                .presence(Transition::NONE, Transition::NONE)
                 .child(
                     at(live, text_x, 0.0)
                         .text_style(style)
