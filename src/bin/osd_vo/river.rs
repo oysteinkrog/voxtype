@@ -122,9 +122,11 @@ fn rim_inset(level: f32) -> f32 {
 }
 
 /// R2-24-b: the rings at `t`, each its radius past the microphone's ring
-/// (design pixels) and alpha, for a voice level `at(s)` at time `s`.
-fn ripples(t: f64, at: impl Fn(f64) -> f32) -> Vec<(f32, f32)> {
-    let last = (t / RIPPLE_EVERY).floor() as i64;
+/// (design pixels) and alpha, for a voice level `at(s)` at time `s`. No
+/// ring starts after `heard`, the newest audio, so all are gone by
+/// `heard + RIPPLE_LIFE`.
+fn ripples(t: f64, heard: f64, at: impl Fn(f64) -> f32) -> Vec<(f32, f32)> {
+    let last = (t.min(heard) / RIPPLE_EVERY).floor() as i64;
     let first = ((t - RIPPLE_LIFE) / RIPPLE_EVERY).ceil() as i64;
     (first.max(0)..=last)
         .filter_map(|j| {
@@ -557,10 +559,11 @@ impl Popup {
         let levels = self.kit_levels();
         let mic = Point::new(MIC_X * k, MIC_Y * k);
         let fade = (TEXT_X * k, (TEXT_X + 110.0) * k);
+        let heard = self.newest_at;
         let until = if still {
             self.shown_at
         } else {
-            self.newest_at + RIPPLE_LIFE
+            heard + RIPPLE_LIFE
         };
         let canvas = Element::canvas("panel", until, move |t, r, p| {
             let level = if still {
@@ -579,7 +582,7 @@ impl Popup {
                 return;
             }
             let centre = Point::new(r.x + mic.x, r.y + mic.y);
-            for (reach, a) in ripples(t, |s| levels.at(s)) {
+            for (reach, a) in ripples(t, heard, |s| levels.at(s)) {
                 let rx = (MIC_R + 4.0 + reach) * k;
                 let ry = 0.55 * rx;
                 let pts: Vec<Point> = (0..72)
@@ -906,8 +909,9 @@ mod r2_tests {
             let i = rim_inset(level);
             assert!((0.0..=3.0).contains(&i), "{level} {i}");
         }
-        assert!(ripples(3.0, |_| 0.0).is_empty());
-        let rings = ripples(3.0, |_| 0.5);
+        assert!(ripples(3.0, 9.0, |_| 0.0).is_empty());
+        assert!(ripples(3.0 + RIPPLE_LIFE, 3.0, |_| 0.5).is_empty());
+        let rings = ripples(3.0, 9.0, |_| 0.5);
         assert!(!rings.is_empty());
         assert!(rings
             .iter()
