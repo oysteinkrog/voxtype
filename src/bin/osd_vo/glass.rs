@@ -694,11 +694,16 @@ impl Popup {
             self.glass.hold.as_ref(),
         );
         // The stack is wider than the text by its sheets' margin; centre
-        // it on the text so the sheets line up with the text box.
-        let text = Element::column("text")
-            .width(tw)
-            .height(rows as f32 * TEXT_LINE * k)
-            .child(at(stack, (tw - span) / 2.0, 0.0));
+        // it on the text so the sheets line up with the text box. The stack
+        // places itself in a box `span` wide (`at` inside), so it goes in a
+        // box of that width: placing it directly would drop that offset and
+        // push the reading band left by half the margin.
+        let rows_h = rows as f32 * TEXT_LINE * k;
+        let text = Element::column("text").width(tw).height(rows_h).child(at(
+            Element::column("stack-box").size(span, rows_h).child(stack),
+            (tw - span) / 2.0,
+            0.0,
+        ));
         self.letter_fx_layers(text, tw)
     }
 
