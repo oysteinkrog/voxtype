@@ -10,8 +10,11 @@
 //! count. A cancel greys the ring and dims the words. Under reduced motion
 //! the glass draws no sheen, the bars and the ring hold still and the
 //! check is drawn at once.
+//!
+//! The glass faintly reflects a made-up desktop (EG-21): a few still window
+//! shapes in the look's own blue, under everything else on the card.
 
-use super::kit::{at, ease_out, hex, mix, Levels, Mode};
+use super::kit::{at, ease_out, glass_reflection, hex, mix, Levels, Mode};
 use super::*;
 
 use vo::scene::canvas::Painter;
@@ -31,6 +34,9 @@ const VIOLET: u32 = 0x8b6cff;
 const DISC: u32 = 0x0c1846;
 const HINT: u32 = 0xa9bff0;
 const DIM: u32 = 0x6b7591;
+/// The made-up desktop the glass reflects (EG-21): its windows half way from
+/// TINT to HINT, still.
+const DESKTOP_SEED: u64 = 8;
 
 /// The card in the redesign's units at `width_px = 600`; the look scales
 /// with the popup's width. `ROOM` is kept round the card for its glow and
@@ -85,7 +91,9 @@ const _: () = assert!(STATUS_Y + STATUS_H / 2.0 < CARD_H - 20.0);
 /// caustics and shadows than the default, which read as smoke on the navy.
 pub(crate) fn letter_light() -> vo_3d::glyph_fx::Light {
     vo_3d::glyph_fx::Light {
-        color: hex(ICE).fade(0.3),
+        // Opaque: the light's alpha is its strength (vo 47fe913), and the
+        // look was tuned with the light at full strength.
+        color: hex(ICE),
         accent: hex(CYAN),
         shadow_len: 16.0,
         shadow: 0.15,
@@ -490,6 +498,21 @@ impl Popup {
             2.0 * (WAVE_HALF_H + 14.0) * k,
         );
         let mic_box = 2.0 * (MIC_R + 22.0) * k;
+        // EG-21: faint windows of a made-up desktop on the glass, across its
+        // upper part inside the rounded corners, under everything else on
+        // the card.
+        let inset = 0.6 * RADIUS * k;
+        let desktop = vo_3d::Desktop::new(hex(BLUE), DESKTOP_SEED);
+        let reflection = Element::canvas("desktop", 0.0, move |_, r, p| {
+            let inner = Rect::new(
+                r.x + inset,
+                r.y + inset,
+                r.w - 2.0 * inset,
+                0.55 * r.h - inset,
+            );
+            glass_reflection(p, inner, &desktop, mix(hex(TINT), hex(HINT), 0.5), 6.0 * k)
+        })
+        .size(w, h);
         let until = wave.until();
         let mic_until = mic.until();
         Element::panel("card")
@@ -500,6 +523,7 @@ impl Popup {
             .glow(hex(BLUE).fade(0.3), 10.0 * k, 0.6)
             .rim(Color::hex(RIM, 0.75), 1.6 * k, 0.2, -0.375, 0.0)
             .presence(Transition::fade().offset(0.0, 8.0).scale(0.98), exit)
+            .child(at(reflection, 0.0, 0.0))
             .child(at(
                 Element::canvas("wave", until, move |t, r, p| wave.draw(t, r, p))
                     .size(wave_box.w, wave_box.h),

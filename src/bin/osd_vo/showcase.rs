@@ -133,6 +133,11 @@ pub struct Extra {
 /// Shown words, the width they wrap at, and their boxes.
 type ShownBoxes = (Vec<Word>, f32, Vec<sounding::WordBox>);
 
+/// The frame pace while the popup records room tone (RD-11, lq9): the
+/// orbs' drift, the ring's orbit and the rim's light head step 10 times a
+/// second, which keeps idle-open clearly under its CPU limit.
+pub(crate) const ROOM_TONE_FPS: f64 = 10.0;
+
 /// Reach of the card's glow. Its falloff is exp(-d / GLOW_PX), so it is
 /// gone well inside the surface's transparent margin.
 const GLOW_PX: f32 = 8.0;

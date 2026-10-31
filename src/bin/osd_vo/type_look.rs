@@ -170,6 +170,21 @@ fn at<M>(e: Element<M>, x: f32, y: f32) -> Element<M> {
     })
 }
 
+/// Gives the transcript's font a Japanese (CJK) face to fall back on, when
+/// fontconfig has one with the glyphs and the font has no fallbacks yet, so
+/// 東京 in a dictation does not show as two empty boxes.
+fn script_fallbacks(reg: &FontRegistry, font: u32) {
+    if !reg.fallbacks(font).is_empty() {
+        return;
+    }
+    let cjk = reg
+        .system(":lang=ja")
+        .filter(|&id| id != font && reg.get(id).is_some_and(|f| f.has('東')));
+    if let Some(cjk) = cjk {
+        reg.set_fallbacks(font, &[cjk]);
+    }
+}
+
 impl Popup {
     /// [`Popup::room`], except while editing: then every window word draws,
     /// or the caret could sit past the last drawn word (plan section 4.5).
@@ -205,6 +220,7 @@ impl Popup {
     }
 
     pub(crate) fn type_view(&self) -> Element<Msg> {
+        script_fallbacks(&self.look.fonts, self.look.text_style().font);
         let root = Element::column("root").align_items(AlignItems::CENTER);
         if self.closing {
             return root;

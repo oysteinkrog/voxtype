@@ -149,7 +149,8 @@ impl Popup {
 
     /// `words` laid out in `style` at `width` as the live text lays them
     /// out, from the last few layouts. With `breath`, the flex font and each
-    /// word's instance (MO-81): each word is laid in its instance, so the
+    /// word's instance (MO-81): each word is laid in its instance, in place
+    /// (with the widths of `style`'s font, as the live text lays it), so the
     /// letters sit where the live text draws them, and each glyph is then
     /// drawn in the flex font's default instance. A new instance is a new
     /// font, and the light's atlas would need a fresh glyph field for every
@@ -196,10 +197,12 @@ impl Popup {
         let ranges: Vec<_> = key.4.iter().map(|&(a, b, f)| (a..b, f)).collect();
         let mut laid = self
             .measure
-            .layout_fonts(&key.0, style, Some(width), &[], &ranges);
-        for g in &mut laid.glyphs {
-            if key.4.iter().any(|r| r.2 == g.font) {
-                g.font = style.font;
+            .layout_fonts_in_place(&key.0, style, Some(width), &[], &ranges);
+        if let Some((base, _)) = breath {
+            for g in &mut laid.glyphs {
+                if key.4.iter().any(|r| r.2 == g.font) {
+                    g.font = *base;
+                }
             }
         }
         // Centred lines sit across the wrap width, as the live text puts them.
@@ -218,17 +221,15 @@ impl Popup {
             return text;
         }
         let l = &self.look;
-        let mut style = l.text_style();
+        let style = l.text_style();
         // MO-81: words set in the variable font are laid as the live text
-        // lays them, so the effects sit on the drawn letters.
+        // lays them, in place in the look's own font, so the effects sit on
+        // the drawn letters.
         let breath = if l.on(super::wild_motion::VARIABLE_BREATH) {
             self.breath_fonts(style.size, false)
         } else {
             None
         };
-        if let Some((base, _)) = &breath {
-            style.font = *base;
-        }
         let height = self.lines as f32 * style.line_height;
         // The letters' colour: the look's own text colour where it has one.
         let letter_ink = match l.theme {

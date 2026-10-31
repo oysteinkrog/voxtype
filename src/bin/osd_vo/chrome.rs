@@ -237,7 +237,7 @@ impl HeroSource for Blob {
                 env: Some(Env {
                     reach: 2.5,
                     strength: 0.6,
-                    key: None,
+                    ..Env::default()
                 }),
             },
             stretch: [1.0, 1.0 + 0.06 * voice + bob, 1.0],
