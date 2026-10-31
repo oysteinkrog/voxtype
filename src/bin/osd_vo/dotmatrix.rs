@@ -6,6 +6,13 @@
 //!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
+//!
+//! While the popup is open it keeps a little idle life (feo, RD-02): about
+//! 2 % of the meter's unlit dots rise to 12 % ink for 400 ms at random, and
+//! below the level floor the meter's dots step one cell right every 2 s and
+//! back. Both are drawn by the meter's canvas in steps of 15 a second, far
+//! from the transcript; neither runs once the popup closes or under reduced
+//! motion.
 
 use super::kit::{at, ease_out, hex, mix, reduced, Levels, Mode};
 use super::*;
@@ -82,6 +89,45 @@ const SEAM_PITCH: f32 = 4.0;
 const SEAM_R: f32 = 0.9;
 /// The word count's room in the status row, and the notch's room.
 const NOTCH_ROOM: f32 = 8.0;
+
+/// feo: the idle motion's pace (RD-02's slow-loop cap), the share of
+/// unlit dots that twinkle at a time, their ink at the peak, how long one
+/// twinkle lasts, and how long the quiet meter holds each side of its drift.
+const IDLE_FPS: f64 = 15.0;
+const TWINKLE_SHARE: f32 = 0.02;
+const TWINKLE_INK: f32 = 0.12;
+const TWINKLE_SECS: f64 = 0.4;
+const DRIFT_SECS: f64 = 2.0;
+
+/// feo: `t` held to the start of its idle step.
+fn idle_step(t: f64) -> f64 {
+    (t * IDLE_FPS).floor() / IDLE_FPS
+}
+
+/// feo: the ink of unlit cell `cell` at `t`, 0 unless it twinkles. Time
+/// runs in `TWINKLE_SECS` windows on one clock, so the twinkles change
+/// together a few times a second and the frames between them are the same.
+/// A cell may light only in every other window (by its parity), at twice
+/// `TWINKLE_SHARE`, so it never stays lit for two windows in a row.
+fn twinkle(cell: u32, t: f64) -> f32 {
+    let window = (t / TWINKLE_SECS).floor() as i64 as u32;
+    if (window ^ cell) % 2 == 1
+        || noise(cell.wrapping_mul(0x9E37_79B1) ^ window.wrapping_mul(7919)) >= 2.0 * TWINKLE_SHARE
+    {
+        return 0.0;
+    }
+    TWINKLE_INK
+}
+
+/// feo: how many cells the quiet meter is shifted at `t`: one for every
+/// other `DRIFT_SECS`, else none.
+fn drift_cells(t: f64) -> f32 {
+    if (t / DRIFT_SECS).floor() as i64 % 2 == 1 {
+        1.0
+    } else {
+        0.0
+    }
+}
 
 /// Seconds from a word's arrival until the meter has regrown its dots.
 fn sort_secs() -> f64 {
@@ -188,6 +234,11 @@ struct Columns {
     /// Spans of the meter that gave their dots to a word, in canvas x, and
     /// when.
     taken: Vec<(f32, f32, f64)>,
+    /// feo: the idle twinkle and drift run (open, not reduced).
+    idle: bool,
+    /// feo: this copy draws only the twinkles, in a canvas of their own, so
+    /// the meter's canvas stays the same from frame to frame on room tone.
+    twinkles: bool,
 }
 
 impl Columns {
@@ -228,6 +279,13 @@ impl Columns {
             -1.0
         };
         let head = ((since / 1.2).fract() * n as f64) as f32;
+        let idle = self.idle && matches!(self.mode, Mode::Loading | Mode::Listening);
+        let step = idle_step(since);
+        let drift = if idle && self.mode == Mode::Listening {
+            drift_cells(step) * COL_PITCH * k
+        } else {
+            0.0
+        };
         for i in 0..n {
             let from_mid = (i as f32 - mid).abs();
             // The baseline lights from the centre outward as the popup opens.
@@ -244,6 +302,12 @@ impl Columns {
                 _ => 1.0,
             };
             if self.mode == Mode::Loading {
+                if self.twinkles {
+                    if idle {
+                        twinkles(i, 0, Point::new(x, cy), k, step, p);
+                    }
+                    continue;
+                }
                 // One lit dot runs along the baseline with a short tail.
                 let back = (head - i as f32).rem_euclid(n as f32);
                 let lit = (1.0 - back / 5.0).max(0.0);
@@ -265,11 +329,23 @@ impl Columns {
             // baseline dot dimmed until they regrow.
             let short = self.short(x - r.x, t);
             let rows = rows.saturating_sub(short);
+            if self.twinkles {
+                if idle {
+                    twinkles(i, rows, Point::new(x, cy), k, step, p);
+                }
+                continue;
+            }
             let c = hex(DOT).fade(dim);
             let base_c = if short > 0 { hex(GREY).fade(dim) } else { c };
             let base_r = if rows == 0 { 1.5 } else { DOT_R };
+            // Below the level floor the dot drifts a cell and back (feo).
+            let base_x = if rows == 0 && short == 0 {
+                x + drift
+            } else {
+                x
+            };
             p.shape(ShapeInstance::circle(
-                Point::new(x, cy),
+                Point::new(base_x, cy),
                 base_r * k.min(1.0),
                 Paint::solid(base_c),
             ));
@@ -288,6 +364,28 @@ impl Columns {
                     Paint::solid(c),
                 ));
             }
+        }
+    }
+}
+
+/// feo: the twinkling dots of column `i`, whose baseline is at `base`,
+/// among its unlit cells (the rows above `lit` on both sides).
+fn twinkles(i: usize, lit: usize, base: Point, k: f32, t: f64, p: &mut Painter) {
+    for row in lit + 1..=ROWS {
+        for side in [-1.0, 1.0] {
+            let cell = ((i * ROWS + row) * 2) as u32 + (side > 0.0) as u32;
+            let ink = twinkle(cell, t);
+            if ink <= 0.0 {
+                continue;
+            }
+            let u = row as f32 / ROWS as f32;
+            let rr = DOT_R * (1.0 - 0.3 * u) * k.min(1.0);
+            let dy = side * row as f32 * ROW_PITCH * k;
+            p.shape(ShapeInstance::circle(
+                Point::new(base.x, base.y + dy),
+                rr,
+                Paint::solid(hex(DOT).fade(ink)),
+            ));
         }
     }
 }
@@ -463,8 +561,22 @@ impl Popup {
             finish_at: self.extra.finish_at,
             progress: self.kit_progress(),
             taken,
+            idle: !self.closing && !reduced() && !l.on("reduced-motion"),
+            twinkles: false,
         };
         let until = columns.until();
+        let twinkle = columns.idle.then(|| {
+            let twinkle = Columns {
+                twinkles: true,
+                ..columns.clone()
+            };
+            at(
+                Element::canvas("twinkle", until, move |t, r, p| twinkle.draw(t, r, p)),
+                0.0,
+                WAVE_TOP,
+            )
+            .size(l.width, WAVE_H)
+        });
         let wave = Element::canvas("dots", until, move |t, r, p| columns.draw(t, r, p))
             .size(l.width, WAVE_H)
             .margin_edges(WAVE_TOP, 0.0, 0.0, 0.0);
@@ -483,6 +595,7 @@ impl Popup {
                 hex(RED),
             ))
             .child(wave)
+            .children(twinkle)
             .child(self.dotmatrix_text(mode))
             .child(self.dotmatrix_status(mode, mode_at))
             .child(
@@ -895,5 +1008,65 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn about_2_percent_of_unlit_dots_twinkle_up_to_12_percent_ink() {
+        let (cells, steps) = (600u32, 150);
+        let (mut lit, mut peak) = (0usize, 0.0f32);
+        for s in 0..steps {
+            let t = idle_step(10.0 + s as f64 / IDLE_FPS);
+            for c in 0..cells {
+                let ink = twinkle(c, t);
+                assert!((0.0..=TWINKLE_INK).contains(&ink), "{ink}");
+                lit += (ink > 0.0) as usize;
+                peak = peak.max(ink);
+            }
+        }
+        let share = lit as f32 / (cells as usize * steps) as f32;
+        assert!((0.01..0.03).contains(&share), "share {share}");
+        assert!(peak > 0.9 * TWINKLE_INK, "peak {peak}");
+    }
+
+    #[test]
+    fn a_twinkle_lasts_one_window_at_most() {
+        for c in 0..600u32 {
+            let mut run = 0;
+            for s in 0..300 {
+                if twinkle(c, s as f64 / IDLE_FPS) > 0.0 {
+                    run += 1;
+                    assert!(run as f64 <= TWINKLE_SECS * IDLE_FPS + 1.0, "cell {c}");
+                } else {
+                    run = 0;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_twinkles_change_together_once_a_window() {
+        for c in 0..600u32 {
+            for w in 0..20 {
+                let t0 = w as f64 * TWINKLE_SECS;
+                let ink = twinkle(c, t0 + 0.01);
+                for s in 1..6 {
+                    assert_eq!(twinkle(c, t0 + 0.01 + s as f64 * 0.06), ink, "cell {c}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_quiet_meter_drifts_one_cell_every_2_s_and_back() {
+        assert_eq!(drift_cells(0.5), 0.0);
+        assert_eq!(drift_cells(2.5), 1.0);
+        assert_eq!(drift_cells(4.5), 0.0);
+        assert_eq!(drift_cells(6.5), 1.0);
+        assert_eq!(idle_step(1.0 / IDLE_FPS * 3.5), 3.0 / IDLE_FPS);
     }
 }

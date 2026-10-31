@@ -122,6 +122,18 @@ impl Play {
     }
 }
 
+/// How a look draws its broken frame (MO-53): the stroke's width, colour
+/// and glow (0 for none), the accent its parted ends light up in, and the
+/// stage label's style and top, in the frame's box.
+pub(crate) struct BrokenPen {
+    pub(crate) width: f32,
+    pub(crate) glow: f32,
+    pub(crate) line: Color,
+    pub(crate) accent: Color,
+    pub(crate) label: TextStyle,
+    pub(crate) label_y: f32,
+}
+
 impl Popup {
     /// Whether an outline feature plays over the live text, so new words
     /// come in at the reading-line ink without a rise.
@@ -435,12 +447,10 @@ impl Popup {
         h: f32,
         width: f32,
     ) -> Option<Element<Msg>> {
-        if !self.look.on(BROKEN) || self.ending() != Some(Ending::Failed) {
+        if !self.paths_broken() {
             return None;
         }
         let l = &self.look;
-        let at = self.ended_at.unwrap_or(self.extra.now);
-        let reduced = self.paths_reduced();
         // Break on the top edge, under the gap between the title and the clock.
         let len = border.length();
         let top = (0..512)
@@ -453,27 +463,73 @@ impl Popup {
                     .total_cmp(&(b.1.x - 0.45 * w).abs())
             })
             .map_or(0.0, |x| x.0);
+        let pen = BrokenPen {
+            width,
+            glow: 0.0,
+            line: l.border,
+            accent: l.accent,
+            label: l.mono(l.caption_small_px),
+            label_y: 3.0,
+        };
+        self.paths_broken_frame_at(border, top, w, h, pen)
+    }
+
+    /// Whether the broken frame shows: the feature is on and the dictation
+    /// failed. A look that draws its own frame leaves out the part that
+    /// `paths_broken_frame_at` draws snapped.
+    pub(crate) fn paths_broken(&self) -> bool {
+        self.look.on(BROKEN) && self.ending() == Some(Ending::Failed)
+    }
+
+    /// Any look's frame snapped open on a failure: `border` breaks `top`
+    /// along its length, drawn with `pen`, in a `w` by `h` box. `None` when
+    /// the feature is off or nothing failed.
+    pub(crate) fn paths_broken_frame_at(
+        &self,
+        border: &Contour,
+        top: f32,
+        w: f32,
+        h: f32,
+        pen: BrokenPen,
+    ) -> Option<Element<Msg>> {
+        if !self.paths_broken() {
+            return None;
+        }
+        let at = self.ended_at.unwrap_or(self.extra.now);
+        let reduced = self.paths_reduced();
         // The ends curl into the panel: above the top edge is the surface's end.
         let snap = Snap {
             curl: -4.0,
             ..Snap::new(top)
         };
+        // A look may break one open edge of its frame rather than a closed
+        // border.
+        let open = match (border.segs.first(), border.segs.last()) {
+            (Some(a), Some(b)) => (a.p0.x - b.p2.x).abs() + (a.p0.y - b.p2.y).abs() > 0.5,
+            _ => false,
+        };
         let border = border.clone();
-        let (line, accent) = (l.border, l.accent);
+        let BrokenPen {
+            width,
+            glow,
+            line,
+            accent,
+            label: label_style,
+            label_y,
+        } = pen;
         // The stage that failed, from how far the dictation came.
         let stage = if self.extra.finish_at.is_some() || self.was_finishing {
             "final pass failed"
         } else {
             "recording failed"
         };
-        let label_style = l.mono(l.caption_small_px);
         let shaped = self.measure.layout(stage, &label_style, None);
         let break_x = border.at(top).map_or(0.45 * w, |x| x.0.x);
         let lx = (break_x + 10.0).min(w - shaped.size.w - 4.0);
         let glyphs: Vec<_> = shaped
             .glyphs
             .iter()
-            .map(|g| (g.font, g.glyph, Point::new(lx + g.pos.x, 3.0 + g.pos.y)))
+            .map(|g| (g.font, g.glyph, Point::new(lx + g.pos.x, label_y + g.pos.y)))
             .collect();
         let size = label_style.size;
         let until = if reduced { 0.0 } else { at + SNAP_SECS };
@@ -484,11 +540,23 @@ impl Popup {
                 } else {
                     kit::ease_out((t - at) / SNAP_SECS)
                 };
-                for c in snapped(&border, &snap, k) {
+                let tip = StrokeStyle::solid(width.max(1.2), accent.fade(k));
+                if open {
+                    // An open edge parts into two pieces; only the ends at
+                    // the break light up.
+                    let [a, b] = snapped_open(&border, &snap, k);
+                    let pen = StrokeStyle::solid(width, line);
+                    let pen = if glow > 0.0 { pen.glow(glow) } else { pen };
+                    p.stroke(&a, &pen);
+                    p.stroke(&b, &pen);
+                    let len = a.length();
+                    p.stroke(&a.trim(len - END, len), &tip);
+                    p.stroke(&b.trim(0.0, END), &tip);
+                }
+                for c in snapped(&border, &snap, k).into_iter().filter(|_| !open) {
                     p.stroke(&c, &StrokeStyle::solid(width, line));
                     // The two ends light up in the accent as they part.
                     let len = c.length();
-                    let tip = StrokeStyle::solid(width.max(1.2), accent.fade(k));
                     p.stroke(&c.trim(0.0, END), &tip);
                     p.stroke(&c.trim(len - END, len), &tip);
                 }
@@ -507,6 +575,42 @@ impl Popup {
         });
         Some(kit::at(canvas, 0.0, 0.0).size(w, h))
     }
+}
+
+/// An open edge broken at `snap.at` with progress `k`, as its two pieces:
+/// they part by `k * snap.gap` and the ends at the break bend `k * snap.curl`
+/// off the line, to the left of travel (up for an edge drawn left to right
+/// on a y-down screen; a negative curl bends them the other way).
+fn snapped_open(edge: &Contour, snap: &Snap, k: f32) -> [Contour; 2] {
+    let len = edge.length();
+    let k = k.clamp(0.0, 1.0);
+    let half = 0.5 * snap.gap * k;
+    let at = snap.at.clamp(0.0, len);
+    let lift = snap.curl * k;
+    let piece = |a: f32, b: f32, break_at_end: bool| {
+        let span = (b - a).max(0.0);
+        let hook = snap.hook.min(span);
+        let n = (span.ceil() as usize).max(2);
+        let pts: Vec<Point> = (0..=n)
+            .filter_map(|i| {
+                let s = a + span * i as f32 / n as f32;
+                let (q, tan) = edge.at(s)?;
+                let d = if break_at_end { b - s } else { s - a };
+                let bend = if hook > 0.0 && d < hook {
+                    let u = 1.0 - d / hook;
+                    u * u
+                } else {
+                    0.0
+                };
+                Some(Point::new(
+                    q.x + tan.y * lift * bend,
+                    q.y - tan.x * lift * bend,
+                ))
+            })
+            .collect();
+        Contour::polyline(&pts, false)
+    };
+    [piece(0.0, at - half, true), piece(at + half, len, false)]
 }
 
 impl Popup {

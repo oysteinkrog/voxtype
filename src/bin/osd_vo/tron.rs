@@ -734,7 +734,15 @@ impl Popup {
             .size(width, self.lines.max(1) as f32 * style.line_height)
             .child(words.rewind_hide(self.rewinding()));
         let text = self.signal_marks(text, &self.shown, width, (0.0, 0.0), hex(TEXT, 1.0));
-        at(text, TEXT_X * k, TEXT_TOP * k)
+        // A line that leaves on an overflow stays inside the text box, off
+        // the rule; the margin keeps the halo and the word entry whole.
+        let m = 8.0 * k;
+        let h = self.lines.max(1) as f32 * style.line_height;
+        let clip = Element::layer("text-clip")
+            .size(width + 2.0 * m, h + m)
+            .clip()
+            .child(at(text, m, 0.0));
+        at(clip, TEXT_X * k - m, TEXT_TOP * k)
     }
 
     /// MO-50: a cancel takes the words back into the caret, drawn over

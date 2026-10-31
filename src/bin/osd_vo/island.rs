@@ -134,6 +134,60 @@ const TICK_HZ: f64 = 60.0;
 const BULGE_PX: f32 = 4.0;
 const BULGE_RISE: f64 = 0.05;
 const BULGE_SECS: f64 = 0.2;
+/// Idle motion while listening: a soft light orbits the capsule's edge,
+/// and the flat bars rise by at most 1 px with the room's noise floor.
+const ORBIT_SECS: f64 = 6.0;
+const ORBIT_GLOW: f32 = 12.0;
+const ORBIT_ALPHA: f32 = 0.35;
+const FLOOR_LIFT: f32 = 1.0;
+/// The level that lifts a flat bar the whole `FLOOR_LIFT`; from four times
+/// it the lift is gone, so speech draws as before.
+const FLOOR_REF: f32 = 0.004;
+
+/// The point a fraction `u` of the way round `r`'s edge, clockwise from
+/// the start of the top side.
+fn edge_point(r: RRect, u: f32) -> Point {
+    let b = r.rect;
+    let rad = r.radii[0].min(b.w / 2.0).min(b.h / 2.0);
+    let (sw, sh) = (b.w - 2.0 * rad, b.h - 2.0 * rad);
+    let arc = std::f32::consts::FRAC_PI_2 * rad;
+    let mut d = u.rem_euclid(1.0) * 2.0 * (sw + sh + 2.0 * arc);
+    // Each side, then the corner after it: its centre and start angle.
+    let sides = [
+        (sw, Point::new(b.x + rad, b.y), Point::new(1.0, 0.0)),
+        (sh, Point::new(b.x + b.w, b.y + rad), Point::new(0.0, 1.0)),
+        (
+            sw,
+            Point::new(b.x + b.w - rad, b.y + b.h),
+            Point::new(-1.0, 0.0),
+        ),
+        (sh, Point::new(b.x, b.y + b.h - rad), Point::new(0.0, -1.0)),
+    ];
+    let corners = [
+        (
+            Point::new(b.x + b.w - rad, b.y + rad),
+            -std::f32::consts::FRAC_PI_2,
+        ),
+        (Point::new(b.x + b.w - rad, b.y + b.h - rad), 0.0),
+        (
+            Point::new(b.x + rad, b.y + b.h - rad),
+            std::f32::consts::FRAC_PI_2,
+        ),
+        (Point::new(b.x + rad, b.y + rad), std::f32::consts::PI),
+    ];
+    for ((len, start, dir), (c, a0)) in sides.into_iter().zip(corners) {
+        if d <= len {
+            return Point::new(start.x + dir.x * d, start.y + dir.y * d);
+        }
+        d -= len;
+        if d <= arc {
+            let a = a0 + d / rad.max(1e-3);
+            return Point::new(c.x + rad * a.cos(), c.y + rad * a.sin());
+        }
+        d -= arc;
+    }
+    Point::new(b.x + rad, b.y)
+}
 
 /// How far the right edge is out `s` seconds after a word came.
 fn bulge(s: f64) -> f32 {
@@ -388,6 +442,8 @@ struct Scene {
     rules: Vec<(f32, bool)>,
     /// When the recent words came, for the bulge.
     words_at: Vec<f64>,
+    /// Reduced motion: no idle orbit or floor lift.
+    still: bool,
 }
 
 impl Scene {
@@ -427,6 +483,10 @@ impl Scene {
         }
     }
 
+    fn idle(&self) -> bool {
+        self.mode == Mode::Listening && !self.still
+    }
+
     fn level_at(&self, s: f64) -> f32 {
         let n = self.levels.len();
         if n == 0 {
@@ -448,6 +508,18 @@ impl Scene {
         // A new word pushes the right edge out a little; the left edge and
         // the content stay put.
         let body = RRect::new(Rect::new(o.x, o.y, g.w + self.bulge(t), g.h), g.r);
+        if self.idle() {
+            // Under everything, with an opaque underlay over it, so only its
+            // outer half shows past the edge: the body is 2 % see-through,
+            // and the light showed through it under the newest line.
+            let u = ((t - self.shown_at) / ORBIT_SECS).fract() as f32;
+            p.shape(ShapeInstance::circle(
+                edge_point(body, u),
+                ORBIT_GLOW / 2.0,
+                Paint::glow(hex(HALO).fade(ORBIT_ALPHA), ORBIT_GLOW / 2.0, 0.5),
+            ));
+            p.shape(ShapeInstance::rrect(body, Paint::solid(hex(BODY))));
+        }
         // The blue light round the edge and a soft shadow under it.
         p.shape(ShapeInstance::rrect(
             body,
@@ -622,7 +694,13 @@ impl Scene {
             let jitter = 0.55 + 0.45 * noise(k);
             let taper = (1.0 - reach.powf(1.6)).max(0.0);
             let norm = ((level * 2.6).min(1.0) * jitter * (0.3 + 0.7 * taper)).max(0.0) * settle;
-            let half = (norm * max_half).max(2.2);
+            let mut floor = 2.2;
+            if self.idle() {
+                // Room tone lifts a flat bar a little; speech fades it out.
+                let fade = 1.0 - ((level - FLOOR_REF) / (3.0 * FLOOR_REF)).clamp(0.0, 1.0);
+                floor += FLOOR_LIFT * (level / FLOOR_REF).min(1.0) * jitter * fade;
+            }
+            let half = (norm * max_half).max(floor);
             let x = x0 + i as f32 * pitch;
             let mut c = if u < 0.5 {
                 mix(hex(CYAN), hex(BLUE), u * 2.0)
@@ -1045,6 +1123,7 @@ impl Popup {
                     .filter(|&at| t - at < BULGE_SECS)
                     .collect()
             },
+            still: self.still(),
         };
         let until = scene.until(t);
         let canvas = at(
