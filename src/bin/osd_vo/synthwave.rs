@@ -20,8 +20,9 @@ use super::*;
 
 use std::sync::OnceLock;
 
+use vo::scene::canvas::Painter;
 use vo::scene::display::{BlendMode, Paint, ShapeInstance};
-use vo::scene::{Loop, LoopProp};
+use vo::scene::emitter::{WordParticles, WordSource};
 use vo::scene::geom::{Point, RRect};
 use vo::scene::material::Material;
 use vo::scene::path::{icons, make, Contour, Morph, Outline, StrokeStyle};
@@ -29,6 +30,7 @@ use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
 use vo::scene::taffy::JustifyContent;
 use vo::scene::text::TextLayout;
+use vo::scene::{Loop, LoopProp};
 
 /// Layout at the design width of 600 logical pixels; everything scales
 /// with the popup's width.
@@ -83,14 +85,35 @@ const ROW_STEP: f32 = 0.7;
 /// An onset's row crosses the whole road in this long, so at a speaking
 /// rate the road holds the last few seconds of rhythm and a pause clears it.
 const ONSET_TRAVEL_SECS: f64 = 2.4;
+/// With `light-line` (MO-68): at each onset the tube's light leaves the
+/// left edge, runs under the new word, holds and fades. Seconds for the run
+/// to the word, the stroke under it, the hold and the fade.
+const LIGHT_LEAVE: f64 = 0.18;
+const LIGHT_DRAW: f64 = 0.22;
+const LIGHT_HOLD: f64 = 0.2;
+const LIGHT_FADE: f64 = 0.25;
+/// The underline sits this far under the font's descenders, so it never
+/// touches a letter.
+const LIGHT_GAP: f32 = 3.0;
+/// The frame pace while the popup records room tone (RD-11). The grid,
+/// the waveform and the tube's hum are canvases that redraw every frame,
+/// and at 15 fps they cost 2.3 % of a core; their slow motion reads the
+/// same at this pace.
+pub(crate) const ROOM_TONE_FPS: f64 = 10.0;
 /// Seconds for the tube to power down on a cancel.
 const POWER_DOWN_SECS: f64 = 0.45;
 /// How far the lit tube's brightness wanders while it hums.
 const HUM: f32 = 0.03;
 /// Seconds per cycle of the "..." after "Loading".
 const DOTS_SECS: f64 = 1.2;
-/// When the title first tracks in, after the tube has started drawing.
+/// When the title first tracks in, after the tube has started drawing, and
+/// how long the old word takes to fade out when the state changes.
 const TITLE_DELAY: f64 = 0.22;
+const TITLE_SWAP_SECS: f64 = 0.16;
+/// A new row's words wait this long while the rows above rise out of its
+/// place, so they never land on the row that is leaving (the envelope's
+/// pending hold covers it).
+const ROW_HOLD_SECS: f64 = 0.16;
 
 const MAGENTA: u32 = 0xff2bd6;
 const VIOLET: u32 = 0x9b5cff;
@@ -209,12 +232,21 @@ pub(crate) fn text_width(look: &Look) -> f32 {
     TEXT_W * look.width / DESIGN_W
 }
 
-/// What only the synthwave look keeps: when the card last changed height.
+/// What only the synthwave look keeps: when the card last changed height,
+/// the title's word and when it last changed, and the newest row's first
+/// word and when a new newest row came.
 #[derive(Default)]
 pub struct State {
     lines_from: u32,
     lines_to: u32,
     lines_at: f64,
+    title: &'static str,
+    title_at: f64,
+    row_key: Option<u32>,
+    row_at: f64,
+    /// A hash of the words the rows were last split from, so room tone's
+    /// messages do not lay the text out again.
+    rows_of: u64,
 }
 
 /// The card outline as two halves from the bottom middle, left and right
@@ -310,6 +342,34 @@ impl Popup {
         if self.look.theme != OsdTheme::Synthwave {
             return;
         }
+        let title = self.title_word();
+        let st = &mut self.synth;
+        if title != st.title {
+            if !st.title.is_empty() {
+                st.title_at = t;
+            }
+            st.title = title;
+        }
+        let words = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            self.look.width.to_bits().hash(&mut h);
+            for w in &self.shown {
+                (w.id, &w.text).hash(&mut h);
+            }
+            h.finish()
+        };
+        if self.edit_view.is_none() && words != self.synth.rows_of {
+            let key = self.sw_rows().last().and_then(|r| r.first()).map(|w| w.id);
+            let st = &mut self.synth;
+            st.rows_of = words;
+            if key.is_some() && key != st.row_key {
+                if st.row_key.is_some() {
+                    st.row_at = t;
+                }
+                st.row_key = key;
+            }
+        }
         let st = &mut self.synth;
         if st.lines_to == 0 {
             st.lines_from = self.lines;
@@ -318,6 +378,24 @@ impl Popup {
             st.lines_from = st.lines_to;
             st.lines_to = self.lines;
             st.lines_at = t;
+        }
+    }
+
+    /// Wakes the view once the old title has left, so the new one tracks
+    /// in, and once a new row's place is clear, so its words show.
+    pub(crate) fn arm_synthwave_tick(&mut self, cx: &mut Cx<Msg>) {
+        let now = cx.t();
+        let back = [
+            self.synth.title_at + TITLE_SWAP_SECS,
+            self.synth.row_at + ROW_HOLD_SECS,
+        ]
+        .into_iter()
+        .filter(|&b| b > now)
+        .reduce(f64::min);
+        if let Some(back) = back {
+            if self.look.theme == OsdTheme::Synthwave && self.extra.tick.is_none() {
+                self.extra.tick = Some(cx.after(back - now + 0.01, Msg::Tick));
+            }
         }
     }
 
@@ -406,6 +484,7 @@ impl Popup {
                     .motion(Prop::Position, Spring::critical_to_98(GROW_SECS)),
             )
             .child(at(self.sw_text(), MARGIN, text_top))
+            .children(self.sw_light_line(text_top))
             .child(at(self.sw_tube(), 0.0, 0.0))
     }
 
@@ -819,7 +898,10 @@ impl Popup {
         let style = TextStyle::new(f.title, px, line).tracking(3.0 * s);
         let box_h = line;
         let box_y = TITLE_Y * s - box_h / 2.0;
-        let shown = self.now() >= self.shown_at + TITLE_DELAY;
+        // A new word waits until the old one has faded out, so their
+        // letters never cross.
+        let shown = self.now() >= self.shown_at + TITLE_DELAY
+            && self.now() >= self.synth.title_at + TITLE_SWAP_SECS;
         let word = self.title_word();
         let cancelled = self.cancelled();
         let shaped = self.measure.layout(word, &style, None);
@@ -909,30 +991,11 @@ impl Popup {
             .edit_view
             .is_some()
             .then(|| self.text_lines(&style, width));
-        let mut lines: Vec<Vec<Word>> = Vec::new();
-        if let Some(edited) = &edited {
-            lines = edited.iter().map(|(w, _)| w.clone()).collect();
-        } else {
-            let joined: Vec<&str> = self.shown.iter().map(|w| w.text.as_str()).collect();
-            let text = joined.join(" ");
-            let shaped = self.measure.layout(&text, &style, Some(width));
-            // The line of each word, from where its first glyph landed.
-            let mut offset = 0usize;
-            let first_y = shaped.glyphs.first().map_or(0.0, |g| g.pos.y);
-            for word in &self.shown {
-                let y = shaped
-                    .glyphs
-                    .iter()
-                    .find(|g| g.cluster as usize >= offset)
-                    .map_or(first_y, |g| g.pos.y);
-                let line = ((y - first_y) / style.line_height).round().max(0.0) as usize;
-                while lines.len() <= line {
-                    lines.push(Vec::new());
-                }
-                lines[line].push(word.clone());
-                offset += word.text.len() + 1;
-            }
-        }
+        let lines: Vec<Vec<Word>> = match &edited {
+            Some(edited) => edited.iter().map(|(w, _)| w.clone()).collect(),
+            None => self.sw_rows(),
+        };
+        let held = self.now() < self.synth.row_at + ROW_HOLD_SECS;
         let dim = if self.cancelled() { 0.3 } else { 1.0 };
         // The rows sit on the bottom of the tallest card's text box: a new
         // line comes in on the last row and the older ones rise with the
@@ -944,8 +1007,27 @@ impl Popup {
             .opacity(dim)
             .motion(Prop::Opacity, Spring::critical_to_98(0.4));
         let newest = lines.len().saturating_sub(1);
+        // MO-69: the words form from particles that leave the waveform.
+        let particles = (l.on(showcase::PARTICLE_SOURCE)
+            && edited.is_none()
+            && !self.still()
+            && self.extra.finish_at.is_none())
+        .then(|| WordParticles {
+            color: Color::hex(0xff6ae6, 0.8),
+            size: 0.6,
+            density: 0.6,
+            from: Some(self.sw_particle_source()),
+            ..WordParticles::default()
+        });
         for (i, line) in lines.iter().enumerate() {
-            let words = Element::live_text(format!("line-{i}"), line)
+            // A row is keyed by its first word, so on a cut the rows slide
+            // up as they are and the top one leaves upward with them; no
+            // row ever fades its old words out over its new ones.
+            let key = match line.first() {
+                Some(w) => format!("{}", w.id),
+                None => format!("{i}"),
+            };
+            let words = Element::live_text(format!("line-{key}"), line)
                 .text_style(style)
                 .color(hex(WHITE))
                 .text_halo(Color::hex(0x6a5cff, 0.9), 11.0 * s)
@@ -953,10 +1035,36 @@ impl Popup {
                 .motion(Prop::Offset, Spring::POP)
                 .motion(Prop::Position, Spring::critical_to_98(0.2))
                 .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 8.0 * s)));
-            let row = Element::row(format!("row-{i}"))
+            // MO-14: the newest word's baseline follows the pitch.
+            let words = self.typo_words(words);
+            let words = match particles {
+                Some(p) => words.word_particles(p),
+                None => words,
+            };
+            let row = Element::row(format!("row-{key}"))
                 .width(l.width)
                 .height(style.line_height)
                 .motion(Prop::Position, Spring::critical_to_98(GROW_SECS));
+            // On a cut the top row leaves upward with the rows below it;
+            // any other row that goes fades where it is. The edit window's
+            // rows change in place.
+            let row = if edited.is_none() {
+                let leave = if i == 0 && lines.len() >= swiss::MAX_LINES as usize {
+                    Transition::fade().offset(0.0, -style.line_height)
+                } else {
+                    Transition::fade()
+                };
+                row.motion(Prop::Offset, Spring::critical_to_98(GROW_SECS))
+                    .presence(Transition::NONE, leave)
+            } else {
+                row
+            };
+            // A new row takes its place at once, so the rows above start to
+            // rise, but its words wait until that place is clear.
+            if i == newest && held && edited.is_none() {
+                column = column.child(row);
+                continue;
+            }
             let mut row = match edited.as_ref().and_then(|e| e.get(i)) {
                 // Set by its sticky width rather than centred by the row,
                 // so it holds still while you type; as wide as the text box,
@@ -993,6 +1101,171 @@ impl Popup {
             column = column.child(self.signal_marks_in(slot, &[], &tail, (l.width / 2.0, 0.0), hex(WHITE)));
         }
         column
+    }
+
+    /// The shown words in centred rows, each from where its first glyph
+    /// landed.
+    fn sw_rows(&self) -> Vec<Vec<Word>> {
+        let style = text_style(&self.look);
+        let joined: Vec<&str> = self.shown.iter().map(|w| w.text.as_str()).collect();
+        let text = joined.join(" ");
+        let width = text_width(&self.look);
+        let shaped = self.measure.layout(&text, &style, Some(width));
+        let mut lines: Vec<Vec<Word>> = Vec::new();
+        let mut offset = 0usize;
+        let first_y = shaped.glyphs.first().map_or(0.0, |g| g.pos.y);
+        for word in &self.shown {
+            let y = shaped
+                .glyphs
+                .iter()
+                .find(|g| g.cluster as usize >= offset)
+                .map_or(first_y, |g| g.pos.y);
+            let line = ((y - first_y) / style.line_height).round().max(0.0) as usize;
+            while lines.len() <= line {
+                lines.push(Vec::new());
+            }
+            lines[line].push(word.clone());
+            offset += word.text.len() + 1;
+        }
+        lines
+    }
+
+    /// MO-69: the light the words' particles leave from, running along the
+    /// waveform's centre line from left to right, in surface pixels.
+    fn sw_particle_source(&self) -> WordSource {
+        let s = self.scale();
+        let tall = self.card_h(swiss::MAX_LINES as u32);
+        let top = MARGIN + tall - self.card_h(self.lines);
+        WordSource {
+            centre: Point::new(MARGIN + self.look.width / 2.0, top + WAVE_Y * s),
+            radius: [(WAVE_X1 - WAVE_X0) * 0.35 * s, 1.0],
+            from: -std::f32::consts::PI,
+            to: 0.0,
+            period: 3.0,
+            lag: 0.2,
+            spread: 0.3,
+        }
+    }
+
+    /// MO-68: the tube's light runs from the left edge to the newest word,
+    /// strokes a line under it, holds and fades. `text_top` is the text
+    /// column's top. Under reduced motion the line sits still under the
+    /// word once it lands.
+    fn sw_light_line(&self, text_top: f32) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(tron::LIGHT_LINE)
+            || self.edit_view.is_some()
+            || self.ended()
+            || self.extra.finish_at.is_some()
+        {
+            return None;
+        }
+        let newest = self.shown.last()?;
+        let heard = self.heard.word(newest.id)?;
+        let style = text_style(l);
+        let width = text_width(l);
+        // The newest row's words, as `sw_text` splits them.
+        let joined: Vec<&str> = self.shown.iter().map(|w| w.text.as_str()).collect();
+        let shaped = self.measure.layout(&joined.join(" "), &style, Some(width));
+        let last_y = shaped.glyphs.last()?.pos.y;
+        let mut offset = 0usize;
+        let mut row = Vec::new();
+        for w in &self.shown {
+            let y = shaped
+                .glyphs
+                .iter()
+                .find(|g| g.cluster as usize >= offset)
+                .map_or(last_y, |g| g.pos.y);
+            if (y - last_y).abs() < 1.0 {
+                row.push(w.clone());
+            }
+            offset += w.text.len() + 1;
+        }
+        let (boxes, _) = sounding::word_boxes(&self.measure, &row, &style, None);
+        let row_text: Vec<&str> = row.iter().map(|w| w.text.as_str()).collect();
+        let lw = self
+            .measure
+            .layout(&row_text.join(" "), &style, None)
+            .size
+            .w;
+        let b = boxes.iter().find(|b| b.id == newest.id)?;
+        // The font's descent: its own line height less the baseline it sets
+        // in that height.
+        let own = self
+            .measure
+            .fonts()
+            .line_height(style.font, style.size)
+            .unwrap_or(style.line_height);
+        let descent = self
+            .measure
+            .layout(
+                "H",
+                &TextStyle {
+                    line_height: own,
+                    ..style
+                },
+                None,
+            )
+            .lines
+            .first()
+            .map_or(0.25 * style.size, |x| own - x.baseline);
+        let x = MARGIN + (l.width - lw) / 2.0;
+        let row_top = text_top + (swiss::MAX_LINES - 1) as f32 * style.line_height;
+        let (x0, x1) = (x + b.rect.x, x + b.rect.x + b.rect.w);
+        let y = row_top + b.baseline + descent + LIGHT_GAP;
+        let edge = MARGIN + 2.0 * self.scale();
+        let from = heard.onset.unwrap_or(heard.born);
+        let landed = heard.born.max(from + LIGHT_LEAVE);
+        let reduced = l.on("reduced-motion") || kit::reduced();
+        let k = self.scale();
+        let surface = Self::synthwave_surface(l);
+        let until = if reduced {
+            landed
+        } else {
+            from + LIGHT_LEAVE + LIGHT_DRAW + LIGHT_HOLD + LIGHT_FADE
+        };
+        let pink = hex(MAGENTA);
+        let canvas = Element::canvas(
+            format!("light-line-{}", newest.id),
+            until,
+            move |t, r, p| {
+                let line = |p: &mut Painter, a: f32, b: f32, alpha: f32| {
+                    if b <= a || alpha <= 0.0 {
+                        return;
+                    }
+                    let ends = [Point::new(r.x + a, r.y + y), Point::new(r.x + b, r.y + y)];
+                    p.stroke(
+                        &Contour::polyline(&ends, false),
+                        &StrokeStyle::solid(1.6 * k, pink.fade(alpha)).glow(5.0 * k),
+                    );
+                };
+                if reduced {
+                    if t >= landed {
+                        line(p, x0, x1, 0.7);
+                    }
+                    return;
+                }
+                let u = t - from;
+                if u < 0.0 {
+                    return;
+                }
+                let ease = |f: f64| (1.0 - (1.0 - f.clamp(0.0, 1.0)).powi(2)) as f32;
+                let (head, fade) = if u < LIGHT_LEAVE {
+                    (edge + (x0 - edge) * ease(u / LIGHT_LEAVE), 1.0)
+                } else if u < LIGHT_LEAVE + LIGHT_DRAW {
+                    (x0 + (x1 - x0) * ease((u - LIGHT_LEAVE) / LIGHT_DRAW), 1.0)
+                } else {
+                    let f = (u - LIGHT_LEAVE - LIGHT_DRAW - LIGHT_HOLD) / LIGHT_FADE;
+                    (x1, 1.0 - f.clamp(0.0, 1.0) as f32)
+                };
+                // The lead from the tube, fainter, and the stroke under the
+                // word. No bright head: its glow would reach the letters.
+                line(p, edge, head.min(x0), 0.35 * fade);
+                line(p, x0, head, 0.95 * fade);
+            },
+        )
+        .size(surface.w, surface.h);
+        Some(at(canvas, 0.0, 0.0))
     }
 
     /// Icon, state and detail, centred near the bottom edge.

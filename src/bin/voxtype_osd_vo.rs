@@ -1982,6 +1982,7 @@ impl Popup {
             OsdTheme::Showcase => showcase::ROOM_TONE_FPS,
             OsdTheme::Scope => scope::ROOM_TONE_FPS,
             OsdTheme::Biolume => biolume::ROOM_TONE_FPS,
+            OsdTheme::Synthwave => synthwave::ROOM_TONE_FPS,
             _ => ROOM_TONE_FPS,
         };
         quiet.then_some(fps)
@@ -2324,6 +2325,7 @@ impl App for Popup {
         self.arm_island_tick(cx);
         self.arm_hologram_tick(cx);
         self.arm_cyber_tick(cx);
+        self.arm_synthwave_tick(cx);
         self.arm_dotmatrix_tick(cx);
     }
 
@@ -2489,6 +2491,7 @@ impl App for Popup {
         self.arm_jarvis_wake(cx);
         self.arm_glass_wake(cx);
         self.arm_cyber_tick(cx);
+        self.arm_synthwave_tick(cx);
         self.arm_dotmatrix_tick(cx);
         self.pace = self.room_tone_pace(t);
         if !tick && self.idle(t) {
