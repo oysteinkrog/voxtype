@@ -102,8 +102,16 @@ impl Popup {
         let mut voices = self.breath.0.lock().unwrap_or_else(|e| e.into_inner());
         voices.update(t, &self.model, &bus);
         let reduced = self.look.on("reduced-motion") || kit::reduced();
-        let level = bus.envelope(Sig::Level, 0.03, 0.3, t);
-        let pitch = voices.live_pitch(&bus, t);
+        // On room tone the newest word holds still: it mixes in silence at
+        // its own pitch rather than the live level and pitch, which wander
+        // on room tone (lq9).
+        let room_tone = self.room_tone_pace(t).is_some();
+        let level = if room_tone {
+            0.0
+        } else {
+            bus.envelope(Sig::Level, 0.03, 0.3, t)
+        };
+        let live_pitch = voices.live_pitch(&bus, t);
         let n = self.shown.len();
         self.shown
             .iter()
@@ -114,6 +122,11 @@ impl Popup {
                 let spl = v.map_or(0.0, |v| v.duration / letters);
                 let said = v.map_or(Axes::REST, |v| Axes::from_voice(v.level.max(0.8 * v.peak), spl, v.pitch, size));
                 let a = if i + 1 == n && !reduced {
+                    let pitch = if room_tone {
+                        v.map_or(live_pitch, |v| v.pitch)
+                    } else {
+                        live_pitch
+                    };
                     said.mix(Axes::from_voice(level, spl, pitch, size), BREATH)
                 } else {
                     said

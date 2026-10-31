@@ -1943,6 +1943,7 @@ impl Popup {
         let fps = match self.look.theme {
             OsdTheme::Chrome => chrome::ROOM_TONE_FPS,
             OsdTheme::Orb => orb::ROOM_TONE_FPS,
+            OsdTheme::Showcase => showcase::ROOM_TONE_FPS,
             _ => ROOM_TONE_FPS,
         };
         quiet.then_some(fps)
