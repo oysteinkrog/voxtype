@@ -990,6 +990,7 @@ impl Look {
             OsdTheme::Hologram => Some(hologram::newest_line_centre(self, lines)),
             OsdTheme::Glass => Some(glass::newest_line_centre(self)),
             OsdTheme::Chrome => Some(chrome::newest_line_centre(self, lines)),
+            OsdTheme::Orb => Some(orb::newest_line_centre(self, lines)),
             _ => None,
         }
     }
@@ -1069,6 +1070,9 @@ impl Look {
         if self.theme == OsdTheme::Chrome {
             return chrome::text_width(self);
         }
+        if self.theme == OsdTheme::Orb {
+            return orb::text_width(self);
+        }
         self.width - swiss::PANEL_INSET_PX as f32
     }
 
@@ -1112,6 +1116,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Chrome {
             return chrome::MAX_LINES;
+        }
+        if self.theme == OsdTheme::Orb {
+            return orb::MAX_LINES;
         }
         swiss::MAX_LINES as u32
     }
@@ -1201,6 +1208,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Chrome {
             return chrome::text_style(self);
+        }
+        if self.theme == OsdTheme::Orb {
+            return orb::text_style(self);
         }
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
@@ -1299,6 +1309,7 @@ impl Look {
             OsdTheme::Jarvis => jarvis::panel_top(),
             OsdTheme::Glass => glass::panel_top(self),
             OsdTheme::Chrome => chrome::panel_top(self),
+            OsdTheme::Orb => orb::panel_top(self),
             _ => 0.0,
         }
     }
@@ -1397,6 +1408,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Chrome {
             return chrome::surface(self);
+        }
+        if self.theme == OsdTheme::Orb {
+            return orb::surface(self);
         }
         Size::new(
             self.width.ceil(),
@@ -2739,6 +2753,7 @@ fn default_motion(look: &Look) -> Motion {
             | OsdTheme::Hologram
             | OsdTheme::Glass
             | OsdTheme::Chrome
+            | OsdTheme::Orb
     ) {
         Motion::Spring(Spring::SOFT)
     } else {
