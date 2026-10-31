@@ -722,9 +722,14 @@ impl Popup {
             // An edited line is the buffer's own text, spaces and all, so it
             // gets the whole wrap width: its own words' width could wrap it.
             let body_w = if editing { WRAP } else { width(body) };
+            // A row that rolls up becomes a new node in its upper slot, and
+            // the one in the newest slot goes at once: the newest row comes
+            // in where the old one stood, so the old one may not slide out
+            // through it. Fold keeps one node a row, for its turn away.
+            let up = if !fold && age > 0 { "-up" } else { "" };
             let key = words
                 .first()
-                .map_or_else(|| format!("slot-{i}"), |w| w.id.to_string());
+                .map_or_else(|| format!("slot-{i}"), |w| format!("{}{up}", w.id));
             let mut row = Element::column(format!("line-{key}"))
                 .size(*w + 4.0, LINE)
                 .child(at(
@@ -767,17 +772,21 @@ impl Popup {
                     .motion(Prop::Size, Motion::Snap)
                     // A new row comes in through its words' own entry: a fade
                     // and rise of the whole row put the newest words 10 px low
-                    // at 4 % ink, past the reading-line envelope (RD-09).
-                    // Rows only roll up while listening. After the stop the
-                    // final text re-keys every row in place, so the old rows
-                    // go at once: rising as they faded, they drew over the
-                    // final rows.
+                    // at 4 % ink, past the reading-line envelope (RD-09). A
+                    // row that rolled up fades in in its upper slot.
+                    // Rows go at once: one fading up drew over the row
+                    // rising into its place, and after the stop over the
+                    // final rows. Fold's last row is already turned away.
                     .presence(
-                        Transition::NONE,
-                        if tapped || !matches!(mode, Mode::Listening | Mode::Loading) {
+                        if up.is_empty() || tapped {
                             Transition::NONE
                         } else {
+                            Transition::fade()
+                        },
+                        if fold && !tapped && matches!(mode, Mode::Listening | Mode::Loading) {
                             Transition::fade().offset(0.0, -18.0)
+                        } else {
+                            Transition::NONE
                         },
                     ),
             );
