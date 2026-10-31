@@ -4,6 +4,14 @@
 //! waveform, the transcript as the input text with a violet caret, words the
 //! engine is unsure of softly underlined, and a key badge in the status.
 //!
+//! While the popup is open it keeps a little idle life (5wu, RD-02): the
+//! caret blinks 530 ms on and 530 ms off in its own box, the waveform's
+//! violet-to-blue gradient drifts 8 px/s back and forth over 10 s (it
+//! stands in for a selection highlight, which this look does not have), and
+//! a 1 s sheen crosses the key badge in the status every 10 s. All three
+//! step at 15 frames a second, stop once the popup closes and stay still
+//! under reduced motion.
+//!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
 
@@ -203,6 +211,45 @@ fn noise(n: u32) -> f32 {
     (x & 0xFFFF) as f32 / 65535.0
 }
 
+/// 5wu: the idle motion's pace (RD-02's slow-loop cap); the caret's half
+/// period; the gradient drift's speed and period; the key sheen's period,
+/// pass, first pass after the popup opens and strength.
+const IDLE_FPS: f64 = 15.0;
+const BLINK_SECS: f64 = 0.53;
+const DRIFT_PX_S: f32 = 8.0;
+const DRIFT_SECS: f64 = 10.0;
+const SHEEN_EVERY: f64 = 10.0;
+const SHEEN_PASS: f64 = 1.0;
+const SHEEN_FIRST: f64 = 3.0;
+const SHEEN_ALPHA: f32 = 0.06;
+
+/// 5wu: `t` held to the start of its idle step.
+fn idle_step(t: f64) -> f64 {
+    (t * IDLE_FPS).floor() / IDLE_FPS
+}
+
+/// 5wu: how far the gradient's middle sits from the waveform's middle `s`
+/// seconds after the popup opened: out and back at `DRIFT_PX_S`, once per
+/// `DRIFT_SECS`, starting from the middle.
+fn drift_px(s: f64) -> f32 {
+    let u = (s / DRIFT_SECS).rem_euclid(1.0) as f32;
+    let tri = if u < 0.25 {
+        4.0 * u
+    } else if u < 0.75 {
+        2.0 - 4.0 * u
+    } else {
+        4.0 * u - 4.0
+    };
+    tri * DRIFT_PX_S * DRIFT_SECS as f32 / 4.0
+}
+
+/// 5wu: where the key sheen is in its pass, 0 to 1, `s` seconds after the
+/// popup opened, or `None` between passes.
+fn sheen_at(s: f64) -> Option<f32> {
+    let u = (s - SHEEN_FIRST).rem_euclid(SHEEN_EVERY) / SHEEN_PASS;
+    (s >= SHEEN_FIRST && u < 1.0).then_some(u as f32)
+}
+
 /// The bar waveform, mirrored out from the middle.
 #[derive(Clone)]
 struct Bars {
@@ -211,6 +258,8 @@ struct Bars {
     mode: Mode,
     mode_at: f64,
     finish_at: Option<f64>,
+    /// 5wu: the gradient drifts (open, working, not reduced).
+    idle: bool,
 }
 
 impl Bars {
@@ -241,14 +290,22 @@ impl Bars {
             _ => 1.0,
         };
         let sweep = ((since / 1.2).fract()) as f32 * 2.0 - 1.0;
+        let drift = if self.idle {
+            drift_px(idle_step(t) - self.shown_at) * k
+        } else {
+            0.0
+        };
+        let span = n as f32 * BAR_PITCH * k;
         for i in -n..=n {
             let reach = i.unsigned_abs() as f32 / n as f32;
             if reach > open + 1e-3 {
                 continue;
             }
             let x = mid + i as f32 * BAR_PITCH * k;
-            // Blue at the ends, violet in the middle.
-            let c = mix(hex(VIOLET), hex(BLUE), (reach * 1.6).min(1.0)).fade(dim);
+            // Blue at the ends, violet in the middle (which drifts while
+            // idle).
+            let hue = ((x - mid - drift).abs() / span).min(1.0);
+            let c = mix(hex(VIOLET), hex(BLUE), (hue * 1.6).min(1.0)).fade(dim);
             if self.mode == Mode::Loading {
                 let u = i as f32 / n as f32;
                 let near = (1.0 - (u - sweep).abs() * 6.0).clamp(0.0, 1.0);
@@ -374,6 +431,7 @@ impl Popup {
             mode,
             mode_at,
             finish_at: self.extra.finish_at,
+            idle: self.palette_idle(mode),
         };
         let until = bars.until();
         let wave = Element::canvas("bars", until, move |t, r, p| bars.draw(t, r, p))
@@ -404,6 +462,14 @@ impl Popup {
             )
             .child(self.palette_progress(mode, rule_w))
             .child(self.palette_status(mode, mode_at))
+    }
+
+    /// 5wu: the idle motion runs: open, listening or loading, not reduced.
+    fn palette_idle(&self, mode: Mode) -> bool {
+        !self.closing
+            && matches!(mode, Mode::Listening | Mode::Loading)
+            && !reduced()
+            && !self.look.on("reduced-motion")
     }
 
     /// The logo, the three chips and the gear.
@@ -636,8 +702,12 @@ impl Popup {
                 None => (0.0, (TEXT_LINE - TEXT_PX) / 2.0),
             };
             let idle_from = self.fam.preview_at + CARET_IDLE;
-            let caret = Element::canvas("caret", f64::INFINITY, move |t, r, p| {
-                let on = reduced() || t < idle_from || ((t - idle_from) / 0.53) as i64 % 2 == 0;
+            let blink = self.palette_idle(mode);
+            let until = if blink { f64::INFINITY } else { 0.0 };
+            let caret = Element::canvas("caret", until, move |t, r, p| {
+                let on = !blink
+                    || t < idle_from
+                    || ((idle_step(t) - idle_from) / BLINK_SECS) as i64 % 2 == 0;
                 if on {
                     p.shape(ShapeInstance::rrect(
                         RRect::new(Rect::new(r.x, r.y, 2.4, r.h), 1.2),
@@ -727,7 +797,33 @@ impl Popup {
                 // "tap" words fading out sat under the next state's hint.
                 .motion(Prop::Position, Motion::Snap)
         };
+        let mono = TextStyle::new(f.mono, 12.0, 16.0);
+        // 5wu: while idle a soft sheen crosses the key badge every 10 s.
+        let shown_at = self.shown_at;
+        let shimmer = self.palette_idle(mode) && mode == Mode::Listening;
         let badge = |key: String, s: &str| {
+            let w = self.measure.layout(s, &mono, None).size.w + 16.0;
+            let sheen = Element::canvas(
+                "sheen",
+                if shimmer { f64::INFINITY } else { 0.0 },
+                move |t, r, p| {
+                    let Some(u) = sheen_at(idle_step(t) - shown_at).filter(|_| shimmer) else {
+                        return;
+                    };
+                    let light = Color::WHITE.fade(SHEEN_ALPHA);
+                    let x = r.x - r.h + u * (r.w + 2.0 * r.h);
+                    p.shape(ShapeInstance::rrect(
+                        RRect::new(r, 4.0),
+                        Paint::sheen(
+                            Point::new(x, r.y + r.h / 2.0),
+                            Point::new(r.h * 0.6, -r.h * 0.4),
+                            light,
+                            light.fade(0.0),
+                        ),
+                    ));
+                },
+            )
+            .size(w, 23.0);
             Element::panel(key)
                 .direction_row()
                 .height(23.0)
@@ -738,9 +834,10 @@ impl Popup {
                 .border(hex(CHIP_EDGE), 1.0)
                 .margin_edges(0.0, 0.0, 0.0, 9.0)
                 .motion(Prop::Position, Motion::Snap)
+                .child(at(sheen, 0.0, 0.0))
                 .child(
                     Element::label("key", s.to_string())
-                        .text_style(TextStyle::new(f.mono, 12.0, 16.0))
+                        .text_style(mono)
                         .color(hex(INK)),
                 )
         };
@@ -831,4 +928,33 @@ mod edit_tests {
     fn palette_edits_within_the_envelope() {
         envelope(OsdTheme::Palette, "palette");
     }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    #[test]
+    fn the_gradient_drifts_8_px_a_second_out_and_back_over_10_s() {
+        assert_eq!(drift_px(0.0), 0.0);
+        assert!((drift_px(1.0) - 8.0).abs() < 1e-3);
+        assert!((drift_px(2.5) - 20.0).abs() < 1e-3);
+        assert!((drift_px(5.0)).abs() < 1e-3);
+        assert!((drift_px(7.5) + 20.0).abs() < 1e-3);
+        assert!((drift_px(3.3) - drift_px(3.3 + DRIFT_SECS)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_key_sheen_passes_for_1_s_every_10_s() {
+        assert!(sheen_at(0.0).is_none());
+        for k in 0..3 {
+            let t0 = SHEEN_FIRST + k as f64 * SHEEN_EVERY;
+            assert!(sheen_at(t0 - 0.05).is_none());
+            assert!((sheen_at(t0 + 0.5).unwrap() - 0.5).abs() < 1e-3);
+            assert!(sheen_at(t0 + SHEEN_PASS + 0.05).is_none());
+        }
+    }
+
+    // The caret keeps its 530 ms beat and the sheen stays soft.
+    const _: () = assert!(BLINK_SECS == 0.53 && SHEEN_ALPHA <= 0.10);
 }
