@@ -37,7 +37,7 @@ pub(crate) const MAX_LINES: u32 = 3;
 // Transcript box, in concept units.
 const TEXT_X: f32 = 140.0;
 const TEXT_Y: f32 = 312.0;
-const TEXT_W: f32 = 800.0;
+const TEXT_W: f32 = 720.0;
 const TEXT_PX: f32 = 56.0;
 const TEXT_LINE: f32 = 65.0;
 
@@ -67,6 +67,8 @@ pub(crate) const ONSET_JOINT: &str = sounding::ONSET_JOINT;
 
 /// The lag between two links of the hydraulic chain: word, caret, plate.
 const LINK: f64 = 0.015;
+/// How far a new word pushes the caret on past its place, in ems.
+const CARET_KICK: f32 = 0.12;
 /// How far one word pushes the status plate, in concept units.
 const PUSH: f32 = 5.0;
 
@@ -223,6 +225,19 @@ fn noise(i: i64) -> f32 {
     x ^= x >> 31;
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
+
+/// MO-53: where the text panel's border snaps, along it from its top left
+/// corner (concept units): half way round the top right corner.
+const BREAK_AT: f32 = 831.0;
+/// MO-53: the stage label's top and its right end at most, above the text
+/// panel's border and left of the wave panel's right chevron and slash.
+const BREAK_LABEL_Y: f32 = 268.0;
+const BREAK_LABEL_RIGHT: f32 = 888.0;
+
+/// The transcript clip's margin on the sides, room for a line that starts
+/// with "…", and at the bottom (concept units).
+const TEXT_CLIP_SIDE: f32 = 30.0;
+const TEXT_CLIP_MARGIN: f32 = 8.0;
 
 // The frame, in concept units.
 const OUTER: [(f32, f32); 12] = [
@@ -475,6 +490,9 @@ struct Snap {
     icon: Icon,
     /// When new words came, newest last: each pushes the status plate.
     pushes: Vec<f64>,
+    /// MO-53: the text panel's border is drawn snapped by
+    /// `paths_broken_frame_at` instead.
+    broken: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -615,7 +633,9 @@ impl Snap {
             &StrokeStyle::solid(1.0, hex(PANEL).fade(fill_k)),
         );
         let k = ease_out(ramp(u, 0.06, 0.42));
-        p.stroke(&panel.trim(0.0, k * panel.length()), &line(2.8));
+        if !self.broken {
+            p.stroke(&panel.trim(0.0, k * panel.length()), &line(2.8));
+        }
 
         // Notches, side bars and slashes slide in from outside.
         let slide = (1.0 - ease_back(ramp(u, 0.26, 0.50))) * 24.0;
@@ -1097,6 +1117,27 @@ impl Popup {
         (Phase::Listening, self.shown_at)
     }
 
+    /// MO-53: on a failure the text panel's border snaps at its top right
+    /// corner, the parted ends lit yellow, with the stage that failed above
+    /// it, left of the break and clear of the outer frame.
+    fn mecha_broken_frame(&self, size: Size) -> Option<Element<Msg>> {
+        if !self.paths_broken() {
+            return None;
+        }
+        let s = scale(&self.look);
+        let border = ring(&TEXT_PANEL.map(|(x, y)| (x * s, y * s)));
+        let pen = glyph_paths::BrokenPen {
+            width: 2.8 * s,
+            glow: 1.6,
+            line: hex(ORANGE),
+            accent: hex(YELLOW),
+            label: TextStyle::new(fonts(&self.look.fonts).label, 13.0, 16.0).tracking(0.6),
+            label_y: BREAK_LABEL_Y * s,
+        };
+        let right = BREAK_LABEL_RIGHT * s;
+        self.paths_broken_frame_within(&border, BREAK_AT * s, size.w, size.h, pen, right)
+    }
+
     /// MO-50: a cancel takes the words back into the caret, drawn over the
     /// hidden text at the bottom of its box.
     fn mecha_rewind(&self, color: Color, s: f32) -> Option<Element<Msg>> {
@@ -1214,7 +1255,10 @@ impl Popup {
         });
 
         // The badge types its words in when the phase begins.
-        let (kanji, english) = phase.badge();
+        let (kanji, english) = match self.ending() {
+            Some(Ending::Failed) => ("中止", "FAILED"),
+            _ => phase.badge(),
+        };
         let badge_at = if phase == Phase::Listening || phase == Phase::Loading {
             0.40
         } else {
@@ -1244,6 +1288,12 @@ impl Popup {
 
         // The status line.
         let (state, detail) = match phase {
+            _ if self.ending() == Some(Ending::Failed) => {
+                ("Failed".to_string(), "nothing was typed".to_string())
+            }
+            _ if self.ending() == Some(Ending::Empty) => {
+                (Ending::Empty.label().to_string(), String::new())
+            }
             Phase::Cancelled => ("Cancelled".to_string(), String::new()),
             Phase::Done => {
                 let app = self.files.live.as_ref().and_then(|d| d.target.as_ref());
@@ -1316,6 +1366,7 @@ impl Popup {
             status: status_labels,
             icon,
             pushes: chain.pushes(),
+            broken: self.paths_broken(),
         };
         // The canvas keeps drawing while anything on it moves: the stripes
         // and the readout's dot until the dictation ends.
@@ -1364,9 +1415,21 @@ impl Popup {
         let rows = ((self.measure.layout(&joined, &style, Some(wrap)).size.h / style.line_height).round() as u32).max(1);
         let tail = model_signals::TailText { style, width: wrap, rows };
         let top = box_h - rows as f32 * style.line_height;
+        // Clipped to the text box, so a line folding out at the top on an
+        // overflow stays off the panel's border. A margin on the sides and
+        // bottom keeps the halo and the word entry whole; none at the top,
+        // where the box meets the border.
+        let (side, margin) = (TEXT_CLIP_SIDE * s, TEXT_CLIP_MARGIN * s);
         let text = at(
-            self.signal_marks_in(text, &self.shown, &tail, (0.0, top), text_color),
-            TEXT_X * s,
+            Element::layer("text-clip")
+                .size(text_width(l) + 2.0 * side, box_h + margin)
+                .clip()
+                .child(at(
+                    self.signal_marks_in(text, &self.shown, &tail, (0.0, top), text_color),
+                    side,
+                    0.0,
+                )),
+            TEXT_X * s - side,
             TEXT_Y * s,
         );
 
@@ -1379,6 +1442,7 @@ impl Popup {
             .size(size.w, size.h)
             .presence(Transition::fade().opacity(0.0), exit)
             .child(at(canvas, 0.0, 0.0))
+            .children(self.mecha_broken_frame(size))
             .child(at(chain.element(), TEXT_X * s, TEXT_Y * s))
             .child(text);
         if phase == Phase::Cancelled {
@@ -1456,38 +1520,19 @@ impl Chain {
         self.targets.iter().map(|&(at, _, _)| at).collect()
     }
 
-    /// The caret's place at `t`: each new word pushes it from the last
-    /// target to the next one link after the word, as a damped piston. A
-    /// new line moves it at once.
+    /// The caret's place at `t`: right of the newest word as soon as the
+    /// word shows, so it never stands on the word's letters, pushed a little
+    /// further on; one link later it settles back as a damped piston.
+    /// Before the first word it waits at home.
     fn caret_at(&self, t: f64) -> Point {
-        let live: Vec<_> = self
-            .targets
-            .iter()
-            .filter(|&&(at, _, _)| at + LINK <= t || self.reduced)
-            .filter(|&&(at, _, _)| at <= t)
-            .collect();
-        let Some(base) = live
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(i, (_, _, line))| *i == 0 || live[i - 1].2 != *line)
-            .map(|(i, _)| i)
-        else {
+        let Some(&(at, to, _)) = self.targets.iter().rev().find(|&&(at, _, _)| at <= t) else {
             return self.home;
         };
-        let mut p = live[base].1;
-        for k in base + 1..live.len() {
-            let (at, to, _) = *live[k];
-            let from = live[k - 1].1;
-            let a = if self.reduced {
-                1.0
-            } else {
-                sounding::piston(t - at - LINK)
-            };
-            p.x += (to.x - from.x) * a;
-            p.y += (to.y - from.y) * a;
+        if self.reduced {
+            return to;
         }
-        p
+        let kick = CARET_KICK * self.size * (1.0 - sounding::piston(t - at - LINK));
+        Point::new(to.x + kick, to.y)
     }
 
     /// The scene keeps drawing until the last event has played out.
@@ -1631,7 +1676,9 @@ impl Popup {
         let box_size = Size::new(text_width(l), MAX_LINES as f32 * TEXT_LINE * s);
         // The text sits at the bottom of its box.
         let y0 = box_size.h - lines.max(1).min(MAX_LINES as usize) as f32 * style.line_height;
-        let gap = 0.12 * style.size;
+        // Clear of the word: the caret's foot reaches 0.125 em left of its
+        // block, under the last letter's descender.
+        let gap = 0.2 * style.size;
         let (hydraulic, joint) = (l.on(HYDRAULIC_CHAIN), l.on(ONSET_JOINT));
         let editing = self.edit_view.is_some();
         let mut chain = Chain {
