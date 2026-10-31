@@ -1267,6 +1267,8 @@ A spoken correction (holding the correction key) works again once you resume, bu
 
 **Pasting.** Before it pastes, voxtype checks that the window you were dictating into is active again, and checks once more before pressing Enter. If it is not (you closed it, or another window took focus), the text goes to the clipboard only and the popup says "Copied, not pasted". Paste it yourself with Ctrl+V.
 
+**Learning.** When you fix a spoken word by keyboard, the same fix applies to the words you say after it in the same dictation. When the dictation is pasted, the fix is logged and learned like a spoken correction (see `learn_corrections` in the Configuration Guide). Undone fixes and discarded dictations teach nothing.
+
 **Undo a discard.** A dictation you discarded after pausing it is kept for 60 seconds:
 
 ```bash

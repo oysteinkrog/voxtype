@@ -2179,13 +2179,60 @@ impl Daemon {
         // placed now and frozen with the rest.
         (self.edit_link.freeze)(clock as f32 / 16000.0);
         let shown = (self.edit_link.shown)();
-        let tp = &self.text_processor;
+        let session = self.edit_processor();
+        let tp = session.as_ref().unwrap_or(&self.text_processor);
         let doc = self
             .edit_doc
             .get_or_insert_with(|| crate::osd::edit_doc::EditDoc::new(crate::osd::live::session()));
         doc.freeze(&shown, |t| {
             output::normalize_quotes(&tp.process(t)).into_owned()
         });
+    }
+
+    /// The text processor for words frozen or pasted after a keyboard edit,
+    /// with the rules this dictation's edits made (table 2.7); None when
+    /// they made none.
+    fn edit_processor(&self) -> Option<TextProcessor> {
+        let rules = self.edit_doc.as_ref()?.session_rules();
+        if rules.is_empty() {
+            return None;
+        }
+        let mut tp = self.text_processor.clone();
+        for (from, to) in &rules {
+            tp.learn(from, to);
+        }
+        Some(tp)
+    }
+
+    /// Log the delivered dictation's keyboard edits of spoken words, and
+    /// learn the rules they make (table 2.7). A discarded dictation learns
+    /// nothing, and an edit undone or put back was never kept.
+    fn edit_learn(&mut self, pasted: &str) {
+        use crate::text::learn;
+        let edits = self
+            .edit_doc
+            .as_ref()
+            .map(|d| d.edits().to_vec())
+            .unwrap_or_default();
+        for e in edits {
+            let entry = learn::Entry {
+                time: learn::now(),
+                wrong: e.wrong,
+                right: e.right,
+                pasted: pasted.to_string(),
+                source: learn::Source::Keyboard,
+                ..learn::Entry::default()
+            };
+            match self.learning.record(&entry) {
+                Ok(Some((from, to))) => self.text_processor.learn(&from, &to),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    "Could not log a keyboard edit to {:?}: {}",
+                    self.learning.log,
+                    e
+                ),
+            }
+        }
     }
 
     /// Tell the popup the edit phase and the frozen text. Nothing is shown
@@ -2403,7 +2450,8 @@ impl Daemon {
     fn edit_final_text(&mut self, phase: Option<Phase>) -> Option<String> {
         let shown = (self.edit_link.shown)();
         let snapshot = crate::osd::edit_ipc::read_buffer_from(&self.edit_link.buffer);
-        let tp = &self.text_processor;
+        let session = self.edit_processor();
+        let tp = session.as_ref().unwrap_or(&self.text_processor);
         let pause = self.edit_pauses;
         let at_caret = self.config.osd.edit_resume_at == crate::osd::config::EditResumeAt::Caret;
         let doc = self.edit_doc.as_mut()?;
@@ -2585,6 +2633,9 @@ impl Daemon {
         let d = self
             .deliver_edited(session, chain, &clipboard, edited)
             .await;
+        if d.result.is_ok() {
+            self.edit_learn(edited);
+        }
         if !d.paste.confirmed() && d.result.is_ok() {
             self.report_not_pasted(edited, d.paste, started).await;
         } else if d.result.is_ok() {
@@ -6889,6 +6940,12 @@ mod tests {
         let engine = Arc::new(std::sync::Mutex::new(None));
         let (s, p, f) = (shown.clone(), published.clone(), frozen_at.clone());
         let e = engine.clone();
+        // Keyboard edits are logged at delivery: never in the real log.
+        daemon.learning = crate::text::learn::Learning {
+            log: dir.path().join("corrections.jsonl"),
+            rules: dir.path().join("words-learned.toml"),
+            enabled: true,
+        };
         daemon.edit_link = EditLink {
             publish: Box::new(move |b| p.lock().unwrap().push(b)),
             shown: Box::new(move || s.lock().unwrap().clone()),
@@ -7137,6 +7194,52 @@ mod tests {
             (block.phase.as_str(), block.frozen.as_str()),
             ("listening", "hello world!")
         );
+    }
+
+    /// M9.4: an edit session's swap of spoken words applies to the words
+    /// frozen after it in the same dictation, and a delivered dictation
+    /// logs its keyboard edits with their source.
+    #[tokio::test]
+    async fn keyboard_edits_teach_the_rest_of_the_dictation_and_the_log() {
+        use crate::osd::edit_ipc::{append_cmd_to, write_buffer_to, EditBuffer, EditCmd};
+        use crate::text::learn::Source;
+        let (mut daemon, _rx, mut state, link) = edit_daemon_linked();
+        link.show("teh cat");
+        daemon.edit_toggle(&mut state).await;
+        daemon
+            .edit_tick(&mut state, Instant::now() + EDIT_SETTLE_MAX, None)
+            .await;
+        let session = daemon.edit_doc.as_ref().unwrap().session();
+        let buffer = EditBuffer {
+            session,
+            rev: 1,
+            text: "the cat".into(),
+            sel: (7, 7),
+            pause: 1,
+            base: Some("teh cat".into()),
+        };
+        write_buffer_to(&daemon.edit_link.buffer, &buffer).unwrap();
+        append_cmd_to(&daemon.edit_link.cmds, session, EditCmd::Resume { rev: 1 }).unwrap();
+        daemon.edit_handle_commands(&mut state).await;
+        // The model writes the same word wrong again after the resume.
+        link.show("teh cat saw teh dog");
+        assert_eq!(
+            daemon.edit_final_text(state.phase()).as_deref(),
+            Some("the cat saw the dog")
+        );
+        daemon.edit_toggle(&mut state).await;
+        assert_eq!(link.last().unwrap().frozen, "the cat saw the dog");
+        // Nothing is logged before delivery.
+        assert!(daemon.learning.entries().is_empty());
+        daemon.edit_learn("the cat saw the dog");
+        let entries = daemon.learning.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            (entries[0].wrong.as_str(), entries[0].right.as_str()),
+            ("teh", "the")
+        );
+        assert_eq!(entries[0].source, Source::Keyboard);
+        assert_eq!(entries[0].pasted, "the cat saw the dog");
     }
 
     /// M9.2: in engine mode, the final engine's text of the audio after the

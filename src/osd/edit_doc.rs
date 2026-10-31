@@ -7,6 +7,11 @@
 //! recording's text, so the freeze boundary is kept in its terms: the raw
 //! text through the boundary, and its word count.
 //!
+//! Each edit session's changes of spoken words ([`KeyboardEdit`]) are kept
+//! for learning at delivery (table 2.7); a later edit that puts the words
+//! back drops the change. Words typed in the popup are never the source of
+//! one.
+//!
 //! With `[osd] edit_resume_at = "caret"`, speech after a resume goes where
 //! the caret was when the edit ended, not at the end.
 
@@ -25,6 +30,13 @@ pub enum Piece {
     Edited { text: String },
 }
 
+/// A keyboard change of spoken words: `wrong` empty for a pure insertion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyboardEdit {
+    pub wrong: String,
+    pub right: String,
+}
+
 /// The document of one dictation with keyboard editing on.
 #[derive(Clone, Debug, Default)]
 pub struct EditDoc {
@@ -41,6 +53,10 @@ pub struct EditDoc {
     insert_at: Option<usize>,
     /// Seconds of audio sent to the live worker before the last resume.
     resumed_at: Option<f32>,
+    /// For each word of the frozen region, whether it was spoken.
+    spoken: Vec<bool>,
+    /// The keyboard changes of spoken words so far, oldest first.
+    edits: Vec<KeyboardEdit>,
 }
 
 impl EditDoc {
@@ -151,6 +167,7 @@ impl EditDoc {
             return String::new();
         }
         let text = process(&new);
+        let old = self.frozen();
         let at = self.insert_at;
         if let Some(a) = at {
             // Later speech goes on after this piece.
@@ -161,6 +178,7 @@ impl EditDoc {
             text: text.clone(),
             at,
         });
+        self.spoken = carry(&old, &self.frozen(), &self.spoken, true);
         text
     }
 
@@ -169,9 +187,54 @@ impl EditDoc {
     /// until [`EditDoc::resume_at`] says otherwise.
     pub fn replace_frozen(&mut self, text: &str) {
         self.insert_at = None;
+        let old = self.frozen();
+        self.note_edits(&old, text);
+        self.spoken = carry(&old, text, &self.spoken, false);
         self.pieces.push(Piece::Edited {
             text: text.to_string(),
         });
+    }
+
+    /// The keyboard changes of spoken words to learn from at delivery.
+    pub fn edits(&self) -> &[KeyboardEdit] {
+        &self.edits
+    }
+
+    /// The rules this dictation's edits make for the words frozen after
+    /// them (table 2.7): `(key, right)` pairs as [`learn::keyboard_rule`]
+    /// makes them.
+    ///
+    /// [`learn::keyboard_rule`]: crate::text::learn::keyboard_rule
+    pub fn session_rules(&self) -> Vec<(String, String)> {
+        self.edits
+            .iter()
+            .filter_map(|e| crate::text::learn::keyboard_rule(&e.wrong, &e.right))
+            .collect()
+    }
+
+    /// Keep the changes from `old` to `new` that only replace spoken words
+    /// or only insert; drop a change that puts back an earlier one's words.
+    fn note_edits(&mut self, old: &str, new: &str) {
+        let a: Vec<&str> = old.split_whitespace().collect();
+        let b: Vec<&str> = new.split_whitespace().collect();
+        for (del, ins) in hunks(&word_diff(&a, &b)) {
+            let wrong = del.iter().map(|&i| a[i]).collect::<Vec<_>>().join(" ");
+            let right = ins.iter().map(|&j| b[j]).collect::<Vec<_>>().join(" ");
+            if let Some(i) = self
+                .edits
+                .iter()
+                .position(|e| e.right == wrong && e.wrong == right)
+            {
+                self.edits.remove(i);
+                continue;
+            }
+            let spoken = del.iter().all(|&i| self.spoken.get(i) == Some(&true));
+            // A pure deletion teaches nothing; typed words are no source.
+            if right.is_empty() || !spoken {
+                continue;
+            }
+            self.edits.push(KeyboardEdit { wrong, right });
+        }
     }
 
     /// The text to paste: the frozen region exactly as frozen or edited,
@@ -188,6 +251,93 @@ impl EditDoc {
             None => join(&self.frozen(), &live),
         }
     }
+}
+
+/// One step from the words of an old text to a new one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Op {
+    /// Old word `i` is new word `j`.
+    Same(usize, usize),
+    Del(usize),
+    Ins(usize),
+}
+
+/// The fewest word insertions and deletions from `a` to `b` (a longest
+/// common subsequence), in order.
+fn word_diff(a: &[&str], b: &[&str]) -> Vec<Op> {
+    let pre = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    let post = a[pre..]
+        .iter()
+        .rev()
+        .zip(b[pre..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    let (am, bm) = (&a[pre..a.len() - post], &b[pre..b.len() - post]);
+    // lcs[i][j]: the longest common run of am[i..] and bm[j..].
+    let mut lcs = vec![vec![0u32; bm.len() + 1]; am.len() + 1];
+    for i in (0..am.len()).rev() {
+        for j in (0..bm.len()).rev() {
+            lcs[i][j] = if am[i] == bm[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let mut ops: Vec<Op> = (0..pre).map(|i| Op::Same(i, i)).collect();
+    let (mut i, mut j) = (0, 0);
+    while i < am.len() || j < bm.len() {
+        if i < am.len() && j < bm.len() && am[i] == bm[j] {
+            ops.push(Op::Same(pre + i, pre + j));
+            i += 1;
+            j += 1;
+        } else if j < bm.len() && (i == am.len() || lcs[i][j + 1] >= lcs[i + 1][j]) {
+            ops.push(Op::Ins(pre + j));
+            j += 1;
+        } else {
+            ops.push(Op::Del(pre + i));
+            i += 1;
+        }
+    }
+    let (ae, be) = (a.len() - post, b.len() - post);
+    ops.extend((0..post).map(|k| Op::Same(ae + k, be + k)));
+    ops
+}
+
+/// The changes in `ops`: each run of deletions and insertions between two
+/// kept words, as the old and the new word indexes.
+fn hunks(ops: &[Op]) -> Vec<(Vec<usize>, Vec<usize>)> {
+    let mut out = Vec::new();
+    let mut cur: (Vec<usize>, Vec<usize>) = Default::default();
+    for op in ops {
+        match *op {
+            Op::Same(..) => {
+                if !cur.0.is_empty() || !cur.1.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            Op::Del(i) => cur.0.push(i),
+            Op::Ins(j) => cur.1.push(j),
+        }
+    }
+    if !cur.0.is_empty() || !cur.1.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Which words of `new` were spoken: a word kept from `old` keeps its
+/// mark in `spoken`, a new one gets `added`.
+fn carry(old: &str, new: &str, spoken: &[bool], added: bool) -> Vec<bool> {
+    let a: Vec<&str> = old.split_whitespace().collect();
+    let b: Vec<&str> = new.split_whitespace().collect();
+    let mut out = vec![added; b.len()];
+    for op in word_diff(&a, &b) {
+        if let Op::Same(i, j) = op {
+            out[j] = spoken.get(i).copied().unwrap_or(added);
+        }
+    }
+    out
 }
 
 /// `a` then `b`, with a space between unless `a` ends in whitespace.
@@ -497,6 +647,76 @@ mod tests {
             add_unseen("a c", "a b.", "a X b.", true),
             ("a c X".into(), Some((3, 2)))
         );
+    }
+
+    fn same(s: &str) -> String {
+        s.to_string()
+    }
+
+    fn edits(doc: &EditDoc) -> Vec<(&str, &str)> {
+        doc.edits()
+            .iter()
+            .map(|e| (e.wrong.as_str(), e.right.as_str()))
+            .collect()
+    }
+
+    /// Table 2.7, per edit session: which changes are kept to learn from
+    /// and which make a rule for the rest of the dictation.
+    #[test]
+    fn keyboard_edits_follow_table_2_7() {
+        let mut doc = EditDoc::new(1);
+        doc.freeze("um teh cat sat on paris", same);
+        // A swap, a change of case and a pure deletion.
+        doc.replace_frozen("the cat sat on Paris");
+        assert_eq!(edits(&doc), [("um teh", "the"), ("paris", "Paris")]);
+        // A pure insertion and a long rewording are kept, with no rule.
+        doc.freeze("um teh cat sat on paris and it was a long day", same);
+        doc.replace_frozen("the big cat sat on Paris and we had fun all day");
+        assert_eq!(
+            edits(&doc),
+            [
+                ("um teh", "the"),
+                ("paris", "Paris"),
+                ("", "big"),
+                ("it was a long", "we had fun all")
+            ]
+        );
+        assert_eq!(
+            doc.session_rules(),
+            [
+                ("um teh".to_string(), "the".to_string()),
+                ("paris".to_string(), "Paris".to_string())
+            ]
+        );
+    }
+
+    /// Typed words are never the source of a change, and an edit undone
+    /// in a later session is dropped.
+    #[test]
+    fn typed_words_and_put_back_edits_teach_nothing() {
+        let mut doc = EditDoc::new(1);
+        doc.freeze("teh cat", same);
+        doc.replace_frozen("the cat xyz");
+        assert_eq!(edits(&doc), [("teh", "the"), ("", "xyz")]);
+        // The typed word is changed: no source. The spoken one goes back.
+        doc.replace_frozen("teh cat abc");
+        assert_eq!(edits(&doc), [("", "xyz")]);
+        // New speech after the edits is spoken again.
+        doc.freeze("teh cat dog", same);
+        doc.replace_frozen("teh cat abc Dog");
+        assert_eq!(edits(&doc), [("", "xyz"), ("dog", "Dog")]);
+    }
+
+    #[test]
+    fn the_word_diff_finds_the_fewest_changes() {
+        let a = ["a", "b", "c", "d"];
+        let b = ["a", "x", "c", "d", "e"];
+        assert_eq!(
+            hunks(&word_diff(&a, &b)),
+            [(vec![1], vec![1]), (vec![], vec![4])]
+        );
+        assert_eq!(hunks(&word_diff(&a, &a)), []);
+        assert_eq!(hunks(&word_diff(&[], &b)), [(vec![], vec![0, 1, 2, 3, 4])]);
     }
 
     /// R21: random live logs with appends and changes to earlier words,
