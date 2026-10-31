@@ -85,7 +85,9 @@ const _: () = assert!(STATUS_Y + STATUS_H / 2.0 < CARD_H - 20.0);
 /// caustics and shadows than the default, which read as smoke on the navy.
 pub(crate) fn letter_light() -> vo_3d::glyph_fx::Light {
     vo_3d::glyph_fx::Light {
-        color: hex(ICE).fade(0.3),
+        // Opaque: the light's alpha is its strength (vo 47fe913), and the
+        // look was tuned with the light at full strength.
+        color: hex(ICE),
         accent: hex(CYAN),
         shadow_len: 16.0,
         shadow: 0.15,
