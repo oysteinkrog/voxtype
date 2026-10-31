@@ -72,6 +72,16 @@ const CARET_KICK: f32 = 0.12;
 /// How far one word pushes the status plate, in concept units.
 const PUSH: f32 = 5.0;
 
+/// Idle motion (RD-02), while listening. The level meter's cell just above
+/// the reading flickers this much above its unlit ink, a new value this
+/// many times a second, as a gauge needle jitters about its reading.
+const JITTER_INK: f32 = 0.12;
+const JITTER_HZ: f64 = 6.0;
+/// The two side bars left of the text panel reach toward each other by this
+/// many pixels and back on this cycle, as a hydraulic pair breathing.
+const BREATHE_PX: f32 = 2.0;
+const BREATHE_SECS: f64 = 3.0;
+
 /// The fonts of the look.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Fonts {
@@ -493,6 +503,10 @@ struct Snap {
     /// MO-53: the text panel's border is drawn snapped by
     /// `paths_broken_frame_at` instead.
     broken: bool,
+    /// Reduced motion: the stripes stand still and there is no idle motion.
+    reduced: bool,
+    /// `BREATHE_PX` in concept units.
+    breathe: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -529,6 +543,9 @@ impl Snap {
 
     /// How far the stripes have slid.
     fn shift(&self, t: f64) -> f32 {
+        if self.reduced {
+            return 0.0;
+        }
         let end = self.end_at.unwrap_or(f64::INFINITY).min(t);
         let fin = self.finish_at.unwrap_or(f64::INFINITY).min(end);
         let mut d = (fin - self.shown_at).max(0.0) * 14.0;
@@ -536,6 +553,11 @@ impl Snap {
             d += (end - f).max(0.0) * 42.0;
         }
         d as f32
+    }
+
+    /// The idle motion runs: listening, past the opening, motion allowed.
+    fn idle(&self, u: f64) -> bool {
+        !self.reduced && u > 0.62 && matches!(self.phase, Phase::Listening | Phase::Loading)
     }
 
     /// The voice level at `t`: each level decays from when it was heard.
@@ -657,7 +679,14 @@ impl Snap {
             ])],
             &solid(accent),
         );
-        for (y0, y1) in [(330.0, 384.0), (418.0, 470.0)] {
+        // Idle: the bars' facing ends reach toward each other and back.
+        let reach = if self.idle(u) {
+            let k = (std::f64::consts::TAU * u / BREATHE_SECS).cos() as f32;
+            self.breathe * 0.5 * (1.0 - k)
+        } else {
+            0.0
+        };
+        for (y0, y1) in [(330.0, 384.0 + reach), (418.0 - reach, 470.0)] {
             p.fill(
                 [&poly(&[
                     (44.0 - slide, y0),
@@ -989,6 +1018,10 @@ impl Snap {
                 } else {
                     c
                 }
+            } else if i == lit && self.idle(u) {
+                // Idle: the cell above the reading jitters like a needle.
+                let step = (t * JITTER_HZ).floor() as i64;
+                accent.fade(0.18 + JITTER_INK * noise(step))
             } else {
                 accent.fade(0.18)
             };
@@ -1367,6 +1400,8 @@ impl Popup {
             icon,
             pushes: chain.pushes(),
             broken: self.paths_broken(),
+            reduced: kit::reduced() || l.on("reduced-motion"),
+            breathe: BREATHE_PX / s,
         };
         // The canvas keeps drawing while anything on it moves: the stripes
         // and the readout's dot until the dictation ends.
