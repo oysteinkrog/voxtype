@@ -986,6 +986,7 @@ impl Look {
             OsdTheme::Type => type_look::newest_line_centre(self, lines),
             OsdTheme::Jarvis => Some(jarvis::newest_line_centre(self, lines)),
             OsdTheme::Particles => Some(particles::newest_line_centre(self, lines)),
+            OsdTheme::River => Some(river::newest_line_centre(self, lines)),
             _ => None,
         }
     }
@@ -1053,6 +1054,9 @@ impl Look {
         if self.theme == OsdTheme::Mission {
             return mission::text_width(self);
         }
+        if self.theme == OsdTheme::River {
+            return river::text_width(self);
+        }
         self.width - swiss::PANEL_INSET_PX as f32
     }
 
@@ -1084,6 +1088,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Mission {
             return mission::max_lines();
+        }
+        if self.theme == OsdTheme::River {
+            return river::max_lines();
         }
         swiss::MAX_LINES as u32
     }
@@ -1161,6 +1168,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Mission {
             return mission::text_style(self);
+        }
+        if self.theme == OsdTheme::River {
+            return river::text_style(self);
         }
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
@@ -1343,6 +1353,9 @@ impl Look {
         }
         if self.theme == OsdTheme::Mecha {
             return mecha::surface(self);
+        }
+        if self.theme == OsdTheme::River {
+            return river::surface(self);
         }
         Size::new(
             self.width.ceil(),
@@ -2668,6 +2681,7 @@ fn default_motion(look: &Look) -> Motion {
             | OsdTheme::Synthwave
             | OsdTheme::Mecha
             | OsdTheme::Cyberpunk
+            | OsdTheme::River
     ) {
         Motion::Spring(Spring::SOFT)
     } else {
