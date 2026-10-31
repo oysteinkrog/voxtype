@@ -137,12 +137,15 @@ pub(crate) struct BrokenPen {
 /// The transcript the glyph paths follow (RD-10): the calling look's text
 /// style, the width its live text wraps at and its line pitch. The
 /// outlines and pen strokes are built from this style, so they sit on the
-/// look's own letters.
+/// look's own letters. `ink` and `nib` colour the pen's wet ink and its
+/// light: the desktop's text and accent unless the look sets its own.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PathsText {
     pub(crate) style: TextStyle,
     pub(crate) width: f32,
     pub(crate) line: f32,
+    pub(crate) ink: Color,
+    pub(crate) nib: Color,
 }
 
 impl PathsText {
@@ -152,6 +155,8 @@ impl PathsText {
             style: look.text_style(),
             width: look.text_width(),
             line: look.text_line,
+            ink: look.foreground,
+            nib: look.accent,
         }
     }
 }
@@ -368,7 +373,7 @@ impl Popup {
             out.push(kit::at(Element::canvas("glyph-paths", until, draw), 0.0, 0.0).size(w, h));
         }
         if self.look.on(WRITE) {
-            out.extend(self.writing_overlay(&laid, &text.style, w, h));
+            out.extend(self.writing_overlay(&laid, text, w, h));
         }
         out
     }
@@ -664,6 +669,9 @@ fn write_cache() -> &'static Mutex<HashMap<WriteKey, Arc<Writing>>> {
 struct PenBook {
     schedule: PenSchedule,
     slot: HashMap<u32, usize>,
+    /// Each word's voice when it joined the pen, 0 to 1, frozen for its
+    /// nib pressure (SW-05).
+    voice: HashMap<u32, f32>,
     used: f64,
 }
 
@@ -681,25 +689,25 @@ impl Popup {
     /// lifted toward white at the letter's stem width, drying back into the
     /// type 180 ms after the letter is done, with the dots, crossbars and
     /// marks written at the end of the word and only the nib light in the
-    /// accent.
+    /// accent (`PathsText::ink` and `nib`).
     fn writing_overlay(
         &self,
         laid: &[Laid],
-        style: &TextStyle,
+        text: &PathsText,
         w: f32,
         h: f32,
     ) -> Option<Element<Msg>> {
         if self.paths_reduced() {
             return None;
         }
-        let l = &self.look;
+        let style = &text.style;
         let now = self.extra.now;
-        let wet = WetInk::new(l.foreground, l.accent);
+        let wet = WetInk::new(text.ink, text.nib);
         self.pen_prefetch(style);
-        let plays: Vec<(Arc<Writing>, PenSlot)> = self
+        let plays: Vec<(Arc<Writing>, PenSlot, f32)> = self
             .pen_slots(laid, style, |slot| wet.until(slot) >= now - 0.05)
             .into_iter()
-            .map(|(_, writing, slot)| (writing, slot))
+            .map(|(_, writing, slot, voice)| (writing, slot, voice))
             .collect();
         if plays.is_empty() {
             return None;
@@ -707,8 +715,8 @@ impl Popup {
         let until = plays.iter().map(|p| wet.until(&p.1)).fold(0.0, f64::max);
         let draw = move |t: f64, r: Rect, p: &mut Painter| {
             p.layer(Affine::translate(r.x, r.y), 1.0, |p| {
-                for (writing, slot) in &plays {
-                    writing.draw_wet(p, t, slot, &wet);
+                for (writing, slot, voice) in &plays {
+                    writing.draw_wet_voiced(p, t, slot, &wet, *voice);
                 }
             })
         };
@@ -727,19 +735,20 @@ impl Popup {
         let now = self.extra.now;
         self.pen_slots(&laid, &text.style, |slot| slot.end >= now - 0.05)
             .into_iter()
-            .map(|(id, writing, slot)| (id, fill_keys(&writing, &slot)))
+            .map(|(id, writing, slot, _)| (id, fill_keys(&writing, &slot)))
             .collect()
     }
 
-    /// The laid words' writings and their slots with the popup's pen, for
-    /// the slots `keep` takes. A word seen for the first time joins the pen
-    /// here, so its slot is the same whichever asks first.
+    /// The laid words' writings, their slots with the popup's pen and
+    /// their voices, for the slots `keep` takes. A word seen for the first
+    /// time joins the pen here, so its slot and voice are the same whichever
+    /// asks first.
     fn pen_slots(
         &self,
         laid: &[Laid],
         style: &TextStyle,
         keep: impl Fn(&PenSlot) -> bool,
-    ) -> Vec<(u32, Arc<Writing>, PenSlot)> {
+    ) -> Vec<(u32, Arc<Writing>, PenSlot, f32)> {
         let size = style.size;
         let now = self.extra.now;
         let popup = self.paths_popup();
@@ -754,6 +763,7 @@ impl Popup {
                 ..PenParams::default()
             }),
             slot: HashMap::new(),
+            voice: HashMap::new(),
             used: now,
         });
         book.used = now;
@@ -773,15 +783,29 @@ impl Popup {
                     let born = self.paths_times(word).0;
                     let i = book.schedule.push(born, writing.length());
                     book.slot.insert(word.id, i);
+                    book.voice.insert(word.id, self.pen_voice());
                     book.schedule.slots()[i]
                 }
             };
             if !keep(&slot) {
                 continue;
             }
-            plays.push((word.id, writing, slot));
+            let voice = book.voice.get(&word.id).copied().unwrap_or(0.5);
+            plays.push((word.id, writing, slot, voice));
         }
         plays
+    }
+
+    /// The voice a word joins the pen with: the level as it arrives, the
+    /// loudest of the last six frames, 0 to 1.
+    fn pen_voice(&self) -> f32 {
+        let level = self
+            .levels
+            .iter()
+            .rev()
+            .take(6)
+            .fold(0.0f64, |a, b| a.max(*b));
+        level.clamp(0.0, 1.0) as f32
     }
 
     /// Queues the pen strokes of the text face's common letters on the
