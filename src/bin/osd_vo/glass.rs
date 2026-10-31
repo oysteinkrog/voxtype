@@ -18,6 +18,7 @@ use super::kit::{at, ease_out, glass_reflection, hex, mix, Levels, Mode};
 use super::*;
 
 use vo::scene::canvas::Painter;
+use vo::scene::depth_stack::DepthStack;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::glass::Glass;
@@ -689,7 +690,7 @@ impl Popup {
         let rows = self.lines.clamp(1, MAX_LINES);
         let lines = self.text_lines(&style, tw);
         let skip = lines.len().saturating_sub(rows as usize);
-        let stack = self.depth_stack_lines(
+        let stack = self.depth_stack_lines_tuned(
             &lines[skip..],
             span,
             rows,
@@ -714,6 +715,14 @@ impl Popup {
                 self.signal_marks_in(line, words, &tail, (0.0, 0.0), hex(INK))
             },
             self.glass.hold.as_ref(),
+            // Each older line a full line pitch above the next, at the same
+            // pitch all the way back: the shared stack's 0.82 pitch and
+            // shrinking parallax set the receding lines' text on top of
+            // each other.
+            &|s: &mut DepthStack| {
+                s.step_rise = style.line_height;
+                s.parallax = vec![1.0];
+            },
         );
         // The stack is wider than the text by its sheets' margin; centre
         // it on the text so the sheets line up with the text box. The stack
