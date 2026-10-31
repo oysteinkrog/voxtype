@@ -2282,6 +2282,7 @@ impl App for Popup {
         self.arm_captions_tick(cx);
         self.arm_karaoke_tick(cx);
         self.arm_island_tick(cx);
+        self.arm_jarvis_wake(cx);
         self.arm_cyber_tick(cx);
         self.arm_dotmatrix_tick(cx);
         self.pace = self.room_tone_pace(t);

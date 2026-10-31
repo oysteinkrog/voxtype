@@ -229,6 +229,9 @@ pub struct Extra {
     /// With `depth-stack`: the line that just left the reading place, held
     /// flat for a moment before it moves back (6ofh).
     pub(crate) hold: Option<vo::scene::depth_stack::Hold>,
+    /// When the new reading line shows behind a gliding held line: the
+    /// view is built again then, even with no message in between.
+    stack_wake: Option<f64>,
 }
 
 /// Words laid out at most, from a start that only moves in steps of half
@@ -690,6 +693,13 @@ impl Popup {
         Geo::new(look).surface()
     }
 
+    /// Builds the view again when the new stack line shows (`stack_wake`).
+    pub(crate) fn arm_jarvis_wake(&mut self, cx: &mut Cx<Msg>) {
+        if let Some(at) = self.jarvis.stack_wake.take() {
+            cx.after((at - cx.t()).max(0.0) + 0.01, Msg::Loop);
+        }
+    }
+
     /// Notes when a dictation ended without a final text, and breaks the
     /// transcript into lines when its words change.
     pub(crate) fn sync_jarvis(&mut self, t: f64) {
@@ -733,7 +743,7 @@ impl Popup {
         if let (Some((was, rows)), Some((id, now_rows))) = (self.jarvis.newest, newest) {
             let behind = n.checked_sub(2).and_then(|i| first(&self.jarvis.lines[i]));
             if id != was && behind == Some(was) {
-                self.jarvis.hold = Some(vo::scene::depth_stack::Hold {
+                let hold = vo::scene::depth_stack::Hold {
                     key: wild_space::depth_stack_key(was),
                     since: t,
                     secs: if now_rows > rows {
@@ -743,7 +753,11 @@ impl Popup {
                     },
                     rise: self.look.text_style().line_height,
                     glide: now_rows <= rows,
-                });
+                };
+                // The stack's spring is the default one (`wild_space`).
+                self.jarvis.stack_wake =
+                    Some(vo::scene::depth_stack::DepthStack::default().newest_shows_at(&hold));
+                self.jarvis.hold = Some(hold);
             }
         }
         if newest.is_some() {
