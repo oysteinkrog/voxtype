@@ -15,8 +15,8 @@
 //!
 //! The redesign's other three effects play in the same material (d6x).
 //! With `stroke-write` the pen writes each new word in green wet ink with a
-//! pale nib light, and the beam keeps to revisions, sweeping only the
-//! changed letters; without the pen the beam writes new words as above.
+//! pale nib light and rewrites a revised word's changed letters, so the
+//! beam stays off; without the pen the beam writes as above.
 //! With `confidence-ink` a tentative word sits at 75 % ink over a row of
 //! green phosphor dots with a gap, which fills and fades once the word
 //! sets. With `broken-frame` a failure snaps the screen's green border open
@@ -1036,7 +1036,7 @@ impl Popup {
     }
 
     /// The beam's sweeps over the newest words and the newest changed
-    /// letters, or `None` under reduced motion.
+    /// letters, or `None` under reduced motion and with the pen on.
     /// MO-50: a cancel takes the words back into the caret, drawn over the
     /// hidden text.
     fn phosphor_rewind(&self, style: &TextStyle, size: Size) -> Option<Element<Msg>> {
@@ -1053,20 +1053,18 @@ impl Popup {
     }
 
     fn phosphor_beam(&self, g: &Geo) -> Option<Beam> {
-        if !self.motion("beam-write") || self.still() {
+        // The pen writes new words and rewrites changed letters itself
+        // (SW-06): a beam on the same letters would write them twice.
+        if !self.motion("beam-write") || self.motion("stroke-write") || self.still() {
             return None;
         }
         let k = g.k;
         let style = self.look.text_style();
         let width = self.look.text_width();
         let keep = BEAM_SECS + BEAM_TAIL + 0.3;
-        // With the pen on, the pen writes new words and the beam only
-        // rewrites changed letters: two writers on one word drew it twice.
-        let pen = self.motion("stroke-write");
         let mut sweeps: Vec<Sweep> = self
             .tally_arrivals(&style, width, keep)
             .into_iter()
-            .filter(|_| !pen)
             .map(|(b, at)| Sweep {
                 line: b.rect,
                 x0: b.rect.x,
