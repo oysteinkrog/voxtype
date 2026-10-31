@@ -3,8 +3,9 @@
 //! (MO-33 fold-under or MO-32 margin mark) that suit its material, as if
 //! those features had been asked for by name. The revision (MO-20 and its
 //! variants) is already the look's own: `revision.rs` picks escrow, hinge and
-//! address per look, and cyberpunk rolls. The hand-off (MO-42) has one form,
-//! drawn in each look's colours, so there is nothing to pick there.
+//! address per look, and cyberpunk takes the palimpsest. The hand-off (MO-42)
+//! has one form, drawn in each look's colours, so there is nothing to pick
+//! there.
 //!
 //! A pick only shows in a look that draws that motion; the others ignore it.
 //! Reduced motion still wins: every motion has its still form.

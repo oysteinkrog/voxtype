@@ -4,9 +4,17 @@
 //! centre between brackets, bold white words and a chamfered status bar.
 //!
 //! The frame, the bars and the decoration are drawn on canvases from the
-//! frame time; the text is labels and live text. Glitch slices fire only on
-//! events (the open, a revised word, a change of state), so an idle popup
-//! draws nothing new. Short ticks drive the typing and the panel's growth.
+//! frame time; the text is labels and live text. Glitch bursts fire only on
+//! events (the open, a revised word, a change of state). Short ticks drive
+//! the typing and the panel's growth.
+//!
+//! While the popup is open it keeps a little idle life (RD-02): a 6 px
+//! slice of the frame's side edge jumps 4 px out for one step every 6 s,
+//! the hazard slashes dim to 70 % for one step every 9 s, and faint
+//! scanlines scroll down the waveform window at 4 px/s. All three are
+//! ambient loops stepped at 15 a second, away from the transcript. They
+//! leave the view when the dictation ends, in the update that asks to exit
+//! and on a look switch, and hold still under reduced motion.
 //!
 //! It shares the stop and final-text times with the showcase look
 //! (`Extra::finish_at`, `Extra::final_at`).
@@ -15,6 +23,7 @@ use super::*;
 
 use std::sync::OnceLock;
 
+use vo::scene::ambient::{Loop, LoopProp, Wave as LoopWave};
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
@@ -103,6 +112,33 @@ const OPEN_GLITCH_SECS: f64 = 0.24;
 /// Ticks while something is being typed or grown.
 const TICK_HZ: f64 = 60.0;
 
+/// RD-02: the idle loops' pace, the room-tone frame rate, so they add no
+/// frames of their own.
+const IDLE_FPS: f64 = 15.0;
+/// The glitch slice: how tall, how far it jumps, the time between two
+/// slices (they alternate sides, so each side's loop is twice as long), and
+/// when the first comes after the popup opens. Each shows for one step.
+const IDLE_SLICE_H: f32 = 6.0;
+const IDLE_SLICE_DX: f32 = 4.0;
+const IDLE_SLICE_EVERY: f64 = 6.0;
+const IDLE_SLICE_FIRST: f64 = 3.0;
+/// Where the slices sit on the side edges, from the panel's top.
+const IDLE_SLICE_LEFT_Y: f32 = 74.0;
+const IDLE_SLICE_RIGHT_Y: f32 = 96.0;
+/// The neon flicker: how far the slashes dim, how often, the first one.
+const IDLE_FLICKER_DIP: f64 = 0.3;
+const IDLE_FLICKER_EVERY: f64 = 9.0;
+const IDLE_FLICKER_FIRST: f64 = 5.4;
+/// The scanlines: spacing, opacity and speed down the waveform window.
+/// Blending is in linear light, so 0.3 % of white lifts the near-black body
+/// from 11 to about 18 of 255: 3 % as the eye sees it.
+const SCAN_GAP: f32 = 3.0;
+const SCAN_ALPHA: f32 = 0.003;
+const SCAN_PX_PER_S: f64 = 4.0;
+/// The scanlines step every third idle step (0.8 px): each step redraws the
+/// panel, and a faint pattern needs no more.
+const SCAN_FPS: f64 = 5.0;
+
 /// The fonts the look adds to the registry.
 #[derive(Clone, Copy)]
 struct Fonts {
@@ -134,6 +170,39 @@ fn reduced() -> bool {
     *R.get_or_init(|| {
         std::env::var("VO_REDUCED_MOTION").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
     })
+}
+
+/// RD-02: 1 for one idle step at `at` seconds into each `period`, else 0.
+/// The window is centred on that step, so the stepped clock cannot miss it.
+fn blink(at: f64, period: f64) -> Loop {
+    let half = 0.5 / IDLE_FPS;
+    let (from, to) = ((at - half) / period, (at + half) / period);
+    Loop::gate(from, to, period)
+        .fps(IDLE_FPS)
+        .settle(Spring::SNAP)
+}
+
+/// The glitch slice on side `side` (0 left, 1 right): on for one step,
+/// every other slice.
+fn slice_loop(side: u8) -> Loop {
+    let at = IDLE_SLICE_FIRST + side as f64 * IDLE_SLICE_EVERY;
+    blink(at, 2.0 * IDLE_SLICE_EVERY)
+}
+
+/// The neon flicker on opacity: down to `1 - IDLE_FLICKER_DIP` for a step.
+fn flicker_loop() -> Loop {
+    Loop {
+        amp: -IDLE_FLICKER_DIP,
+        ..blink(IDLE_FLICKER_FIRST, IDLE_FLICKER_EVERY)
+    }
+}
+
+/// The scanlines' scroll: down one gap, again and again.
+fn scan_loop() -> Loop {
+    let gap = SCAN_GAP as f64;
+    Loop::new(LoopWave::Ramp, gap, gap / SCAN_PX_PER_S)
+        .fps(SCAN_FPS)
+        .settle(Spring::SNAP)
 }
 
 /// The transcript: Inter SemiBold, as large as in the mock-up.
@@ -1338,7 +1407,8 @@ impl Popup {
                 )
                 .presence(Transition::fade(), Transition::fade()),
             )
-            .child(self.cyber_wave(mode, progress, ox, oy));
+            .child(self.cyber_wave(mode, progress, ox, oy))
+            .children(self.cyber_idle_parts(mode, w, ox, oy));
         // The transcript hangs from the panel's bottom: it takes the place
         // of the grown panel at once, so the newest line stays put and the
         // older ones step up a line while the panel's top follows (RD-09).
@@ -1463,12 +1533,100 @@ impl Popup {
             red: mode == Mode::Cancelled,
         };
         let until = drift_until.max(self.shown_at + 0.7);
-        at(
+        let e = at(
             Element::canvas("slashes", until, move |t, rect, p| slashes.draw(t, rect, p))
                 .size(50.0, 13.0),
             ox + w - 86.0,
             oy + 10.0,
+        );
+        if self.cyber_idle() {
+            e.ambient(LoopProp::Opacity, flicker_loop())
+        } else {
+            e
+        }
+    }
+
+    /// RD-02: whether the idle loops run: the cyberpunk look open on a
+    /// dictation that has not ended, and motion not reduced.
+    fn cyber_idle(&self) -> bool {
+        self.look.theme == OsdTheme::Cyberpunk
+            && !self.closing
+            && !self.ended()
+            && !reduced()
+            && !self.look.on("reduced-motion")
+    }
+
+    /// RD-02: a 6 px slice of a side edge, drawn jumped `IDLE_SLICE_DX` out
+    /// over a patch of body that hides the edge under it. At rest it is
+    /// invisible; its loop shows it for one step.
+    fn cyber_slice(&self, side: u8, mode: Mode, w: f32, ox: f32, oy: f32) -> Element<Msg> {
+        // The edge's centre, width and colour (see `Geo::pieces`).
+        let (x, y, line, hue) = if side == 0 {
+            (12.0, IDLE_SLICE_LEFT_Y, 3.0, YELLOW)
+        } else {
+            (w - (DESIGN_W - 588.0), IDLE_SLICE_RIGHT_Y, 2.0, RED)
+        };
+        let hue = if mode == Mode::Cancelled { RED } else { hue };
+        let out = if side == 0 { -1.0 } else { 1.0 };
+        let dx = out * IDLE_SLICE_DX;
+        let pad = IDLE_SLICE_DX + line;
+        let key = ["idle-slice-l", "idle-slice-r"][side as usize];
+        let slice = Element::canvas(key, 0.0, move |_, b, p| {
+            let mid = b.x + pad;
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(mid - line, b.y, 2.0 * line, b.h), 0.0),
+                Paint::solid(hex(BODY)),
+            ));
+            p.shape(ShapeInstance::rrect(
+                RRect::new(Rect::new(mid + dx - line / 2.0, b.y, line, b.h), 0.0),
+                Paint::solid(hex(hue)),
+            ));
+        });
+        at(slice, ox + x - pad, oy + y - IDLE_SLICE_H / 2.0)
+            .size(2.0 * pad, IDLE_SLICE_H)
+            .opacity(0.0)
+            .ambient(LoopProp::Opacity, slice_loop(side))
+    }
+
+    /// RD-02: faint scanlines over the waveform window, scrolling down, in a
+    /// layer clipped to the window between the brackets.
+    fn cyber_scanlines(&self, w: f32, ox: f32, oy: f32) -> Element<Msg> {
+        let span = w - (DESIGN_W - WAVE_X1) - WAVE_X0;
+        let box_h = 2.0 * WAVE_HALF + 8.0;
+        let lines = Element::canvas("scan", 0.0, move |_, b, p| {
+            let c = hex(PAPER).fade(SCAN_ALPHA);
+            let mut y = b.y;
+            while y < b.y + b.h {
+                p.shape(ShapeInstance::rrect(
+                    RRect::new(Rect::new(b.x, y, b.w, 1.0), 0.0),
+                    Paint::solid(c),
+                ));
+                y += SCAN_GAP;
+            }
+        });
+        at(
+            Element::layer("scanlines").clip(),
+            ox + WAVE_X0,
+            oy + WAVE_Y - box_h / 2.0,
         )
+        .size(span, box_h)
+        .child(
+            at(lines, 0.0, -SCAN_GAP)
+                .size(span, box_h + SCAN_GAP)
+                .ambient(LoopProp::OffsetY, scan_loop()),
+        )
+    }
+
+    /// RD-02: the idle loops that ride on the panel's top, when they run.
+    fn cyber_idle_parts(&self, mode: Mode, w: f32, ox: f32, oy: f32) -> Vec<Element<Msg>> {
+        if !self.cyber_idle() {
+            return Vec::new();
+        }
+        vec![
+            self.cyber_scanlines(w, ox, oy),
+            self.cyber_slice(0, mode, w, ox, oy),
+            self.cyber_slice(1, mode, w, ox, oy),
+        ]
     }
 
     fn cyber_wave(&self, mode: Mode, progress: Option<f32>, ox: f32, oy: f32) -> Element<Msg> {
@@ -1817,5 +1975,58 @@ mod edit_tests {
     #[test]
     fn cyberpunk_edits_within_the_envelope() {
         envelope(OsdTheme::Cyberpunk, "cyberpunk");
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+
+    /// The seconds in `0..secs` at which `l` is off its rest, stepped as drawn.
+    fn on_at(l: &Loop, secs: f64) -> Vec<f64> {
+        (0..(secs * IDLE_FPS) as usize)
+            .map(|k| k as f64 / IDLE_FPS)
+            .filter(|&t| l.value(0.0, t) != 0.0)
+            .collect()
+    }
+
+    #[test]
+    fn a_slice_shows_for_one_step_every_6_s_alternating_sides() {
+        let mut all: Vec<f64> = (0..2u8).flat_map(|s| on_at(&slice_loop(s), 60.0)).collect();
+        all.sort_by(f64::total_cmp);
+        assert_eq!(all.len(), 10, "{all:?}");
+        assert!((all[0] - IDLE_SLICE_FIRST).abs() < 1e-6, "{all:?}");
+        for pair in all.windows(2) {
+            assert!(
+                (pair[1] - pair[0] - IDLE_SLICE_EVERY).abs() < 1e-6,
+                "{all:?}"
+            );
+        }
+        assert!(slice_loop(0).fps <= IDLE_FPS);
+    }
+
+    #[test]
+    fn the_flicker_dims_to_70_percent_for_one_step_every_9_s() {
+        let l = flicker_loop();
+        let on = on_at(&l, 45.0);
+        assert_eq!(on.len(), 5, "{on:?}");
+        assert!((on[0] - IDLE_FLICKER_FIRST).abs() < 1e-6, "{on:?}");
+        assert!((l.value(0.0, on[0]) + 0.3).abs() < 1e-9);
+        assert!(l.fps <= IDLE_FPS);
+    }
+
+    #[test]
+    fn the_scanlines_scroll_4_px_a_second_and_wrap_on_their_gap() {
+        let l = scan_loop();
+        assert!(l.wraps());
+        let a = l.value(0.0, 0.0);
+        // Three steps at 5 a second: 0.6 s, so 2.4 px.
+        let b = l.value(0.0, 0.6);
+        assert!((b - a - 2.4).abs() < 1e-6, "{a} {b}");
+        for k in 0..100 {
+            let v = l.value(0.0, k as f64 * 0.07);
+            assert!((0.0..SCAN_GAP as f64).contains(&v), "{v}");
+        }
+        assert!(l.fps <= IDLE_FPS);
     }
 }
