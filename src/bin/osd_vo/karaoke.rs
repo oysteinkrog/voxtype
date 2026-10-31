@@ -33,6 +33,13 @@
 //!   into one smooth strand. The dots sit in the gap under each line's
 //!   descenders and ride with it. Reduced motion: dots and lines, no easing.
 //!
+//! In a replay of a recorded dictation (`--replay`, EG-35) the words still to
+//! come on the newest line show after it at 35 % ink, as a prompter shows the
+//! script, and each lights up in the 0.3 s before it is spoken. They are drawn
+//! glyphs outside the live text (word id `NO_WORD`), so the reading line never
+//! tracks them. Live and scripted runs cannot know them and show none. Reduced
+//! motion: no light-up.
+//!
 //! While editing ([`KaraokeSite`]) the three large slots hold the edit
 //! window and the two small ones the two lines above it, which the caret
 //! never enters. The lit word is off, and a line keeps its left edge while
@@ -43,11 +50,13 @@ use super::*;
 use std::sync::OnceLock;
 
 use vo::scene::canvas::Painter;
-use vo::scene::display::{Paint, ShapeInstance};
+use vo::scene::display::{GlyphInstance, Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
+use vo::scene::glyph_morph::WordOutline;
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::taffy;
 use vo::scene::taffy::prelude::{auto, length};
+use vo::scene::text::Align;
 
 const BG_TOP: u32 = 0x0d1530;
 const BG_BOTTOM: u32 = 0x0a1026;
@@ -107,6 +116,11 @@ const WRAP: f32 = 495.0;
 /// Each line's box: wider than the wrap, so a line whose words change in
 /// the final pass never wraps inside it; the words sit centred in it.
 const LINE_BOX: f32 = WRAP + 60.0;
+/// EG-35: the coming words' ink, how bright one gets as it comes, and over
+/// how long before its time.
+const AHEAD_INK: f32 = 0.35;
+const AHEAD_LIT: f32 = 0.7;
+const AHEAD_SWEEP_SECS: f64 = 0.3;
 /// R2-14-a: the ribbon's band in the gap under the newest line, its ends,
 /// alpha and the head's glide.
 pub(crate) const TYPEWRITER_RIBBON: &str = "living-typewriter-ribbon";
@@ -194,6 +208,15 @@ fn fonts(reg: &FontRegistry) -> Fonts {
         text: add("Nunito:medium", SANS),
         ui: add("Nunito", SANS),
     }
+}
+
+/// EG-35: a coming word's ink `left` seconds before it is spoken.
+fn ahead_ink(left: f64, still: bool) -> f32 {
+    if still {
+        return AHEAD_INK;
+    }
+    let k = (1.0 - left / AHEAD_SWEEP_SECS).clamp(0.0, 1.0) as f32;
+    AHEAD_INK + (AHEAD_LIT - AHEAD_INK) * k
 }
 
 fn reduced() -> bool {
@@ -487,7 +510,11 @@ impl Scene {
             .finish_at
             .map_or(1.0, |f| 1.0 - ease_out((t - f) / 0.45));
         let flat = self.final_at.map_or(0.0, |f| ease_out((t - f) / 0.3));
-        let dim = if self.mode == Mode::Cancelled { 0.35 } else { 1.0 };
+        let dim = if self.mode == Mode::Cancelled {
+            0.35
+        } else {
+            1.0
+        };
         let mid = (BARS as f32 - 1.0) / 2.0;
         for i in 0..BARS {
             let d = (i as f32 - mid).abs();
@@ -517,14 +544,20 @@ impl Scene {
                 continue;
             }
             let r = Rect::new(x - 1.2, WAVE_Y - half, 2.4, 2.0 * half);
-            p.shape(ShapeInstance::capsule(r, Paint::glow(c.fade(0.4), 3.0, 0.35)));
+            p.shape(ShapeInstance::capsule(
+                r,
+                Paint::glow(c.fade(0.4), 3.0, 0.35),
+            ));
             p.shape(ShapeInstance::capsule(r, Paint::solid(c)));
         }
         if flat > 0.0 {
             let half = span / 2.0 * 0.78 * flat;
             let mid_x = WAVE_X0 + span / 2.0;
             p.shape(ShapeInstance::rrect(
-                RRect::new(Rect::new(mid_x - half, WAVE_Y - 0.75, 2.0 * half, 1.5), 0.75),
+                RRect::new(
+                    Rect::new(mid_x - half, WAVE_Y - 0.75, 2.0 * half, 1.5),
+                    0.75,
+                ),
                 Paint::linear(
                     Point::new(mid_x - half, 0.0),
                     hex(CYAN),
@@ -614,11 +647,15 @@ impl Scene {
         match self.mode {
             Mode::Done => {
                 let k = ease_out((t - self.mode_at) / 0.3);
-                p.stroke(&make::ring(c, r), &StrokeStyle::solid(1.6, hex(GREEN).fade(k)));
+                p.stroke(
+                    &make::ring(c, r),
+                    &StrokeStyle::solid(1.6, hex(GREEN).fade(k)),
+                );
                 let o = {
-                let c = Outline::new(&icons::check(), 0.05);
-                c.trim(0.0, (k) * c.length())
-            }.transform(
+                    let c = Outline::new(&icons::check(), 0.05);
+                    c.trim(0.0, (k) * c.length())
+                }
+                .transform(
                     &Affine::translate(-12.0, -12.0)
                         .then(&Affine::scale(0.48))
                         .then(&Affine::translate(c.x, c.y)),
@@ -626,7 +663,10 @@ impl Scene {
                 p.outline(&o, &StrokeStyle::solid(1.6, hex(GREEN)));
             }
             Mode::Cancelled => {
-                p.stroke(&make::ring(c, r), &StrokeStyle::solid(1.6, hex(HINT).fade(0.6)));
+                p.stroke(
+                    &make::ring(c, r),
+                    &StrokeStyle::solid(1.6, hex(HINT).fade(0.6)),
+                );
             }
             _ => {
                 let spin = if reduced() {
@@ -634,12 +674,8 @@ impl Scene {
                 } else {
                     ((t - self.shown_at) / 1.4).fract() as f32
                 };
-                let style = StrokeStyle::solid(2.0, hex(BLUE)).conic(
-                    c,
-                    spin,
-                    hex(CYAN),
-                    hex(VIOLET),
-                );
+                let style =
+                    StrokeStyle::solid(2.0, hex(BLUE)).conic(c, spin, hex(CYAN), hex(VIOLET));
                 p.stroke(&make::ring(c, r), &style);
             }
         }
@@ -647,6 +683,70 @@ impl Scene {
 }
 
 impl Popup {
+    /// EG-35: in a replay, the coming words that fit on the newest line
+    /// (`words`, `lw` wide), after it in the line's box. None live.
+    fn karaoke_ahead(&self, words: &[Word], lw: f32, style: &TextStyle) -> Option<Element<Msg>> {
+        let ahead = self
+            .lookahead
+            .as_ref()?
+            .ahead(self.shown.len(), self.extra.now);
+        if ahead.is_empty() || words.is_empty() {
+            return None;
+        }
+        let mut full = words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let start = full.len();
+        let mut ends = Vec::with_capacity(ahead.len());
+        for (w, t) in ahead {
+            full.push(' ');
+            full.push_str(w);
+            ends.push((full.len(), *t));
+        }
+        // Laid out from the line's left edge to the box's right edge: the
+        // line is centred in the box.
+        let width = WRAP.min((LINE_BOX + lw) / 2.0);
+        let flat = TextStyle {
+            align: Align::Start,
+            ..*style
+        };
+        let laid = self.measure.layout(&full, &flat, Some(width));
+        let row = laid.lines.first()?.baseline;
+        let outline = WordOutline::new(self.measure.fonts(), &laid, style.size, Point::ZERO);
+        let glyphs: Vec<(GlyphInstance, f64)> = outline
+            .glyphs
+            .iter()
+            .filter(|g| g.cluster as usize >= start && g.has_ink() && (g.pos.y - row).abs() < 0.5)
+            .filter_map(|g| {
+                let at = ends.iter().find(|e| (g.cluster as usize) < e.0)?.1;
+                Some((g.instance(hex(WHITE)), at))
+            })
+            .collect();
+        if glyphs.is_empty() {
+            return None;
+        }
+        let until = glyphs.iter().map(|g| g.1).fold(f64::NEG_INFINITY, f64::max);
+        let still = self.still();
+        let draw = move |t: f64, r: Rect, p: &mut Painter| {
+            for (g, at) in &glyphs {
+                p.glyph(GlyphInstance {
+                    pos: Point::new(r.x + g.pos.x, r.y + g.pos.y),
+                    color: hex(WHITE).fade(ahead_ink(at - t, still)),
+                    ..*g
+                });
+            }
+        };
+        Some(at(
+            Element::canvas("ahead", until, draw)
+                .size(width, LINE)
+                .presence(Transition::NONE, Transition::NONE),
+            0.0,
+            0.0,
+        ))
+    }
+
     fn karaoke_mode(&self) -> Mode {
         self.kit_mode().into()
     }
@@ -672,7 +772,10 @@ impl Popup {
 
     pub(crate) fn arm_karaoke_tick(&mut self, cx: &mut Cx<Msg>) {
         let busy = cx.t() < self.karaoke.prog.2 + 0.4 && self.karaoke.mode == Some(Mode::Finishing);
-        if self.look.theme == OsdTheme::Karaoke && self.extra.tick.is_none() && busy && !self.closing
+        if self.look.theme == OsdTheme::Karaoke
+            && self.extra.tick.is_none()
+            && busy
+            && !self.closing
         {
             self.extra.tick = Some(cx.after(1.0 / TICK_HZ, Msg::Tick));
         }
@@ -767,7 +870,9 @@ impl Popup {
         for w in words {
             let range = start..start + w.text.len();
             start = range.end + 1;
-            while glyph < shaped.glyphs.len() && (shaped.glyphs[glyph].cluster as usize) < range.start {
+            while glyph < shaped.glyphs.len()
+                && (shaped.glyphs[glyph].cluster as usize) < range.start
+            {
                 glyph += 1;
             }
             let y = shaped
@@ -934,13 +1039,17 @@ impl Popup {
             .iter()
             .map(|w| format!("{} ", w.text))
             .collect::<String>();
-        let px = lead + if prefix.is_empty() {
-            0.0
-        } else {
-            // The advance of the prefix with its trailing space.
-            self.measure.layout(&format!("{prefix}x"), style, None).size.w
-                - self.measure.layout("x", style, None).size.w
-        };
+        let px = lead
+            + if prefix.is_empty() {
+                0.0
+            } else {
+                // The advance of the prefix with its trailing space.
+                self.measure
+                    .layout(&format!("{prefix}x"), style, None)
+                    .size
+                    .w
+                    - self.measure.layout("x", style, None).size.w
+            };
         let ww = self.measure.layout(&word.text, style, None).size.w;
         // The gradient runs over `span` (the whole box when `None`); past it
         // the box keeps the last colour.
@@ -968,7 +1077,11 @@ impl Popup {
             Element::layer(format!("hot-{}", word.id))
                 .size(box_w, LINE)
                 .child(at(gradient("fill", box_w, LINE, span), 0.0, 0.0))
-                .child(Element::mask("glyphs").child(at(self.karaoke_lit_glyphs(word, style), 0.0, 0.0))),
+                .child(Element::mask("glyphs").child(at(
+                    self.karaoke_lit_glyphs(word, style),
+                    0.0,
+                    0.0,
+                ))),
             // In the line's own box (see karaoke_text), which moves with the words.
             px - lead,
             0.0,
@@ -1038,16 +1151,29 @@ impl Popup {
 
     /// MO-64: the underline as a bowstring from the middle of the word
     /// before (or the line's start) to the end of the newest word.
-    fn karaoke_bow(&self, last: &[Word], lead: f32, px: f32, ww: f32, style: &TextStyle) -> Element<Msg> {
+    fn karaoke_bow(
+        &self,
+        last: &[Word],
+        lead: f32,
+        px: f32,
+        ww: f32,
+        style: &TextStyle,
+    ) -> Element<Msg> {
         let word = &last[last.len() - 1];
         let x0 = match last.len() {
             0 | 1 => lead,
             n => {
-                let before: String = last[..n - 2].iter().map(|w| format!("{} ", w.text)).collect();
+                let before: String = last[..n - 2]
+                    .iter()
+                    .map(|w| format!("{} ", w.text))
+                    .collect();
                 let start = if before.is_empty() {
                     0.0
                 } else {
-                    self.measure.layout(&format!("{before}x"), style, None).size.w
+                    self.measure
+                        .layout(&format!("{before}x"), style, None)
+                        .size
+                        .w
                         - self.measure.layout("x", style, None).size.w
                 };
                 let prev_w = self.measure.layout(&last[n - 2].text, style, None).size.w;
@@ -1060,7 +1186,11 @@ impl Popup {
         let born = heard.map_or(self.extra.now, |h| h.born);
         let pitch = heard.and_then(|h| h.pitch);
         let reduced = self.look.on("reduced-motion") || kit::reduced();
-        let until = if reduced { f64::NEG_INFINITY } else { born + BOW_TIGHTEN + 0.05 };
+        let until = if reduced {
+            f64::NEG_INFINITY
+        } else {
+            born + BOW_TIGHTEN + 0.05
+        };
         at(
             Element::canvas(format!("bow-{}", word.id), until, move |t, r, p| {
                 let (a, b) = (Point::new(r.x + x0, r.y + y), Point::new(r.x + x1, r.y + y));
@@ -1111,7 +1241,10 @@ impl Popup {
         let text = text.line_motion(&self.look);
         match self.look.margin_mark() {
             // In the look's own cyan rather than the desktop accent.
-            Some(m) => text.margin_mark(MarginMark { color: hex(CYAN), ..m }),
+            Some(m) => text.margin_mark(MarginMark {
+                color: hex(CYAN),
+                ..m
+            }),
             None => text,
         }
     }
@@ -1120,7 +1253,12 @@ impl Popup {
     /// mark stays beside the line before (`lines[i]`) and fades as that line
     /// rolls up; the bottom half is the newest line's own mark, in the slot the
     /// reader keeps looking at. Nothing splits under reduced motion.
-    fn karaoke_mark_top(&self, lines: &[(Vec<Word>, f32)], i: usize, style: &TextStyle) -> Option<Element<Msg>> {
+    fn karaoke_mark_top(
+        &self,
+        lines: &[(Vec<Word>, f32)],
+        i: usize,
+        style: &TextStyle,
+    ) -> Option<Element<Msg>> {
         let mark = self.look.margin_mark()?;
         if self.look.on("reduced-motion") || kit::reduced() {
             return None;
@@ -1131,28 +1269,40 @@ impl Popup {
             return None;
         }
         let (words, w) = &lines[i];
-        let joined = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
-        let baseline = self.measure.layout(&joined, style, None).glyphs.first()?.pos.y;
+        let joined = words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let baseline = self
+            .measure
+            .layout(&joined, style, None)
+            .glyphs
+            .first()?
+            .pos
+            .y;
         let full = mark.height * style.size;
         let x = (LINE_BOX - w) / 2.0 - mark.gap - mark.width;
         let y = baseline - 0.28 * style.size - 0.25 * full;
         let fade = mark.fade;
-        Some(at(
-            Element::canvas("mark-top", born + fade, move |t, r, p| {
-                let k = 1.0 - ease_out((t - born) / fade);
-                if k <= 0.0 {
-                    return;
-                }
-                let bar = Rect::new(r.x + x, r.y + y - 0.25 * full, mark.width, 0.5 * full);
-                p.shape(ShapeInstance::rrect(
-                    RRect::new(bar, 0.5 * mark.width),
-                    Paint::solid(hex(CYAN).fade(k)),
-                ));
-            }),
-            0.0,
-            0.0,
+        Some(
+            at(
+                Element::canvas("mark-top", born + fade, move |t, r, p| {
+                    let k = 1.0 - ease_out((t - born) / fade);
+                    if k <= 0.0 {
+                        return;
+                    }
+                    let bar = Rect::new(r.x + x, r.y + y - 0.25 * full, mark.width, 0.5 * full);
+                    p.shape(ShapeInstance::rrect(
+                        RRect::new(bar, 0.5 * mark.width),
+                        Paint::solid(hex(CYAN).fade(k)),
+                    ));
+                }),
+                0.0,
+                0.0,
+            )
+            .size(LINE_BOX, LINE),
         )
-        .size(LINE_BOX, LINE))
     }
 
     /// While editing, the two lines above the edit window, oldest first,
@@ -1217,7 +1367,9 @@ impl Popup {
         // The lit newest word and its underline ride on the newest line.
         let hot = match (mode, lines.last()) {
             _ if waits || tapped => Vec::new(),
-            (Mode::Listening, Some((last, w))) => self.karaoke_hot(last, (LINE_BOX - w) / 2.0, &style),
+            (Mode::Listening, Some((last, w))) => {
+                self.karaoke_hot(last, (LINE_BOX - w) / 2.0, &style)
+            }
             _ => Vec::new(),
         };
         let mut hot = Some(hot);
@@ -1271,6 +1423,11 @@ impl Popup {
             }
             if !hot.is_empty() {
                 inline = inline.child(hot.remove(0));
+            }
+            if age == 0 && !hidden && !editing && !tapped && mode == Mode::Listening {
+                if let Some(ahead) = self.karaoke_ahead(words, *lw, &style) {
+                    inline = inline.child(ahead);
+                }
             }
             if age == 0 && !hidden {
                 // The ghost tail after the newest line, inside the line's
@@ -1368,18 +1525,24 @@ impl Popup {
                                 Element::layer("under")
                                     .size((w * f).max(3.0), 3.0)
                                     .glow(hex(BLUE).fade(0.6), 4.0, 0.6)
-                                    .child(Element::canvas("bar", f64::NEG_INFINITY, move |_, r, p| {
-                                        p.shape(ShapeInstance::rrect(
-                                            RRect::new(r, 1.5),
-                                            Paint::linear(
-                                                Point::new(r.x, 0.0),
-                                                hex(CYAN),
-                                                Point::new(r.x + w, 0.0),
-                                                hex(MAGENTA),
-                                            ),
-                                        ));
-                                    })
-                                    .size((w * f).max(3.0), 3.0)),
+                                    .child(
+                                        Element::canvas(
+                                            "bar",
+                                            f64::NEG_INFINITY,
+                                            move |_, r, p| {
+                                                p.shape(ShapeInstance::rrect(
+                                                    RRect::new(r, 1.5),
+                                                    Paint::linear(
+                                                        Point::new(r.x, 0.0),
+                                                        hex(CYAN),
+                                                        Point::new(r.x + w, 0.0),
+                                                        hex(MAGENTA),
+                                                    ),
+                                                ));
+                                            },
+                                        )
+                                        .size((w * f).max(3.0), 3.0),
+                                    ),
                                 x,
                                 under_y + 6.0,
                             )
@@ -1891,4 +2054,21 @@ mod idle_tests {
 
     // The stage light stays below the newest line and at most 8 % alpha.
     const _: () = assert!(STAGE_TOP > SLOTS[0].0 + LINE / 2.0 && LIGHT_ALPHA <= 0.08);
+}
+
+#[cfg(test)]
+mod ahead_tests {
+    use super::*;
+
+    /// EG-35: a coming word stays at 35 % ink and lights up in the 0.3 s
+    /// before its time; under reduced motion it does not light up.
+    #[test]
+    fn a_coming_word_lights_up_as_its_time_comes() {
+        assert_eq!(ahead_ink(1.0, false), AHEAD_INK);
+        assert_eq!(ahead_ink(AHEAD_SWEEP_SECS, false), AHEAD_INK);
+        let mid = ahead_ink(AHEAD_SWEEP_SECS / 2.0, false);
+        assert!(mid > AHEAD_INK && mid < AHEAD_LIT);
+        assert_eq!(ahead_ink(0.0, false), AHEAD_LIT);
+        assert_eq!(ahead_ink(0.0, true), AHEAD_INK);
+    }
 }

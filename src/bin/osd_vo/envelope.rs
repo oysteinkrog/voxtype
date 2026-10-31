@@ -28,7 +28,15 @@ pub(crate) fn run(
     fps: f64,
     cancel: bool,
     moment: Option<&str>,
+    replay: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    if let Some(path) = replay {
+        let events = super::replay::load(path)?;
+        let lookahead = super::replay::Lookahead::scan(&events);
+        let scenario = super::replay::scenario(&look, events);
+        let popup = || Popup::replayed(look.clone(), &fonts, lookahead.clone());
+        return check(&look, &fonts, fps, &scenario, popup);
+    }
     let moment = moment
         .map(|name| {
             super::moments::Moment::parse(name).ok_or_else(|| {
@@ -52,9 +60,20 @@ pub(crate) fn run(
             None => p,
         }
     };
+    check(&look, &fonts, fps, &scenario, popup)
+}
+
+/// The envelope and the budget of `scenario` played by the popups `popup` makes.
+fn check(
+    look: &Look,
+    fonts: &FontRegistry,
+    fps: f64,
+    scenario: &vo::Scenario<super::Msg>,
+    popup: impl Fn() -> Popup,
+) -> anyhow::Result<()> {
     let options = || Options {
         fonts: fonts.clone(),
-        default_motion: default_motion(&look),
+        default_motion: default_motion(look),
         renderer_setup: Some(std::sync::Arc::new(vo_3d::install)),
         ..Options::default()
     };
@@ -72,7 +91,7 @@ pub(crate) fn run(
              holds still for about 100 ms is not seen at rest"
         );
     }
-    let report = check_scenario(popup(), &scenario, fps, options(), &envelope);
+    let report = check_scenario(popup(), scenario, fps, options(), &envelope);
     println!("envelope:\n{report}");
     // Development: every breach, one line each, to find where a look goes wrong.
     if std::env::var_os("VO_ENVELOPE_DETAIL").is_some() {
@@ -87,7 +106,7 @@ pub(crate) fn run(
             );
         }
     }
-    let budget = measure_budget(popup(), &scenario, fps, options())
+    let budget = measure_budget(popup(), scenario, fps, options())
         .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
     let mut over = None;
     match &budget {
