@@ -82,6 +82,8 @@ const SCALE_W: f32 = 60.0;
 const READ: (f32, f32, f32, f32) = (745.0, 58.0, 155.0, 230.0);
 const TRANS: (f32, f32, f32, f32) = (13.0, 300.0, 887.0, 255.0);
 const INNER: (f32, f32, f32, f32) = (20.0, 336.0, 873.0, 210.0);
+/// The transcript box's corner brackets' arm length, in concept px.
+const BRACKET_ARM: f32 = 6.0;
 const STATUS_Y: f32 = 573.0;
 
 const TEXT_PX: f32 = 28.0 * S;
@@ -512,13 +514,15 @@ impl Scene {
             ShapeInstance::rrect(RRect::new(inner, 2.0), Paint::solid(hex(BG).fade(0.6)))
                 .with_stroke(Paint::solid(hex(FRAME).fade(0.8)), 1.0),
         );
-        // Corner brackets in the transcript box.
+        // Corner brackets in the transcript box, their arms short enough
+        // that the bottom-left one ends well before the lattice's first
+        // pause label on the fourth line.
         for c in vo::scene::path::make::brackets(
             inner.x + 7.0 * S,
             inner.y + 7.0 * S,
             inner.w - 14.0 * S,
             inner.h - 14.0 * S,
-            10.0 * S,
+            BRACKET_ARM * S,
         ) {
             p.stroke(&c, &StrokeStyle::solid(1.4, hex(TEXT)));
         }
