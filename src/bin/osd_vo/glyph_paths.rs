@@ -56,9 +56,10 @@ const RISE_SECS: f64 = 0.06;
 const FILL_SECS: f64 = 0.16;
 /// How long the kink under the first word takes to relax.
 const KINK_SECS: f64 = 0.6;
-/// The breath line sits this far below the baseline, and the kink lifts it
-/// this far, up to the baseline.
-const LINE_DROP: f32 = 4.0;
+/// The breath line sits this far under the font's descenders, so no letter
+/// ever touches it, and the kink lifts it this far, stopping short of them.
+const LINE_GAP: f32 = 3.0;
+const KINK_LIFT: f32 = 2.0;
 /// The frame snapping apart.
 const SNAP_SECS: f64 = 0.15;
 /// How much of each broken end lights up.
@@ -173,6 +174,28 @@ impl Popup {
         kit::reduced() || self.look.on("reduced-motion")
     }
 
+    /// Where the line under a word on `baseline` runs: `LINE_GAP` under the
+    /// font's descent. The descent is the font's own line height less the
+    /// baseline it sets in that height.
+    fn paths_line_y(&self, baseline: f32, style: &TextStyle) -> f32 {
+        let own = self
+            .measure
+            .fonts()
+            .line_height(style.font, style.size)
+            .unwrap_or(style.line_height);
+        let set = TextStyle {
+            line_height: own,
+            ..*style
+        };
+        let descent = self
+            .measure
+            .layout("H", &set, None)
+            .lines
+            .first()
+            .map_or(0.25 * style.size, |x| own - x.baseline);
+        baseline + descent + LINE_GAP
+    }
+
     /// The shown words laid out as the live text in `text` lays them out.
     fn paths_laid(&self, text: &PathsText) -> Vec<Laid> {
         let style = text.style;
@@ -239,7 +262,7 @@ impl Popup {
             c.clear();
         }
         let word = WordOutline::new(self.measure.fonts(), &w.shaped, size, Point::ZERO);
-        let y = w.baseline + LINE_DROP;
+        let y = self.paths_line_y(w.baseline, style);
         let from = match source {
             Source::Dot => MorphFrom::Blob {
                 centre: Point::new(0.5 * (w.x.0 + w.x.1), w.baseline - 0.3 * size),
@@ -400,7 +423,7 @@ impl Popup {
                 .first()
                 .map_or(style.size, |x| x.baseline)
         });
-        let y = baseline + LINE_DROP;
+        let y = self.paths_line_y(baseline, style);
         let first = laid
             .first()
             .filter(|_| self.cut == 0)
@@ -444,14 +467,14 @@ impl Popup {
                         &pen,
                     ),
                     Some((x0, x1, k)) => {
-                        let lift = LINE_DROP * k;
+                        let lift = KINK_LIFT * k;
                         let shoulder = 8.0f32;
                         let (a, b) = ((x0 - shoulder).max(0.0), (x1 + shoulder).min(w));
                         p.stroke(
                             &Contour::polyline(&[Point::new(0.0, y), Point::new(a, y)], false),
                             &pen,
                         );
-                        // The kink: smooth shoulders up to the baseline under the word.
+                        // The kink: smooth shoulders up towards the word.
                         let mut pts = Vec::new();
                         let n = 24;
                         for i in 0..=n {

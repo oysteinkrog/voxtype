@@ -25,6 +25,22 @@
 //! marker blinks at 1 Hz. The glow and the blink are ambient loops stepped
 //! at 15 a second; all three stop under reduced motion and leave the view
 //! as the popup closes. None of them is near the transcript.
+//!
+//! Round 2 (R2-18) adds three opt-in features:
+//!
+//! - `typewriter-echo`: a mirrored, squashed reflection of the newest line
+//!   under it, at most 25 % alpha, wobbling a little, fading out 1.5 s after
+//!   each word. It stays inside the transcript frame. Reduced motion: the
+//!   reflection does not wobble.
+//! - `breathing-text`: a soft pill behind the newest word brightens with
+//!   the voice, and a matching ring round the trace's middle grows with it.
+//!   The word itself never scales. Reduced motion: both hold still at a
+//!   middle brightness.
+//! - `cinematic-rewind`: each word becomes a translucent tile (at most
+//!   30 % alpha) on a strip in the transcript's bottom row; the newest sits
+//!   at the right and older tiles slide left, smaller and fainter, at most
+//!   12. The transcript keeps three lines to make room. Reduced motion: the
+//!   tiles step without sliding.
 
 use super::*;
 
@@ -34,9 +50,8 @@ use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::path::{icons, Contour, Outline, StrokeStyle};
-use vo::scene::roll::digit_roll;
 use vo::scene::taffy;
-use vo::scene::taffy::prelude::{auto, length};
+use vo::scene::taffy::prelude::{auto, length, AlignItems};
 use vo::scene::{Loop, LoopProp};
 
 const BG: u32 = 0x04100b;
@@ -67,6 +82,8 @@ const SCALE_W: f32 = 60.0;
 const READ: (f32, f32, f32, f32) = (745.0, 58.0, 155.0, 230.0);
 const TRANS: (f32, f32, f32, f32) = (13.0, 300.0, 887.0, 255.0);
 const INNER: (f32, f32, f32, f32) = (20.0, 336.0, 873.0, 210.0);
+/// The transcript box's corner brackets' arm length, in concept px.
+const BRACKET_ARM: f32 = 6.0;
 const STATUS_Y: f32 = 573.0;
 
 const TEXT_PX: f32 = 28.0 * S;
@@ -75,6 +92,35 @@ const TEXT_X: f32 = 50.0 * S;
 const TEXT_TOP: f32 = 350.0 * S;
 const WRAP: f32 = 800.0 * S;
 pub(crate) const MAX_LINES: u32 = 4;
+
+/// The transcript lines `look` shows: one fewer with the tile strip
+/// (R2-18-c) in the bottom row.
+pub(crate) fn max_lines(look: &Look) -> u32 {
+    if look.on(CINEMATIC_REWIND) {
+        MAX_LINES - 1
+    } else {
+        MAX_LINES
+    }
+}
+
+/// R2-18-a: the reflection's alpha, squash, wobble in pixels and life.
+pub(crate) const TYPEWRITER_ECHO: &str = "typewriter-echo";
+const ECHO_ALPHA: f32 = 0.25;
+const ECHO_SQUASH: f32 = 0.5;
+const ECHO_WOBBLE: f32 = 1.2;
+const ECHO_SECS: f64 = 1.5;
+/// R2-18-b: the pill's padding and alpha range, and the trace ring's reach.
+pub(crate) const BREATHING_TEXT: &str = "breathing-text";
+const PILL_PAD: f32 = 4.0;
+const PILL_ALPHA: f32 = 0.35;
+const HALO_R: f32 = 30.0;
+const HALO_REACH: f32 = 60.0;
+/// R2-18-c: tiles kept, their alpha at the front, and how much each older
+/// tile shrinks.
+pub(crate) const CINEMATIC_REWIND: &str = "cinematic-rewind";
+const TILES: usize = 12;
+const TILE_ALPHA: f32 = 0.3;
+const TILE_SHRINK: f32 = 0.9;
 
 /// Seconds of audio across the graticule.
 const WINDOW: f64 = 2.6;
@@ -147,6 +193,11 @@ const GLOW_PERIOD: f64 = 4.0;
 const TRIGGER_DIM: f32 = 0.35;
 /// m18: the idle loops' pace, the slow-loop cap of MOTION-PLAN rule 8.
 const IDLE_FPS: f64 = 15.0;
+/// The frame pace while the popup records room tone (RD-11, ddyi): the
+/// room-tone trace is fresh carrier noise each frame either way, and the
+/// glow and marker loops are slow, so 10 a second reads the same as 15 and
+/// keeps idle-open under its CPU limit.
+pub(crate) const ROOM_TONE_FPS: f64 = 10.0;
 
 /// MO-63: one word's stretch of trace, frozen when the word came.
 #[derive(Clone, Debug, PartialEq)]
@@ -463,13 +514,15 @@ impl Scene {
             ShapeInstance::rrect(RRect::new(inner, 2.0), Paint::solid(hex(BG).fade(0.6)))
                 .with_stroke(Paint::solid(hex(FRAME).fade(0.8)), 1.0),
         );
-        // Corner brackets in the transcript box.
+        // Corner brackets in the transcript box, their arms short enough
+        // that the bottom-left one ends well before the lattice's first
+        // pause label on the fourth line.
         for c in vo::scene::path::make::brackets(
             inner.x + 7.0 * S,
             inner.y + 7.0 * S,
             inner.w - 14.0 * S,
             inner.h - 14.0 * S,
-            10.0 * S,
+            BRACKET_ARM * S,
         ) {
             p.stroke(&c, &StrokeStyle::solid(1.4, hex(TEXT)));
         }
@@ -895,7 +948,7 @@ impl Popup {
         let o = MARGIN;
         let style = l.text_style();
         let all = self.text_lines(&style, WRAP);
-        let lines = &all[all.len().saturating_sub(MAX_LINES as usize)..];
+        let lines = &all[all.len().saturating_sub(max_lines(l) as usize)..];
         let editing = self.edit_view.as_ref();
         // A line is keyed by its first word, while editing too, so a line
         // keeps its node as the edit starts and ends and as the window
@@ -969,6 +1022,7 @@ impl Popup {
             .presence(Transition::fade(), Transition::fade().scale(0.98))
             .child(canvas)
             .children(self.scope_idle(o))
+            .children(self.scope_round2(o, lines, &style))
             .child(label("title".into(), "VOICE DICTATION".into(), bold(14.0 * S * 1.15), hex(TEXT), 61.0, 15.0))
             .child(
                 label(
@@ -1001,7 +1055,7 @@ impl Popup {
         };
         let value = |key: &'static str, text: String, py: f32| {
             at(
-                digit_roll(key, &text, mono(17.0 * S * 1.25), hex(VALUE), roll),
+                readout_roll(key, &text, mono(17.0 * S * 1.25), hex(VALUE), roll),
                 o + 760.0 * S,
                 o + py * S,
             )
@@ -1165,6 +1219,337 @@ impl Popup {
     }
 }
 
+/// The ten digits, one a line, for a rolling digit's column.
+const DIGIT_COLUMN: &str = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9";
+
+/// `vo::scene::roll::digit_roll` as Scope's readouts use it, with each
+/// digit column drawn as one ten-line label instead of ten labels. It looks
+/// the same with a quarter of the nodes. The readouts were 90 of the view's
+/// 130 nodes, and the view is built and matched again for every audio batch.
+fn readout_roll(
+    key: &str,
+    text: &str,
+    style: TextStyle,
+    color: Color,
+    spring: Spring,
+) -> Element<Msg> {
+    let lh = style.line_height;
+    let n = text.chars().count();
+    let cells = text.chars().enumerate().map(|(i, c)| {
+        // Keyed by place from the right, and a column by the text to its
+        // left, so a carry rolls a new column in from below.
+        let place = n - 1 - i;
+        match c.to_digit(10) {
+            Some(d) => {
+                let prefix: String = text.chars().take(i).collect();
+                let digits = Element::column(format!("{key}-c{place}-{prefix}"))
+                    .height(10.0 * lh)
+                    .shrink(0.0)
+                    .child(
+                        Element::label(format!("{key}-c{place}-{prefix}-n"), DIGIT_COLUMN)
+                            .text_style(style)
+                            .color(color)
+                            .height(10.0 * lh)
+                            .shrink(0.0),
+                    )
+                    .offset(0.0, -(d as f32) * lh)
+                    .motion(Prop::Offset, spring)
+                    .presence(
+                        Transition::NONE.offset(0.0, lh),
+                        Transition::NONE
+                            .offset(0.0, -(d as f32 + 1.0) * lh)
+                            .opacity(0.0),
+                    )
+                    .motion(Prop::Opacity, Spring::SNAP);
+                Element::layer(format!("{key}-d{place}"))
+                    .height(lh)
+                    .align_items(AlignItems::FLEX_START)
+                    .fade_edges(0.0, 0.2 * lh, 0.0, 0.2 * lh)
+                    .child(digits)
+            }
+            // A space has no ink, so it gets the width text layout would give it.
+            None if c.is_whitespace() => Element::row(format!("{key}-s{place}"))
+                .width(0.26 * style.size)
+                .height(lh),
+            None => Element::label(format!("{key}-s{place}"), c.to_string())
+                .text_style(style)
+                .color(color)
+                .height(lh),
+        }
+    });
+    Element::row(key.to_string()).children(cells)
+}
+
+/// R2-18-a: the reflection's alpha `age` seconds after the newest word
+/// came: full at once, nothing from `ECHO_SECS` on.
+fn echo_alpha(age: f64) -> f32 {
+    if !(0.0..ECHO_SECS).contains(&age) {
+        return 0.0;
+    }
+    ECHO_ALPHA * (1.0 - (age / ECHO_SECS) as f32).powf(1.5)
+}
+
+/// R2-18-a: where the reflection of a line whose top is at `line_top`
+/// hangs, as its mirror axis and the box it is clipped to, inside `inner`.
+/// Just under the descenders on its own; with the lattice, under the
+/// newest line's gutter, so it never shares space with a strand or a
+/// pause label. `None` when no room is left above the frame.
+fn echo_band(line_top: f32, inner: Rect, lattice: bool) -> Option<(f32, Rect)> {
+    let top = if lattice {
+        line_top + LINE + LATTICE_GUTTER + 1.0
+    } else {
+        inner.y
+    };
+    let axis = if lattice { top } else { line_top + LINE * 0.95 };
+    let bottom = inner.y + inner.h;
+    (bottom - axis > 2.0).then(|| (axis, Rect::new(inner.x, top, inner.w, bottom - top)))
+}
+
+/// R2-18-c: the tile scales and their centres' x, newest first, for tiles
+/// of `widths` (newest first) whose newest right edge is at `right`.
+fn tile_slots(widths: &[f32], right: f32, gap: f32) -> Vec<(f32, f32)> {
+    let mut x = right;
+    widths
+        .iter()
+        .take(TILES)
+        .enumerate()
+        .map(|(i, w)| {
+            let s = TILE_SHRINK.powi(i as i32);
+            let c = x - 0.5 * w * s;
+            x -= w * s + gap * s;
+            (s, c)
+        })
+        .collect()
+}
+
+/// R2-18: the voice level at scene time `t` from `levels`, newest at
+/// `newest_at`, smoothed over a quarter second, 0 to 1.
+fn voice_at(levels: &[f32], newest_at: f64, t: f64) -> f32 {
+    let n = levels.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let at = |back: f64| {
+        let i = (n - 1) as f64 - ((newest_at - t).max(0.0) + back) * FRAME_HZ as f64;
+        if i < 0.0 {
+            0.0
+        } else {
+            levels[(i.round() as usize).min(n - 1)]
+        }
+    };
+    let mean = (0..5).map(|j| at(j as f64 * 0.05)).sum::<f32>() / 5.0;
+    (mean * 4.0).min(1.0)
+}
+
+impl Popup {
+    /// R2-18: the round 2 features that are on, over the frames and under
+    /// the text. `lines` are the window's lines.
+    fn scope_round2(
+        &self,
+        o: f32,
+        lines: &[(Vec<Word>, f32)],
+        style: &TextStyle,
+    ) -> Vec<Element<Msg>> {
+        let l = &self.look;
+        let still = reduced() || l.on("reduced-motion");
+        let mode = self.scope.mode.unwrap_or(Mode::Loading);
+        let listening = mode == Mode::Listening;
+        let mut out = Vec::new();
+        let Some((newest, _)) = lines.last() else {
+            return out;
+        };
+        let row = lines.len() - 1;
+        let line_at = Point::new(o + TEXT_X, o + TEXT_TOP + row as f32 * LINE);
+        let born = |w: &Word| self.heard.word(w.id).map(|h| h.born);
+        let inner = scaled(INNER);
+        let inner = Rect::new(o + inner.x, o + inner.y, inner.w, inner.h);
+
+        let band = echo_band(line_at.y, inner, l.on(wild_space::KINETIC_LATTICE));
+        if l.on(TYPEWRITER_ECHO) && listening && !newest.is_empty() {
+            if let (Some(at), Some((axis, clip))) = (newest.last().and_then(born), band) {
+                let text = newest
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let shaped = self.measure.layout(&text, style, None);
+                let outline = vo::scene::glyph_morph::WordOutline::new(
+                    self.measure.fonts(),
+                    &shaped,
+                    style.size,
+                    Point::ZERO,
+                );
+                let glyphs: Arc<[(f32, Vec<Contour>)]> = outline
+                    .glyphs
+                    .iter()
+                    .map(|g| (g.pos.x, g.outline.contours.clone()))
+                    .collect();
+                // The line mirrors just under its descenders, and hangs from `axis`.
+                let (x0, y0) = (clip.x, clip.y);
+                let canvas = Element::canvas("echo", at + ECHO_SECS, move |t, _r, p| {
+                    let a = echo_alpha(t - at);
+                    if a <= 0.0 {
+                        return;
+                    }
+                    for (gx, contours) in glyphs.iter() {
+                        let dx = if still {
+                            0.0
+                        } else {
+                            ECHO_WOBBLE
+                                * (std::f32::consts::TAU * (0.9 * t as f32 + gx * 0.02)).sin()
+                        };
+                        // Mirror at the axis, squashed, in the clip box's space.
+                        let flip = Affine::translate(0.0, -LINE * 0.95)
+                            .then(&Affine {
+                                a: 1.0,
+                                b: 0.0,
+                                c: 0.0,
+                                d: -ECHO_SQUASH,
+                                e: 0.0,
+                                f: 0.0,
+                            })
+                            .then(&Affine::translate(line_at.x + dx - x0, axis - y0));
+                        let mirrored: Vec<Contour> =
+                            contours.iter().map(|c| c.transform(&flip)).collect();
+                        p.fill(&mirrored, &StrokeStyle::solid(1.0, hex(TEXT).fade(a)));
+                    }
+                });
+                out.push(at_clip("echo-clip", clip, canvas));
+            }
+        }
+
+        if l.on(BREATHING_TEXT) && listening {
+            let boxes = sounding::word_boxes(&self.measure, newest, style, Some(WRAP)).0;
+            let pill = boxes.last().map(|b| {
+                Rect::new(
+                    line_at.x + b.rect.x - PILL_PAD,
+                    line_at.y + b.rect.y + 0.1 * b.rect.h,
+                    b.rect.w + 2.0 * PILL_PAD,
+                    0.8 * b.rect.h,
+                )
+            });
+            let (levels, newest_at) = (self.wave.clone(), self.newest_at);
+            let g = graticule();
+            let centre = Point::new(o + g.x + 0.5 * g.w, o + g.y + 0.5 * (g.h - STRIP_H * S));
+            let canvas = Element::canvas("breath", f64::INFINITY, move |t, _r, p| {
+                let v = if still {
+                    0.5
+                } else {
+                    voice_at(&levels, newest_at, t)
+                };
+                if let Some(r) = pill {
+                    p.shape(
+                        ShapeInstance::rrect(
+                            RRect::new(r, 0.5 * r.h),
+                            Paint::glow(hex(TRACE).fade(PILL_ALPHA * (0.3 + 0.7 * v)), 8.0, 0.8),
+                        )
+                        .with_stroke(
+                            Paint::solid(hex(TRACE).fade(0.5 * PILL_ALPHA * (0.4 + 0.6 * v))),
+                            1.0,
+                        ),
+                    );
+                }
+                let rad = HALO_R + HALO_REACH * v;
+                let pts: Vec<Point> = (0..=72)
+                    .map(|j| {
+                        let u = std::f32::consts::TAU * j as f32 / 72.0;
+                        Point::new(centre.x + rad * u.cos(), centre.y + 0.55 * rad * u.sin())
+                    })
+                    .collect();
+                p.stroke(
+                    &Contour::polyline(&pts, true),
+                    &StrokeStyle::solid(1.0, hex(TRACE).fade(0.12 + 0.18 * v)).glow(4.0),
+                );
+            })
+            .size(W + 2.0 * MARGIN, H + 2.0 * MARGIN);
+            out.push(at(canvas, 0.0, 0.0));
+        }
+
+        if l.on(CINEMATIC_REWIND) {
+            out.push(self.scope_tiles(o, still));
+        }
+        out
+    }
+
+    /// R2-18-c: the tile strip in the transcript's bottom row.
+    fn scope_tiles(&self, o: f32, still: bool) -> Element<Msg> {
+        let f = fonts(&self.look.fonts);
+        let style = TextStyle::new(f.mono, TEXT_PX * 0.7, LINE * 0.6);
+        let h = LINE * 0.6;
+        let from = self.shown.len().saturating_sub(TILES);
+        let words: Vec<&Word> = self.shown[from..].iter().rev().collect();
+        let widths: Vec<f32> = words
+            .iter()
+            .map(|w| self.measure.layout(&w.text, &style, None).size.w.ceil() + 12.0)
+            .collect();
+        let row_top = TEXT_TOP + (MAX_LINES - 1) as f32 * LINE;
+        // Low in the row, under the reflection and the marks of the line
+        // above it.
+        let strip = Rect::new(
+            o + TEXT_X - 6.0,
+            o + row_top + 0.4 * LINE,
+            WRAP + 12.0,
+            h + 4.0,
+        );
+        let slots = tile_slots(&widths, strip.w - 2.0, 6.0);
+        // A new tile slides in from the right as the older ones make room,
+        // on the same spring, so no two ever cross.
+        let glide: Motion = if still {
+            Motion::Snap
+        } else {
+            Spring::critical_to_98(0.2).into()
+        };
+        let mut layer = at(Element::layer("tiles"), strip.x, strip.y)
+            .size(strip.w, strip.h)
+            .clip();
+        for (i, (w, (s, c))) in words.iter().zip(slots).enumerate() {
+            let width = widths[i];
+            let a = TILE_ALPHA * (1.0 - i as f32 / TILES as f32);
+            let tile = Element::layer(format!("tile-{}", w.id))
+                .size(width, h)
+                .child(
+                    at(Element::shape("bg", ShapeKind::RRect), 0.0, 0.0)
+                        .size(width, h)
+                        .fill(hex(PANEL).fade(0.0))
+                        .border(hex(TRACE).fade(a), 1.0)
+                        .radius(3.0),
+                )
+                .child(at(
+                    Element::label("w", w.text.as_str())
+                        .text_style(style)
+                        .color(hex(TEXT).fade(a * 1.6))
+                        .width(width - 12.0),
+                    6.0,
+                    0.5 * (h - style.line_height),
+                ));
+            layer = layer.child(
+                at(tile, c - 0.5 * width, 2.0)
+                    .scale(s)
+                    .motion(Prop::Position, glide)
+                    .motion(Prop::Scale, glide)
+                    .motion(Prop::Offset, glide)
+                    .motion(Prop::Opacity, Spring::critical_to_98(0.3))
+                    .presence(
+                        if still {
+                            Transition::fade()
+                        } else {
+                            Transition::fade().offset(width + 6.0, 0.0)
+                        },
+                        Transition::fade(),
+                    ),
+            );
+        }
+        layer
+    }
+}
+
+/// `e` drawn in a clip box at `r`, `e` sized to the box.
+fn at_clip(key: &'static str, r: Rect, e: Element<Msg>) -> Element<Msg> {
+    at(Element::layer(key), r.x, r.y)
+        .size(r.w, r.h)
+        .clip()
+        .child(at(e.size(r.w, r.h), 0.0, 0.0))
+}
 /// Scope's edit adapter (plan section 4.5): one node per line at its row,
 /// the block caret, and the audio marks under the newest line off.
 pub(crate) struct ScopeSite;
@@ -1197,6 +1582,60 @@ impl edit_site::EditSite for ScopeSite {
 mod sentence_tests {
     use super::*;
 
+    #[test]
+    fn the_echo_fades_out_1_5_s_after_the_word_at_most_25_percent() {
+        assert_eq!(echo_alpha(-0.01), 0.0);
+        assert_eq!(echo_alpha(0.0), ECHO_ALPHA);
+        assert!(echo_alpha(1.0) > 0.0 && echo_alpha(1.0) < ECHO_ALPHA);
+        assert_eq!(echo_alpha(ECHO_SECS), 0.0);
+    }
+
+    #[test]
+    fn with_the_lattice_the_echo_hangs_under_the_pause_labels_or_not_at_all() {
+        let inner = scaled(INNER);
+        for row in 0..MAX_LINES {
+            let top = TEXT_TOP + row as f32 * LINE;
+            // The lattice's newest strip, labels included, ends here.
+            let lattice_bottom = top + LINE + LATTICE_GUTTER;
+            match echo_band(top, inner, true) {
+                Some((axis, clip)) => {
+                    assert!(clip.y > lattice_bottom && axis >= clip.y, "row {row}");
+                    assert!(clip.y + clip.h <= inner.y + inner.h, "row {row}");
+                }
+                None => assert_eq!(row, MAX_LINES - 1, "only the last row has no room"),
+            }
+            let (axis, clip) = echo_band(top, inner, false).expect("room without the lattice");
+            assert_eq!((axis, clip), (top + LINE * 0.95, inner), "row {row}");
+        }
+    }
+
+    #[test]
+    fn at_most_12_tiles_each_smaller_and_none_overlapping() {
+        let widths = vec![40.0; 20];
+        let slots = tile_slots(&widths, 600.0, 6.0);
+        assert_eq!(slots.len(), TILES);
+        assert_eq!(slots[0].0, 1.0);
+        for w in slots.windows(2) {
+            let ((s0, c0), (s1, c1)) = (w[0], w[1]);
+            assert!(s1 < s0);
+            assert!(c1 + 0.5 * 40.0 * s1 < c0 - 0.5 * 40.0 * s0, "{w:?}");
+        }
+        assert!((slots[0].1 + 20.0 - 600.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_tile_strip_takes_the_bottom_row() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Scope,
+            ..OsdConfig::default()
+        };
+        let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        assert_eq!(max_lines(&look), MAX_LINES);
+        look.features = [CINEMATIC_REWIND].iter().map(|f| f.to_string()).collect();
+        assert_eq!(max_lines(&look), MAX_LINES - 1);
+    }
     #[test]
     fn landed_words_pack_from_the_right_without_overlap() {
         let widths = [20.0, 8.0, 30.0];

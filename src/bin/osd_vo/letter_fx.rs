@@ -235,6 +235,7 @@ impl Popup {
         let letter_ink = match l.theme {
             OsdTheme::Hologram => super::hologram::text_color(),
             OsdTheme::Chrome => super::chrome::text_color(),
+            OsdTheme::Aurora => super::aurora::text_color(),
             _ => l.foreground,
         };
         let reduced = self.letter_fx_reduced();
@@ -271,6 +272,21 @@ impl Popup {
             // but casts no letters, or it would show the old text as a ghost.
             let all: Vec<FxGlyph> = if leaving {
                 Vec::new()
+            } else if l.theme == OsdTheme::Glass && l.on(super::wild_space::DEPTH_STACK) {
+                // Glass: the stack's reading line where the stack draws it,
+                // or the flat text once the stack gives way to it.
+                match self.glass_reading_line() {
+                    Some((line, left, at)) => self
+                        .letter_fx_laid(&line, &left, width, breath.as_ref())
+                        .glyphs
+                        .iter()
+                        .map(|g| {
+                            let pos = Point::new(g.pos.x + at.x, g.pos.y + at.y);
+                            FxGlyph::new(g.font, g.glyph, pos, left.size, letter_ink, 0.0)
+                        })
+                        .collect(),
+                    None => laid.glyphs.iter().map(|g| glyph(g, 0.0)).collect(),
+                }
             } else if l.on(super::wild_space::DEPTH_STACK) {
                 // Under a depth stack only the reading line lies on the
                 // panel, in the box's last row; the older lines sit on
@@ -299,6 +315,7 @@ impl Popup {
             let light = match l.theme {
                 OsdTheme::Glass => super::glass::letter_light(),
                 OsdTheme::Orb => super::orb::letter_light(),
+                OsdTheme::Aurora => super::aurora::letter_light(),
                 _ => Light {
                     accent: l.accent,
                     ..Light::default()

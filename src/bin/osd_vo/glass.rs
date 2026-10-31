@@ -18,6 +18,7 @@ use super::kit::{at, ease_out, glass_reflection, hex, mix, Levels, Mode};
 use super::*;
 
 use vo::scene::canvas::Painter;
+use vo::scene::depth_stack::DepthStack;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::glass::Glass;
@@ -649,9 +650,31 @@ impl Popup {
         ))
     }
 
+    /// Where the depth stack draws its reading line, for the effects under
+    /// the letters: its words, its style, and the top left of its live text
+    /// in the stack's text column (as `depth_stack_lines` places it on the
+    /// newest sheet). `None` while the stack is not drawn.
+    pub(crate) fn glass_reading_line(&self) -> Option<(Vec<Word>, TextStyle, Point)> {
+        if !self.glass_stacking(self.kit_mode()) {
+            return None;
+        }
+        let l = &self.look;
+        let (style, tw, k) = (left_style(l), text_width(l), scale(l));
+        let span = stack_span(l);
+        let rows = self.lines.clamp(1, MAX_LINES) as f32;
+        let (words, width) = self.text_lines(&style, tw).pop()?;
+        let sheet_w = (span * 0.84).min(span - 24.0 * k);
+        let lw = width.ceil() + 2.0;
+        let x = (tw - sheet_w) / 2.0 + ((sheet_w - lw) / 2.0).max(0.0);
+        // The newest sheet, line height plus 8 px, sits at the stack's
+        // foot; its line is 4 px into it.
+        let y = (rows - 1.0) * style.line_height - 4.0 * k;
+        Some((words, style, Point::new(x, y)))
+    }
+
     /// MO-86: the depth stack draws the words while they are spoken and
     /// made final; the hand-off, a cancel and an edit take the flat text.
-    fn glass_stacking(&self, mode: Mode) -> bool {
+    pub(crate) fn glass_stacking(&self, mode: Mode) -> bool {
         self.look.on(wild_space::DEPTH_STACK)
             && matches!(mode, Mode::Listening | Mode::Finishing)
             && self.delivered().is_none()
@@ -667,7 +690,7 @@ impl Popup {
         let rows = self.lines.clamp(1, MAX_LINES);
         let lines = self.text_lines(&style, tw);
         let skip = lines.len().saturating_sub(rows as usize);
-        let stack = self.depth_stack_lines(
+        let stack = self.depth_stack_lines_tuned(
             &lines[skip..],
             span,
             rows,
@@ -692,13 +715,26 @@ impl Popup {
                 self.signal_marks_in(line, words, &tail, (0.0, 0.0), hex(INK))
             },
             self.glass.hold.as_ref(),
+            // Each older line a full line pitch above the next, at the same
+            // pitch all the way back: the shared stack's 0.82 pitch and
+            // shrinking parallax set the receding lines' text on top of
+            // each other.
+            &|s: &mut DepthStack| {
+                s.step_rise = style.line_height;
+                s.parallax = vec![1.0];
+            },
         );
         // The stack is wider than the text by its sheets' margin; centre
-        // it on the text so the sheets line up with the text box.
-        let text = Element::column("text")
-            .width(tw)
-            .height(rows as f32 * TEXT_LINE * k)
-            .child(at(stack, (tw - span) / 2.0, 0.0));
+        // it on the text so the sheets line up with the text box. The stack
+        // places itself in a box `span` wide (`at` inside), so it goes in a
+        // box of that width: placing it directly would drop that offset and
+        // push the reading band left by half the margin.
+        let rows_h = rows as f32 * TEXT_LINE * k;
+        let text = Element::column("text").width(tw).height(rows_h).child(at(
+            Element::column("stack-box").size(span, rows_h).child(stack),
+            (tw - span) / 2.0,
+            0.0,
+        ));
         self.letter_fx_layers(text, tw)
     }
 
@@ -830,14 +866,20 @@ impl Popup {
                     .margin_edges(0.0, 0.0, 0.0, 8.0 * k),
             )
             .child(
-                Element::live_text("detail", &words)
+                // Keyed by state: a new state's detail replaces the old one
+                // at once, so the old words never linger beside the new ones
+                // ("Done  ·  19 words left").
+                Element::live_text(format!("detail-{state}"), &words)
+                    .presence(Transition::NONE, Transition::fade())
                     .text_style(hint)
                     .color(detail_c)
                     .height(STATUS_H * k)
                     .margin_edges(0.0, 0.0, 0.0, 3.0 * k)
                     .shrink(1.0)
                     .min_width(0.0)
-                    .motion(Prop::Opacity, Spring::critical_to_98(0.12))
+                    // The old state's detail goes in the frame the new one
+                    // shows; the new words fade in on their own.
+                    .motion(Prop::Opacity, Motion::Snap)
                     .word_enter(Transition::fade())
                     .word_change(Transition::fade().opacity(0.2)),
             );

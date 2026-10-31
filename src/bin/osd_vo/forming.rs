@@ -239,6 +239,7 @@ impl Popup {
             OsdTheme::Particles => Some(text.style.size * 0.8),
             OsdTheme::Mecha => Some(text.style.size * 0.6),
             OsdTheme::Synthwave => Some(text.style.size * 0.8),
+            OsdTheme::Aurora | OsdTheme::Biolume => Some(text.style.size * 0.6),
             _ => None,
         };
         let landing = reach.map(|reach| {
@@ -375,7 +376,10 @@ impl Popup {
             .motion(Prop::Size, Motion::Snap)
             .motion(Prop::Position, Motion::Snap)
             .motion(Prop::Opacity, Motion::Snap)
-            .presence(Transition::NONE, Transition::NONE);
+            // A cue that goes leaves in that frame (a fade with a snapped
+            // opacity). With no exit transition the old cue stayed drawn for
+            // a while, a second bar over the words behind the new one.
+            .presence(Transition::NONE, Transition::fade());
         Some(kit::at(e, origin.0 + x, origin.1 + y))
     }
 

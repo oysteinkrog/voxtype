@@ -530,10 +530,42 @@ impl Popup {
         marks: &LineMarks,
         hold: Option<&Hold>,
     ) -> Element<Msg> {
+        self.depth_stack_lines_tuned(
+            lines,
+            w,
+            rows,
+            style,
+            k,
+            text,
+            glow,
+            newest,
+            marks,
+            hold,
+            &|_| {},
+        )
+    }
+
+    /// [`Popup::depth_stack_lines`] with `tune` changing the stack's steps
+    /// first, for a look whose lines need other spacing.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn depth_stack_lines_tuned(
+        &self,
+        lines: &[(Vec<Word>, f32)],
+        w: f32,
+        rows: u32,
+        style: TextStyle,
+        k: f32,
+        text: Color,
+        glow: Color,
+        newest: &dyn Fn(Element<Msg>) -> Element<Msg>,
+        marks: &LineMarks,
+        hold: Option<&Hold>,
+        tune: &dyn Fn(&mut DepthStack),
+    ) -> Element<Msg> {
         let reduced = self.wild_reduced();
         let line_h = style.line_height;
         let sheet = Size::new((w * 0.84).min(w - 24.0 * k), line_h + 8.0 * k);
-        let stack = DepthStack {
+        let mut stack = DepthStack {
             step_z: 90.0 * k,
             step_rise: line_h * 0.82,
             step_x: 12.0 * k,
@@ -546,6 +578,7 @@ impl Popup {
             }),
             ..DepthStack::default()
         };
+        tune(&mut stack);
         let keyed: Vec<(vo::scene::Key, &(Vec<Word>, f32))> = lines
             .iter()
             .map(|l| {

@@ -19,6 +19,14 @@
 //!   (`Element::word_fonts_in_place`), so the breath changes how the letters
 //!   are drawn and never moves a word or a line break.
 //!
+//! - `letter-tumble`, `italic-arrival`, `line-wave` (EG-16), from
+//!   `vo::scene::flow::letter_motion`: a copy of each new letter tumbles in
+//!   and lands on it within 0.35 s while the letter itself stands readable;
+//!   a new word arrives leaning 5 degrees and straightens in 0.2 s; the
+//!   older lines ride a 3 px wave while the newest line holds still. The
+//!   fourth, `digit-lean`, leans a counter's digits with the pace; its
+//!   station exhibit draws the counter.
+//!
 //! Each is a motion feature (`--motion`, `VOXTYPE_OSD_VO_MOTION`), off by
 //! default. A look takes part by passing its transcript through
 //! [`WildMotion::wild_motion`] last in its builder chain. Under
@@ -27,6 +35,7 @@
 
 use super::*;
 
+use vo::scene::flow::letter_motion::LetterMotions;
 pub(crate) use vo::scene::flow::letter_physics::LetterPhysics;
 use vo::scene::flow::magnet::Magnet;
 use vo::scene::flow::Caret;
@@ -42,6 +51,10 @@ use super::kit::at;
 pub(crate) const LETTER_PHYSICS: &str = "letter-physics";
 pub(crate) const MAGNETIC_CARET: &str = "magnetic-caret";
 pub(crate) const VARIABLE_BREATH: &str = "variable-breath";
+pub(crate) const LETTER_TUMBLE: &str = "letter-tumble";
+pub(crate) const ITALIC_ARRIVAL: &str = "italic-arrival";
+pub(crate) const LINE_WAVE: &str = "line-wave";
+pub(crate) const DIGIT_LEAN: &str = "digit-lean";
 
 /// How much of the live voice the newest word takes over its own reading.
 const BREATH: f32 = 0.6;
@@ -80,6 +93,14 @@ impl<M> WildMotion for Element<M> {
         }
         if physics && !reduced {
             words = words.letter_physics(letters);
+        }
+        let per_letter = LetterMotions {
+            tumble: look.on(LETTER_TUMBLE),
+            italic: look.on(ITALIC_ARRIVAL),
+            wave: look.on(LINE_WAVE),
+        };
+        if per_letter.any() && !reduced {
+            words = words.letter_motion(per_letter);
         }
         if magnet {
             words = words

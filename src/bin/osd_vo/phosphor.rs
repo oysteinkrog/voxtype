@@ -32,6 +32,22 @@
 //! stop once the popup closes, and under reduced motion the caret stays
 //! solid and nothing rolls or flickers.
 //!
+//! Round 2 (R2-06) adds three opt-in features:
+//!
+//! - `liquid-surface`: the block meter becomes a smooth wave of light that
+//!   flows across its band, its height from the voice, with at most 24
+//!   faint particles riding it. Reduced motion: the wave line only, still,
+//!   its height from the voice.
+//! - `falling-letters`: when a word comes, faint copies of its letters
+//!   (20 % alpha) fall 12 px into place over 250 ms with a short glow trail.
+//!   They show only in the leading above the word and vanish at the top of
+//!   its letters, so nothing is drawn on the word itself. Reduced motion:
+//!   none.
+//! - `breathing-halo`: a soft arc of light rises behind the top of the text
+//!   while you speak, like a slow sunrise, growing and brightening with the
+//!   voice (800 ms release) and settling in a pause. It stays above the
+//!   first line. Reduced motion: it brightens but does not grow.
+//!
 //! Geometry is laid out in the pixels of the concept image and scaled so the
 //! screen is as wide as the popup.
 
@@ -42,7 +58,7 @@ use std::sync::OnceLock;
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
-use vo::scene::path::{icons, make, Outline, StrokeStyle};
+use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 
 use super::glyph_paths::{BrokenPen, PathsText};
 use vo::scene::roll::digit_roll;
@@ -98,6 +114,28 @@ const ROLL_ALPHA: f32 = 0.06;
 const NOISE_FPS: f64 = 12.0;
 const NOISE_SPECKS: u32 = 40;
 const NOISE_ALPHA: f32 = 0.02;
+/// R2-06-a: the wave's sample points and the particles riding it, their
+/// alpha, and how fast the wave flows (radians a second).
+pub(crate) const LIQUID_SURFACE: &str = "liquid-surface";
+const WAVE_POINTS: usize = 96;
+const WAVE_DOTS: u32 = 24;
+const WAVE_DOT_ALPHA: f32 = 0.45;
+const WAVE_FLOW: f32 = 1.6;
+/// R2-06-b: how far the copies fall, in logical pixels, for how long, and
+/// their alpha.
+pub(crate) const FALLING_LETTERS: &str = "falling-letters";
+const FALL_PX: f32 = 12.0;
+const FALL_SECS: f64 = 0.25;
+const FALL_ALPHA: f32 = 0.2;
+/// R2-06-c: the halo's release, its alpha at full voice, its half width at
+/// rest and at full voice in concept pixels, and its height as a share of
+/// the band between the header rule and the text.
+pub(crate) const BREATHING_HALO: &str = "breathing-halo";
+const HALO_RELEASE: f32 = 0.8;
+const HALO_ALPHA: f32 = 0.22;
+const HALO_RX: (f32, f32) = (110.0, 300.0);
+const HALO_RISE: (f32, f32) = (0.3, 0.8);
+
 /// Seconds a revised word stays in reverse video.
 const FLASH_SECS: f64 = 0.35;
 /// The beam: seconds to write a whole word, the head's width in logical
@@ -241,6 +279,9 @@ struct Screen {
     /// The screen's height, and reduced motion (the caret stays solid).
     h: f32,
     still: bool,
+    /// R2-06-a and R2-06-c: the liquid surface and the halo are on.
+    liquid: bool,
+    halo: bool,
 }
 
 /// A number from 0 to 1 that depends only on `n`.
@@ -265,7 +306,121 @@ fn caret_on(idle: f64) -> bool {
     idle < 0.0 || (idle / CARET_BLINK).floor() as i64 % 2 == 0
 }
 
+/// R2-06-c: the voice level with a fast rise and an `HALO_RELEASE` release,
+/// from `level(age)`, the level `age` seconds ago.
+fn released(level: impl Fn(f32) -> f32) -> f32 {
+    (0..48)
+        .map(|i| {
+            let age = i as f32 * 0.05;
+            level(age) * (-age / HALO_RELEASE).exp()
+        })
+        .fold(0.0, f32::max)
+}
+
 impl Screen {
+    /// R2-06-a: the wave's height at `u` across the band (0 to 1), 0 to 1,
+    /// from the level history: newest in the middle, as the meter's columns.
+    fn wave_y(&self, t: f64, u: f32) -> f32 {
+        let d = (2.0 * u - 1.0).abs();
+        // Five taps 80 ms apart, so the wave has no step where the level
+        // history starts.
+        let v = (-2..=2)
+            .map(|j| self.level_at(t, (d * HISTORY_SECS + 0.08 * j as f32).max(0.0)))
+            .sum::<f32>()
+            / 5.0
+            * (1.0 - 0.9 * d.powf(0.8));
+        let v = match self.sink_at {
+            Some(s) => v * (1.0 - ease_out((t - s) / SINK_SECS)),
+            None => v,
+        };
+        let flow = if self.still {
+            0.0
+        } else {
+            WAVE_FLOW * (t - self.shown_at) as f32
+        };
+        let swell = 0.6 + 0.4 * (u * 9.0 - flow).sin();
+        (v * 1.4).min(1.0) * swell
+    }
+
+    /// R2-06-a: the liquid surface in the meter's band: a smooth wave with a
+    /// faint fill under it and particles riding it. Under reduced motion the
+    /// line alone, still.
+    fn draw_liquid(&self, t: f64, p: &mut Painter) {
+        let k = self.k;
+        let (x0, x1) = (PAD_X * k, self.w - PAD_X * k);
+        let base = METER_BASE * k - 3.0 * k;
+        let reach = (METER_BASE - RULE_Y - 16.0) * k;
+        let at = |u: f32| Point::new(x0 + u * (x1 - x0), base - reach * self.wave_y(t, u));
+        let pts: Vec<Point> = (0..=WAVE_POINTS)
+            .map(|i| at(i as f32 / WAVE_POINTS as f32))
+            .collect();
+        if !self.still {
+            let mut fill = pts.clone();
+            fill.push(Point::new(x1, base));
+            fill.push(Point::new(x0, base));
+            p.fill(
+                &[Contour::polyline(&fill, true)],
+                &StrokeStyle::solid(1.0, hex(GREEN, 0.06)),
+            );
+        }
+        let line = Contour::polyline(&pts, false);
+        p.stroke(
+            &line,
+            &StrokeStyle::solid(2.0 * k, hex(GREEN, 0.25)).glow(5.0 * k),
+        );
+        p.stroke(&line, &StrokeStyle::solid(1.2 * k, hex(HOT, 0.85)));
+        if self.still {
+            return;
+        }
+        let s = (t - self.shown_at) as f32;
+        for i in 0..WAVE_DOTS {
+            let u = (noise(i * 31 + 7) + s * (0.015 + 0.02 * noise(i * 17 + 3))).fract();
+            let c = at(u);
+            let lift = (2.0 + 6.0 * noise(i * 13 + 5)) * k;
+            let twinkle = 0.5 + 0.5 * (s * (1.0 + noise(i)) * 3.0 + i as f32).sin();
+            p.shape(ShapeInstance::circle(
+                Point::new(c.x, c.y - lift),
+                0.9 * k,
+                Paint::solid(hex(HOT, WAVE_DOT_ALPHA * twinkle)),
+            ));
+        }
+    }
+
+    /// R2-06-c: the halo: a dome of light on the text's top edge, in the
+    /// band under the header rule, growing and brightening with the voice.
+    /// Under reduced motion it keeps its resting size.
+    fn draw_halo(&self, t: f64, p: &mut Painter) {
+        let k = self.k;
+        let env = released(|age| self.level_at(t, age)).min(1.0);
+        let env = match self.sink_at {
+            Some(s) => env * (1.0 - ease_out((t - s) / SINK_SECS)),
+            None => env,
+        };
+        let grow = if self.still { 0.0 } else { env };
+        let top = (TEXT_TOP - 6.0) * k;
+        let band = top - (RULE_Y + 10.0) * k;
+        let rx = (HALO_RX.0 + (HALO_RX.1 - HALO_RX.0) * grow) * k;
+        let ry = band * (HALO_RISE.0 + (HALO_RISE.1 - HALO_RISE.0) * grow);
+        let c = Point::new(self.w / 2.0, top);
+        let alpha = HALO_ALPHA * (0.15 + 0.85 * env);
+        // A bright rim and two wider, fainter shells just inside it.
+        for (i, (inset, a, wide)) in [(0.0, 1.0, 2.2), (0.06, 0.5, 6.0), (0.14, 0.25, 12.0)]
+            .iter()
+            .enumerate()
+        {
+            let (ax, ay) = (rx * (1.0 - inset), ry * (1.0 - inset));
+            let pts: Vec<Point> = (0..=64)
+                .map(|j| {
+                    let a = std::f32::consts::PI * (1.0 + j as f32 / 64.0);
+                    Point::new(c.x + ax * a.cos(), c.y + ay * a.sin())
+                })
+                .collect();
+            let style =
+                StrokeStyle::solid(wide * k, hex(if i == 0 { HOT } else { GREEN }, alpha * a));
+            p.stroke(&Contour::polyline(&pts, false), &style.glow(8.0 * k));
+        }
+    }
+
     /// 5ti: the static and the rolling scanline, under everything else and
     /// clear of the newest line's box.
     fn draw_idle(&self, t: f64, p: &mut Painter) {
@@ -342,6 +497,9 @@ impl Screen {
         if self.idle {
             self.draw_idle(t, p);
         }
+        if self.halo && !self.loading {
+            self.draw_halo(t, p);
+        }
 
         // The rules under the header and over the status line.
         for y in [RULE_Y * k, self.rule2_y] {
@@ -353,11 +511,14 @@ impl Screen {
             ));
         }
 
-        // The block meter.
+        // The block meter, or the liquid surface in its place.
         let pitch = (x1 - x0) / COLUMNS as f32;
         let bw = pitch * 0.62;
         let base = METER_BASE * k;
-        for i in 0..COLUMNS {
+        if self.liquid && !self.loading {
+            self.draw_liquid(t, p);
+        }
+        for i in (0..COLUMNS).filter(|_| !self.liquid || self.loading) {
             let x = x0 + i as f32 * pitch + (pitch - bw) / 2.0;
             let lit = if self.loading { 0 } else { self.blocks(t, i) };
             if lit == 0 {
@@ -782,10 +943,110 @@ impl Popup {
             .child(self.phosphor_canvas(&g, &status, h))
             .child(self.phosphor_header(&g, &status))
             .child(self.phosphor_progress(&g, &status))
+            .children(self.phosphor_falling(&g))
             .child(self.phosphor_text(&g))
             .child(self.phosphor_status(&g, &status, h))
             .children(broken);
         root.child(screen)
+    }
+
+    /// R2-06-b: faint copies of each word that came in the last
+    /// `FALL_SECS` falling `FALL_PX` into place, each in a clip of the
+    /// leading above its word: from under the line above's descenders to the
+    /// top of the word's letters. So the copies never touch a word, and a
+    /// copy vanishes where its letter starts. None under reduced motion or
+    /// after the recording.
+    fn phosphor_falling(&self, g: &Geo) -> Vec<Element<Msg>> {
+        let now = self.extra.now;
+        if !self.look.on(FALLING_LETTERS) || self.still() || self.extra.final_at.is_some() {
+            return Vec::new();
+        }
+        let fresh: Vec<(usize, f64)> = self
+            .shown
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| self.heard.word(w.id).map(|h| (i, h.born)))
+            .filter(|&(_, born)| (0.0..FALL_SECS).contains(&(now - born)))
+            .collect();
+        if fresh.is_empty() {
+            return Vec::new();
+        }
+        let k = g.k;
+        let style = self.look.text_style();
+        let (shaped, starts) = self.phosphor_shaped();
+        let mut out = Vec::new();
+        for (i, born) in fresh {
+            let Some(r) = self.phosphor_word_box(&shaped, &starts, i) else {
+                continue;
+            };
+            let word = self.measure.layout(&self.shown[i].text, &style, None);
+            let baseline = word.lines.first().map_or(style.size, |l| l.baseline);
+            let outline = vo::scene::glyph_morph::WordOutline::new(
+                self.measure.fonts(),
+                &word,
+                style.size,
+                Point::ZERO,
+            );
+            let glyphs: Arc<[(f32, Vec<Contour>)]> = outline
+                .glyphs
+                .iter()
+                .map(|gl| (gl.pos.x, gl.outline.contours.clone()))
+                .collect();
+            // The leading above the word, in the screen: from under the
+            // line above's descenders (or the meter) to the letters' tops.
+            let (x, y) = (PAD_X * k + r.x, TEXT_TOP * k + r.y);
+            let clip_top = y + baseline - style.line_height + 0.25 * style.size;
+            let clip_bottom = y + baseline - 0.78 * style.size;
+            if clip_bottom - clip_top < 2.0 {
+                continue;
+            }
+            let pad = 4.0 * k;
+            let clip = Rect::new(x - pad, clip_top, r.w + 2.0 * pad, clip_bottom - clip_top);
+            let (dx, dy) = (x - clip.x, y - clip.y);
+            let canvas = Element::canvas(
+                format!("fall-{}", self.shown[i].id),
+                born + FALL_SECS,
+                move |t, b, p| {
+                    let u = ((t - born) / FALL_SECS).clamp(0.0, 1.0) as f32;
+                    if u >= 1.0 {
+                        return;
+                    }
+                    let fall = FALL_PX * k * (1.0 - u) * (1.0 - u);
+                    let a = FALL_ALPHA * (1.0 - u);
+                    for (gx, contours) in glyphs.iter() {
+                        let m = Affine::translate(b.x + dx, b.y + dy - fall);
+                        let moved: Vec<Contour> =
+                            contours.iter().map(|c| c.transform(&m)).collect();
+                        p.fill(&moved, &StrokeStyle::solid(1.0, hex(GREEN, a)));
+                        // The trail: a short glow line above the letter.
+                        let cx = b.x + dx + gx + 0.3 * style.size;
+                        let top = b.y + dy - fall + baseline - 0.8 * style.size;
+                        p.shape(ShapeInstance::line(
+                            Point::new(cx, top - 8.0 * k),
+                            Point::new(cx, top),
+                            1.2 * k,
+                            Paint::linear(
+                                Point::new(cx, top - 8.0 * k),
+                                hex(GREEN, 0.0),
+                                Point::new(cx, top),
+                                hex(GREEN, a * 0.8),
+                            ),
+                        ));
+                    }
+                },
+            );
+            out.push(
+                at(
+                    Element::layer(format!("fall-clip-{}", self.shown[i].id)),
+                    clip.x,
+                    clip.y,
+                )
+                .size(clip.w, clip.h)
+                .clip()
+                .child(canvas.size(clip.w, clip.h)),
+            );
+        }
+        out
     }
 
     /// MO-53: the screen's border snapped open on its top edge, in the
@@ -901,6 +1162,8 @@ impl Popup {
             ),
             h,
             still: self.still(),
+            liquid: self.look.on(LIQUID_SURFACE),
+            halo: self.look.on(BREATHING_HALO),
         };
         at(
             Element::canvas("screen", f64::INFINITY, move |t, r, p| {
@@ -1434,7 +1697,46 @@ mod tests {
             newest: (0.0, 0.0),
             h: 300.0,
             still: false,
+            liquid: false,
+            halo: false,
         }
+    }
+
+    #[test]
+    fn the_halo_rises_at_once_and_settles_over_the_release() {
+        // Loud until 1 s ago, quiet since.
+        let level = |since: f32| move |age: f32| if age >= since { 1.0 } else { 0.0 };
+        assert!((released(level(0.0)) - 1.0).abs() < 1e-6, "loud now");
+        let after = released(level(HALO_RELEASE));
+        assert!(
+            (after - (-1.0f32).exp()).abs() < 0.05,
+            "one release later: {after}"
+        );
+        assert!(released(level(2.4)) < 0.06, "settled in a long pause");
+    }
+
+    #[test]
+    fn the_liquid_wave_stays_in_its_band() {
+        let s = Screen {
+            liquid: true,
+            ..screen(&[1.0; 40])
+        };
+        for i in 0..=100 {
+            let y = s.wave_y(1.0, i as f32 / 100.0);
+            assert!((0.0..=1.0).contains(&y), "{i}: {y}");
+        }
+        // The band runs from under the header rule to the meter's base,
+        // which is above the text.
+        assert!(RULE_Y + 16.0 < METER_BASE && METER_BASE < TEXT_TOP);
+    }
+
+    #[test]
+    fn the_halo_stays_between_the_header_rule_and_the_text() {
+        // At full rise the dome's top is 80 % of the band up from the text.
+        let top = TEXT_TOP - 6.0;
+        let band = top - (RULE_Y + 10.0);
+        assert!(top - band * HALO_RISE.1 > RULE_Y + 10.0);
+        assert!(top < TEXT_TOP);
     }
 
     #[test]
