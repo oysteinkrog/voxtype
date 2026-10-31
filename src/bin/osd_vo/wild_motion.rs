@@ -15,6 +15,9 @@
 //!   while the word was said (`vo::scene::word_voice`). The newest word also
 //!   breathes with the live voice. On the reading line the axes stay inside
 //!   the envelope (`Axes::reading`); the specimen tile shows the full ranges.
+//!   Each word keeps the width the look's own font gives it
+//!   (`Element::word_fonts_in_place`), so the breath changes how the letters
+//!   are drawn and never moves a word or a line break.
 //!
 //! Each is a motion feature (`--motion`, `VOXTYPE_OSD_VO_MOTION`), off by
 //! default. A look takes part by passing its transcript through
@@ -85,8 +88,8 @@ impl<M> WildMotion for Element<M> {
         }
         if look.on(VARIABLE_BREATH) {
             let style = look.text_style();
-            if let Some((base, fonts)) = popup.breath_fonts(style.size, false) {
-                words = words.text_style(TextStyle { font: base, ..style }).word_fonts(fonts);
+            if let Some((_, fonts)) = popup.breath_fonts(style.size, false) {
+                words = words.word_fonts_in_place(fonts);
             }
         }
         words
