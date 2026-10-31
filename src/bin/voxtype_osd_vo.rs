@@ -987,6 +987,7 @@ impl Look {
             OsdTheme::Jarvis => Some(jarvis::newest_line_centre(self, lines)),
             OsdTheme::Particles => Some(particles::newest_line_centre(self, lines)),
             OsdTheme::River => Some(river::newest_line_centre(self, lines)),
+            OsdTheme::Glass => Some(glass::newest_line_centre(self)),
             _ => None,
         }
     }
@@ -1057,6 +1058,9 @@ impl Look {
         if self.theme == OsdTheme::River {
             return river::text_width(self);
         }
+        if self.theme == OsdTheme::Glass {
+            return glass::text_width(self);
+        }
         self.width - swiss::PANEL_INSET_PX as f32
     }
 
@@ -1091,6 +1095,9 @@ impl Look {
         }
         if self.theme == OsdTheme::River {
             return river::max_lines();
+        }
+        if self.theme == OsdTheme::Glass {
+            return glass::MAX_LINES;
         }
         swiss::MAX_LINES as u32
     }
@@ -1171,6 +1178,9 @@ impl Look {
         }
         if self.theme == OsdTheme::River {
             return river::text_style(self);
+        }
+        if self.theme == OsdTheme::Glass {
+            return glass::text_style(self);
         }
         TextStyle::new(SANS, self.text_px, self.text_line).tracking(-0.2)
     }
@@ -1267,6 +1277,7 @@ impl Look {
             OsdTheme::Particles => particles::panel_top(self),
             OsdTheme::Showcase => voxtype::osd::showcase::MARGIN_PX,
             OsdTheme::Jarvis => jarvis::panel_top(),
+            OsdTheme::Glass => glass::panel_top(self),
             _ => 0.0,
         }
     }
@@ -1356,6 +1367,9 @@ impl Look {
         }
         if self.theme == OsdTheme::River {
             return river::surface(self);
+        }
+        if self.theme == OsdTheme::Glass {
+            return glass::surface(self);
         }
         Size::new(
             self.width.ceil(),
@@ -2682,6 +2696,7 @@ fn default_motion(look: &Look) -> Motion {
             | OsdTheme::Mecha
             | OsdTheme::Cyberpunk
             | OsdTheme::River
+            | OsdTheme::Glass
     ) {
         Motion::Spring(Spring::SOFT)
     } else {
