@@ -154,14 +154,16 @@ const TITLE_SWAP_SECS: f64 = 0.16;
 const ROW_HOLD_SECS: f64 = 0.16;
 
 /// R2-04-a: the mirror's ink, how far it is squashed, its gap under the
-/// descenders and its wobble (pixels, seconds a cycle); the water line's
-/// alpha; a ring's life, alpha, reach (quiet and loud) and flatness.
+/// descenders, its wobble (pixels, seconds a cycle) and how long a word's
+/// mirror takes to fade in; the water line's alpha; a ring's life, alpha,
+/// reach (quiet and loud) and flatness.
 pub(crate) const LIQUID_ECHO: &str = "liquid-echo";
 const ECHO_ALPHA: f32 = 0.16;
 const ECHO_SQUASH: f32 = 0.42;
 const ECHO_GAP: f32 = 2.0;
 const ECHO_WOBBLE: f32 = 0.9;
 const ECHO_WOBBLE_SECS: f64 = 1.8;
+const ECHO_IN_SECS: f32 = 0.5;
 const SURFACE_ALPHA: f32 = 0.14;
 const RING_SECS: f64 = 1.0;
 const RING_ALPHA: f32 = 0.2;
@@ -1523,6 +1525,19 @@ impl Popup {
             (false, None) => f64::INFINITY,
         };
         let borns: Vec<f64> = words.iter().map(|w| w.0).collect();
+        // Each glyph's word's birth, so a word's mirror fades in with it
+        // and never shows a word before the word itself.
+        let glyph_borns: Vec<f64> = row
+            .glyphs
+            .iter()
+            .map(|g| {
+                row.boxes
+                    .iter()
+                    .find(|b| g.pos.x >= b.rect.x - 0.5 && g.pos.x < b.rect.x + b.rect.w)
+                    .and_then(|b| self.heard.word(b.id))
+                    .map_or(f64::NEG_INFINITY, |h| h.born)
+            })
+            .collect();
         let surface = Self::synthwave_surface(l);
         let ring_y = water + (RING_REACH.1 * RING_FLAT + 1.0) * s;
         let NewestRow {
@@ -1569,7 +1584,15 @@ impl Popup {
                 f: w * (1.0 + ECHO_SQUASH),
             };
             p.layer(flip, 1.0, |q| {
-                for g in &glyphs {
+                for (g, &born) in glyphs.iter().zip(&glyph_borns) {
+                    let ink = if still {
+                        1.0
+                    } else {
+                        smoothstep(0.0, ECHO_IN_SECS, (t - born) as f32)
+                    };
+                    if ink <= 0.0 {
+                        continue;
+                    }
                     let wobble = if still {
                         0.0
                     } else {
@@ -1585,7 +1608,7 @@ impl Popup {
                         font: g.font,
                         glyph: g.glyph,
                         word: NO_WORD,
-                        color: hex(WHITE).fade(ECHO_ALPHA),
+                        color: hex(WHITE).fade(ECHO_ALPHA * ink),
                         xform: GlyphXform {
                             offset: Point::new(wobble, 0.0),
                             ..GlyphXform::IDENTITY
