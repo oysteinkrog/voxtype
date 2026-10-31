@@ -104,7 +104,7 @@ const GHOST_SECS: f64 = 0.4;
 /// word, how many it sends, their alpha, their reach at rest and at full
 /// voice in design pixels, and the half angle they span.
 pub(crate) const LENS_ECHO: &str = "lens-echo";
-const LENS_SECS: f64 = 0.9;
+const LENS_SECS: f64 = 0.85;
 const LENS_STEP: f64 = 0.15;
 const LENS_ARCS: usize = 3;
 const LENS_ALPHA: f32 = 0.15;
@@ -120,7 +120,7 @@ fn lens_arc(age: f64, n: usize) -> Option<(f32, f32)> {
     if !(0.0..1.0).contains(&u) {
         return None;
     }
-    let fade = (1.0 - u as f32).powf(1.5) * (1.0 - 0.3 * n as f32);
+    let fade = (1.0 - u as f32).powf(1.5) * (1.0 - 0.4 * n as f32);
     Some((ease_out(u), fade))
 }
 
