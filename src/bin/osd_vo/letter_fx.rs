@@ -167,6 +167,15 @@ impl Popup {
         }
     }
 
+    /// A depth stack other than Glass's: its reading sheet turns in 3D as
+    /// it moves back, and a light the size of the panel drawn on that sheet
+    /// would bend far past the panel. There the light and the ink lie on the
+    /// panel, cast through the reading line's letters where the stack lays
+    /// them, flat in the box's last row.
+    fn letter_fx_flat_stack(&self) -> bool {
+        self.look.on(super::wild_space::DEPTH_STACK) && self.look.theme != OsdTheme::Glass
+    }
+
     /// The letters' colour: the look's own text colour where it has one.
     fn letter_fx_ink(&self) -> Color {
         let l = &self.look;
@@ -206,17 +215,9 @@ impl Popup {
             if let Some((line, left, at)) = self.glass_reading_line() {
                 stable = vec![(line, 0.0)];
                 (&stable[0].0, left, Rect::new(-at.x, -at.y, width, height))
-            } else if l.on(super::wild_space::DEPTH_STACK) {
-                let dy = self.lines.saturating_sub(1) as f32 * style.line_height;
-                let line = if l.theme == OsdTheme::Showcase {
-                    self.stack_reading_line()
-                } else {
-                    // Looks without showcase's stack state: the newest of
-                    // their stable lines.
-                    stable = self.stable_lines(&style, width);
-                    stable.last().map_or(&[][..], |(w, _)| w.as_slice())
-                };
-                (line, style, Rect::new(0.0, -dy, width, height))
+            } else if self.letter_fx_flat_stack() {
+                // letter_fx_layers casts them on the panel instead.
+                return words;
             } else {
                 (&self.shown, style, Rect::new(0.0, 0.0, width, height))
             };
@@ -386,19 +387,52 @@ impl Popup {
 
         let mut under = Vec::new();
         let mut over = Vec::new();
-        if l.on(LIGHT) && leaving {
-            // The light follows the live text (letter_fx_follow), which the
-            // hand-off takes away. The light on the panel stays a moment
-            // longer, casting no letters, and dims away with the text.
+        // Glyphs of the reading line of a stack the effects do not follow
+        // (letter_fx_flat_stack), where the stack lays it.
+        let stacked: Vec<(FxGlyph, WordId)> = if self.letter_fx_flat_stack() && !leaving {
+            let stable;
+            let line = if l.theme == OsdTheme::Showcase {
+                self.stack_reading_line()
+            } else {
+                // Looks without showcase's stack state: the newest of their
+                // stable lines.
+                stable = self.stable_lines(&style, width);
+                stable.last().map_or(&[][..], |(w, _)| w.as_slice())
+            };
+            let mut starts = Vec::with_capacity(line.len());
+            let mut at = 0usize;
+            for w in line {
+                starts.push(at);
+                at += w.text.len() + 1;
+            }
+            let dy = self.lines.saturating_sub(1) as f32 * style.line_height;
+            self.letter_fx_laid(line, &style, width, breath.as_ref())
+                .glyphs
+                .iter()
+                .filter_map(|g| {
+                    let w = line[starts.iter().rposition(|&s| s <= g.cluster as usize)?].id;
+                    let pos = Point::new(g.pos.x, g.pos.y + dy);
+                    Some((
+                        FxGlyph::new(g.font, g.glyph, pos, style.size, letter_ink, 0.0),
+                        w,
+                    ))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let lit: Vec<FxGlyph> = stacked.iter().map(|(g, _)| *g).collect();
+        if l.on(LIGHT) && (leaving || self.letter_fx_flat_stack()) {
+            // Elsewhere the light follows the live text (letter_fx_follow),
+            // which the hand-off takes away. The light on the panel stays a
+            // moment longer, casting no letters, and dims away with the text.
+            let light = self.letter_fx_light();
             under.push(place(
                 Element::gpu(
                     "light-under",
-                    fx(
-                        Effect::Light(self.letter_fx_light(), Side::Under),
-                        Vec::new(),
-                    ),
+                    fx(Effect::Light(light, Side::Under), lit.clone()),
                 )
-                .opacity(0.0)
+                .opacity(if leaving { 0.0 } else { 1.0 })
                 .motion(Prop::Opacity, Spring::critical_to_98(0.45))
                 .presence(
                     Transition {
@@ -408,6 +442,28 @@ impl Popup {
                     Transition::NONE,
                 ),
             ));
+            if !lit.is_empty() {
+                over.push(place(Element::gpu(
+                    "light-over",
+                    fx(Effect::Light(light, Side::Over), lit),
+                )));
+            }
+        }
+        if l.on(INK) && !stacked.is_empty() {
+            let ink = Ink::default();
+            let window = (ink.secs + ink.trace_secs) as f64;
+            let (born, _) = self.letter_fx_sync();
+            let t = self.extra.now;
+            let fresh: Vec<FxGlyph> = stacked
+                .iter()
+                .filter_map(|(g, w)| {
+                    let b = *born.get(w)?;
+                    (t - b < window).then_some(FxGlyph { start: b, ..*g })
+                })
+                .collect();
+            if !fresh.is_empty() {
+                over.push(place(Element::gpu("ink", fx(Effect::Ink(ink), fresh))));
+            }
         }
         if l.on(LIQUID) && !leaving && !morphs.is_empty() {
             let mut glyphs = Vec::new();

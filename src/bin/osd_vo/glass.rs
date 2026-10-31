@@ -653,9 +653,10 @@ impl Popup {
     /// Where the depth stack draws its reading line, for the effects under
     /// the letters: its words, its style, and the top left of its live text
     /// in the stack's text column (as `depth_stack_lines` places it on the
-    /// newest sheet). `None` while the stack is not drawn.
+    /// newest sheet). `None` while the stack is not drawn, and in other
+    /// looks, whose stacks lie elsewhere.
     pub(crate) fn glass_reading_line(&self) -> Option<(Vec<Word>, TextStyle, Point)> {
-        if !self.glass_stacking(self.kit_mode()) {
+        if self.look.theme != OsdTheme::Glass || !self.glass_stacking(self.kit_mode()) {
             return None;
         }
         let l = &self.look;
