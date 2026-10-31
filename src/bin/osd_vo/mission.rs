@@ -29,6 +29,7 @@ use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
 use vo::scene::path::{icons, make, Contour, Outline, StrokeStyle};
 use vo::scene::lattice::LatticeStyle;
+use vo_core::words::WordId;
 
 /// Colours sampled from the mock-up.
 const ORANGE: u32 = 0xFF7A1A;
@@ -514,6 +515,59 @@ fn led(i: usize, s: f64) -> f32 {
     }
 }
 
+/// R2-22-a: light rings that swirl out behind the transcript, their reach
+/// and pace set by the voice; how many, and the brightest any gets.
+pub(crate) const BREATH_RIPPLE: &str = "breath-ripple";
+const RIPPLE_RINGS: usize = 6;
+const RIPPLE_ALPHA: f32 = 0.08;
+/// R2-22-b: the newest word on a paper patch, in dark ink, rising 2 px;
+/// all of it over in `REVEAL_SECS`.
+pub(crate) const TYPEWRITER_REVEAL: &str = "typewriter-reveal";
+const REVEAL_SECS: f64 = 0.4;
+const REVEAL_RISE: f32 = 2.0;
+/// How long the rise takes to 98 %, as the word's offset spring.
+const RISE_SECS: f64 = 0.3;
+const PAPER: u32 = 0xE9DDC6;
+const PAPER_ALPHA: f32 = 0.85;
+const PAPER_INK: u32 = 0x1B1712;
+/// R2-22-c: spectral dust behind the ghost tail, which stands at 70 % ink;
+/// a word's dust fades over `DUST_SECS` once it commits.
+pub(crate) const SPECTRAL_FOCUS: &str = "spectral-focus";
+const DUST_SECS: f64 = 0.4;
+const DUST_ALPHA: f32 = 0.3;
+/// Grains per pixel of word width.
+const DUST_DENSITY: f32 = 0.35;
+
+/// R2-22-b: the paper patch's alpha and the dark ink's over the word,
+/// `age` seconds after the word arrived. Both hold for the first half, so
+/// the word reads dark on light paper, then go together, the ink faster.
+fn reveal_alpha(age: f64) -> (f32, f32) {
+    if !(0.0..REVEAL_SECS).contains(&age) {
+        return (0.0, 0.0);
+    }
+    let half = REVEAL_SECS / 2.0;
+    let u = (1.0 - ((age - half) / half).max(0.0)) as f32;
+    (PAPER_ALPHA * u * u, u * u * u)
+}
+
+/// R2-22-b: how far below its place the newest word is `age` seconds
+/// after it arrived: the critically damped spring the live text's offset
+/// follows, from `REVEAL_RISE`.
+fn reveal_lift(age: f64) -> f32 {
+    let w = 5.833_9 / RISE_SECS * age.max(0.0);
+    REVEAL_RISE * ((1.0 + w) * (-w).exp()) as f32
+}
+
+/// R2-22-c: a dust grain's alpha for a word that committed `age` seconds
+/// ago (a ghost word has none yet).
+fn dust_fade(age: Option<f64>) -> f32 {
+    match age {
+        None => 1.0,
+        Some(a) if (0.0..DUST_SECS).contains(&a) => (1.0 - a / DUST_SECS) as f32,
+        Some(_) => 0.0,
+    }
+}
+
 /// The status mark: an orange ring with a dot, a spinner on a grey ring, a
 /// check in a closing ring, or a grey X.
 #[derive(Clone)]
@@ -906,9 +960,19 @@ impl Popup {
             .text_style(l.text_style())
             .color(hex(INK))
             .opacity(dim)
-            .motion(Prop::Opacity, Spring::critical_to_98(0.12))
-            .motion(Prop::Offset, Spring::POP)
-            .word_enter(self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0)));
+            .motion(Prop::Opacity, Spring::critical_to_98(0.12));
+        // R2-22-b: a new word rises 2 px, settled well inside 400 ms.
+        let enter = self.ghost_enter(Transition::fade().opacity(0.0).offset(0.0, 6.0));
+        let words = if l.on(TYPEWRITER_REVEAL) && !self.still() {
+            words
+                .motion(Prop::Offset, Spring::critical_to_98(RISE_SECS))
+                .word_enter(Transition {
+                    offset: Some((0.0, REVEAL_RISE)),
+                    ..enter
+                })
+        } else {
+            words.motion(Prop::Offset, Spring::POP).word_enter(enter)
+        };
         let words = self.handoff_or(
             words,
             &l.text_style(),
@@ -1053,6 +1117,7 @@ impl Popup {
         } else {
             None
         };
+        let (paper, paper_ink) = self.mission_reveal(mode, inner, h).unzip();
         tile.children(hairline)
         .child(corners(
                 "brackets",
@@ -1075,6 +1140,9 @@ impl Popup {
                 LABEL_Y,
             ))
             .child(at(glyph, inner - 34.0, LABEL_Y - 3.0))
+            .children(self.mission_ripple(mode, inner, h, accent))
+            .children(self.mission_dust(mode, inner, h, accent))
+            .children(paper)
             .child(at(
                 self.signal_marks(
                     Element::column("text")
@@ -1088,6 +1156,7 @@ impl Popup {
                 TEXT_X,
                 TEXT_TOP,
             ))
+            .children(paper_ink)
             // MO-71: the sound under the newest words.
             .children(self.receipts_element(
                 "mission",
@@ -1270,6 +1339,254 @@ impl Popup {
     }
 }
 
+impl Popup {
+    /// R2-22-a: rings of light that swirl out behind the transcript tile,
+    /// `w` by `h`, clipped to it. They reach further when the voice is loud
+    /// and turn at a pace its loudness sets. A still glow under reduced
+    /// motion.
+    fn mission_ripple(&self, mode: Mode, w: f32, h: f32, accent: Color) -> Option<Element<Msg>> {
+        let live = matches!(mode, Mode::Listening | Mode::Loading | Mode::Finishing);
+        if !self.look.on(BREATH_RIPPLE) || self.edit_view.is_some() || !live {
+            return None;
+        }
+        let (cx, cy) = (w * 0.62, h * 0.55);
+        let canvas = if self.still() {
+            Element::canvas("ripple", 0.0, move |_, r, p| {
+                p.shape(ShapeInstance::circle(
+                    Point::new(r.x + cx, r.y + cy),
+                    0.16 * w,
+                    Paint::glow(accent.fade(0.05), 0.2 * w, 0.5),
+                ));
+            })
+        } else {
+            let levels = self.kit_levels();
+            // The turn is the level summed over time, so a loud voice
+            // speeds it up and a pause slows it, and each frame is a
+            // function of t.
+            let mut sum = Vec::with_capacity(levels.levels.len() + 1);
+            sum.push(0.0f32);
+            for v in levels.levels.iter() {
+                sum.push(sum.last().unwrap() + v / FRAME_HZ as f32);
+            }
+            let sum: Arc<[f32]> = sum.into();
+            let start = levels.newest_at - levels.levels.len() as f64 / FRAME_HZ as f64;
+            let shown_at = self.shown_at;
+            Element::canvas("ripple", f64::INFINITY, move |t, r, p| {
+                let i = (((t - start) * FRAME_HZ as f64).max(0.0) as usize).min(sum.len() - 1);
+                let phase = 0.04 * (t - shown_at) as f32 + 0.7 * sum[i];
+                let loud = (levels.at(t) * 2.0).min(1.0);
+                let reach = w * 0.42 * (0.85 + 0.25 * loud);
+                let (sin, cos) = (-0.2f32).sin_cos();
+                for k in 0..RIPPLE_RINGS {
+                    let s = ((k as f32 + phase) / RIPPLE_RINGS as f32).fract();
+                    let a = RIPPLE_ALPHA * (std::f32::consts::PI * s).sin() * (0.55 + 0.45 * loud);
+                    let (rx, ry) = (reach * s, reach * s * 0.38);
+                    if a < 0.004 || rx < 2.0 {
+                        continue;
+                    }
+                    // Each ring an open arc that turns further as it grows.
+                    let from = 0.9 * k as f32 + 1.6 * phase + 2.0 * s;
+                    let pts: Vec<Point> = (0..=40)
+                        .map(|j| {
+                            let q = from + 1.25 * std::f32::consts::PI * j as f32 / 40.0;
+                            let (ex, ey) = (rx * q.cos(), ry * q.sin());
+                            Point::new(
+                                r.x + cx + ex * cos - ey * sin,
+                                r.y + cy + ex * sin + ey * cos,
+                            )
+                        })
+                        .collect();
+                    p.stroke(
+                        &Contour::polyline(&pts, false),
+                        &StrokeStyle::solid(1.0, accent.fade(a)),
+                    );
+                }
+            })
+        };
+        Some(
+            at(Element::layer("ripple-clip").clip(), 0.0, 0.0)
+                .size(w, h)
+                .presence(Transition::fade(), Transition::fade())
+                .child(at(canvas.size(w, h), 0.0, 0.0)),
+        )
+    }
+
+    /// R2-22-b: the newest word's box in the tile, its baseline and when it
+    /// arrived, while its reveal runs. None for a word that opens a line or
+    /// came with a cut: the text re-lays its lines first, so the patch would
+    /// stand where the word is not yet.
+    fn mission_newest(&self, within: f64) -> Option<(sounding::WordBox, f64)> {
+        let l = &self.look;
+        let words = &self.shown[..self.edit_room()];
+        let last = words.last()?;
+        let born = self.heard.word(last.id)?.born;
+        if self.extra.now - born >= within || self.cut_at >= born - 0.1 {
+            return None;
+        }
+        let (boxes, _) =
+            sounding::word_boxes(&self.measure, words, &l.text_style(), Some(text_width(l)));
+        let b = boxes.into_iter().last().filter(|b| b.id == last.id)?;
+        if b.rect.x < 1.0 && words.len() > 1 {
+            return None;
+        }
+        Some((b, born))
+    }
+
+    /// R2-22-b: the paper patch under the newest word and its dark ink over
+    /// it, both rising with the word and gone in `REVEAL_SECS`. None under
+    /// reduced motion.
+    fn mission_reveal(&self, mode: Mode, w: f32, h: f32) -> Option<(Element<Msg>, Element<Msg>)> {
+        let l = &self.look;
+        if !l.on(TYPEWRITER_REVEAL)
+            || self.still()
+            || self.edit_view.is_some()
+            || mode != Mode::Listening
+        {
+            return None;
+        }
+        let (b, born) = self.mission_newest(REVEAL_SECS)?;
+        let style = l.text_style();
+        let word = self.shown[..self.edit_room()].last()?;
+        let shaped = self.measure.layout(&word.text, &style, None);
+        let own = shaped.lines.first().map_or(style.size, |l| l.baseline);
+        let outline = vo::scene::glyph_morph::WordOutline::new(
+            self.measure.fonts(),
+            &shaped,
+            style.size,
+            Point::ZERO,
+        );
+        let ink: Arc<[Contour]> = outline
+            .glyphs
+            .iter()
+            .flat_map(|g| g.outline.contours.clone())
+            .collect();
+        let size = style.size;
+        let (x0, x1, base) = (
+            TEXT_X + b.rect.x,
+            TEXT_X + b.rect.x + b.rect.w,
+            TEXT_TOP + b.baseline,
+        );
+        let until = born + REVEAL_SECS;
+        let paper = Element::canvas("paper", until, move |t, r, p| {
+            let age = t - born;
+            let a = reveal_alpha(age).0;
+            if a <= 0.0 {
+                return;
+            }
+            let y = r.y + base + reveal_lift(age);
+            p.shape(ShapeInstance::rrect(
+                RRect::new(
+                    Rect::new(r.x + x0 - 4.0, y - 0.82 * size, x1 - x0 + 8.0, 1.1 * size),
+                    2.0,
+                ),
+                Paint::solid(hex(PAPER).fade(a)),
+            ));
+        });
+        let over = Element::canvas("paper-ink", until, move |t, r, p| {
+            let age = t - born;
+            let a = reveal_alpha(age).1;
+            if a <= 0.0 {
+                return;
+            }
+            let m = Affine::translate(r.x + x0, r.y + base - own + reveal_lift(age));
+            let moved: Vec<Contour> = ink.iter().map(|c| c.transform(&m)).collect();
+            p.fill(&moved, &StrokeStyle::solid(1.0, hex(PAPER_INK).fade(a)));
+        });
+        Some((
+            at(paper.size(w, h), 0.0, 0.0),
+            at(over.size(w, h), 0.0, 0.0),
+        ))
+    }
+
+    /// R2-22-c: fine glowing dust behind the ghost tail, and behind each
+    /// word that committed in the last `DUST_SECS`, fading as it does.
+    /// None under reduced motion.
+    fn mission_dust(&self, mode: Mode, w: f32, h: f32, accent: Color) -> Option<Element<Msg>> {
+        let l = &self.look;
+        if !l.on(SPECTRAL_FOCUS)
+            || self.still()
+            || self.edit_view.is_some()
+            || mode != Mode::Listening
+        {
+            return None;
+        }
+        let words = &self.shown[..self.edit_room()];
+        let tail = model_signals::TailText {
+            style: l.text_style(),
+            width: text_width(l),
+            rows: self.lines,
+        };
+        let mut spots: Vec<(Rect, Option<f64>)> = self
+            .ghost_tail_boxes(words, &tail)
+            .into_iter()
+            .map(|r| (r, None))
+            .collect();
+        let ghosts = !spots.is_empty();
+        let now = self.extra.now;
+        let fresh: Vec<(WordId, f64)> = words
+            .iter()
+            .filter_map(|w| Some((w.id, self.heard.word(w.id)?.born)))
+            .filter(|&(_, born)| now - born < DUST_SECS && self.cut_at < born - 0.1)
+            .collect();
+        if !fresh.is_empty() {
+            let (boxes, _) =
+                sounding::word_boxes(&self.measure, words, &l.text_style(), Some(text_width(l)));
+            for b in boxes {
+                if let Some(&(_, born)) = fresh.iter().find(|f| f.0 == b.id) {
+                    spots.push((b.rect, Some(born)));
+                }
+            }
+        }
+        if spots.is_empty() {
+            return None;
+        }
+        let until = if ghosts {
+            f64::INFINITY
+        } else {
+            spots
+                .iter()
+                .filter_map(|s| s.1)
+                .fold(f64::NEG_INFINITY, f64::max)
+                + DUST_SECS
+        };
+        let canvas = Element::canvas("dust", until, move |t, r, p| {
+            for &(rect, born) in &spots {
+                let fade = dust_fade(born.map(|b| t - b));
+                if fade <= 0.0 {
+                    continue;
+                }
+                let seed = (rect.x.round() as u32).wrapping_mul(131)
+                    ^ (rect.y.round() as u32).wrapping_mul(7919);
+                let n = (rect.w * DUST_DENSITY).ceil() as u32;
+                for g in 0..n {
+                    let k = seed.wrapping_add(g * 5);
+                    let (hx, hy, ph, sp) = (
+                        noise(k),
+                        noise(k + 1),
+                        noise(k + 2) * std::f32::consts::TAU,
+                        0.6 + noise(k + 3),
+                    );
+                    let x = TEXT_X + rect.x + hx * rect.w + 1.5 * (t as f32 * sp + ph).cos();
+                    let y = TEXT_TOP
+                        + rect.y
+                        + (0.15 + 0.75 * hy) * rect.h
+                        + 2.0 * (t as f32 * sp * 1.3 + ph).sin();
+                    let twinkle = 0.5 + 0.5 * (t as f32 * 2.0 * sp + 3.0 * ph).sin();
+                    let a = DUST_ALPHA * fade * (0.3 + 0.7 * twinkle);
+                    let rad = 0.5 + 0.7 * noise(k + 4);
+                    let c = mix(accent, hex(0xFFD9A0), noise(k + 4));
+                    p.shape(ShapeInstance::circle(
+                        Point::new(r.x + x, r.y + y),
+                        rad,
+                        Paint::glow(c.fade(a), 2.0 * rad, 0.5),
+                    ));
+                }
+            }
+        });
+        Some(at(canvas.size(w, h), 0.0, 0.0))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1356,4 +1673,37 @@ mod idle_tests {
 
     // The LEDs dim to 40 %, and the radar sweep stays soft.
     const _: () = assert!(LED_LOW == 0.4 && RADAR_ALPHA <= 0.35);
+}
+
+#[cfg(test)]
+mod r2_tests {
+    use super::*;
+
+    #[test]
+    fn the_reveal_rises_at_most_2_px_and_is_over_in_400_ms() {
+        let mut prev = f32::MAX;
+        for i in 0..=60 {
+            let age = i as f64 * 0.01;
+            let lift = reveal_lift(age);
+            assert!((0.0..=REVEAL_RISE).contains(&lift), "{age}: {lift}");
+            assert!(lift <= prev, "{age}: the word sinks");
+            prev = lift;
+            let (paper, ink) = reveal_alpha(age);
+            assert!(paper <= PAPER_ALPHA && ink <= 1.0, "{age}");
+            if age >= REVEAL_SECS {
+                assert_eq!((paper, ink), (0.0, 0.0), "{age}");
+            }
+        }
+        assert!(reveal_lift(REVEAL_SECS) < 0.05);
+        assert_eq!(reveal_alpha(0.0), (PAPER_ALPHA, 1.0));
+    }
+
+    #[test]
+    fn a_word_keeps_its_dust_while_a_ghost_and_loses_it_in_400_ms() {
+        assert_eq!(dust_fade(None), 1.0);
+        assert_eq!(dust_fade(Some(0.0)), 1.0);
+        assert!(dust_fade(Some(0.2)) < 1.0 && dust_fade(Some(0.2)) > 0.0);
+        assert_eq!(dust_fade(Some(DUST_SECS)), 0.0);
+        assert_eq!(dust_fade(Some(-0.1)), 0.0);
+    }
 }
