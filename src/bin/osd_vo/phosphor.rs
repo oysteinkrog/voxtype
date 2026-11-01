@@ -104,11 +104,16 @@ const CARET_BLINK: f64 = 0.53;
 /// xj49: how long the caret hides when the text is laid out anew (a wrap
 /// or a cut), while the old lines roll away under its new place.
 const CARET_REFLOW: f64 = 0.35;
-/// 5ti: the idle motion's pace (RD-02's slow-loop cap); the scanline's
-/// period, pass, first pass after the popup opens, height and alpha; the
-/// static's rate, specks and alpha (in linear light, like every blend here:
-/// a few percent of green lights the dark screen far more than it says).
-const IDLE_FPS: f64 = 15.0;
+/// The frame pace while the popup records room tone (RD-11): the idle
+/// motion's own pace, so every frame drawn shows a new step of the static
+/// and the scanline, and none is drawn between them.
+pub(crate) const ROOM_TONE_FPS: f64 = IDLE_FPS;
+/// 5ti: the idle motion's pace, the static's own (RD-02's slow-loop cap);
+/// the scanline's period, pass, first pass after the popup opens, height
+/// and alpha; the static's rate, specks and alpha (in linear light, like
+/// every blend here: a few percent of green lights the dark screen far
+/// more than it says).
+const IDLE_FPS: f64 = NOISE_FPS;
 const ROLL_EVERY: f64 = 5.0;
 const ROLL_PASS: f64 = 1.6;
 const ROLL_FIRST: f64 = 2.0;
