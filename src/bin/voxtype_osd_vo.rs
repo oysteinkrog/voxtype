@@ -2019,6 +2019,7 @@ impl Popup {
             OsdTheme::Scope => scope::ROOM_TONE_FPS,
             OsdTheme::Biolume => biolume::ROOM_TONE_FPS,
             OsdTheme::Synthwave => synthwave::ROOM_TONE_FPS,
+            OsdTheme::Type => type_look::ROOM_TONE_FPS,
             _ => ROOM_TONE_FPS,
         };
         quiet.then_some(fps)
