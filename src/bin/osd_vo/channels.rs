@@ -109,6 +109,12 @@ impl Popup {
         self.look.on("reduced-motion")
     }
 
+    /// Whether the newest word's baseline follows the pitch (MO-14). Under
+    /// reduced motion the baseline stays flat.
+    pub(crate) fn pitch_baseline_on(&self) -> bool {
+        (self.look.on(PITCH) || self.look.on(VOICE)) && !(self.channels_reduced() || kit::reduced())
+    }
+
     /// Brings the state up to the current hypothesis at `t`: hypothesis
     /// counts, spoken-order delays and voice readings.
     fn channels_sync(&self, t: f64) -> HashMap<WordId, Seen> {
@@ -197,8 +203,7 @@ impl Popup {
         };
         let (onset, pitch, tracking) = (
             l.on(ONSET) || l.on(VOICE),
-            // Under reduced motion the baseline stays flat.
-            (l.on(PITCH) || l.on(VOICE)) && !(self.channels_reduced() || kit::reduced()),
+            self.pitch_baseline_on(),
             l.on(TRACKING) || l.on(VOICE),
         );
         let newest = self.shown.last().map(|w| w.id);

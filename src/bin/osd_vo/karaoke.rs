@@ -47,8 +47,6 @@
 
 use super::*;
 
-use std::sync::OnceLock;
-
 use vo::scene::canvas::Painter;
 use vo::scene::display::{GlyphInstance, Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
@@ -220,10 +218,7 @@ fn ahead_ink(left: f64, still: bool) -> f32 {
 }
 
 fn reduced() -> bool {
-    static R: OnceLock<bool> = OnceLock::new();
-    *R.get_or_init(|| {
-        std::env::var("VO_REDUCED_MOTION").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
-    })
+    crate::kit::reduced()
 }
 
 pub(crate) fn text_style(look: &Look) -> TextStyle {
@@ -1618,7 +1613,7 @@ mod roll_tests {
         let options = Options {
             fonts: reg.clone(),
             default_motion: default_motion(&look),
-            ..Options::default()
+            ..crate::kit::options()
         };
         // Per word: when it first showed, its last y and its current run.
         let mut words: HashMap<u32, (f64, f32, usize)> = HashMap::new();
@@ -1686,7 +1681,7 @@ mod roll_tests {
         let options = Options {
             fonts: reg.clone(),
             default_motion: default_motion(&look),
-            ..Options::default()
+            ..crate::kit::options()
         };
         let mut right = 0.0f32;
         vo::envelope::sample_scenario(

@@ -137,7 +137,7 @@ pub(crate) fn run(look: Look, fonts: FontRegistry, fps: f64, moment: Option<&str
     let options = Options {
         fonts: fonts.clone(),
         default_motion: default_motion(&look),
-        ..Options::default()
+        ..crate::kit::options()
     };
     let mut frames = Vec::new();
     vo::envelope::sample_scenario(Popup::new(look.clone(), &fonts), &scenario, fps, options, &mut |_, t, list| {
@@ -233,7 +233,7 @@ pub(crate) fn forming(look: Look, fonts: FontRegistry, fps: f64, moment: Option<
     let options = Options {
         fonts: fonts.clone(),
         default_motion: default_motion(&look),
-        ..Options::default()
+        ..crate::kit::options()
     };
     let mut shown = Vec::new();
     let mut overlaps = 0usize;

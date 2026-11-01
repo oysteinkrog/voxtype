@@ -2755,6 +2755,21 @@ const EDIT_HINT: &str = "Shift: listen \u{b7} Enter: send";
 /// Edits that show the hint, each fainter than the last.
 const EDIT_HINT_USES: u32 = 3;
 
+/// Keeps the look picked with the chord for later popups. Under test it
+/// goes to a list on the test's own thread instead, so no test writes the
+/// user's state or has to point `XDG_STATE_HOME` somewhere else.
+fn save_look(theme: OsdTheme) {
+    #[cfg(test)]
+    SAVED_LOOKS.with(|s| s.borrow_mut().push(theme));
+    #[cfg(not(test))]
+    look_step::save(theme);
+}
+
+#[cfg(test)]
+thread_local! {
+    static SAVED_LOOKS: std::cell::RefCell<Vec<OsdTheme>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl Popup {
     /// The look chord was pressed: show the next (or previous) look at
     /// once, keep it for later popups and name it in the status row. The
@@ -2769,7 +2784,7 @@ impl Popup {
         self.look.set_theme(theme);
         // Only the live popup keeps the pick for later popups.
         if self.osd.is_some() {
-            look_step::save(theme);
+            save_look(theme);
         }
         // The words wrap afresh to the new look's width and line count.
         self.lines = 1;
@@ -3358,7 +3373,7 @@ fn main() -> anyhow::Result<()> {
             default_motion: default_motion(&look),
             renderer_setup: Some(Arc::new(vo_3d::install)),
             margin: surface_margin(&look),
-            ..Options::default()
+            ..crate::kit::options()
         };
         let mut popup = Popup::new(look.clone(), &fonts);
         popup.recorder = args.record.as_deref().and_then(replay::recorder);
@@ -3414,7 +3429,7 @@ fn prewarm(
     let warm = Options::<Msg> {
         fonts: fonts.clone(),
         renderer_setup: Some(Arc::new(vo_3d::install)),
-        ..Options::default()
+        ..crate::kit::options()
     };
     let (look, fonts) = (look.clone(), fonts.clone());
     match resident.warm_up(&warm, move || warm_frames(look, fonts)) {
@@ -3443,7 +3458,7 @@ fn warm_frames_quietly(look: Look, fonts: FontRegistry) -> vo::WarmFrames {
     let options = || Options {
         fonts: fonts.clone(),
         default_motion: default_motion(&look),
-        ..Options::default()
+        ..crate::kit::options()
     };
     let mut lists = Vec::new();
     vo::envelope::sample_scenario(
@@ -3681,7 +3696,7 @@ fn offline(
         default_motion: default_motion(&look),
         frame_timings: sink,
         renderer_setup: Some(Arc::new(vo_3d::install)),
-        ..Options::default()
+        ..crate::kit::options()
     };
     let n = vo::render_offline_with(Popup::scripted(look, &fonts), &scenario, fps, dir, options)
         .map_err(|e| anyhow::anyhow!("offline render: {e}"))?;
@@ -3722,7 +3737,7 @@ fn exit_check(
     let options = Options {
         fonts: fonts.clone(),
         default_motion: default_motion(&look),
-        ..Options::default()
+        ..crate::kit::options()
     };
     let report = vo::exit_check(Popup::scripted(look, &fonts), &scenario, fps, options);
     match report.ending {
@@ -3849,7 +3864,7 @@ fn run_wall(
         inbox,
         default_motion: Motion::Spring(Spring::SOFT),
         renderer_setup: Some(Arc::new(vo_3d::install)),
-        ..Options::default()
+        ..crate::kit::options()
     };
     if let Some(dir) = &args.offline {
         let scenario = vo::Scenario {
@@ -4126,7 +4141,7 @@ mod tests {
             let options = Options {
                 fonts: fonts.clone(),
                 default_motion: default_motion(&swiss),
-                ..Options::default()
+                ..crate::kit::options()
             };
             let mut sizes: Vec<Size> = Vec::new();
             let popup = Popup::scripted(swiss.clone(), &fonts);

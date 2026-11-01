@@ -1022,7 +1022,7 @@ pub(crate) mod edit_check {
                 let options = vo::Options {
                     fonts: fonts.clone(),
                     default_motion: default_motion(&look),
-                    ..vo::Options::default()
+                    ..crate::kit::options()
                 };
                 let focus = s
                     .inputs

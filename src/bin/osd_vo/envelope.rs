@@ -75,7 +75,7 @@ fn check(
         fonts: fonts.clone(),
         default_motion: default_motion(look),
         renderer_setup: Some(std::sync::Arc::new(vo_3d::install)),
-        ..Options::default()
+        ..crate::kit::options()
     };
     let envelope = Envelope {
         transcript: 0..TRANSCRIPT_IDS,

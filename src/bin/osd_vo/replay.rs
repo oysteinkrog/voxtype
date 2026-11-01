@@ -248,7 +248,7 @@ pub(super) fn offline(
         default_motion: super::default_motion(&look),
         frame_timings: sink,
         renderer_setup: Some(std::sync::Arc::new(vo_3d::install)),
-        ..vo::Options::default()
+        ..crate::kit::options()
     };
     let popup = super::Popup::replayed(look, &fonts, lookahead);
     let n = vo::render_offline_with(popup, &scenario, fps, dir, options)
@@ -359,7 +359,7 @@ pub(super) fn preview_main() -> anyhow::Result<()> {
             fonts: fonts.clone(),
             default_motion: motion,
             renderer_setup: Some(std::sync::Arc::new(vo_3d::install)),
-            ..vo::Options::default()
+            ..crate::kit::options()
         },
         scenario,
     )
@@ -473,7 +473,7 @@ mod tests {
         let options = vo::Options {
             fonts: fonts.clone(),
             default_motion: super::super::default_motion(&look),
-            ..vo::Options::default()
+            ..crate::kit::options()
         };
         let popup = super::super::Popup::replayed(look, &fonts, lookahead);
         let mut out = Vec::new();

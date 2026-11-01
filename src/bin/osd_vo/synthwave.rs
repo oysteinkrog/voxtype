@@ -63,6 +63,11 @@ const FOOT: f32 = 73.0;
 /// Transcript size and line pitch.
 const TEXT_PX: f32 = 33.0;
 const TEXT_LINE: f32 = 42.0;
+/// A new word rises this far as it fades in, the most the reading line
+/// allows. Not while the baseline follows the pitch (MO-14): a word arrives
+/// at one pitch and rests at another, up to the whole 3 px apart, so any
+/// rise on top breaks the line.
+const ENTER_RISE: f32 = vo::scene::typo::Envelope::READING.baseline;
 /// Transcript width.
 const TEXT_W: f32 = 520.0;
 /// Title size and centre line.
@@ -77,8 +82,9 @@ const BAR_PITCH: f32 = 7.1;
 const BAR_W: f32 = 2.8;
 /// Bottom of the grid under the waveform.
 const GRID_BOTTOM: f32 = 262.0;
-/// Status row centre, above the card's bottom edge.
+/// Status row centre, above the card's bottom edge, and its height.
 const STATUS_UP: f32 = 40.0;
+const STATUS_ROW_H: f32 = 30.0;
 const STATUS_PX: f32 = 18.5;
 /// The tube: stroke width and the corner cuts.
 const TUBE_W: f32 = 2.4;
@@ -154,14 +160,20 @@ const TITLE_SWAP_SECS: f64 = 0.16;
 const ROW_HOLD_SECS: f64 = 0.16;
 
 /// R2-04-a: the mirror's ink, how far it is squashed, its gap under the
-/// descenders and its wobble (pixels, seconds a cycle); the water line's
-/// alpha; a ring's life, alpha, reach (quiet and loud) and flatness.
+/// descenders, the clear gap it keeps above the status row, the letters'
+/// height above the baseline as a share of the size, its wobble (pixels,
+/// seconds a cycle) and how long a word's mirror takes to fade in; the
+/// water line's alpha; a ring's life, alpha, reach (quiet and loud) and
+/// flatness.
 pub(crate) const LIQUID_ECHO: &str = "liquid-echo";
 const ECHO_ALPHA: f32 = 0.16;
 const ECHO_SQUASH: f32 = 0.42;
 const ECHO_GAP: f32 = 2.0;
+const ECHO_CLEAR: f32 = 4.0;
+const ECHO_ASCENT: f32 = 0.8;
 const ECHO_WOBBLE: f32 = 0.9;
 const ECHO_WOBBLE_SECS: f64 = 1.8;
+const ECHO_IN_SECS: f32 = 0.5;
 const SURFACE_ALPHA: f32 = 0.14;
 const RING_SECS: f64 = 1.0;
 const RING_ALPHA: f32 = 0.2;
@@ -318,6 +330,15 @@ fn echo_ring(age: f64, level: f32) -> (f32, f32) {
     let reach = RING_REACH.0 + (RING_REACH.1 - RING_REACH.0) * (level * 2.2).clamp(0.0, 1.0);
     let grow = 1.0 - (1.0 - k).powi(2);
     (reach * grow, RING_ALPHA * (1.0 - k).powf(1.5))
+}
+
+/// R2-04-a: how far the mirror is squashed so letters `rise` pixels tall
+/// above the water line fit in `room` pixels under it.
+fn echo_squash(room: f32, rise: f32) -> f32 {
+    if rise <= 0.0 {
+        return ECHO_SQUASH;
+    }
+    (room / rise).clamp(0.0, ECHO_SQUASH)
 }
 
 /// R2-04-c: a new word's entry: 2 px low at 85 % ink, settling on the
@@ -1307,9 +1328,14 @@ impl Popup {
                     .motion(Prop::Offset, Spring::critical_to_98(DIP_SECS))
                     .word_enter(self.ghost_enter(dip_enter(self.still())))
             } else {
+                let rise = if self.pitch_baseline_on() {
+                    0.0
+                } else {
+                    ENTER_RISE
+                };
                 words
                     .motion(Prop::Offset, Spring::POP)
-                    .word_enter(self.ghost_enter(Transition::fade().offset(0.0, 8.0 * s)))
+                    .word_enter(self.ghost_enter(Transition::fade().offset(0.0, rise * s)))
             };
             // MO-14: the newest word's baseline follows the pitch.
             let words = self.typo_words(words);
@@ -1512,6 +1538,11 @@ impl Popup {
             .collect();
         let baseline = row.boxes.first()?.baseline;
         let water = row.top + baseline + row.descent + ECHO_GAP * s;
+        // The mirror and rings stay clear of the status row under the text.
+        let bottom = text_top + (FOOT + swiss::MAX_LINES as f32 * TEXT_LINE) * s;
+        let floor = bottom - (STATUS_UP + STATUS_ROW_H / 2.0 + ECHO_CLEAR) * s;
+        let room = (floor - water).max(0.0);
+        let squash = echo_squash(room, water - (row.top + baseline - ECHO_ASCENT * row.size));
         let (x0, x1) = (
             row.x - 12.0 * s,
             row.x + row.boxes.last().map_or(0.0, |b| b.rect.x + b.rect.w) + 12.0 * s,
@@ -1523,8 +1554,22 @@ impl Popup {
             (false, None) => f64::INFINITY,
         };
         let borns: Vec<f64> = words.iter().map(|w| w.0).collect();
+        // Each glyph's word's birth, so a word's mirror fades in with it
+        // and never shows a word before the word itself.
+        let glyph_borns: Vec<f64> = row
+            .glyphs
+            .iter()
+            .map(|g| {
+                row.boxes
+                    .iter()
+                    .find(|b| g.pos.x >= b.rect.x - 0.5 && g.pos.x < b.rect.x + b.rect.w)
+                    .and_then(|b| self.heard.word(b.id))
+                    .map_or(f64::NEG_INFINITY, |h| h.born)
+            })
+            .collect();
         let surface = Self::synthwave_surface(l);
-        let ring_y = water + (RING_REACH.1 * RING_FLAT + 1.0) * s;
+        let ring_y = water + ((RING_REACH.1 * RING_FLAT + 1.0) * s).min(room / 2.0);
+        let ring_ry = (floor - ring_y).max(0.0);
         let NewestRow {
             x,
             top,
@@ -1564,12 +1609,20 @@ impl Popup {
                 a: 1.0,
                 b: 0.0,
                 c: 0.0,
-                d: -ECHO_SQUASH,
+                d: -squash,
                 e: 0.0,
-                f: w * (1.0 + ECHO_SQUASH),
+                f: w * (1.0 + squash),
             };
             p.layer(flip, 1.0, |q| {
-                for g in &glyphs {
+                for (g, &born) in glyphs.iter().zip(&glyph_borns) {
+                    let ink = if still {
+                        1.0
+                    } else {
+                        smoothstep(0.0, ECHO_IN_SECS, (t - born) as f32)
+                    };
+                    if ink <= 0.0 {
+                        continue;
+                    }
                     let wobble = if still {
                         0.0
                     } else {
@@ -1585,7 +1638,7 @@ impl Popup {
                         font: g.font,
                         glyph: g.glyph,
                         word: NO_WORD,
-                        color: hex(WHITE).fade(ECHO_ALPHA),
+                        color: hex(WHITE).fade(ECHO_ALPHA * ink),
                         xform: GlyphXform {
                             offset: Point::new(wobble, 0.0),
                             ..GlyphXform::IDENTITY
@@ -1599,7 +1652,7 @@ impl Popup {
             for (age, i) in echo_rings(&borns, t) {
                 let (_, cx, level) = words[i];
                 let (reach, alpha) = echo_ring(age, level);
-                let (rx, ry) = (reach * s, reach * RING_FLAT * s);
+                let (rx, ry) = (reach * s, (reach * RING_FLAT * s).min(ring_ry));
                 let pts: Vec<Point> = (0..48)
                     .map(|k| {
                         let u = std::f32::consts::TAU * k as f32 / 48.0;
@@ -1868,7 +1921,7 @@ impl Popup {
                         .word_change(Transition::fade().opacity(0.2).offset(0.0, -7.0 * s)),
                 );
         }
-        let row_h = 30.0 * s;
+        let row_h = STATUS_ROW_H * s;
         at(
             Element::row("status-row")
                 .size(l.width, row_h)
@@ -2086,6 +2139,57 @@ mod edit_tests {
 #[cfg(test)]
 mod round2_tests {
     use super::*;
+
+    /// The first words keep the reading line's 3 px from where they rest,
+    /// as they rise in and follow the pitch, and as they rise in with the
+    /// pitch baseline taken out.
+    #[test]
+    fn the_first_words_keep_the_reading_line() {
+        use super::super::moments::{scenario, Moment};
+        let plasma = PlasmaTheme::default();
+        let fonts = super::super::swiss_look::edit_check::fonts();
+        for names in [vec![], vec!["no-pitch-baseline".to_string()]] {
+            let cfg = OsdConfig {
+                theme: OsdTheme::Synthwave,
+                motion: OsdMotion::from_names(&names),
+                ..OsdConfig::default()
+            };
+            let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+            look.set_motion(&cfg.motion);
+            assert_eq!(look.on(channels::PITCH), names.is_empty());
+            let s = scenario(&look, Moment::FirstWord);
+            for fps in [30.0, 60.0] {
+                let options = vo::Options {
+                    fonts: fonts.clone(),
+                    default_motion: default_motion(&look),
+                    ..crate::kit::options()
+                };
+                let env = vo::envelope::Envelope {
+                    transcript: 0..1 << 20,
+                    ..vo::envelope::Envelope::default()
+                };
+                let popup = Popup::new(look.clone(), &fonts);
+                let report = vo::envelope::check_scenario(popup, &s, fps, options, &env);
+                assert!(
+                    report.is_ok() && report.glyphs_checked > 0,
+                    "{names:?} at {fps} fps: {report}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_mirror_fits_above_the_status_row() {
+        assert_eq!(echo_squash(100.0, 30.0), ECHO_SQUASH);
+        assert_eq!(echo_squash(0.0, 30.0), 0.0);
+        for room in [0.0, 3.0, 8.0, 12.6, 20.0] {
+            for rise in [0.0, 10.0, 30.0, 40.0] {
+                let k = echo_squash(room, rise);
+                assert!((0.0..=ECHO_SQUASH).contains(&k));
+                assert!(rise * k <= room + 1e-4, "{room} {rise}");
+            }
+        }
+    }
 
     #[test]
     fn the_dip_stays_within_2_px_and_settles_in_120_ms() {

@@ -1261,7 +1261,7 @@ mod tests {
                 let options = Options {
                     fonts: reg.clone(),
                     default_motion: default_motion(&look),
-                    ..Options::default()
+                    ..crate::kit::options()
                 };
                 let mut last = Vec::new();
                 vo::envelope::sample_scenario(

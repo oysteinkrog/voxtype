@@ -817,7 +817,7 @@ mod tests {
         look.theme = OsdTheme::Scope;
         let s = super::moments::scenario(&look, super::moments::Moment::LongSilence);
         let seen = std::rc::Rc::new(RefCell::new(Vec::new()));
-        vo::exit_check(Loudness(Popup::scripted(look, &fonts), seen.clone()), &s, 10.0, Options::default());
+        vo::exit_check(Loudness(Popup::scripted(look, &fonts), seen.clone()), &s, 10.0, crate::kit::options());
         let seen = seen.borrow();
         // From when the first word's sound is fully heard, to well past the
         // few seconds of level history.

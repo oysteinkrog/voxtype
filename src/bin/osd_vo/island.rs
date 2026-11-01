@@ -16,8 +16,6 @@
 
 use super::*;
 
-use std::sync::OnceLock;
-
 use vo::scene::canvas::Painter;
 use vo::scene::display::{Paint, ShapeInstance};
 use vo::scene::geom::{Affine, Point, RRect};
@@ -352,10 +350,7 @@ fn fonts(reg: &FontRegistry) -> Fonts {
 }
 
 fn reduced() -> bool {
-    static R: OnceLock<bool> = OnceLock::new();
-    *R.get_or_init(|| {
-        std::env::var("VO_REDUCED_MOTION").is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"))
-    })
+    crate::kit::reduced()
 }
 
 fn card_style(look: &Look) -> TextStyle {

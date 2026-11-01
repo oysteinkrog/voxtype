@@ -1192,7 +1192,7 @@ pub(crate) fn offline(
         default_motion: default_motion(&look),
         frame_timings: sink,
         renderer_setup: Some(Arc::new(vo_3d::install)),
-        ..Options::default()
+        ..crate::kit::options()
     };
     let n = vo::render_offline_with(
         popup_for(m, Popup::scripted(look, &fonts)),
@@ -1246,7 +1246,7 @@ pub(crate) fn live(
         default_motion: default_motion(&look),
         renderer_setup: Some(Arc::new(vo_3d::install)),
         margin: surface_margin(&look),
-        ..Options::default()
+        ..crate::kit::options()
     };
     let spec = live_spec(cfg, &look);
     // Warm up as the daemon does at start, so the moment shows what a
@@ -1255,7 +1255,7 @@ pub(crate) fn live(
     let warm = Options::<Msg> {
         fonts: fonts.clone(),
         renderer_setup: Some(Arc::new(vo_3d::install)),
-        ..Options::default()
+        ..crate::kit::options()
     };
     let (warm_look, warm_fonts) = (look.clone(), fonts.clone());
     resident
@@ -1385,23 +1385,15 @@ mod tests {
 
     #[test]
     fn the_look_switch_moment_steps_the_look_and_saves_nothing() {
-        // The saved look lives under XDG_STATE_HOME: point it at an empty
-        // folder, and nothing may appear there.
-        let state = std::path::PathBuf::from(format!(
-            "/var/tmp/voxtype-test-look-switch-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&state);
-        std::fs::create_dir_all(&state).unwrap();
-        std::env::set_var("XDG_STATE_HOME", &state);
-
+        // A save under test lands in this thread's list, not on disk.
+        crate::SAVED_LOOKS.with(|s| s.borrow_mut().clear());
         let mut look = test_look();
         look.theme = OsdTheme::Swiss;
         let fonts = load_fonts(&PlasmaTheme::default()).unwrap();
         let s = scenario(&look, Moment::LookSwitch);
         let seen = std::rc::Rc::new(std::cell::RefCell::new(vec![OsdTheme::Swiss]));
         let spy = Spy(Popup::scripted(look, &fonts), seen.clone());
-        let report = vo::exit_check(spy, &s, 10.0, Options::default());
+        let report = vo::exit_check(spy, &s, 10.0, crate::kit::options());
         let next = look_step::step(&OsdTheme::VO_LOOKS, OsdTheme::Swiss, true);
         assert_eq!(
             *seen.borrow(),
@@ -1409,22 +1401,8 @@ mod tests {
             "one step, to the next look"
         );
         assert!(report.ending.after_exit().is_some(), "{report:?}");
-        let left: Vec<_> = walk(&state);
-        let _ = std::fs::remove_dir_all(&state);
-        assert!(left.is_empty(), "the scripted step saved {left:?}");
-    }
-
-    fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
-        let mut out = Vec::new();
-        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                out.extend(walk(&p));
-            } else {
-                out.push(p);
-            }
-        }
-        out
+        let saved = crate::SAVED_LOOKS.with(|s| s.borrow().clone());
+        assert!(saved.is_empty(), "the scripted step saved {saved:?}");
     }
 
     #[test]
@@ -1595,7 +1573,7 @@ mod tests {
         let options = || Options {
             fonts: fonts.clone(),
             default_motion: default_motion(&look),
-            ..Options::default()
+            ..crate::kit::options()
         };
         let popup = || popup_for(Moment::Edit, Popup::scripted(look.clone(), &fonts));
         let keys: Vec<f64> = s
@@ -1734,7 +1712,7 @@ mod tests {
         let options = Options {
             fonts: fonts.clone(),
             default_motion: default_motion(look),
-            ..Options::default()
+            ..crate::kit::options()
         };
         vo::envelope::sample_scenario(spy, s, 30.0, options, &mut |_, _, _| {});
         let out = seen.borrow().clone();

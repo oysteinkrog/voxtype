@@ -1650,7 +1650,7 @@ mod tests {
         let options = Options {
             fonts: fonts.clone(),
             default_motion: default_motion(&look),
-            ..Options::default()
+            ..crate::kit::options()
         };
         let mut out = Vec::new();
         vo::envelope::sample_scenario(
