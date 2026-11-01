@@ -17,7 +17,7 @@
 //! caret, so the square takes the caret's breath), the hairline under the
 //! text lightens a little with the smoothed level (it stands in for a
 //! baseline grid), and once every 12 s a 1 s sheen crosses the status word.
-//! The loops step 15 times a second, keep off the transcript, leave the
+//! The loops step 12 times a second, keep off the transcript, leave the
 //! view once the recording stops and hold still under reduced motion.
 
 use super::*;
@@ -56,12 +56,15 @@ const WAVE_WIDTH: f32 = 1.2;
 const WAVE_DROP: f32 = 2.0;
 /// The underline's colour: amber, apart from the theme's accent.
 const DOUBT_COLOR: u32 = 0xf5a524;
+/// The frame pace while the popup records room tone (RD-11): the idle
+/// loops' own pace, so no frame is drawn between their steps.
+pub(crate) const ROOM_TONE_FPS: f64 = IDLE_FPS;
 /// 09b: the idle loops' pace (RD-02's slow-loop cap); the square's lowest
 /// opacity and seconds per breath; how far the hairline moves toward the
 /// text colour at full level and the level samples it smooths over; the
 /// sheen's width, period, pass, first pass after the popup opens and
 /// strength.
-const IDLE_FPS: f64 = 15.0;
+const IDLE_FPS: f64 = 12.0;
 const DOT_LOW: f64 = 0.6;
 const DOT_PERIOD: f64 = 2.0;
 const RULE_LIFT: f32 = 0.2;
