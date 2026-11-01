@@ -741,6 +741,19 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     }
 }
 
+/// Give the engine model's freed heap back to the kernel. glibc keeps it for
+/// reuse otherwise, so a warm worker that had dropped Cohere still held
+/// 4.8 GB resident between recordings (home PC, 2026-11-01).
+#[cfg(feature = "parakeet")]
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free heap pages; it has no
+    // preconditions and does not touch live allocations.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 /// One recording of the live worker: READY, audio until an empty block or
 /// EOF, then the response. Returns whether another recording may follow
 /// (false after EOF).
@@ -839,14 +852,19 @@ fn live_session(
                         }
                     }
                     Err(e) => {
+                        drop(transcriber);
+                        release_freed_memory();
                         let _ = msg_tx.send(EngineMsg::Done(Err(e.to_string())));
                         return;
                     }
                 }
             }
+            let language = transcriber.last_detected_language();
+            drop(transcriber);
+            release_freed_memory();
             let _ = msg_tx.send(EngineMsg::Done(Ok(EngineDone {
                 text: texts.join(" "),
-                language: transcriber.last_detected_language(),
+                language,
                 clips,
                 resumed,
             })));
