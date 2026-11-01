@@ -1077,4 +1077,40 @@ mod tests {
             .collect();
         assert!(moved.is_empty(), "{moved:?}");
     }
+
+    /// qnjl: in the revision burst at 400 px, a revised word's kept letters
+    /// slid to their new places at once while its replaced letter held its
+    /// ink until the new one showed, so for 22 frames the word was 5 % too
+    /// narrow (tracking 95 %, word 3 at 1.533 s). Fixed in vo f325c28: the
+    /// kept letters move in the frame the new letters show.
+    #[test]
+    fn swissfi_revision_burst_keeps_word_widths_at_400_px() {
+        use super::super::moments::{popup_for, scenario, Moment};
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let cfg = OsdConfig {
+            theme: OsdTheme::Swissfi,
+            ..OsdConfig::default()
+        };
+        assert_eq!(cfg.width_px, 400, "the default width the breach needed");
+        let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+        look.set_motion(&cfg.motion);
+        let options = Options {
+            fonts: fonts.clone(),
+            default_motion: default_motion(&look),
+            ..crate::kit::options()
+        };
+        let moment = Moment::RevisionBurst;
+        let report = vo::envelope::check_scenario(
+            popup_for(moment, Popup::new(look.clone(), &fonts)),
+            &scenario(&look, moment),
+            30.0,
+            options,
+            &vo::envelope::Envelope {
+                transcript: 0..1 << 20,
+                ..vo::envelope::Envelope::default()
+            },
+        );
+        assert!(report.is_ok() && report.glyphs_checked > 0, "{report}");
+    }
 }
