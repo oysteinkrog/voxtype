@@ -17,7 +17,8 @@
 #
 # Each live run plays the moment in the real popup surface inside its own
 # nested `kwin_wayland --virtual` (never the real display). CPU is the
-# process's utime + stime from /proc/<pid>/stat over the window, in percent of
+# process's run time summed over its threads from /proc/<pid>/task/*/schedstat
+# (nanoseconds) over the window, in percent of
 # one core. Frames per second count the `vo: frame` lines (VO_DIAG_FRAMES=1)
 # whose scene time falls in the window. GPU is the worst surface's median, p95
 # and p99 per frame from `--offline --gpu-times --moment <moment>` at --fps 10 (no
@@ -135,7 +136,10 @@ for _ in $(seq 400); do
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.02
 done
-cpu() { awk '{ sub(/.*\) /, ""); print $12 + $13 }' "/proc/$pid/stat" 2>/dev/null; }
+# CPU time of all the popup's threads, in clock ticks but read from schedstat in
+# nanoseconds: utime and stime count whole 10 ms ticks, about 0.24 % of a 4 s window,
+# so one tick decided whether a look passed (1 Nov).
+cpu() { cat /proc/"$pid"/task/*/schedstat 2>/dev/null | awk -v hz="$(getconf CLK_TCK)" '{ ns += $1 } END { printf "%.4f", ns * hz / 1e9 }'; }
 until_uptime() {
     local now
     now=$(cut -d' ' -f1 /proc/uptime)
