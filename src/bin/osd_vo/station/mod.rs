@@ -286,10 +286,6 @@ impl Station {
         }
     }
 
-    fn per_page(&self) -> usize {
-        self.cols * self.rows
-    }
-
     pub(crate) fn pages(&self) -> usize {
         self.starts.len()
     }
