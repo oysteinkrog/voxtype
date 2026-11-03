@@ -538,8 +538,7 @@ const LIVE_TYPING_FINAL_WAIT: std::time::Duration = std::time::Duration::from_mi
 async fn modifiers_released(timeout: std::time::Duration) -> bool {
     #[cfg(target_os = "linux")]
     {
-        crate::output::modifier_guard::ModifierGuard::new()
-            .wait_for_release(timeout)
+        crate::output::modifier_guard::wait_until_released(timeout)
             .await
             .is_ok()
     }
@@ -2847,6 +2846,10 @@ impl Daemon {
         // A stream never passes through "transcribing", where a batch
         // recording starts the receipt's latency clock.
         crate::osd::outcome::stopped();
+        // The final text waits for the modifier keys to be up; their
+        // devices open now, while it is transcribed.
+        #[cfg(target_os = "linux")]
+        crate::output::modifier_guard::prewarm();
         self.cut_streaming_audio();
         self.start_streaming_drain_pump();
         if let Some(mut c) = audio_capture.take() {

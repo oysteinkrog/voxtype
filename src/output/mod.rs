@@ -578,9 +578,7 @@ pub async fn output_via_confirmed(
     if options.wait_for_modifier_release
         && chain_synthesizes_keystrokes(chain.iter().map(|o| o.name()))
     {
-        let mut guard = modifier_guard::ModifierGuard::new();
-        if guard
-            .wait_for_release(options.modifier_release_timeout)
+        if modifier_guard::wait_until_released(options.modifier_release_timeout)
             .await
             .is_err()
         {
