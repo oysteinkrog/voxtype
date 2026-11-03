@@ -2692,6 +2692,14 @@ impl App for Popup {
         })
     }
 
+    /// What a screen reader sees (plan F8): the shown text, read out now
+    /// and then while it is live and once when the dictation is done, and
+    /// while editing, the buffer with its caret and selection. vo asks only
+    /// while a screen reader runs.
+    fn accessible(&self) -> Option<vo::a11y_tree::Accessible> {
+        Some(popup_accessible(self))
+    }
+
     /// An input method's batch (plan F7): commits go in as typed text,
     /// the preedit shows at the caret.
     fn text_input(&mut self, ev: &vo::scene::input::TextInputEvent, cx: &mut Cx<Msg>) {
@@ -3085,6 +3093,29 @@ fn new_step(
     next: Option<look_step::Step>,
 ) -> Option<look_step::Step> {
     next.filter(|_| seen && next != last)
+}
+
+/// The popup for a screen reader (`App::accessible`).
+fn popup_accessible(p: &Popup) -> vo::a11y_tree::Accessible {
+    let edit = p
+        .edit_view
+        .as_ref()
+        .and(p.edit.as_ref())
+        .and_then(|l| l.buffer())
+        .map(|b| {
+            let s = b.selection();
+            vo::a11y_tree::EditField {
+                value: b.text().to_string(),
+                anchor: s.anchor,
+                focus: s.focus,
+            }
+        });
+    vo::a11y_tree::Accessible {
+        name: "Voxtype dictation".into(),
+        text: p.files.preview.clone(),
+        done: p.ending() == Some(Ending::Done),
+        edit,
+    }
 }
 
 /// The live popup's surface for `look`. With keyboard edit on, the input

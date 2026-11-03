@@ -626,6 +626,33 @@ mod tests {
     /// look draws there, on every wrapped line of the window, in Swiss, Type
     /// and River; per-line tags (`place_lines`) land on the same stops.
     #[test]
+    fn the_screen_reader_tree_holds_the_text_and_in_an_edit_the_field() {
+        use vo::a11y_tree::{tree, EDIT, TEXT, WINDOW};
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut p, _fonts) = popup(&dir, OsdTheme::Swiss);
+        p.files.preview = "plum pear fig".into();
+        let a = p.accessible().expect("the popup describes itself");
+        assert_eq!((a.text.as_str(), a.edit.is_none()), ("plum pear fig", true));
+        let u = tree(&a, &a.text);
+        assert_eq!(u.focus, WINDOW);
+        let label = &u.nodes.iter().find(|(id, _)| *id == TEXT).unwrap().1;
+        assert_eq!(label.value(), Some("plum pear fig"));
+        // Editing: the field holds the buffer, with the caret at its end.
+        sync(&mut p, Some("editing"), "plum pear fig");
+        let a = p.accessible().unwrap();
+        let e = a.edit.clone().expect("an edit field while editing");
+        assert_eq!(
+            (e.value.as_str(), e.anchor, e.focus),
+            ("plum pear fig", 13, 13)
+        );
+        let u = tree(&a, "");
+        assert_eq!(u.focus, EDIT);
+        let field = &u.nodes.iter().find(|(id, _)| *id == EDIT).unwrap().1;
+        assert_eq!(field.value(), Some("plum pear fig"));
+        assert_eq!(field.text_selection().unwrap().focus.character_index, 13);
+    }
+
+    #[test]
     fn a_point_on_the_window_maps_to_the_stop_under_it() {
         use super::super::edit::WINDOW;
         use vo::scene::geom::Point;

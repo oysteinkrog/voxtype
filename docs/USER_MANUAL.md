@@ -1249,6 +1249,8 @@ When the pause starts, the microphone is muted and the last words still being de
 
 **Edit.** The text you see is the text that will be pasted, already processed (spoken punctuation, replacements, quotes). The usual editing keys work: arrows, Ctrl+arrows, Home and End, Shift to select, Backspace and Delete, Ctrl+Z to undo. Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste through the clipboard (Ctrl+Insert, Shift+Delete and Shift+Insert do the same). Selecting text never changes the clipboard or the primary selection; only a copy or cut does. Pasted text goes in as if you typed it. With the mouse, click in the text to put the caret there, drag to select, double-click to select a word and triple-click to select a line. Clicks anywhere else on the popup go through to the window under it. An input method (such as Fcitx or IBus) works in the popup when your compositor supports text-input-v3: the text being composed shows underlined at the caret and goes into the text when you confirm it. Shift+Enter adds a new line. Shift for capitals or with arrows never counts as an edit tap.
 
+**Screen readers.** A screen reader such as Orca can read the vo popup. While you speak it reads the text every few seconds, and once more when the final text is ready. While you edit, it reads the text box with its caret and selection. None of this runs unless a screen reader is on. Set `VO_A11Y=0` in the popup's environment to turn it off.
+
 **Go on or finish.**
 
 | Key | What it does |
