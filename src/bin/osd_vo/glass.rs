@@ -678,12 +678,23 @@ impl Popup {
             shadow: [0.45, 22.0 * k, 10.0 * k],
             ..Glass::dark()
         };
-        let glass = glass
-            .tinted_for(hex(TINT), &[hex(INK), hex(HINT)], 4.5)
-            .unwrap_or(Glass {
+        // The tint that keeps the words readable depends only on constants, and its search
+        // (20 halvings of four contrast tests) cost about 4 % of the look's idle CPU when it
+        // ran each frame (bqw3), so it runs once.
+        static TINTED: std::sync::OnceLock<Option<Glass>> = std::sync::OnceLock::new();
+        let tinted =
+            TINTED.get_or_init(|| glass.tinted_for(hex(TINT), &[hex(INK), hex(HINT)], 4.5));
+        let glass = match tinted {
+            Some(t) => Glass {
+                tint: t.tint,
+                edge_alpha: glass.edge_alpha.min(t.tint.a),
+                ..glass
+            },
+            None => Glass {
                 tint: Color::hex(TINT, 0.9),
                 ..glass
-            });
+            },
+        };
         let glass = if still { glass.still() } else { glass };
         let wave = Wave {
             levels: self.kit_raw_levels(),
