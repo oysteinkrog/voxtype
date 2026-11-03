@@ -12,9 +12,11 @@
 //! errors): the guard becomes `Disabled` and `wait_for_release` returns
 //! immediately so output proceeds as before.
 //!
-//! Re-enumerated on every output call so hotplug (Bluetooth keyboards plugged
-//! in mid-session) is handled implicitly without needing inotify watchers in
-//! the output path.
+//! [`wait_until_released`] keeps the opened devices for up to 30 s, and
+//! [`prewarm`] opens them again ahead of a paste, so a keyboard plugged in
+//! mid-session is picked up without inotify watchers in the output path.
+//! Opening them takes 50 ms or more (17 devices, some slow to open), which
+//! used to come before every paste.
 
 use evdev::{AttributeSet, Device, KeyCode as Key};
 use std::path::PathBuf;
@@ -160,6 +162,49 @@ impl ModifierGuard {
         }
         Ok(())
     }
+}
+
+/// Devices opened by [`prewarm`] or a [`wait_until_released`], with when.
+static OPENED: std::sync::Mutex<Option<(Instant, ModifierGuard)>> = std::sync::Mutex::new(None);
+
+/// How long opened devices are reused before they are opened again.
+const REUSE_FOR: Duration = Duration::from_secs(30);
+
+/// Open the keyboard devices now, on a thread of their own, for the next
+/// [`wait_until_released`]. For the moment a recording stops: the text is
+/// at least a transcription away.
+pub fn prewarm() {
+    std::thread::spawn(|| {
+        let guard = ModifierGuard::new();
+        *OPENED.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), guard));
+    });
+}
+
+/// [`ModifierGuard::wait_for_release`] on the devices [`prewarm`] or an
+/// earlier call opened, when that was less than 30 s ago; otherwise they
+/// are opened now, off the async threads.
+pub async fn wait_until_released(timeout: Duration) -> Result<(), Timeout> {
+    let kept = OPENED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .filter(|(at, _)| at.elapsed() < REUSE_FOR);
+    let (at, mut guard) = match kept {
+        Some(kept) => kept,
+        None => {
+            let guard = tokio::task::spawn_blocking(ModifierGuard::new)
+                .await
+                .unwrap_or(ModifierGuard::Disabled);
+            (Instant::now(), guard)
+        }
+    };
+    let result = guard.wait_for_release(timeout).await;
+    let mut slot = OPENED.lock().unwrap_or_else(|e| e.into_inner());
+    // A prewarm meanwhile is newer.
+    if slot.is_none() {
+        *slot = Some((at, guard));
+    }
+    result
 }
 
 /// Returned when `wait_for_release` gives up because modifiers were still held

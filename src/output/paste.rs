@@ -21,6 +21,11 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+/// The clipboard restore of the last paste, which runs after the paste so
+/// it holds up neither the output hook nor the popup.
+static PENDING_RESTORE: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
 /// Keystroke-capable drivers, in the order tried when the configured
 /// `driver_order` doesn't name any of them. clipboard/xclip have no
 /// keystroke-simulation path, so they never appear here.
@@ -348,7 +353,20 @@ impl PasteOutput {
             return copy_to_x11_clipboard(text.as_bytes()).await;
         }
 
-        // Spawn wl-copy with stdin pipe
+        // The primary selection is set at the same time, not after.
+        let primary = async {
+            if self.paste_primary {
+                if let Err(e) = Self::copy_to_primary(text).await {
+                    tracing::warn!("Failed to set primary selection: {}", e);
+                }
+            }
+        };
+        let (copied, ()) = tokio::join!(Self::copy_to_wl_clipboard(text), primary);
+        copied
+    }
+
+    /// Copy text to the Wayland clipboard with `wl-copy`.
+    async fn copy_to_wl_clipboard(text: &str) -> Result<(), OutputError> {
         let mut child = Command::new("wl-copy")
             .arg("--type")
             .arg(super::clipboard::WL_COPY_TEXT_MIME)
@@ -387,13 +405,61 @@ impl PasteOutput {
             ));
         }
 
-        if self.paste_primary {
-            if let Err(e) = Self::copy_to_primary(text).await {
-                tracing::warn!("Failed to set primary selection: {}", e);
-            }
-        }
-
         Ok(())
+    }
+
+    /// Wait until the text can be pasted. A configured `pre_type_delay_ms`
+    /// is a fixed wait, as before. Without one, Wayland waits until
+    /// `wl-paste` reads the text back (and from the primary selection with
+    /// `paste_primary`), at most 100 ms; that takes about 5 ms, where the
+    /// old fixed wait took 100 ms on every paste. X11 keeps the 100 ms.
+    async fn wait_until_pasteable(&self, text: &str) {
+        const MAX: std::time::Duration = std::time::Duration::from_millis(100);
+        if self.pre_type_delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                self.pre_type_delay_ms as u64,
+            ))
+            .await;
+            return;
+        }
+        if detect() != DisplaySession::Wayland {
+            tokio::time::sleep(MAX).await;
+            return;
+        }
+        let deadline = std::time::Instant::now() + MAX;
+        loop {
+            let primary = async { !self.paste_primary || Self::reads_back(text, true).await };
+            let (clipboard, primary) = tokio::join!(Self::reads_back(text, false), primary);
+            if clipboard && primary {
+                return;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                tracing::debug!("Clipboard did not read back within 100 ms; pasting anyway");
+                return;
+            }
+            tokio::time::sleep(left.min(std::time::Duration::from_millis(10))).await;
+        }
+    }
+
+    /// Whether `wl-paste` reads `text` from the clipboard, or from the
+    /// primary selection.
+    async fn reads_back(text: &str, primary: bool) -> bool {
+        let mut cmd = Command::new("wl-paste");
+        if primary {
+            cmd.arg("--primary");
+        }
+        cmd.args([
+            "--no-newline",
+            "--type",
+            super::clipboard::WL_COPY_TEXT_MIME,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+        let read = tokio::time::timeout(std::time::Duration::from_millis(100), cmd.output());
+        matches!(read.await, Ok(Ok(out)) if out.status.success() && out.stdout == text.as_bytes())
     }
 
     /// Copy text to the Wayland primary selection with `wl-copy --primary`.
@@ -562,13 +628,10 @@ impl PasteOutput {
     }
 
     /// Restore clipboard content using wl-copy or xclip
-    async fn restore_clipboard_content(
-        &self,
-        content: &ClipboardContent,
-    ) -> Result<(), OutputError> {
+    async fn restore_clipboard_content(content: &ClipboardContent) -> Result<(), OutputError> {
         // Try wl-copy first (Wayland)
         if std::env::var("WAYLAND_DISPLAY").is_ok() {
-            match self.restore_clipboard_wl_copy(content).await {
+            match Self::restore_clipboard_wl_copy(content).await {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     tracing::debug!("wl-copy restore failed, trying xclip: {}", e);
@@ -577,14 +640,11 @@ impl PasteOutput {
         }
 
         // Fallback to xclip
-        self.restore_clipboard_xclip(content).await
+        Self::restore_clipboard_xclip(content).await
     }
 
     /// Restore clipboard using wl-copy with MIME type preservation
-    async fn restore_clipboard_wl_copy(
-        &self,
-        content: &ClipboardContent,
-    ) -> Result<(), OutputError> {
+    async fn restore_clipboard_wl_copy(content: &ClipboardContent) -> Result<(), OutputError> {
         let mut child = Command::new("wl-copy")
             .arg("--type")
             .arg(&content.mime_type)
@@ -623,7 +683,7 @@ impl PasteOutput {
     }
 
     /// Restore clipboard using xclip
-    async fn restore_clipboard_xclip(&self, content: &ClipboardContent) -> Result<(), OutputError> {
+    async fn restore_clipboard_xclip(content: &ClipboardContent) -> Result<(), OutputError> {
         let mut child = Command::new("xclip")
             .args(["-selection", "clipboard"])
             .stdin(Stdio::piped())
@@ -903,7 +963,7 @@ impl PasteOutput {
     /// Simulate paste keystroke, trying each driver in `self.driver_order`
     /// (derived from `[output] driver_order`, defaulting to
     /// wtype -> eitype -> ydotool) until one succeeds.
-    async fn simulate_paste_keystroke(&self) -> Result<(), OutputError> {
+    async fn simulate_paste_keystroke(&self) -> Result<&'static str, OutputError> {
         let mut tried = Vec::new();
 
         for driver in &self.driver_order {
@@ -933,7 +993,7 @@ impl PasteOutput {
             match result {
                 Ok(()) => {
                     tracing::debug!("Paste keystroke sent via {}", name);
-                    return Ok(());
+                    return Ok(name);
                 }
                 Err(e) => {
                     tracing::debug!("{} paste failed: {}", name, e);
@@ -1022,8 +1082,18 @@ impl TextOutput for PasteOutput {
         if text.is_empty() {
             return Ok(());
         }
+        // The last paste's restore must not land on this one.
+        let pending = PENDING_RESTORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(pending) = pending {
+            let _ = pending.await;
+        }
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1000.0;
 
         // Save original clipboard content if restoration is enabled
+        let step = std::time::Instant::now();
         let original_clipboard = if self.restore_clipboard {
             match self.read_clipboard().await {
                 Ok(content) => {
@@ -1042,6 +1112,7 @@ impl TextOutput for PasteOutput {
         } else {
             None
         };
+        let read_ms = ms(step);
 
         // Prepare text with optional append
         let text_to_paste = if let Some(ref append) = self.append_text {
@@ -1051,45 +1122,40 @@ impl TextOutput for PasteOutput {
         };
 
         // Step 1: Copy to clipboard
+        let step = std::time::Instant::now();
         self.copy_to_clipboard(&text_to_paste).await?;
-
-        // Pre-paste delay to ensure clipboard is set before pasting
-        // Default to 100ms if not configured (minimum needed for reliability)
-        let delay = if self.pre_type_delay_ms > 0 {
-            self.pre_type_delay_ms
-        } else {
-            100
-        };
-        tokio::time::sleep(std::time::Duration::from_millis(delay as u64)).await;
+        let copy_ms = ms(step);
+        let step = std::time::Instant::now();
+        self.wait_until_pasteable(&text_to_paste).await;
+        let wait_ms = ms(step);
 
         // Step 2: Simulate paste keystroke
-        self.simulate_paste_keystroke().await?;
+        let step = std::time::Instant::now();
+        let driver = self.simulate_paste_keystroke().await?;
+        let key_ms = ms(step);
 
         // Send Enter key if configured
         if self.auto_submit {
             self.send_enter().await?;
         }
 
-        // Restore original clipboard content if we saved something
+        // Restore the original clipboard after the paste has had time to
+        // read it, without holding up the output hook or the next step.
         if let Some(content) = original_clipboard {
-            // Wait for paste to complete before restoring
-            tokio::time::sleep(std::time::Duration::from_millis(
-                self.restore_clipboard_delay_ms as u64,
-            ))
-            .await;
-
-            match self.restore_clipboard_content(&content).await {
-                Ok(()) => {
-                    tracing::debug!("Restored original clipboard content");
+            let delay = std::time::Duration::from_millis(self.restore_clipboard_delay_ms as u64);
+            let restore = tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                match Self::restore_clipboard_content(&content).await {
+                    Ok(()) => tracing::debug!("Restored original clipboard content"),
+                    Err(e) => tracing::warn!("Failed to restore clipboard content: {}", e),
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to restore clipboard content: {}", e);
-                }
-            }
+            });
+            *PENDING_RESTORE.lock().unwrap_or_else(|e| e.into_inner()) = Some(restore);
         }
 
         tracing::info!(
-            "Text pasted via clipboard + {} ({} chars)",
+            "Text pasted via clipboard + {} ({} chars, {}): read clipboard {:.0} ms, \
+             copy {:.0} ms, wait {:.0} ms, keystroke {:.0} ms",
             self.keystroke.modifiers.join("+")
                 + if !self.keystroke.modifiers.is_empty() {
                     "+"
@@ -1097,7 +1163,12 @@ impl TextOutput for PasteOutput {
                     ""
                 }
                 + &self.keystroke.key,
-            text.len()
+            text.len(),
+            driver,
+            read_ms,
+            copy_ms,
+            wait_ms,
+            key_ms
         );
         Ok(())
     }
@@ -1171,6 +1242,33 @@ impl TextOutput for PasteOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Times a paste with clipboard restore and the primary selection,
+    /// against the compositor in WAYLAND_DISPLAY. Run it only in a nested
+    /// `kwin_wayland --virtual` with a stand-in `wtype` first on PATH and
+    /// `driver_order` pinned to it, never on a real desktop: the paste key
+    /// would land in the focused window. The paste logs its step times.
+    #[tokio::test]
+    #[ignore]
+    async fn nested_paste_timing() {
+        let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+        let paste = PasteOutput::new(
+            false,
+            None,
+            Some("shift+insert".into()),
+            Some(vec![OutputDriver::Wtype]),
+            0,
+            0,
+            true,
+            200,
+        )
+        .with_paste_primary(true);
+        for i in 0..3 {
+            let start = std::time::Instant::now();
+            paste.output(&format!("made up words {i}")).await.unwrap();
+            eprintln!("paste {i}: output() returned after {:?}", start.elapsed());
+        }
+    }
 
     #[tokio::test]
     async fn only_the_drivers_in_driver_order_are_checked() {

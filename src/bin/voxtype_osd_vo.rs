@@ -92,6 +92,8 @@ mod letter_fx;
 mod limit;
 #[path = "osd_vo/mission.rs"]
 mod mission;
+#[path = "osd_vo/finish_progress.rs"]
+mod finish_progress;
 #[path = "osd_vo/orb.rs"]
 mod orb;
 #[path = "osd_vo/palette.rs"]
@@ -1661,6 +1663,8 @@ enum Msg {
     Loop,
     /// A timer of the motion station. A popup ignores it.
     Station(Box<station::Cue>),
+    /// The next step of the final pass's progress bar.
+    Progress,
     /// `preview-signals.json` changed: the live model took a step. Kept
     /// apart from `Files`, so it never touches the text or the lifecycle.
     ModelSignals(Box<voxtype::osd::live::ModelSignals>),
@@ -1698,6 +1702,9 @@ struct Popup {
     /// The frame pace for `App::frame_pace`, set after each update.
     pace: Option<f64>,
     files: Files,
+    /// The final pass's bar, moved on between the worker's status lines.
+    /// `files.fraction` holds the share to show; this the one sent.
+    finish: finish_progress::FinishProgress,
     /// "00:12", frozen while the final text is made.
     clock: String,
     word_count: usize,
@@ -1867,6 +1874,7 @@ impl Popup {
             pace: None,
             last_audio: None,
             files: Files::default(),
+            finish: Default::default(),
             clock: "00:00".into(),
             word_count: 0,
             model: WordModel::new(),
@@ -1914,6 +1922,27 @@ impl Popup {
             picked_at: None,
             live_surface: false,
             lookahead: None,
+        }
+    }
+
+    /// Moves the final pass's bar on from the worker's time estimate, and
+    /// wakes the view for its next step while it moves.
+    fn move_finish_progress(&mut self, t: f64, cx: &mut Cx<Msg>) {
+        use voxtype::osd::live::Phase;
+        let eta = self
+            .files
+            .live
+            .as_ref()
+            .and_then(|l| l.status.as_ref())
+            .filter(|s| s.phase == Phase::Finishing)
+            .and_then(|s| s.eta_s);
+        self.finish.note(self.finish.raw, eta, t);
+        if !self.finish.moving() {
+            return;
+        }
+        self.files.fraction = self.finish.fraction(t);
+        if self.finish.timer.is_none() && self.shows_progress(&self.status()) {
+            self.finish.timer = Some(cx.after(1.0 / finish_progress::STEP_HZ, Msg::Progress));
         }
     }
 
@@ -2343,6 +2372,57 @@ impl Popup {
     }
 }
 
+impl Popup {
+    /// Runs an edit (a key, a paste) on the buffer while the popup owns it,
+    /// then shows the change: the new text, and a mark on each word the
+    /// edit made or changed. `act` gets the lines the look draws, so Up,
+    /// Down, Home and End move by them. Returns what `act` returned.
+    fn edit_by(
+        &mut self,
+        t: f64,
+        cx: &mut Cx<Msg>,
+        act: impl FnOnce(
+            &mut edit_focus::Focus,
+            &mut edit_link::EditLink,
+            Option<&dyn vo_core::edit::Lines>,
+            &mut Cx<Msg>,
+        ) -> bool,
+    ) -> bool {
+        let text_box = edit_site::site(self.look.theme).text_box_in(self);
+        let Some(link) = self.edit.as_mut() else {
+            return false;
+        };
+        let lines = match link.buffer() {
+            Some(b) if self.edit_view.is_some() => Some(self.edit_layer.shaped(
+                b.text(),
+                &self.measure,
+                text_box.style,
+                text_box.width,
+            ) as &dyn vo_core::edit::Lines),
+            _ => None,
+        };
+        let before: HashSet<vo_core::words::WordId> =
+            self.model.words().iter().map(|w| w.id).collect();
+        let used = act(&mut self.focus, link, lines, cx);
+        self.focus.follow(link, cx, t);
+        if used {
+            self.sync_quiet();
+            if self.edit_text(t) {
+                // A word the edit made or changed has a new id.
+                let new = self
+                    .model
+                    .words()
+                    .iter()
+                    .map(|w| w.id)
+                    .filter(|id| !before.contains(id));
+                self.edit_marks.extend(new);
+                self.mark_edits();
+            }
+        }
+        used
+    }
+}
+
 impl App for Popup {
     type Msg = Msg;
 
@@ -2408,6 +2488,8 @@ impl App for Popup {
                 }
             }
             Msg::Files(files) => {
+                // Compared as the daemon wrote it, not as the bar shows it.
+                self.files.fraction = self.finish.raw;
                 let step = new_step(self.step_seen, self.files.look_step, files.look_step);
                 self.step_seen = true;
                 let preview_changed = files.preview != self.files.preview;
@@ -2425,6 +2507,7 @@ impl App for Popup {
                 self.was_recording |= files.recording;
                 self.was_finishing |= files.transcribing || (files.finishing && !files.recording);
                 self.files = files;
+                self.finish.raw = self.files.fraction;
                 if self.busy() {
                     // A new recording in the same popup.
                     self.quiet_since = None;
@@ -2474,8 +2557,10 @@ impl App for Popup {
             }
             Msg::Check => self.check = None,
             Msg::Tick => self.extra.tick = None,
+            Msg::Progress => self.finish.timer = None,
             Msg::Loop | Msg::Station(_) | Msg::ModelSignals(_) => {}
         }
+        self.move_finish_progress(t, cx);
         if let Some(ending) = self.ending() {
             if self.ended_at.is_none() {
                 self.ended_at = Some(t);
@@ -2564,39 +2649,17 @@ impl App for Popup {
     }
 
     fn key(&mut self, ev: &vo::scene::input::KeyEvent, cx: &mut Cx<Msg>) -> bool {
-        let text_box = edit_site::site(self.look.theme).text_box_in(self);
-        let Some(link) = self.edit.as_mut() else {
-            return false;
-        };
-        // Up, Down, Home and End move by the lines the look draws.
-        let lines = match link.buffer() {
-            Some(b) if self.edit_view.is_some() => Some(self.edit_layer.shaped(
-                b.text(),
-                &self.measure,
-                text_box.style,
-                text_box.width,
-            ) as &dyn vo_core::edit::Lines),
-            _ => None,
-        };
-        let before: HashSet<vo_core::words::WordId> =
-            self.model.words().iter().map(|w| w.id).collect();
-        let used = self.focus.key(ev, link, lines);
-        self.focus.follow(link, cx, ev.t);
-        if used {
-            self.sync_quiet();
-            if self.edit_text(ev.t) {
-                // A word the key made or changed has a new id.
-                let new = self
-                    .model
-                    .words()
-                    .iter()
-                    .map(|w| w.id)
-                    .filter(|id| !before.contains(id));
-                self.edit_marks.extend(new);
-                self.mark_edits();
-            }
-        }
-        used
+        self.edit_by(ev.t, cx, |focus, link, lines, cx| {
+            focus.key(ev, link, lines, cx)
+        })
+    }
+
+    /// Pasted text (Ctrl+V, Shift+Insert) goes in as typed text.
+    fn clipboard(&mut self, text: Option<String>, cx: &mut Cx<Msg>) {
+        let t = cx.t();
+        self.edit_by(t, cx, |focus, link, lines, _| {
+            focus.pasted(text, link, lines, t)
+        });
     }
 
     fn keyboard_focus(&mut self, gained: bool, requested: bool, cx: &mut Cx<Msg>) {

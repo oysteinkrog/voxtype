@@ -49,6 +49,9 @@ pub(crate) enum Moment {
     /// A keyboard edit (plan M7.6): a tap in a pause, the caret up two
     /// lines, a word typed, Enter.
     Edit,
+    /// A keyboard edit with the clipboard (plan F5): the last word copied,
+    /// the caret up two lines, the word pasted there, Enter.
+    EditPaste,
     /// A word every 0.3 s for 7.2 s with no pause, for the recording cost
     /// of features that work per word (SW-09).
     Cadence,
@@ -83,6 +86,7 @@ impl Moment {
         Moment::Correction,
         Moment::Spell,
         Moment::Edit,
+        Moment::EditPaste,
         Moment::Cadence,
         Moment::WordBurst,
         Moment::Nordic,
@@ -112,6 +116,7 @@ impl Moment {
             Moment::Correction => "correction",
             Moment::Spell => "spell",
             Moment::Edit => "edit",
+            Moment::EditPaste => "edit-paste",
             Moment::Cadence => "cadence",
             Moment::WordBurst => "word-burst",
             Moment::Nordic => "nordic",
@@ -622,18 +627,26 @@ impl Take {
         self.files_at(t);
     }
 
-    /// The final pass from `t` for `secs`, with the finishing fraction
-    /// moving, then `text` as the final text. Returns when it is shown.
+    /// The final pass from `t` for `secs`, then `text` as the final text.
+    /// Returns when it is shown. As the live worker reports a clip with one
+    /// part left: one status line with nothing done yet and the estimated
+    /// time, then nothing until the text.
     fn finish(&mut self, t: f64, secs: f64, text: &str) -> f64 {
         self.files.finishing = true;
-        let steps = 6;
-        for k in 0..steps {
-            let f = (k + 1) as f64 / steps as f64;
-            self.files.fraction = Some(f);
-            let left = ((1.0 - f) * secs * 2.0).ceil() as u32;
-            self.files.status = format!("Finishing: {left} s of audio left");
-            self.files_at(t + 0.05 + k as f64 * secs / steps as f64);
-        }
+        let audio_left = (secs / 0.15) as f32;
+        self.files.fraction = Some(0.0);
+        self.files.status =
+            format!("Finishing: {audio_left:.0} s of audio left, about {secs:.1} s");
+        self.doc.status = Some(voxtype::osd::live::LiveStatus {
+            phase: voxtype::osd::live::Phase::Finishing,
+            fraction: Some(0.0),
+            text: self.files.status.clone(),
+            audio_left_s: Some(audio_left),
+            eta_s: Some(secs as f32),
+        });
+        self.files.live = Some(self.doc.clone());
+        self.files_at(t + 0.05);
+        self.doc.status = None;
         let shown = t + secs + 0.1;
         self.files.preview = text.to_string();
         self.files_at(shown);
@@ -1078,6 +1091,7 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
             k.scenario(look, shown + 1.4)
         }
         Moment::Edit => edit_scenario(look, 2),
+        Moment::EditPaste => edit_paste_scenario(look),
         Moment::TimeLimit => {
             // Runs to the limit: the recording stops itself. `Files` does not
             // carry the limit yet; MO-35 adds it.
@@ -1139,6 +1153,86 @@ pub(crate) fn edit_scenario(look: &Look, ups: usize) -> vo::Scenario<Msg> {
     s
 }
 
+/// The edit-paste moment (plan F5): as the edit moment, but Ctrl+Shift+Left
+/// selects the last word, Ctrl+C copies it, the caret goes up two lines,
+/// and a space and Ctrl+V put the word there. Offline the driver keeps the
+/// copy, so the paste needs no host.
+pub(crate) fn edit_paste_scenario(look: &Look) -> vo::Scenario<Msg> {
+    use vo::scene::input::{LogicalKey, Mods, NamedKey};
+    let s0 = 0.2;
+    let mut k = Take::new(s0);
+    k.record(s0);
+    let t = k.speak(s0, &sentence_words(0, 26), 0.32);
+    let keys = t + 0.7;
+    let enter = keys + 2.4;
+    let done = enter + 0.25;
+    k.sound(t, done + 1.6, Sound::Quiet);
+    k.edit(t + 0.1, Some("pending"));
+    k.edit(t + 0.35, Some("editing"));
+    k.inputs.push((
+        t + 0.4,
+        Input::KeyboardFocus {
+            gained: true,
+            requested: true,
+        },
+    ));
+    let edited = pasted_text(look, &k.files.preview);
+    k.say(done, &edited);
+    k.edit(done, Some("releasing"));
+    k.edit(done + 0.2, None);
+    deliver(&mut k, done + 0.2, Delivery::PastedEnter);
+    let mut s = k.scenario(look, done + 1.6);
+    let ctrl_shift = Mods {
+        ctrl: true,
+        shift: true,
+        ..Mods::NONE
+    };
+    let mut at = s.chord(keys, ctrl_shift, LogicalKey::Named(NamedKey::Left));
+    at = s.chord(at + 0.25, Mods::CTRL, LogicalKey::Char('c'));
+    for _ in 0..2 {
+        at = s.key(at + 0.25, LogicalKey::Named(NamedKey::Up), None, Mods::NONE);
+    }
+    at = s.type_text(at + 0.25, " ");
+    s.chord(at + 0.25, Mods::CTRL, LogicalKey::Char('v'));
+    s.key(enter, LogicalKey::Named(NamedKey::Enter), None, Mods::NONE);
+    s
+}
+
+/// `text` after the edit-paste moment's keys in `look`, done on a buffer
+/// with the look's own line breaks.
+fn pasted_text(look: &Look, text: &str) -> String {
+    use vo::scene::text::TextLayout;
+    use vo_core::edit::{Dir, EditAction, EditBuffer, Unit};
+    let mut shown = Popup::scripted(look.clone(), &look.fonts);
+    shown.text(text);
+    let text_box = super::edit_site::site(look.theme).text_box_in(&shown);
+    let measure = vo::ShapedLayout::new(look.fonts.clone());
+    let lines = measure.layout(
+        text,
+        &super::edit::edit_style(text_box.style),
+        Some(text_box.width),
+    );
+    let mut buffer = EditBuffer::new(text);
+    let select = EditAction::MoveBy {
+        dir: Dir::Back,
+        unit: Unit::Word,
+        extend: true,
+    };
+    buffer.apply(select, &lines, 0.0);
+    let sel = buffer.selection();
+    let word = text[sel.anchor.min(sel.focus)..sel.anchor.max(sel.focus)].to_string();
+    for _ in 0..2 {
+        let up = EditAction::MoveLine {
+            down: false,
+            extend: false,
+        };
+        buffer.apply(up, &lines, 0.0);
+    }
+    buffer.apply_plain(EditAction::Insert(" ".into()), 0.0);
+    buffer.apply_plain(EditAction::Insert(word), 0.0);
+    buffer.text().to_string()
+}
+
 /// `text` after the edit moment's keys in `look`: the caret from the end
 /// `ups` lines up by the look's own line breaks, then `typed`.
 fn edited_text(look: &Look, text: &str, ups: usize, typed: &str) -> String {
@@ -1169,7 +1263,7 @@ fn edited_text(look: &Look, text: &str, ups: usize, typed: &str) -> String {
 /// `popup` set up for `moment`: in the edit moment it has a keyboard edit
 /// link that reads and writes no files.
 pub(crate) fn popup_for(moment: Moment, mut popup: Popup) -> Popup {
-    if moment == Moment::Edit {
+    if matches!(moment, Moment::Edit | Moment::EditPaste) {
         popup.edit = Some(super::edit_link::EditLink::offline());
     }
     popup
@@ -1621,6 +1715,48 @@ mod tests {
         }
     }
 
+    /// F5: the edit-paste moment copies the last word and pastes it two
+    /// lines up, and the buffer ends as the replay on the look's lines
+    /// says. Within the envelope too.
+    #[test]
+    fn the_edit_paste_moment_pastes_the_copied_word() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let mut look = edit_look();
+        look.theme = OsdTheme::Swiss;
+        let s = scenario(&look, Moment::EditPaste);
+        let seen = spy_run(&look, &s);
+        let first = seen
+            .iter()
+            .find_map(|e| e.buffer.clone())
+            .expect("an edit buffer");
+        let want = pasted_text(&look, &first);
+        assert!(
+            seen.iter()
+                .any(|e| e.buffer.as_deref() == Some(want.as_str())),
+            "the buffer never read {want:?}"
+        );
+        let last = first.split_whitespace().last().unwrap();
+        assert_eq!(want.matches(last).count(), 2, "{last:?} twice in {want:?}");
+        let options = Options {
+            fonts: fonts.clone(),
+            default_motion: default_motion(&look),
+            ..crate::kit::options()
+        };
+        let popup = popup_for(Moment::EditPaste, Popup::scripted(look.clone(), &fonts));
+        let report = vo::envelope::check_scenario(
+            popup,
+            &s,
+            30.0,
+            options,
+            &vo::envelope::Envelope {
+                transcript: 0..1 << 20,
+                ..vo::envelope::Envelope::default()
+            },
+        );
+        assert!(report.is_ok(), "{report}");
+    }
+
     /// What [`EditSpy`] saw after each message, key and focus change.
     #[derive(Clone, Debug, Default)]
     struct EditSeen {
@@ -1633,6 +1769,8 @@ mod tests {
         /// The marked words' text in the edit view, or in the shown words
         /// once the view is gone.
         marked: Vec<String>,
+        /// The edit buffer's text.
+        buffer: Option<String>,
     }
 
     /// The popup, recording its edit badge, hint and marks.
@@ -1662,6 +1800,11 @@ mod tests {
                 hint: p.edit_hint(),
                 quiet: !p.look.quiet.is_empty(),
                 marked,
+                buffer: p
+                    .edit
+                    .as_ref()
+                    .and_then(|l| l.buffer())
+                    .map(|b| b.text().to_string()),
             });
         }
     }
@@ -1686,6 +1829,11 @@ mod tests {
 
         fn keyboard_focus(&mut self, gained: bool, requested: bool, cx: &mut Cx<Msg>) {
             self.0.keyboard_focus(gained, requested, cx);
+            self.seen(cx.t());
+        }
+
+        fn clipboard(&mut self, text: Option<String>, cx: &mut Cx<Msg>) {
+            self.0.clipboard(text, cx);
             self.seen(cx.t());
         }
 

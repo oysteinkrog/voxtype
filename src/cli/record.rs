@@ -194,11 +194,13 @@ pub enum RecordAction {
     /// keyboard_edit); otherwise, and when not recording, it does nothing.
     Edit,
 
-    /// Copy the text of a discarded keyboard-edit dictation to the clipboard
+    /// Copy the text of a lost keyboard-edit dictation to the clipboard
     ///
     /// Discarding a dictation that was paused for a keyboard edit keeps its
-    /// text for 60 seconds. This copies it with wl-copy, or prints it with
-    /// --print. Exits with an error when nothing is kept.
+    /// text for 60 seconds. If Voxtype stops during an edit (a crash), the
+    /// next start keeps the edited text for 10 minutes. This copies the
+    /// newest one with wl-copy, or prints it with --print. It never pastes.
+    /// Exits with an error when nothing is kept.
     Restore {
         /// Print the text to stdout instead of copying it
         #[arg(long)]

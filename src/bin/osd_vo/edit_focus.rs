@@ -8,9 +8,14 @@
 //! popup did not give up (a click elsewhere, Alt+Tab, the lock screen) moves
 //! the edit to Detached: text and caret stay, and only a new edit tap takes
 //! focus again. The popup never takes it back by itself.
+//!
+//! Copy, cut and paste (plan F5) use the clipboard through the focus
+//! proxy. Only Ctrl+C, Ctrl+X and their Insert and Delete twins set it:
+//! selecting text never does, and the primary selection is never set (R18).
+//! Pasted text goes in as typed text.
 
 use vo::scene::input::KeyEvent;
-use vo_core::edit::{Lines, PlainLines};
+use vo_core::edit::{Dir, EditAction, EditBuffer, Lines, PlainLines, Unit};
 use vo_core::edit_keymap::{EditCmd, TextBoxKeys};
 use voxtype::osd::edit_ipc::FinishMode;
 
@@ -24,6 +29,10 @@ pub(crate) const PROXY_NAMESPACE: &str = "voxtype-edit";
 pub(crate) trait FocusCtl {
     fn take(&mut self);
     fn release(&mut self);
+    /// Puts `text` on the clipboard.
+    fn copy(&mut self, text: String);
+    /// Asks for the clipboard; the app's `clipboard` answers.
+    fn paste(&mut self);
 }
 
 impl<M> FocusCtl for vo::Cx<'_, M> {
@@ -37,6 +46,14 @@ impl<M> FocusCtl for vo::Cx<'_, M> {
     fn release(&mut self) {
         self.release_keyboard_focus();
     }
+
+    fn copy(&mut self, text: String) {
+        vo::Cx::copy(self, text);
+    }
+
+    fn paste(&mut self) {
+        vo::Cx::paste(self);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -48,6 +65,8 @@ pub(crate) struct Focus {
     /// Keys come now.
     has: bool,
     keys: TextBoxKeys,
+    /// A paste was asked for and not answered yet. A focus loss drops it.
+    pasting: bool,
 }
 
 impl Focus {
@@ -90,6 +109,7 @@ impl Focus {
         self.asked = false;
         self.asked_at = None;
         self.has = false;
+        self.pasting = false;
         self.keys.reset();
     }
 
@@ -101,6 +121,7 @@ impl Focus {
         ev: &KeyEvent,
         link: &mut EditLink,
         lines: Option<&dyn Lines>,
+        ctl: &mut dyn FocusCtl,
     ) -> bool {
         if !self.has || !link.editable() {
             return false;
@@ -109,11 +130,28 @@ impl Focus {
             return false;
         };
         let selection = !buffer.selection().is_caret();
+        let plain = PlainLines::new(buffer.text());
+        let selected = selected(buffer);
         match self.keys.map(ev, selection) {
             None => return false,
             Some(EditCmd::Edit(action)) => {
-                let plain = PlainLines::new(buffer.text());
                 link.apply(action, lines.unwrap_or(&plain), ev.t);
+            }
+            Some(EditCmd::Copy) => {
+                if let Some(text) = selected {
+                    ctl.copy(text);
+                }
+            }
+            Some(EditCmd::Cut) => {
+                if let Some(text) = selected {
+                    ctl.copy(text);
+                    let delete = EditAction::Delete(Dir::Back, Unit::Grapheme);
+                    link.apply(delete, lines.unwrap_or(&plain), ev.t);
+                }
+            }
+            Some(EditCmd::Paste) => {
+                self.pasting = true;
+                ctl.paste();
             }
             Some(EditCmd::Collapse) => link.collapse(),
             Some(EditCmd::Resume) => link.resume(),
@@ -121,6 +159,49 @@ impl Focus {
         }
         true
     }
+
+    /// The clipboard's answer to a paste. The text goes in at the caret,
+    /// replacing any selection, as typed text would. Returns true when the
+    /// buffer took it.
+    pub(crate) fn pasted(
+        &mut self,
+        text: Option<String>,
+        link: &mut EditLink,
+        lines: Option<&dyn Lines>,
+        t: f64,
+    ) -> bool {
+        if !std::mem::take(&mut self.pasting) || !self.has || !link.editable() {
+            return false;
+        }
+        let text = paste_text(&text.unwrap_or_default());
+        let Some(buffer) = link.buffer().filter(|_| !text.is_empty()) else {
+            return false;
+        };
+        let plain = PlainLines::new(buffer.text());
+        link.apply(EditAction::Insert(text), lines.unwrap_or(&plain), t);
+        true
+    }
+}
+
+/// The selected text, or `None` for a caret.
+fn selected(buffer: &EditBuffer) -> Option<String> {
+    let sel = buffer.selection();
+    let range = sel.anchor.min(sel.focus)..sel.anchor.max(sel.focus);
+    (!range.is_empty()).then(|| buffer.text()[range].to_string())
+}
+
+/// Pasted text as the text box takes typed text: line breaks become `\n`
+/// (Shift+Enter's), a tab a space, and other control characters go.
+fn paste_text(raw: &str) -> String {
+    raw.replace("\r\n", "\n")
+        .chars()
+        .filter_map(|c| match c {
+            '\n' | '\r' => Some('\n'),
+            '\t' => Some(' '),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -134,6 +215,7 @@ mod tests {
     #[derive(Default)]
     struct Ctl {
         log: Vec<&'static str>,
+        copied: Vec<String>,
     }
 
     impl FocusCtl for Ctl {
@@ -142,6 +224,12 @@ mod tests {
         }
         fn release(&mut self) {
             self.log.push("release");
+        }
+        fn copy(&mut self, text: String) {
+            self.copied.push(text);
+        }
+        fn paste(&mut self) {
+            self.log.push("paste");
         }
     }
 
@@ -189,6 +277,24 @@ mod tests {
         }
 
         fn key(&mut self, key: LogicalKey, text: Option<&str>, state: KeyState) -> bool {
+            self.key_with(key, text, state, Mods::default())
+        }
+
+        fn ctrl(&mut self, c: char) -> bool {
+            let mods = Mods {
+                ctrl: true,
+                ..Mods::default()
+            };
+            self.key_with(LogicalKey::Char(c), None, KeyState::Down, mods)
+        }
+
+        fn key_with(
+            &mut self,
+            key: LogicalKey,
+            text: Option<&str>,
+            state: KeyState,
+            mods: Mods,
+        ) -> bool {
             let ev = KeyEvent {
                 surface: 0,
                 t: 0.0,
@@ -196,9 +302,9 @@ mod tests {
                 key,
                 code: 0,
                 text: text.map(Into::into),
-                mods: Mods::default(),
+                mods,
             };
-            let used = self.focus.key(&ev, &mut self.link, None);
+            let used = self.focus.key(&ev, &mut self.link, None, &mut self.ctl);
             self.focus.follow(&mut self.link, &mut self.ctl, 0.0);
             used
         }
@@ -307,5 +413,48 @@ mod tests {
                 Accepted::ProxyClosed
             ]
         ));
+    }
+
+    #[test]
+    fn copy_and_cut_send_the_selection_and_paste_goes_in_as_typed() {
+        let mut rig = Rig::new();
+        rig.daemon("editing");
+        rig.focus(true, false);
+        // A caret copies nothing.
+        assert!(rig.ctrl('c'));
+        assert!(rig.ctl.copied.is_empty());
+        // Ctrl+A, Ctrl+C: the whole text; selecting alone copied nothing.
+        rig.ctrl('a');
+        assert!(
+            rig.ctl.copied.is_empty(),
+            "a selection never sets the clipboard"
+        );
+        rig.ctrl('c');
+        assert_eq!(rig.ctl.copied, ["helo"]);
+        // Ctrl+X: copied and gone.
+        rig.ctrl('x');
+        assert_eq!(rig.ctl.copied, ["helo", "helo"]);
+        assert_eq!(rig.link.buffer().unwrap().text(), "");
+        // Ctrl+V asks; the answer goes in, line breaks and tabs as typed.
+        rig.ctrl('v');
+        assert_eq!(rig.ctl.log, ["take", "paste"]);
+        let pasted = Some("tea\r\nfor\ttwo\u{7}".to_string());
+        assert!(rig.focus.pasted(pasted, &mut rig.link, None, 0.0));
+        assert_eq!(rig.link.buffer().unwrap().text(), "tea\nfor two");
+        // An answer nobody asked for is dropped.
+        assert!(!rig.focus.pasted(Some("x".into()), &mut rig.link, None, 0.0));
+    }
+
+    #[test]
+    fn a_paste_answer_after_focus_went_is_dropped() {
+        let mut rig = Rig::new();
+        rig.daemon("editing");
+        rig.focus(true, false);
+        rig.ctrl('v');
+        rig.focus(false, false);
+        assert!(!rig
+            .focus
+            .pasted(Some("late".into()), &mut rig.link, None, 0.0));
+        assert_eq!(rig.link.buffer().unwrap().text(), "helo");
     }
 }

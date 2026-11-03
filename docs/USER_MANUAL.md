@@ -372,7 +372,7 @@ voxtype record stop                 # Stop recording and transcribe (sends SIGUS
 voxtype record toggle               # Toggle recording state
 voxtype record cancel               # Cancel recording or transcription in progress
 voxtype record edit                 # Pause for a keyboard edit, or resume (needs [osd] keyboard_edit)
-voxtype record restore              # Copy the text of a discarded edited dictation (kept 60 s)
+voxtype record restore              # Copy the text of a discarded (60 s) or crashed (10 min) edited dictation
 ```
 
 **Model override:** Use `--model` to specify which model to use for this recording:
@@ -1247,7 +1247,7 @@ When the model gets a word wrong and saying it again does not help, you can paus
 
 When the pause starts, the microphone is muted and the last words still being decoded appear after your text as a short "settling" tail. They become editable when they land, at most 1.2 s later. The popup keeps its look; the badge says "EDIT".
 
-**Edit.** The text you see is the text that will be pasted, already processed (spoken punctuation, replacements, quotes). The usual editing keys work: arrows, Ctrl+arrows, Home and End, Shift to select, Backspace and Delete, Ctrl+Z to undo. Shift+Enter adds a new line. Shift for capitals or with arrows never counts as an edit tap.
+**Edit.** The text you see is the text that will be pasted, already processed (spoken punctuation, replacements, quotes). The usual editing keys work: arrows, Ctrl+arrows, Home and End, Shift to select, Backspace and Delete, Ctrl+Z to undo. Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste through the clipboard (Ctrl+Insert, Shift+Delete and Shift+Insert do the same). Selecting text never changes the clipboard or the primary selection; only a copy or cut does. Pasted text goes in as if you typed it. Shift+Enter adds a new line. Shift for capitals or with arrows never counts as an edit tap.
 
 **Go on or finish.**
 
@@ -1275,6 +1275,8 @@ A spoken correction (holding the correction key) works again once you resume, bu
 voxtype record restore           # copy it to the clipboard
 voxtype record restore --print   # or print it
 ```
+
+**After a crash.** If Voxtype stops while you are editing (a crash, or the service restarted), the edited text is not lost. When the daemon starts again, it shows a notification, and `voxtype record restore` copies the text for 10 minutes. It is never pasted on its own. While you edit, the popup saves the text to `$XDG_RUNTIME_DIR/voxtype/` (a private folder in memory) on every change. That copy is deleted when the dictation is pasted, when you restore it, and after the 10 minutes.
 
 ## Whisper Models
 

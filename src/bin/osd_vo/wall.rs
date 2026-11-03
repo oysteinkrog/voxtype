@@ -238,6 +238,18 @@ impl App for Wall {
                     p.update(Msg::Tick, cx);
                 }
             }
+            Msg::Progress => {
+                // As for Tick: every cell gets it and re-arms, so the
+                // pending ones go first.
+                for p in &mut self.cells {
+                    if let Some(id) = p.finish.timer.take() {
+                        cx.cancel(id);
+                    }
+                }
+                for p in &mut self.cells {
+                    p.update(Msg::Progress, cx);
+                }
+            }
             m => {
                 for p in &mut self.cells {
                     p.update(m.clone(), cx);
