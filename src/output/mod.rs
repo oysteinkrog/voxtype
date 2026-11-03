@@ -473,6 +473,7 @@ async fn run_hook_with(
     outcome: Option<HookOutcome>,
 ) -> Result<(), String> {
     tracing::debug!("Running {} hook: {}", hook_name, command);
+    let started = std::time::Instant::now();
 
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(command);
@@ -487,7 +488,11 @@ async fn run_hook_with(
         .map_err(|e| format!("{} hook failed to execute: {}", hook_name, e))?;
 
     if output.status.success() {
-        tracing::info!("{} hook completed successfully", hook_name);
+        tracing::info!(
+            "{} hook completed successfully in {:.0} ms",
+            hook_name,
+            started.elapsed().as_secs_f32() * 1000.0
+        );
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);

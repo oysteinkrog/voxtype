@@ -6195,6 +6195,7 @@ impl Daemon {
                                     // one Final after the stop tap. Wait for
                                     // Right Ctrl to come up, or the paste
                                     // key becomes a different shortcut.
+                                    let final_at = Instant::now();
                                     let corrected;
                                     // A dictation with a keyboard edit pastes
                                     // what the popup showed, exactly.
@@ -6227,15 +6228,25 @@ impl Daemon {
                                     let committed = match &edited {
                                         Some(edited) => self.deliver_edit(s, chain, edited).await,
                                         None => {
+                                            let prepared_ms = final_at.elapsed().as_secs_f32() * 1000.0;
                                             if self.config.live_preview_active()
                                                 && !modifiers_released(LIVE_TYPING_FINAL_WAIT).await
                                             {
                                                 tracing::warn!("Modifier still held; sending the final text anyway");
                                             }
+                                            let keys_ms = final_at.elapsed().as_secs_f32() * 1000.0 - prepared_ms;
                                             let pre = self.config.output.pre_output_command.as_deref();
                                             let post = self.config.output.post_output_command.as_deref();
                                             let started = Instant::now();
                                             let r = s.commit_segment(chain, text, Some(&self.text_processor), pre, post).await;
+                                            tracing::info!(
+                                                "Final text out in {:.0} ms: corrections {:.0} ms, key wait {:.0} ms, \
+                                                 output and hooks {:.0} ms",
+                                                final_at.elapsed().as_secs_f32() * 1000.0,
+                                                prepared_ms,
+                                                keys_ms,
+                                                started.elapsed().as_secs_f32() * 1000.0
+                                            );
                                             // Live preview sends the whole text as one Final.
                                             if r.is_ok() && self.config.live_preview_active() {
                                                 self.report_stream_delivery(s, started);
