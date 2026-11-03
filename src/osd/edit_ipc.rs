@@ -160,10 +160,20 @@ pub fn engine_resumed() -> Option<String> {
 }
 
 /// Write the buffer: a temp file renamed over the old one, so a reader
-/// never sees half of it.
+/// never sees half of it. Readable by the user only: it holds the text, and
+/// a daemon that starts after a crash offers it back
+/// ([`crate::osd::edit_journal::rescue_in`]).
 pub fn write_buffer_to(path: &std::path::Path, buffer: &EditBuffer) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec(buffer)?)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.write_all(&serde_json::to_vec(buffer)?)?;
+    drop(file);
     std::fs::rename(&tmp, path)
 }
 
@@ -290,10 +300,15 @@ pub fn accept(cmd: EditCmd, session: u64, buffer: Option<&EditBuffer>) -> Option
 /// Remove the buffer and command files: after delivery, or when a new
 /// dictation starts.
 pub fn clear() {
-    let _ = std::fs::remove_file(buffer_path());
-    let _ = std::fs::remove_file(cmd_path());
-    let _ = std::fs::remove_file(resume_path());
+    clear_in(&crate::config::Config::runtime_dir());
     set_engine_resumed(None);
+}
+
+/// [`clear`]'s file removal, in `dir`.
+pub fn clear_in(dir: &std::path::Path) {
+    for name in ["edit-buffer.json", "edit-cmd", "edit-resume.json"] {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
 }
 
 #[cfg(test)]

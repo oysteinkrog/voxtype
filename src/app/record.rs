@@ -11,19 +11,22 @@ use std::time::{Duration, Instant};
 use voxtype::daemon::{result_sidecar_path, trigger_stamp, START_REQUEST_FILE};
 use voxtype::{config, daemon_status, RecordAction};
 
-/// `voxtype record restore`: copy or print the text of a discarded
-/// keyboard-edit dictation.
+/// `voxtype record restore`: copy or print the text of a keyboard-edit
+/// dictation that was discarded, or that a daemon crash left undelivered.
 fn restore_discarded(print: bool) -> anyhow::Result<()> {
     use std::io::Write;
-    use voxtype::osd::edit_journal::{discarded_path, now_ms, restore_from};
-    let Some(text) = restore_from(&discarded_path(), now_ms()) else {
+    use voxtype::osd::edit_journal::{discarded_path, journal_path, now_ms, restorable, restored};
+    let journal = journal_path();
+    let Some(kept) = restorable(&discarded_path(), &journal, now_ms()) else {
         anyhow::bail!(
-            "No discarded text to restore. Only a dictation paused for a keyboard \
-             edit is kept, and only for 60 seconds."
+            "No text to restore. Only a dictation paused for a keyboard edit is kept: \
+             for 60 seconds after a discard, or for 10 minutes after Voxtype stopped \
+             during the edit."
         );
     };
     if print {
-        println!("{text}");
+        println!("{}", kept.text);
+        restored(&kept, &journal);
         return Ok(());
     }
     let mut child = std::process::Command::new("wl-copy")
@@ -32,12 +35,17 @@ fn restore_discarded(print: bool) -> anyhow::Result<()> {
         .spawn()
         .map_err(|e| anyhow::anyhow!("Could not run wl-copy: {e}. Use --print instead."))?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes())?;
+        stdin.write_all(kept.text.as_bytes())?;
     }
     if !child.wait()?.success() {
         anyhow::bail!("wl-copy failed. Use --print instead.");
     }
-    eprintln!("Copied the discarded text to the clipboard.");
+    restored(&kept, &journal);
+    if kept.crashed {
+        eprintln!("Copied the text left by the stopped dictation to the clipboard.");
+    } else {
+        eprintln!("Copied the discarded text to the clipboard.");
+    }
     Ok(())
 }
 

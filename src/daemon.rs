@@ -2531,6 +2531,36 @@ impl Daemon {
         });
     }
 
+    /// On start: an edit the last daemon never delivered (it crashed or was
+    /// stopped mid-edit) is kept for 10 minutes for `voxtype record
+    /// restore`, and a notification says so. Never pasted, never logged.
+    async fn offer_crashed_edit(&self, dir: &std::path::Path) {
+        use crate::osd::edit_journal;
+        let now = edit_journal::now_ms();
+        let Some(at) = edit_journal::rescue_in(dir, now) else {
+            return;
+        };
+        tracing::info!(
+            "An edited dictation was not delivered before the last stop: \
+             `voxtype record restore` copies it for 10 minutes"
+        );
+        send_notification(
+            "Edited dictation kept",
+            "Voxtype stopped during an edit. Run `voxtype record restore` within 10 minutes to copy the text.",
+            self.config.output.notification.show_engine_icon,
+            self.config.engine,
+            &self.config.output.notification.urgency,
+        )
+        .await;
+        let path = dir.join(edit_journal::JOURNAL_FILE);
+        let left =
+            edit_journal::CRASH_KEEP.saturating_sub(Duration::from_millis(now.saturating_sub(at)));
+        tokio::spawn(async move {
+            tokio::time::sleep(left).await;
+            edit_journal::expire_journal_in(&path, at, edit_journal::now_ms());
+        });
+    }
+
     /// The id of the window saved at record start, once its lookup is done.
     async fn edit_saved_window(&mut self) -> Option<String> {
         if let Some(task) = self.edit_target.take() {
@@ -4930,6 +4960,10 @@ impl Daemon {
         // crashed daemon's leftover lockfile is recovered as stale on the
         // next start.
         let _instance_lock = acquire_instance_lock(&Config::runtime_dir())?;
+
+        // Before anything clears the edit files: offer back an edit a crash
+        // left undelivered.
+        self.offer_crashed_edit(&Config::runtime_dir()).await;
 
         // Engine-vs-binary mismatch check at startup so users see a desktop
         // notification before the first transcription attempt would fail.

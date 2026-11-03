@@ -1335,6 +1335,12 @@ Before pasting, and again before pressing Enter, voxtype checks that the window 
 
 Run `voxtype record restore` within 60 seconds to copy its text to the clipboard (`--print` prints it). Only dictations that were paused for an edit are kept. The copy lives in `$XDG_RUNTIME_DIR/voxtype/discarded.json` and is deleted after 60 s.
 
+### Voxtype stopped while I was editing a dictation
+
+Run `voxtype record restore` within 10 minutes of the daemon starting again. It copies the edited text to the clipboard (`--print` prints it). The daemon shows an "Edited dictation kept" notification when there is text to restore. Voxtype never pastes it by itself, and the text is not written to any log.
+
+The popup saves its text to `$XDG_RUNTIME_DIR/voxtype/edit-buffer.json` on every change. On start, the daemon moves an undelivered one to `edit-journal.json` in the same folder (readable by you only). The file is deleted when you restore it or after 10 minutes. If restore says there is nothing to restore, the edit was older than 10 minutes, or it was already pasted.
+
 ---
 
 ## Systemd Service Issues
