@@ -52,6 +52,10 @@ pub(crate) enum Moment {
     /// A keyboard edit with the clipboard (plan F5): the last word copied,
     /// the caret up two lines, the word pasted there, Enter.
     EditPaste,
+    /// A keyboard edit with an input method (plan F7): the caret up two
+    /// lines, a preedit that grows over three batches, then its commit,
+    /// Enter.
+    EditPreedit,
     /// A word every 0.3 s for 7.2 s with no pause, for the recording cost
     /// of features that work per word (SW-09).
     Cadence,
@@ -87,6 +91,7 @@ impl Moment {
         Moment::Spell,
         Moment::Edit,
         Moment::EditPaste,
+        Moment::EditPreedit,
         Moment::Cadence,
         Moment::WordBurst,
         Moment::Nordic,
@@ -117,6 +122,7 @@ impl Moment {
             Moment::Spell => "spell",
             Moment::Edit => "edit",
             Moment::EditPaste => "edit-paste",
+            Moment::EditPreedit => "edit-preedit",
             Moment::Cadence => "cadence",
             Moment::WordBurst => "word-burst",
             Moment::Nordic => "nordic",
@@ -1092,6 +1098,7 @@ pub(crate) fn scenario(look: &Look, moment: Moment) -> vo::Scenario<Msg> {
         }
         Moment::Edit => edit_scenario(look, 2),
         Moment::EditPaste => edit_paste_scenario(look),
+        Moment::EditPreedit => edit_preedit_scenario(look),
         Moment::TimeLimit => {
             // Runs to the limit: the recording stops itself. `Files` does not
             // carry the limit yet; MO-35 adds it.
@@ -1198,6 +1205,62 @@ pub(crate) fn edit_paste_scenario(look: &Look) -> vo::Scenario<Msg> {
     s
 }
 
+/// The edit-preedit moment (plan F7): as the edit moment with one line up
+/// twice, but the word comes from an input method: preedits "pl", "plu"
+/// and "plum" shown at the caret, then " plum" committed. The buffer never
+/// holds a preedit, only the commit.
+pub(crate) fn edit_preedit_scenario(look: &Look) -> vo::Scenario<Msg> {
+    use vo::scene::input::{LogicalKey, Mods, NamedKey, Preedit, TextInputEvent};
+    let s0 = 0.2;
+    let mut k = Take::new(s0);
+    k.record(s0);
+    let t = k.speak(s0, &sentence_words(0, 26), 0.32);
+    let up = t + 0.7;
+    let ime = up + 0.85;
+    let enter = ime + 1.6;
+    let done = enter + 0.25;
+    k.sound(t, done + 1.6, Sound::Quiet);
+    k.edit(t + 0.1, Some("pending"));
+    k.edit(t + 0.35, Some("editing"));
+    k.inputs.push((
+        t + 0.4,
+        Input::KeyboardFocus {
+            gained: true,
+            requested: true,
+        },
+    ));
+    let edited = edited_text(look, &k.files.preview, 2, " plum");
+    k.say(done, &edited);
+    k.edit(done, Some("releasing"));
+    k.edit(done + 0.2, None);
+    deliver(&mut k, done + 0.2, Delivery::PastedEnter);
+    let mut s = k.scenario(look, done + 1.6);
+    for i in 0..2 {
+        s.key(
+            up + 0.25 * i as f64,
+            LogicalKey::Named(NamedKey::Up),
+            None,
+            Mods::NONE,
+        );
+    }
+    let batch = |commit: Option<&str>, preedit: Option<&str>| {
+        Input::TextInput(TextInputEvent {
+            commit: commit.map(str::to_owned),
+            preedit: preedit.map(|p| Preedit {
+                text: p.into(),
+                cursor: Some((p.len(), p.len())),
+            }),
+            ..TextInputEvent::default()
+        })
+    };
+    for (i, p) in [" pl", " plu", " plum"].into_iter().enumerate() {
+        s.push(ime + 0.3 * i as f64, batch(None, Some(p)));
+    }
+    s.push(ime + 1.0, batch(Some(" plum"), None));
+    s.key(enter, LogicalKey::Named(NamedKey::Enter), None, Mods::NONE);
+    s
+}
+
 /// `text` after the edit-paste moment's keys in `look`, done on a buffer
 /// with the look's own line breaks.
 fn pasted_text(look: &Look, text: &str) -> String {
@@ -1263,7 +1326,7 @@ fn edited_text(look: &Look, text: &str, ups: usize, typed: &str) -> String {
 /// `popup` set up for `moment`: in the edit moment it has a keyboard edit
 /// link that reads and writes no files.
 pub(crate) fn popup_for(moment: Moment, mut popup: Popup) -> Popup {
-    if matches!(moment, Moment::Edit | Moment::EditPaste) {
+    if matches!(moment, Moment::Edit | Moment::EditPaste | Moment::EditPreedit) {
         popup.edit = Some(super::edit_link::EditLink::offline());
     }
     popup
@@ -1757,6 +1820,57 @@ mod tests {
         assert!(report.is_ok(), "{report}");
     }
 
+    /// F7: in the edit-preedit moment the preedit shows in the edit view
+    /// but never in the buffer, the commit goes in, and every frame stays
+    /// within the envelope.
+    #[test]
+    fn the_edit_preedit_moment_shows_the_preedit_and_commits_once() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        let mut look = edit_look();
+        look.theme = OsdTheme::Swiss;
+        let s = scenario(&look, Moment::EditPreedit);
+        let seen = spy_run(&look, &s);
+        let first = seen
+            .iter()
+            .find_map(|e| e.buffer.clone())
+            .expect("an edit buffer");
+        let want = edited_text(&look, &first, 2, " plum");
+        assert!(!first.contains("plu"));
+        assert!(
+            seen.iter()
+                .filter_map(|e| e.buffer.as_deref())
+                .all(|b| !b.contains("plu") || b == want),
+            "a preedit reached the buffer"
+        );
+        assert!(
+            seen.iter()
+                .any(|e| e.buffer.as_deref() == Some(want.as_str())),
+            "the buffer never read {want:?}"
+        );
+        assert!(
+            seen.iter().any(|e| e.preedit.as_deref() == Some(" plum")),
+            "the view never showed the preedit"
+        );
+        let options = Options {
+            fonts: fonts.clone(),
+            default_motion: default_motion(&look),
+            ..crate::kit::options()
+        };
+        let popup = popup_for(Moment::EditPreedit, Popup::scripted(look.clone(), &fonts));
+        let report = vo::envelope::check_scenario(
+            popup,
+            &s,
+            30.0,
+            options,
+            &vo::envelope::Envelope {
+                transcript: 0..1 << 20,
+                ..vo::envelope::Envelope::default()
+            },
+        );
+        assert!(report.is_ok(), "{report}");
+    }
+
     /// What [`EditSpy`] saw after each message, key and focus change.
     #[derive(Clone, Debug, Default)]
     struct EditSeen {
@@ -1771,6 +1885,8 @@ mod tests {
         marked: Vec<String>,
         /// The edit buffer's text.
         buffer: Option<String>,
+        /// The preedit the edit view shows.
+        preedit: Option<String>,
     }
 
     /// The popup, recording its edit badge, hint and marks.
@@ -1805,6 +1921,10 @@ mod tests {
                     .as_ref()
                     .and_then(|l| l.buffer())
                     .map(|b| b.text().to_string()),
+                preedit: p.edit_view.as_ref().and_then(|v| {
+                    let r = v.preedit.clone()?;
+                    Some(v.text[r].to_string())
+                }),
             });
         }
     }
@@ -1835,6 +1955,11 @@ mod tests {
         fn clipboard(&mut self, text: Option<String>, cx: &mut Cx<Msg>) {
             self.0.clipboard(text, cx);
             self.seen(cx.t());
+        }
+
+        fn text_input(&mut self, ev: &vo::scene::input::TextInputEvent, cx: &mut Cx<Msg>) {
+            self.0.text_input(ev, cx);
+            self.seen(ev.t);
         }
 
         fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {

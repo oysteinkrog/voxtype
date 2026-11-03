@@ -286,10 +286,6 @@ impl Station {
         }
     }
 
-    fn per_page(&self) -> usize {
-        self.cols * self.rows
-    }
-
     pub(crate) fn pages(&self) -> usize {
         self.starts.len()
     }
@@ -555,6 +551,20 @@ impl App for Station {
                 }
                 for t in &mut self.tiles {
                     t.popup.update(Msg::Tick, cx);
+                }
+            }
+            Msg::Progress => {
+                // As for Tick: every tile gets it and re-arms its final-pass
+                // step, so cancel the pending ones first. Without this the
+                // timers grow by the tile count each step, and an offline
+                // page stalls in the room-tone moment.
+                for t in &mut self.tiles {
+                    if let Some(id) = t.popup.finish.timer.take() {
+                        cx.cancel(id);
+                    }
+                }
+                for t in &mut self.tiles {
+                    t.popup.update(Msg::Progress, cx);
                 }
             }
             Msg::Check => {

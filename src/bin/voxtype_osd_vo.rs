@@ -1650,6 +1650,8 @@ impl Voice {
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)] // Audio carries frames inline; boxing would add an allocation per capture batch
 enum Msg {
+    /// A press, drag or release on the edit text (plan F6).
+    EditPointer(vo::scene::input::PointerInput),
     /// Frames read from the socket in one go, with their voice features when
     /// the daemon sends them. One message per capture batch, so the view is
     /// built once per batch.
@@ -2217,7 +2219,8 @@ impl Popup {
             }
             return false;
         };
-        let text = buffer.text().to_string();
+        self.edit_layer.set_preedit(self.focus.preedit().cloned());
+        let text = self.edit_layer.composed(buffer).0.into_owned();
         if self.edit_view.is_none() {
             self.edit_entries += 1;
         }
@@ -2252,8 +2255,11 @@ impl Popup {
             return;
         };
         let window = view.start..view.start + view.text.len();
+        let text = self.edit_layer.composed(buffer).0;
         view.decor.marks =
-            edit::mark_ranges(self.model.words(), buffer.text(), window, &self.edit_marks);
+            edit::mark_ranges(self.model.words(), &text, window, &self.edit_marks);
+        // The preedit is underlined like an edit mark.
+        view.decor.marks.extend(view.preedit.clone());
     }
 
     /// R34: from a pending tap until resume or a cancelled tap, the look's
@@ -2373,6 +2379,34 @@ impl Popup {
 }
 
 impl Popup {
+    /// A press, drag or release on the edit text: to the buffer position
+    /// under it, by the layout the caret uses.
+    fn edit_pointer(&mut self, p: vo::scene::input::PointerInput, cx: &mut Cx<Msg>) {
+        if self.focus.preedit().is_some() {
+            // The shown text has the preedit in it, the buffer does not.
+            return;
+        }
+        let text_box = edit_site::site(self.look.theme).text_box_in(self);
+        let (Some(view), Some(buffer)) = (
+            self.edit_view.as_ref(),
+            self.edit.as_ref().and_then(|l| l.buffer()),
+        ) else {
+            return;
+        };
+        let at = self.edit_layer.hit(
+            buffer.text(),
+            &self.measure,
+            text_box.style,
+            text_box.width,
+            view,
+            p.local,
+            p.tag,
+        );
+        self.edit_by(p.t, cx, |focus, link, lines, _| {
+            focus.pointer(p.phase, at, link, lines, p.t)
+        });
+    }
+
     /// Runs an edit (a key, a paste) on the buffer while the popup owns it,
     /// then shows the change: the new text, and a mark on each word the
     /// edit made or changed. `act` gets the lines the look draws, so Up,
@@ -2457,6 +2491,10 @@ impl App for Popup {
             }
         }
         let msg = match msg {
+            Msg::EditPointer(p) => {
+                self.edit_pointer(p, cx);
+                return;
+            }
             Msg::ModelSignals(s) => {
                 tracing::debug!(
                     step = s.step,
@@ -2558,7 +2596,7 @@ impl App for Popup {
             Msg::Check => self.check = None,
             Msg::Tick => self.extra.tick = None,
             Msg::Progress => self.finish.timer = None,
-            Msg::Loop | Msg::Station(_) | Msg::ModelSignals(_) => {}
+            Msg::Loop | Msg::Station(_) | Msg::ModelSignals(_) | Msg::EditPointer(_) => {}
         }
         self.move_finish_progress(t, cx);
         if let Some(ending) = self.ending() {
@@ -2652,6 +2690,22 @@ impl App for Popup {
         self.edit_by(ev.t, cx, |focus, link, lines, cx| {
             focus.key(ev, link, lines, cx)
         })
+    }
+
+    /// What a screen reader sees (plan F8): the shown text, read out now
+    /// and then while it is live and once when the dictation is done, and
+    /// while editing, the buffer with its caret and selection. vo asks only
+    /// while a screen reader runs.
+    fn accessible(&self) -> Option<vo::a11y_tree::Accessible> {
+        Some(popup_accessible(self))
+    }
+
+    /// An input method's batch (plan F7): commits go in as typed text,
+    /// the preedit shows at the caret.
+    fn text_input(&mut self, ev: &vo::scene::input::TextInputEvent, cx: &mut Cx<Msg>) {
+        self.edit_by(ev.t, cx, |focus, link, _, _| {
+            focus.text_input(ev, link, ev.t)
+        });
     }
 
     /// Pasted text (Ctrl+V, Shift+Insert) goes in as typed text.
@@ -3041,12 +3095,41 @@ fn new_step(
     next.filter(|_| seen && next != last)
 }
 
-/// The live popup's surface for `look`.
+/// The popup for a screen reader (`App::accessible`).
+fn popup_accessible(p: &Popup) -> vo::a11y_tree::Accessible {
+    let edit = p
+        .edit_view
+        .as_ref()
+        .and(p.edit.as_ref())
+        .and_then(|l| l.buffer())
+        .map(|b| {
+            let s = b.selection();
+            vo::a11y_tree::EditField {
+                value: b.text().to_string(),
+                anchor: s.anchor,
+                focus: s.focus,
+            }
+        });
+    vo::a11y_tree::Accessible {
+        name: "Voxtype dictation".into(),
+        text: p.files.preview.clone(),
+        done: p.ending() == Some(Ending::Done),
+        edit,
+    }
+}
+
+/// The live popup's surface for `look`. With keyboard edit on, the input
+/// region follows the nodes that take the pointer, which only the edit
+/// text does (plan F6): empty, so click-through, outside editing.
 fn live_spec(cfg: &OsdConfig, look: &Look) -> OverlaySpec {
     OverlaySpec {
         size: look.live_surface(),
         placement: placement(cfg, look),
-        input: InputMode::None,
+        input: if cfg.keyboard_edit {
+            InputMode::Regions(Default::default())
+        } else {
+            InputMode::None
+        },
         app_id: "voxtype-osd".into(),
         ..OverlaySpec::default()
     }
