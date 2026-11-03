@@ -16,7 +16,13 @@
 //! where the layer does (R54). Looks that centre each line centre it on
 //! [`EditView::centre`]: a line's left edge holds still while you type and
 //! re-centres [`RECENTRE_SECS`] after the last key (plan 4.2 item 5).
+//!
+//! An input method's preedit (plan F7) is shown at the caret, underlined
+//! like an edit mark, laid out with the text around it, but it is never in
+//! the buffer (R55): the layer lays out the buffer with the preedit put in
+//! ([`EditLayer::composed`]) and the caret at the preedit's cursor.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
 
@@ -24,6 +30,7 @@ use vo::scene::element::TextStyle;
 use vo::scene::flow::{Caret, EditDecor};
 use vo::scene::text::{ShapedText, TextLayout};
 use vo_core::edit::{Affinity, EditBuffer, Lines, Selection};
+use vo_core::text_input::Preedit;
 use vo_core::words::{Word, WordId};
 
 /// What the look draws while editing.
@@ -49,6 +56,8 @@ pub(crate) struct EditView {
     /// line's left edge holds still. A line that would overflow the box at
     /// that place is centred on its own width at once.
     pub centre: Vec<f32>,
+    /// The input method's preedit in `text`'s bytes, while one shows.
+    pub preedit: Option<Range<usize>>,
 }
 
 impl EditView {
@@ -86,6 +95,9 @@ pub(crate) struct EditLayer {
     /// they are for (a scroll centres every line again).
     held: Vec<f32>,
     held_top: Option<usize>,
+    /// The input method's preedit, shown at the caret and never in the
+    /// buffer.
+    preedit: Option<Preedit>,
 }
 
 /// The style the layer and the look's live text lay out with: the look's,
@@ -101,6 +113,33 @@ impl EditLayer {
     /// Forget the window, for a new edit session.
     pub(crate) fn reset(&mut self) {
         *self = EditLayer::default();
+    }
+
+    /// The input method's preedit to show from the next view on, or none.
+    pub(crate) fn set_preedit(&mut self, preedit: Option<Preedit>) {
+        self.preedit = preedit;
+    }
+
+    /// The text the look shows for `buffer`: the buffer, with the preedit
+    /// put in at the caret (at the start of a selection) while one shows;
+    /// the selection to show, and the preedit's bytes in that text.
+    pub(crate) fn composed<'a>(
+        &self,
+        buffer: &'a EditBuffer,
+    ) -> (Cow<'a, str>, Selection, Option<Range<usize>>) {
+        let sel = buffer.selection();
+        let Some(p) = &self.preedit else {
+            return (Cow::Borrowed(buffer.text()), sel, None);
+        };
+        let at = sel.range().start;
+        let text = buffer.text();
+        let composed = format!("{}{}{}", &text[..at], p.text, &text[at..]);
+        let caret = at + p.cursor.map_or(p.text.len(), |c| c.0);
+        let sel = Selection {
+            affinity: sel.affinity,
+            ..Selection::caret(caret)
+        };
+        (Cow::Owned(composed), sel, Some(at..at + p.text.len()))
     }
 
     /// The buffer position under `local`, a point on the live text that
@@ -166,22 +205,25 @@ impl EditLayer {
         max_lines: u32,
         t: f64,
     ) -> EditView {
-        let sel = buffer.selection();
-        if self.seen != Some((buffer.rev(), sel)) {
-            self.seen = Some((buffer.rev(), sel));
+        let (text, sel, preedit) = self.composed(buffer);
+        let text = text.into_owned();
+        // A preedit change counts as a change, so the caret holds solid.
+        let rev = buffer
+            .rev()
+            .wrapping_add(preedit.as_ref().map_or(0, |p| 1 + p.end as u64) << 40);
+        if self.seen != Some((rev, sel)) {
+            self.seen = Some((rev, sel));
             self.since = t;
         }
         let top = self.top;
-        let shaped = self.shaped(buffer.text(), measure, style, width);
+        let shaped = self.shaped(&text, measure, style, width);
         let total = shaped.lines.len().max(1);
         let n = (max_lines.max(1) as usize).min(total);
         let caret_line = shaped.line_of(sel.focus, sel.affinity);
         let top = scroll(top, caret_line, n, total);
         let lines = &shaped.lines;
         let start = lines.get(top).map_or(0, |l| l.bytes.start);
-        let end = lines
-            .get(top + n - 1)
-            .map_or(buffer.text().len(), |l| l.bytes.end);
+        let end = lines.get(top + n - 1).map_or(text.len(), |l| l.bytes.end);
         let window_lines: Vec<(Range<usize>, f32)> = lines
             .get(top..top + n)
             .unwrap_or_default()
@@ -222,8 +264,12 @@ impl EditLayer {
             },
             ..EditDecor::default()
         };
+        let preedit = preedit
+            .filter(|p| p.start >= start && p.end <= end)
+            .map(|p| p.start - start..p.end - start);
         EditView {
-            text: buffer.text()[window].to_string(),
+            preedit,
+            text: text[window].to_string(),
             start,
             decor,
             lines: n as u32,
