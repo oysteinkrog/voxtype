@@ -78,8 +78,8 @@ pub fn resmooth(
         smooth.push_back(smooth_level_at(raw, i) as f32);
     }
     if popped > 0 {
-        for i in 0..n.min(3) {
-            smooth[i] = smooth_level_at(raw, i) as f32;
+        for (i, v) in smooth.iter_mut().enumerate().take(3) {
+            *v = smooth_level_at(raw, i) as f32;
         }
     }
 }
