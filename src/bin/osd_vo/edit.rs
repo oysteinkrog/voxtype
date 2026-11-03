@@ -23,7 +23,7 @@ use std::ops::Range;
 use vo::scene::element::TextStyle;
 use vo::scene::flow::{Caret, EditDecor};
 use vo::scene::text::{ShapedText, TextLayout};
-use vo_core::edit::{EditBuffer, Selection};
+use vo_core::edit::{Affinity, EditBuffer, Lines, Selection};
 use vo_core::words::{Word, WordId};
 
 /// What the look draws while editing.
@@ -63,6 +63,10 @@ impl EditView {
     }
 }
 
+/// The pointer tag of a live text that shows the whole window, as opposed
+/// to one window line (`EditLayer::hit`).
+pub(crate) const WINDOW: u32 = u32::MAX;
+
 /// How long after the last key a centred line re-centres.
 pub(crate) const RECENTRE_SECS: f64 = 0.5;
 
@@ -97,6 +101,40 @@ impl EditLayer {
     /// Forget the window, for a new edit session.
     pub(crate) fn reset(&mut self) {
         *self = EditLayer::default();
+    }
+
+    /// The buffer position under `local`, a point on the live text that
+    /// shows the window (plan F6): the caret stop nearest to it on the line
+    /// the look draws there, from the same layout the caret uses (R33).
+    /// `tag` is the window line of a look that draws one live text per
+    /// line, or [`WINDOW`] for a live text that shows the whole window.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn hit(
+        &mut self,
+        text: &str,
+        measure: &dyn TextLayout,
+        style: TextStyle,
+        width: f32,
+        view: &EditView,
+        local: vo::scene::geom::Point,
+        tag: u32,
+    ) -> (usize, Affinity) {
+        let shaped = self.shaped(text, measure, style, width);
+        let count = Lines::line_count(shaped).max(1);
+        let lh = shaped.size.h / count as f32;
+        let top = Lines::line_of(shaped, view.start, Affinity::Downstream);
+        let last_row = view.lines.saturating_sub(1) as usize;
+        let row = if tag == WINDOW {
+            if lh > 0.0 {
+                (local.y / lh).floor().clamp(0.0, last_row as f32) as usize
+            } else {
+                0
+            }
+        } else {
+            (tag as usize).min(last_row)
+        };
+        let line = (top + row).min(count - 1);
+        Lines::stop_at_x(shaped, line, local.x)
     }
 
     /// The buffer laid out at `width`; laid out again only when the text,

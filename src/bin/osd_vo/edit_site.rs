@@ -138,11 +138,21 @@ pub(crate) trait EditSite {
             if !shows_window(&e, view) {
                 return e;
             }
-            e.live_source(view.text.clone())
+            pointable(e.live_source(view.text.clone()), super::edit::WINDOW)
                 .edit(decor.clone())
                 .still_motion(true)
         })
     }
+}
+
+/// Live text `e`, which shows the edit window (or window line `tag`),
+/// takes the pointer: a click places the caret, a drag selects, a double
+/// and triple click select a word and a line (plan F6). The I-beam shows
+/// over it.
+pub(crate) fn pointable(e: Element<Msg>, tag: u32) -> Element<Msg> {
+    e.on_pointer(Msg::EditPointer)
+        .pointer_tag(tag)
+        .cursor(vo::scene::input::Cursor::Text)
 }
 
 /// Whether live text `e` is the look's transcript, which shows the edit
@@ -203,9 +213,12 @@ pub(crate) fn place_lines(
         used[j] = true;
         let bytes = view.line_bytes[j].clone();
         let has_caret = j == view.caret_line as usize;
-        e.live_source(view.text[bytes.clone()].to_string())
-            .edit(line_decor(&decor, bytes, has_caret))
-            .still_motion(true)
+        pointable(
+            e.live_source(view.text[bytes.clone()].to_string()),
+            j as u32,
+        )
+        .edit(line_decor(&decor, bytes, has_caret))
+        .still_motion(true)
     })
 }
 
@@ -607,5 +620,58 @@ mod tests {
             (foot.y - base).abs() < 1.0,
             "{foot:?} on the baseline {base}"
         );
+    }
+
+    /// F6: a point on the window's live text maps to the caret stop the
+    /// look draws there, on every wrapped line of the window, in Swiss, Type
+    /// and River; per-line tags (`place_lines`) land on the same stops.
+    #[test]
+    fn a_point_on_the_window_maps_to_the_stop_under_it() {
+        use super::super::edit::WINDOW;
+        use vo::scene::geom::Point;
+        use vo_core::edit::{is_grapheme_boundary, Affinity};
+        let text = "Cafe\u{301} cre\u{300}me bru\u{302}le\u{301}e, naïve 🍐 pears and many \
+                    more words, so the text wraps over several lines in every look we \
+                    check here";
+        for theme in [OsdTheme::Swiss, OsdTheme::Type, OsdTheme::River] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let (mut p, _fonts) = popup(&dir, theme);
+            sync(&mut p, Some("editing"), text);
+            let view = p.edit_view.clone().expect("editing shows the window");
+            assert!(view.lines >= 2, "{theme:?}: the text wraps");
+            let tb = site(theme).text_box_in(&p);
+            let buffer = p
+                .edit
+                .as_ref()
+                .unwrap()
+                .buffer()
+                .unwrap()
+                .text()
+                .to_string();
+            let shaped = p
+                .edit_layer
+                .shaped(&buffer, &p.measure, tb.style, tb.width)
+                .clone();
+            let lh = shaped.size.h / shaped.lines.len() as f32;
+            let top = shaped.line_of(view.start, Affinity::Downstream);
+            let mut checked = 0;
+            for row in 0..view.lines as usize {
+                for stop in shaped.stops.iter().filter(|s| s.line == top + row) {
+                    let mut hit = |local: Point, tag: u32| {
+                        p.edit_layer
+                            .hit(&buffer, &p.measure, tb.style, tb.width, &view, local, tag)
+                            .0
+                    };
+                    let y = (row as f32 + 0.5) * lh;
+                    let b = hit(Point::new(stop.x, y), WINDOW);
+                    assert_eq!(b, stop.byte, "{theme:?} row {row} x {}", stop.x);
+                    assert!(is_grapheme_boundary(&buffer, b));
+                    let b = hit(Point::new(stop.x + 0.2, 0.0), row as u32);
+                    assert_eq!(b, stop.byte, "{theme:?} line node {row}");
+                    checked += 1;
+                }
+            }
+            assert!(checked > 40, "{theme:?}: {checked} stops");
+        }
     }
 }

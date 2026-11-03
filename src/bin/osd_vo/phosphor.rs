@@ -1622,7 +1622,7 @@ impl edit_site::EditSite for PhosphorSite {
             if e.key().to_string() != "words" {
                 return e;
             }
-            e.live_source(view.text.clone())
+            edit_site::pointable(e.live_source(view.text.clone()), edit::WINDOW)
                 .edit(decor.clone())
                 .still_motion(true)
         })

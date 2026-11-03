@@ -14,8 +14,10 @@
 //! selecting text never does, and the primary selection is never set (R18).
 //! Pasted text goes in as typed text.
 
-use vo::scene::input::KeyEvent;
-use vo_core::edit::{Dir, EditAction, EditBuffer, Lines, PlainLines, Unit};
+use vo::scene::input::{KeyEvent, PointerPhase};
+use vo_core::edit::{
+    line_at, word_at, Affinity, Dir, EditAction, EditBuffer, Lines, PlainLines, Unit,
+};
 use vo_core::edit_keymap::{EditCmd, TextBoxKeys};
 use voxtype::osd::edit_ipc::FinishMode;
 
@@ -67,6 +69,8 @@ pub(crate) struct Focus {
     keys: TextBoxKeys,
     /// A paste was asked for and not answered yet. A focus loss drops it.
     pasting: bool,
+    /// A single click is held: a drag extends the selection from it.
+    dragging: bool,
 }
 
 impl Focus {
@@ -157,6 +161,60 @@ impl Focus {
             Some(EditCmd::Resume) => link.resume(),
             Some(EditCmd::Finish) => link.finish(FinishMode::PasteEnter),
         }
+        true
+    }
+
+    /// A press, drag or release of the primary button on the edit text, at
+    /// buffer position `at` (plan F6). One click puts the caret there, a
+    /// drag from it selects, two clicks select the word and three the line
+    /// (`vo_core::edit::word_at`, `line_at`). Returns true when the buffer
+    /// changed or its selection moved.
+    pub(crate) fn pointer(
+        &mut self,
+        phase: PointerPhase,
+        at: (usize, Affinity),
+        link: &mut EditLink,
+        lines: Option<&dyn Lines>,
+        t: f64,
+    ) -> bool {
+        if !link.editable() {
+            self.dragging = false;
+            return false;
+        }
+        let Some(buffer) = link.buffer() else {
+            return false;
+        };
+        let (to, affinity) = at;
+        let select = |r: std::ops::Range<usize>| EditAction::Select {
+            anchor: r.start,
+            focus: r.end,
+        };
+        let action = match phase {
+            PointerPhase::Press { clicks } => {
+                self.dragging = clicks == 1;
+                match clicks {
+                    1 => EditAction::MoveTo {
+                        to,
+                        affinity,
+                        extend: false,
+                    },
+                    2 => select(word_at(buffer.text(), to)),
+                    _ => select(line_at(buffer.text(), to)),
+                }
+            }
+            PointerPhase::Drag if self.dragging => EditAction::MoveTo {
+                to,
+                affinity,
+                extend: true,
+            },
+            PointerPhase::Drag => return false,
+            PointerPhase::Release => {
+                self.dragging = false;
+                return false;
+            }
+        };
+        let plain = PlainLines::new(buffer.text());
+        link.apply(action, lines.unwrap_or(&plain), t);
         true
     }
 
@@ -456,5 +514,58 @@ mod tests {
             .focus
             .pasted(Some("late".into()), &mut rig.link, None, 0.0));
         assert_eq!(rig.link.buffer().unwrap().text(), "helo");
+    }
+
+    #[test]
+    fn a_click_places_the_caret_a_drag_selects_and_double_and_triple_clicks() {
+        let mut rig = Rig::new();
+        rig.daemon("editing");
+        rig.focus(true, false);
+        // "helo" plus a typed line.
+        rig.key(LogicalKey::Named(NamedKey::End), None, KeyState::Down);
+        let shift = Mods {
+            shift: true,
+            ..Mods::default()
+        };
+        rig.key_with(
+            LogicalKey::Named(NamedKey::Enter),
+            None,
+            KeyState::Down,
+            shift,
+        );
+        for c in ["n", "e", "w", " ", "l", "i", "n", "e"] {
+            rig.key(
+                LogicalKey::Char(c.chars().next().unwrap()),
+                Some(c),
+                KeyState::Down,
+            );
+        }
+        assert_eq!(rig.link.buffer().unwrap().text(), "helo\nnew line");
+        let sel = |rig: &Rig| rig.link.buffer().unwrap().selection();
+        let at = |b: usize| (b, Affinity::Downstream);
+        let press = |rig: &mut Rig, phase: PointerPhase, b: usize| {
+            rig.focus.pointer(phase, at(b), &mut rig.link, None, 0.0)
+        };
+        assert!(press(&mut rig, PointerPhase::Press { clicks: 1 }, 2));
+        assert!(sel(&rig).is_caret() && sel(&rig).focus == 2);
+        assert!(press(&mut rig, PointerPhase::Drag, 9));
+        assert_eq!((sel(&rig).anchor, sel(&rig).focus), (2, 9));
+        press(&mut rig, PointerPhase::Release, 9);
+        assert!(
+            !press(&mut rig, PointerPhase::Drag, 3),
+            "no drag after release"
+        );
+        // Two clicks on "line": that word; three: the whole second line.
+        press(&mut rig, PointerPhase::Press { clicks: 2 }, 11);
+        assert_eq!(sel(&rig).range(), 9..13);
+        assert!(
+            !press(&mut rig, PointerPhase::Drag, 2),
+            "a word click does not drag"
+        );
+        press(&mut rig, PointerPhase::Press { clicks: 3 }, 11);
+        assert_eq!(sel(&rig).range(), 5..13);
+        // Detached: clicks do nothing.
+        rig.focus(false, false);
+        assert!(!press(&mut rig, PointerPhase::Press { clicks: 1 }, 0));
     }
 }

@@ -1650,6 +1650,8 @@ impl Voice {
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)] // Audio carries frames inline; boxing would add an allocation per capture batch
 enum Msg {
+    /// A press, drag or release on the edit text (plan F6).
+    EditPointer(vo::scene::input::PointerInput),
     /// Frames read from the socket in one go, with their voice features when
     /// the daemon sends them. One message per capture batch, so the view is
     /// built once per batch.
@@ -2373,6 +2375,30 @@ impl Popup {
 }
 
 impl Popup {
+    /// A press, drag or release on the edit text: to the buffer position
+    /// under it, by the layout the caret uses.
+    fn edit_pointer(&mut self, p: vo::scene::input::PointerInput, cx: &mut Cx<Msg>) {
+        let text_box = edit_site::site(self.look.theme).text_box_in(self);
+        let (Some(view), Some(buffer)) = (
+            self.edit_view.as_ref(),
+            self.edit.as_ref().and_then(|l| l.buffer()),
+        ) else {
+            return;
+        };
+        let at = self.edit_layer.hit(
+            buffer.text(),
+            &self.measure,
+            text_box.style,
+            text_box.width,
+            view,
+            p.local,
+            p.tag,
+        );
+        self.edit_by(p.t, cx, |focus, link, lines, _| {
+            focus.pointer(p.phase, at, link, lines, p.t)
+        });
+    }
+
     /// Runs an edit (a key, a paste) on the buffer while the popup owns it,
     /// then shows the change: the new text, and a mark on each word the
     /// edit made or changed. `act` gets the lines the look draws, so Up,
@@ -2457,6 +2483,10 @@ impl App for Popup {
             }
         }
         let msg = match msg {
+            Msg::EditPointer(p) => {
+                self.edit_pointer(p, cx);
+                return;
+            }
             Msg::ModelSignals(s) => {
                 tracing::debug!(
                     step = s.step,
@@ -2558,7 +2588,7 @@ impl App for Popup {
             Msg::Check => self.check = None,
             Msg::Tick => self.extra.tick = None,
             Msg::Progress => self.finish.timer = None,
-            Msg::Loop | Msg::Station(_) | Msg::ModelSignals(_) => {}
+            Msg::Loop | Msg::Station(_) | Msg::ModelSignals(_) | Msg::EditPointer(_) => {}
         }
         self.move_finish_progress(t, cx);
         if let Some(ending) = self.ending() {
@@ -3041,12 +3071,18 @@ fn new_step(
     next.filter(|_| seen && next != last)
 }
 
-/// The live popup's surface for `look`.
+/// The live popup's surface for `look`. With keyboard edit on, the input
+/// region follows the nodes that take the pointer, which only the edit
+/// text does (plan F6): empty, so click-through, outside editing.
 fn live_spec(cfg: &OsdConfig, look: &Look) -> OverlaySpec {
     OverlaySpec {
         size: look.live_surface(),
         placement: placement(cfg, look),
-        input: InputMode::None,
+        input: if cfg.keyboard_edit {
+            InputMode::Regions(Default::default())
+        } else {
+            InputMode::None
+        },
         app_id: "voxtype-osd".into(),
         ..OverlaySpec::default()
     }

@@ -1247,7 +1247,7 @@ When the model gets a word wrong and saying it again does not help, you can paus
 
 When the pause starts, the microphone is muted and the last words still being decoded appear after your text as a short "settling" tail. They become editable when they land, at most 1.2 s later. The popup keeps its look; the badge says "EDIT".
 
-**Edit.** The text you see is the text that will be pasted, already processed (spoken punctuation, replacements, quotes). The usual editing keys work: arrows, Ctrl+arrows, Home and End, Shift to select, Backspace and Delete, Ctrl+Z to undo. Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste through the clipboard (Ctrl+Insert, Shift+Delete and Shift+Insert do the same). Selecting text never changes the clipboard or the primary selection; only a copy or cut does. Pasted text goes in as if you typed it. Shift+Enter adds a new line. Shift for capitals or with arrows never counts as an edit tap.
+**Edit.** The text you see is the text that will be pasted, already processed (spoken punctuation, replacements, quotes). The usual editing keys work: arrows, Ctrl+arrows, Home and End, Shift to select, Backspace and Delete, Ctrl+Z to undo. Ctrl+C, Ctrl+X and Ctrl+V copy, cut and paste through the clipboard (Ctrl+Insert, Shift+Delete and Shift+Insert do the same). Selecting text never changes the clipboard or the primary selection; only a copy or cut does. Pasted text goes in as if you typed it. With the mouse, click in the text to put the caret there, drag to select, double-click to select a word and triple-click to select a line. Clicks anywhere else on the popup go through to the window under it. Shift+Enter adds a new line. Shift for capitals or with arrows never counts as an edit tap.
 
 **Go on or finish.**
 
