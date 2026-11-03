@@ -275,6 +275,37 @@ impl Focus {
         true
     }
 
+    /// A screen reader's request (plan F8, y24d). A selection, in bytes of
+    /// the buffer as the screen reader last saw it, goes in as a click's
+    /// would; one off the buffer's characters now is dropped. Focus changes
+    /// nothing here: [`Focus::follow`] already asks for it while the text
+    /// can be edited. Returns true when the selection moved.
+    pub(crate) fn accessibility(
+        &mut self,
+        request: vo::a11y_tree::Request,
+        link: &mut EditLink,
+        lines: Option<&dyn Lines>,
+        t: f64,
+    ) -> bool {
+        let vo::a11y_tree::Request::Select { anchor, focus } = request else {
+            return false;
+        };
+        let Some(buffer) = link.buffer().filter(|_| link.editable()) else {
+            return false;
+        };
+        let text = buffer.text();
+        if !text.is_char_boundary(anchor) || !text.is_char_boundary(focus) {
+            return false;
+        }
+        let plain = PlainLines::new(text);
+        link.apply(
+            EditAction::Select { anchor, focus },
+            lines.unwrap_or(&plain),
+            t,
+        );
+        true
+    }
+
     /// The clipboard's answer to a paste. The text goes in at the caret,
     /// replacing any selection, as typed text would. Returns true when the
     /// buffer took it.

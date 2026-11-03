@@ -17,6 +17,9 @@
 #   tree     with it on, a window "Voxtype dictation" with the shown text
 #   edit     while editing, a focused text field whose text is the buffer
 #            and whose caret is at the buffer's caret
+#   action   the screen reader moves the caret (AT-SPI SetCaretOffset) and
+#            sets a selection (SetSelection), and the popup's buffer follows:
+#            the field reads back the new caret and selection
 #
 # Writes logs under $VOXTYPE_A11Y_DIR (default /var/tmp/claude/osd-vo-a11y)
 # and exits 0 when every check passes.
@@ -59,6 +62,9 @@ def walk(node, depth=0):
     if node.get_text_iface() is not None and role in ("text", "entry", "paragraph"):
         out["text"] = Atspi.Text.get_text(node, 0, -1)
         out["caret"] = Atspi.Text.get_caret_offset(node)
+        if Atspi.Text.get_n_selections(node) > 0:
+            r = Atspi.Text.get_selection(node, 0)
+            out["selection"] = [r.start_offset, r.end_offset]
     if depth < 3:
         out["children"] = [walk(node.get_child_at_index(i), depth + 1) for i in range(node.get_child_count())]
     return out
@@ -72,6 +78,49 @@ for i in range(desktop.get_child_count()):
             print(json.dumps(walk(win)))
             sys.exit(0)
 print("{}")
+EOF
+
+cat > "$work/act.py" <<'EOF'
+# Acts on the popup's text field as a screen reader would: caret N, or select A B.
+import sys
+import gi
+gi.require_version("Atspi", "2.0")
+from gi.repository import Atspi
+
+def field(node, depth=0):
+    if node.get_role_name() in ("text", "entry", "paragraph") and node.get_text_iface() is not None:
+        return node
+    if depth < 4:
+        for i in range(node.get_child_count()):
+            hit = field(node.get_child_at_index(i), depth + 1)
+            if hit:
+                return hit
+    return None
+
+desktop = Atspi.get_desktop(0)
+for i in range(desktop.get_child_count()):
+    app = desktop.get_child_at_index(i)
+    for j in range(app.get_child_count()):
+        win = app.get_child_at_index(j)
+        if win.get_name() != "Voxtype dictation":
+            continue
+        f = field(win)
+        if f is None:
+            print("no field")
+            sys.exit(1)
+        op = sys.argv[1]
+        if op == "caret":
+            ok = Atspi.Text.set_caret_offset(f, int(sys.argv[2]))
+        else:
+            a, b = int(sys.argv[2]), int(sys.argv[3])
+            if Atspi.Text.get_n_selections(f) > 0:
+                ok = Atspi.Text.set_selection(f, 0, a, b)
+            else:
+                ok = Atspi.Text.add_selection(f, a, b)
+        print("ok" if ok else "refused")
+        sys.exit(0)
+print("no window")
+sys.exit(1)
 EOF
 
 cat > "$work/inner.py" <<'EOF'
@@ -190,6 +239,22 @@ field = find(t, "text") or find(t, "entry") or {}
 check("edit: a text field holds the buffer", ok, f"tree={t}")
 check("edit: the caret is at the buffer's caret", field.get("caret") == 13, f"field={field}")
 check("edit: the field has focus", bool(field.get("focused")), f"field={field}")
+
+def act(*args):
+    r = subprocess.run(["python3", "-I", os.path.join(work, "act.py"), *map(str, args)],
+                       capture_output=True, text=True, timeout=10)
+    return (r.stdout + r.stderr).strip()
+
+def field_of(t):
+    return find(t, "text") or find(t, "entry") or {}
+
+said = act("caret", 5)
+t, ok = wait_tree(lambda t: field_of(t).get("caret") == 5)
+check("action: the caret moves where the screen reader puts it", ok, f"act={said} field={field_of(t)}")
+said = act("select", 5, 9)
+t, ok = wait_tree(lambda t: field_of(t).get("selection") == [5, 9])
+check("action: a selection the screen reader sets is the buffer's", ok, f"act={said} field={field_of(t)}")
+check("action: the text is unchanged", field_of(t).get("text") == "plum pear fig", f"field={field_of(t)}")
 
 preview("plum pear fig", block("listening", "plum pear fig"))
 write("state", "idle\n")

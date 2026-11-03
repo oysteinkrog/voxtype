@@ -1285,6 +1285,10 @@ impl Popup {
         };
         let h = lines.max(1) as f32 * line_h;
         let x = (w - sheet.w) / 2.0;
+        // The newest sheet ends at the box's foot and its line sits the
+        // sheet's pad above that. Down by the pad, the newest line is on the
+        // flat layout's last line: an edit, which quiets the stack, then
+        // shows the text where it was read instead of 4 px lower (pgnr).
         let view = at(
             stack.view_at(
                 "depth-stack",
@@ -1297,7 +1301,7 @@ impl Popup {
                 self.extra.now,
             ),
             x,
-            0.0,
+            4.0 * k,
         );
         let stack_box = Element::column("stack-box").size(w, h).child(view);
         if !keyed.is_empty() {
@@ -1442,5 +1446,54 @@ mod round2_tests {
         assert!(level_sum(&sums, 1.0, 0.9) < 10.0);
         assert_eq!(level_sum(&sums, 1.0, -100.0), 1.0);
         assert_eq!(level_sum(&[], 1.0, 1.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::super::moments::{self, Moment};
+    use super::*;
+    use crate::{load_fonts, OsdConfig, PlasmaTheme};
+
+    /// pgnr: a tap quiets the depth stack, and its newest line must not
+    /// hop onto the flat layout's last line (4 px at 600 px wide). The whole
+    /// edit and edit-paste moments, as `--envelope --moment` checks them,
+    /// at the default width and at 600 px.
+    #[test]
+    fn hologram_edit_moments_keep_the_envelope_from_the_start() {
+        let plasma = PlasmaTheme::default();
+        let fonts = load_fonts(&plasma).unwrap();
+        for width in [None, Some(600)] {
+            let mut cfg = OsdConfig {
+                theme: OsdTheme::Hologram,
+                ..OsdConfig::default()
+            };
+            if let Some(w) = width {
+                cfg.width_px = w;
+            }
+            let mut look = Look::new(&cfg, &plasma, String::new(), &fonts);
+            look.set_motion(&cfg.motion);
+            assert!(look.on(wild_space::DEPTH_STACK), "the stack is on");
+            for m in [Moment::Edit, Moment::EditPaste] {
+                let s = moments::scenario(&look, m);
+                let options = vo::Options {
+                    fonts: fonts.clone(),
+                    default_motion: crate::default_motion(&look),
+                    ..crate::kit::options()
+                };
+                let popup = moments::popup_for(m, Popup::new(look.clone(), &fonts));
+                let report = vo::envelope::check_scenario(
+                    popup,
+                    &s,
+                    30.0,
+                    options,
+                    &vo::envelope::Envelope {
+                        transcript: 0..1 << 20,
+                        ..vo::envelope::Envelope::default()
+                    },
+                );
+                assert!(report.is_ok(), "width {width:?}, {m:?}: {report}");
+            }
+        }
     }
 }
