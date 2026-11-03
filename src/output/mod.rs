@@ -582,27 +582,25 @@ pub async fn output_via_confirmed(
     #[cfg(target_os = "linux")]
     if options.wait_for_modifier_release
         && chain_synthesizes_keystrokes(chain.iter().map(|o| o.name()))
-    {
-        if modifier_guard::wait_until_released(options.modifier_release_timeout)
+        && modifier_guard::wait_until_released(options.modifier_release_timeout)
             .await
             .is_err()
-        {
-            tracing::warn!(
-                timeout_ms = options.modifier_release_timeout.as_millis() as u64,
-                "Modifier keys still held after timeout; skipping \
-                 keystroke-synthesizing methods and using clipboard fallback \
-                 to avoid triggering keybindings"
-            );
-            // Surface the fallback to the user so they know where the
-            // transcription went. Silent clipboard fallback leaves users
-            // staring at an empty cursor wondering why nothing was typed.
-            crate::notification::send(
-                "Voxtype",
-                "Modifier key held too long, transcription copied to clipboard.",
-            )
-            .await;
-            skip_keystroke_methods = true;
-        }
+    {
+        tracing::warn!(
+            timeout_ms = options.modifier_release_timeout.as_millis() as u64,
+            "Modifier keys still held after timeout; skipping \
+             keystroke-synthesizing methods and using clipboard fallback \
+             to avoid triggering keybindings"
+        );
+        // Surface the fallback to the user so they know where the
+        // transcription went. Silent clipboard fallback leaves users
+        // staring at an empty cursor wondering why nothing was typed.
+        crate::notification::send(
+            "Voxtype",
+            "Modifier key held too long, transcription copied to clipboard.",
+        )
+        .await;
+        skip_keystroke_methods = true;
     }
 
     // Run pre-output hook if configured (e.g., switch to modifier-suppressing submap)
