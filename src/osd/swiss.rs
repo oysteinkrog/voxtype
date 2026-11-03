@@ -55,6 +55,47 @@ pub fn smooth_levels(raw: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// [`smooth_levels`] kept up to date while levels arrive at the back of
+/// `raw` and leave its front, as f32. `smooth` holds the smoothed values of
+/// `raw` before `popped` levels left its front and new ones came (or is
+/// empty, to start again). Only the values whose seven-level window moved are
+/// computed again: the popup did all of them on every audio message.
+pub fn resmooth(
+    raw: &std::collections::VecDeque<f64>,
+    smooth: &mut std::collections::VecDeque<f32>,
+    popped: usize,
+) {
+    let n = raw.len();
+    if popped > smooth.len() {
+        smooth.clear();
+    }
+    smooth.drain(..popped.min(smooth.len()));
+    // A value reads three levels to each side: the last three of the old
+    // run read its old end, and after a pop the first three read the new start.
+    let keep = smooth.len().min(n).saturating_sub(3);
+    smooth.truncate(keep);
+    for i in keep..n {
+        smooth.push_back(smooth_level_at(raw, i) as f32);
+    }
+    if popped > 0 {
+        for i in 0..n.min(3) {
+            smooth[i] = smooth_level_at(raw, i) as f32;
+        }
+    }
+}
+
+/// The value at `i` of [`smooth_levels`] over `raw`, computed the same way.
+fn smooth_level_at(raw: &std::collections::VecDeque<f64>, i: usize) -> f64 {
+    let len = raw.len();
+    let window = |i: usize, r: usize| (i.saturating_sub(r), (i + r).min(len - 1));
+    let peak = |j: usize| {
+        let (lo, hi) = window(j, 2);
+        raw.range(lo..=hi).fold(0.0_f64, |a, b| a.max(*b))
+    };
+    let (lo, hi) = window(i, 1);
+    (lo..=hi).map(peak).sum::<f64>() / (hi - lo + 1) as f64
+}
+
 /// Waveform colours left to right while recording: a cooler hue, the
 /// lightened accent, a warmer hue.
 pub fn wave_hues(accent: Color) -> (Color, Color, Color) {
@@ -269,6 +310,40 @@ mod tests {
         assert_eq!(s[3], 1.0);
         assert!(s[0] > 0.0 && s[0] < 1.0);
         assert_eq!(s[8], 0.0);
+    }
+
+    #[test]
+    fn resmooth_matches_smoothing_the_whole_run() {
+        use std::collections::VecDeque;
+        let mut raw = VecDeque::new();
+        let mut smooth = VecDeque::new();
+        let mut seed = 7u32;
+        for step in 0..400 {
+            // 1 to 4 new levels a message, a window of 40, and a restart.
+            let add = 1 + step % 4;
+            let mut popped = 0;
+            for _ in 0..add {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                raw.push_back((seed >> 8) as f64 / (1u32 << 24) as f64);
+                if raw.len() > 40 {
+                    raw.pop_front();
+                    popped += 1;
+                }
+            }
+            if step == 200 {
+                raw.truncate(2);
+                smooth.clear();
+                popped = 0;
+            }
+            resmooth(&raw, &mut smooth, popped);
+            let all: Vec<f64> = raw.iter().copied().collect();
+            let want: Vec<u32> = smooth_levels(&all)
+                .iter()
+                .map(|&v| (v as f32).to_bits())
+                .collect();
+            let got: Vec<u32> = smooth.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(got, want, "step {step}");
+        }
     }
 
     #[test]

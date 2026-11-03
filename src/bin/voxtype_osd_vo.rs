@@ -51,9 +51,7 @@ use voxtype::osd::ipc::resolve_socket_path;
 use voxtype::osd::look_step;
 use voxtype::osd::outcome::Outcome;
 use voxtype::osd::plasma::{self, PlasmaTheme};
-use voxtype::osd::swiss::{
-    self, smooth_levels, stop_hint, tick_level, wave_hues, wave_stops, StatusLine,
-};
+use voxtype::osd::swiss::{self, stop_hint, tick_level, wave_hues, wave_stops, StatusLine};
 use voxtype::osd::visual::Color as OsdColor;
 
 #[path = "osd_vo/amber.rs"]
@@ -1693,6 +1691,8 @@ struct Popup {
     received: u64,
     /// The smoothed levels and the time the newest reaches the right edge.
     wave: Arc<[f32]>,
+    /// `wave` as it is kept up to date, one value per level in `levels`.
+    smooth: VecDeque<f32>,
     newest_at: f64,
     /// When the popup opened and when the last frame came.
     shown_at: f64,
@@ -1869,6 +1869,7 @@ impl Popup {
             anchor: 0.0,
             received: 0,
             wave: Arc::from([]),
+            smooth: VecDeque::new(),
             newest_at: 0.0,
             shown_at: 0.0,
             loud_at: f64::NEG_INFINITY,
@@ -2094,6 +2095,7 @@ impl Popup {
         self.last_audio = Some(t);
         let window = (self.look.window * FRAME_HZ as f64).ceil() as usize + 12;
         let mut added = 0u64;
+        let mut popped = 0;
         for f in frames {
             if self
                 .last_seq
@@ -2106,6 +2108,8 @@ impl Popup {
                 }
                 // A new recording or a reconnect: start the waveform again.
                 self.levels.clear();
+                self.smooth.clear();
+                popped = 0;
                 self.voice.clear();
                 self.received = 0;
             }
@@ -2118,6 +2122,7 @@ impl Popup {
                 .push_back(tick_level(f.max.max(-f.min) as f64, self.look.gain));
             if self.levels.len() > window {
                 self.levels.pop_front();
+                popped += 1;
             }
             added += 1;
         }
@@ -2144,8 +2149,8 @@ impl Popup {
         }
         self.received += added;
         self.newest_at = self.anchor + PLAYOUT_DELAY_SECS + (self.received - 1) as f64 * step;
-        let raw: Vec<f64> = self.levels.iter().copied().collect();
-        self.wave = smooth_levels(&raw).into_iter().map(|l| l as f32).collect();
+        swiss::resmooth(&self.levels, &mut self.smooth, popped);
+        self.wave = self.smooth.iter().copied().collect();
     }
 
     /// Hands the daemon's word facts to the word model, when `preview.json`
