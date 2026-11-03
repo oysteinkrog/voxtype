@@ -1091,6 +1091,25 @@ fn live_session(
         write_response_to(out, WorkerResponse::error("Empty audio buffer"));
         return Ok(more);
     }
+    // The last part goes to a loaded engine now, so it runs while the live
+    // model flushes (about 0.25 s) instead of after. A model still loading
+    // may yet give way to the preview text below, so it waits for that.
+    let send_last = |progress: &mut Progress, cuts: &mut PartCuts| {
+        if config.live_preview_final == "preview" {
+            return;
+        }
+        if let Some(range) = splitter.tail(samples.len()) {
+            progress.pending.push_back(range.len() as f32 / 16000.0);
+            let specs = crate::osd::correction::read_windows();
+            cuts.offer(range, &samples, &specs, &part_tx);
+        }
+        let specs = crate::osd::correction::read_windows();
+        cuts.retry(&samples, &specs, &part_tx, true);
+    };
+    let sent_last = engine_loaded.load(std::sync::atomic::Ordering::SeqCst);
+    if sent_last {
+        send_last(&mut progress, &mut cuts);
+    }
     // flush() returns the text still held in the right context.
     if let Some(tail) = unified.as_mut().and_then(|u| u.flush().ok()) {
         if !tail.is_empty() {
@@ -1183,13 +1202,9 @@ fn live_session(
         );
         return Ok(more);
     }
-    if let Some(range) = splitter.tail(samples.len()) {
-        progress.pending.push_back(range.len() as f32 / 16000.0);
-        let specs = crate::osd::correction::read_windows();
-        cuts.offer(range, &samples, &specs, &part_tx);
+    if !sent_last {
+        send_last(&mut progress, &mut cuts);
     }
-    let specs = crate::osd::correction::read_windows();
-    cuts.retry(&samples, &specs, &part_tx, true);
     // Each spoken correction's audio alone, with the live words it replaces
     // pushed down, so the final engine does not repeat the mistake.
     let clip_holds: Vec<crate::osd::correction::FinalClip> = {
