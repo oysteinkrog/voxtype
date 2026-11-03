@@ -92,6 +92,8 @@ mod letter_fx;
 mod limit;
 #[path = "osd_vo/mission.rs"]
 mod mission;
+#[path = "osd_vo/finish_progress.rs"]
+mod finish_progress;
 #[path = "osd_vo/orb.rs"]
 mod orb;
 #[path = "osd_vo/palette.rs"]
@@ -1661,6 +1663,8 @@ enum Msg {
     Loop,
     /// A timer of the motion station. A popup ignores it.
     Station(Box<station::Cue>),
+    /// The next step of the final pass's progress bar.
+    Progress,
     /// `preview-signals.json` changed: the live model took a step. Kept
     /// apart from `Files`, so it never touches the text or the lifecycle.
     ModelSignals(Box<voxtype::osd::live::ModelSignals>),
@@ -1698,6 +1702,9 @@ struct Popup {
     /// The frame pace for `App::frame_pace`, set after each update.
     pace: Option<f64>,
     files: Files,
+    /// The final pass's bar, moved on between the worker's status lines.
+    /// `files.fraction` holds the share to show; this the one sent.
+    finish: finish_progress::FinishProgress,
     /// "00:12", frozen while the final text is made.
     clock: String,
     word_count: usize,
@@ -1867,6 +1874,7 @@ impl Popup {
             pace: None,
             last_audio: None,
             files: Files::default(),
+            finish: Default::default(),
             clock: "00:00".into(),
             word_count: 0,
             model: WordModel::new(),
@@ -1914,6 +1922,27 @@ impl Popup {
             picked_at: None,
             live_surface: false,
             lookahead: None,
+        }
+    }
+
+    /// Moves the final pass's bar on from the worker's time estimate, and
+    /// wakes the view for its next step while it moves.
+    fn move_finish_progress(&mut self, t: f64, cx: &mut Cx<Msg>) {
+        use voxtype::osd::live::Phase;
+        let eta = self
+            .files
+            .live
+            .as_ref()
+            .and_then(|l| l.status.as_ref())
+            .filter(|s| s.phase == Phase::Finishing)
+            .and_then(|s| s.eta_s);
+        self.finish.note(self.finish.raw, eta, t);
+        if !self.finish.moving() {
+            return;
+        }
+        self.files.fraction = self.finish.fraction(t);
+        if self.finish.timer.is_none() && self.shows_progress(&self.status()) {
+            self.finish.timer = Some(cx.after(1.0 / finish_progress::STEP_HZ, Msg::Progress));
         }
     }
 
@@ -2459,6 +2488,8 @@ impl App for Popup {
                 }
             }
             Msg::Files(files) => {
+                // Compared as the daemon wrote it, not as the bar shows it.
+                self.files.fraction = self.finish.raw;
                 let step = new_step(self.step_seen, self.files.look_step, files.look_step);
                 self.step_seen = true;
                 let preview_changed = files.preview != self.files.preview;
@@ -2476,6 +2507,7 @@ impl App for Popup {
                 self.was_recording |= files.recording;
                 self.was_finishing |= files.transcribing || (files.finishing && !files.recording);
                 self.files = files;
+                self.finish.raw = self.files.fraction;
                 if self.busy() {
                     // A new recording in the same popup.
                     self.quiet_since = None;
@@ -2525,8 +2557,10 @@ impl App for Popup {
             }
             Msg::Check => self.check = None,
             Msg::Tick => self.extra.tick = None,
+            Msg::Progress => self.finish.timer = None,
             Msg::Loop | Msg::Station(_) | Msg::ModelSignals(_) => {}
         }
+        self.move_finish_progress(t, cx);
         if let Some(ending) = self.ending() {
             if self.ended_at.is_none() {
                 self.ended_at = Some(t);

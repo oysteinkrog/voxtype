@@ -627,18 +627,26 @@ impl Take {
         self.files_at(t);
     }
 
-    /// The final pass from `t` for `secs`, with the finishing fraction
-    /// moving, then `text` as the final text. Returns when it is shown.
+    /// The final pass from `t` for `secs`, then `text` as the final text.
+    /// Returns when it is shown. As the live worker reports a clip with one
+    /// part left: one status line with nothing done yet and the estimated
+    /// time, then nothing until the text.
     fn finish(&mut self, t: f64, secs: f64, text: &str) -> f64 {
         self.files.finishing = true;
-        let steps = 6;
-        for k in 0..steps {
-            let f = (k + 1) as f64 / steps as f64;
-            self.files.fraction = Some(f);
-            let left = ((1.0 - f) * secs * 2.0).ceil() as u32;
-            self.files.status = format!("Finishing: {left} s of audio left");
-            self.files_at(t + 0.05 + k as f64 * secs / steps as f64);
-        }
+        let audio_left = (secs / 0.15) as f32;
+        self.files.fraction = Some(0.0);
+        self.files.status =
+            format!("Finishing: {audio_left:.0} s of audio left, about {secs:.1} s");
+        self.doc.status = Some(voxtype::osd::live::LiveStatus {
+            phase: voxtype::osd::live::Phase::Finishing,
+            fraction: Some(0.0),
+            text: self.files.status.clone(),
+            audio_left_s: Some(audio_left),
+            eta_s: Some(secs as f32),
+        });
+        self.files.live = Some(self.doc.clone());
+        self.files_at(t + 0.05);
+        self.doc.status = None;
         let shown = t + secs + 0.1;
         self.files.preview = text.to_string();
         self.files_at(shown);

@@ -558,25 +558,42 @@ impl Default for Progress {
     }
 }
 
+/// The engine's seconds per second of audio on the last part it did in
+/// this worker, as f32 bits; 0 before the first. A warm worker keeps it
+/// between recordings.
+#[cfg(feature = "parakeet")]
+static LAST_RATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 #[cfg(feature = "parakeet")] // only the parakeet live worker uses this
 impl Progress {
     fn part_done(&mut self, audio: f32, took: f32) {
         self.pending.pop_front();
         self.done_audio += audio;
         self.done_took += took;
+        if audio > 0.0 {
+            LAST_RATE.store(
+                (took / audio).to_bits(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
     }
 
     /// JSON for a status line. The time estimate uses the speed measured on
-    /// the parts done so far, or 0.1 s per second of audio before that.
+    /// the parts done so far, else on the last part this worker did, else
+    /// 0.15 s per second of audio (Cohere with its decoder on the CPU took
+    /// 0.12 to 0.18).
     fn status(&self, loaded: bool) -> String {
         let left: f32 = self.pending.iter().sum();
         let (text, fraction, eta) = if !loaded {
             ("Finishing: loading the model".to_string(), None, None)
         } else {
+            let last = f32::from_bits(LAST_RATE.load(std::sync::atomic::Ordering::Relaxed));
             let rate = if self.done_audio > 0.0 {
                 self.done_took / self.done_audio
+            } else if last > 0.0 {
+                last
             } else {
-                0.1
+                0.15
             };
             let total = self.done_audio + left;
             (
