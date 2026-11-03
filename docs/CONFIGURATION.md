@@ -183,6 +183,18 @@ With a live preview, load the engine model only when the GPU has at least this m
 live_preview_min_free_vram_mib = 4096
 ```
 
+## live_preview_keep_engine
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Keep the engine model (for example Cohere) loaded in the warm worker between recordings. The worker loads it when it starts, so the final text never waits for a load. It holds the model's memory while it waits: about 2.2 GiB VRAM for `cohere-transcribe-q4f16`. With `false`, each recording loads the model and frees it after. That load can take 3 to 20 s on a busy machine.
+
+```toml
+live_preview_keep_engine = true
+```
+
 ## live_preview_warm_secs
 
 **Type:** Integer (seconds)
