@@ -1885,6 +1885,8 @@ mod tests {
         marked: Vec<String>,
         /// The edit buffer's text.
         buffer: Option<String>,
+        /// The edit buffer's selection, anchor and focus.
+        selection: Option<(usize, usize)>,
         /// The preedit the edit view shows.
         preedit: Option<String>,
     }
@@ -1921,6 +1923,10 @@ mod tests {
                     .as_ref()
                     .and_then(|l| l.buffer())
                     .map(|b| b.text().to_string()),
+                selection: p.edit.as_ref().and_then(|l| l.buffer()).map(|b| {
+                    let s = b.selection();
+                    (s.anchor, s.focus)
+                }),
                 preedit: p.edit_view.as_ref().and_then(|v| {
                     let r = v.preedit.clone()?;
                     Some(v.text[r].to_string())
@@ -1962,6 +1968,11 @@ mod tests {
             self.seen(ev.t);
         }
 
+        fn accessibility(&mut self, request: vo::a11y_tree::Request, cx: &mut Cx<Msg>) {
+            self.0.accessibility(request, cx);
+            self.seen(cx.t());
+        }
+
         fn view(&self, tokens: &vo::Tokens) -> Element<Msg> {
             self.0.view(tokens)
         }
@@ -1990,6 +2001,41 @@ mod tests {
         vo::envelope::sample_scenario(spy, s, 30.0, options, &mut |_, _, _| {});
         let out = seen.borrow().clone();
         out
+    }
+
+    /// y24d: a screen reader's set-selection request moves the caret and
+    /// selection while the text can be edited, and does nothing before.
+    #[test]
+    fn a_screen_reader_moves_the_caret_while_editing() {
+        use vo::a11y_tree::Request;
+        let mut look = edit_look();
+        look.theme = OsdTheme::Swiss;
+        let mut s = scenario(&look, Moment::Edit);
+        let focus_at = s
+            .inputs
+            .iter()
+            .find_map(|(t, i)| matches!(i, Input::KeyboardFocus { .. }).then_some(*t))
+            .expect("focus comes");
+        let text = sentence_words(0, 26).join(" ");
+        let word = text.rfind(' ').unwrap() + 1;
+        // Before the tap: no field yet, so nothing to move.
+        let select = |anchor, focus| Input::Accessibility(Request::Select { anchor, focus });
+        s.push(1.0, select(0, 0));
+        // While editing: the caret before the last word, then that word
+        // selected from its end back to its start.
+        let (caret_at, select_at) = (focus_at + 0.1, focus_at + 0.15);
+        s.push(caret_at, select(word, word));
+        s.push(select_at, select(text.len(), word));
+        let seen = spy_run(&look, &s);
+        let last = |t: f64| seen.iter().rev().find(|e| e.t <= t + 1e-9);
+        let at = |t: f64| last(t).and_then(|e| e.selection);
+        assert_eq!(at(1.0), None, "no field before the tap");
+        let end = text.len();
+        assert_eq!(at(caret_at - 0.01), Some((end, end)), "at the end");
+        assert_eq!(at(caret_at), Some((word, word)));
+        assert_eq!(at(select_at), Some((text.len(), word)));
+        let buffer = last(select_at).and_then(|e| e.buffer.as_deref());
+        assert_eq!(buffer, Some(text.as_str()), "the text is unchanged");
     }
 
     fn edit_look() -> Look {

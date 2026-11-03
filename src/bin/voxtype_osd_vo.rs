@@ -2705,6 +2705,17 @@ impl App for Popup {
         Some(popup_accessible(self))
     }
 
+    /// A screen reader's request on the edit field (y24d): a selection
+    /// puts the caret and selection there, as a click does. Focus needs
+    /// nothing more: the edit asks for keyboard focus whenever the text can
+    /// be edited, and a detached edit waits for a new tap, as with keys.
+    fn accessibility(&mut self, request: vo::a11y_tree::Request, cx: &mut Cx<Msg>) {
+        let t = cx.t();
+        self.edit_by(t, cx, |focus, link, lines, _| {
+            focus.accessibility(request, link, lines, t)
+        });
+    }
+
     /// An input method's batch (plan F7): commits go in as typed text,
     /// the preedit shows at the caret.
     fn text_input(&mut self, ev: &vo::scene::input::TextInputEvent, cx: &mut Cx<Msg>) {
