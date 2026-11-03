@@ -24,6 +24,8 @@ use vo::scene::taffy::prelude::{auto, length, JustifyContent};
 // `exhibit` functions in file-name order.
 include!(concat!(env!("OUT_DIR"), "/station_exhibits.rs"));
 
+mod looks;
+
 /// A tile's own view in place of `Popup::view`.
 pub(crate) type ViewFn = fn(&Popup, &vo::Tokens) -> Element<Msg>;
 
@@ -111,11 +113,26 @@ impl Exhibit {
     }
 }
 
-/// Every registered exhibit, by MO number.
+/// Every registered exhibit, by MO number, then one per look (`LK-`).
 pub(crate) fn exhibits() -> Vec<Exhibit> {
     let mut all: Vec<Exhibit> = EXHIBITS.iter().map(|f| f()).collect();
     all.sort_by_key(|e| e.number());
+    all.extend(looks::exhibits());
     all
+}
+
+/// Where each page starts in `exhibits`: every `per` exhibits, and at the
+/// first look exhibit, so the looks get pages of their own.
+pub(crate) fn page_starts(exhibits: &[Exhibit], per: usize) -> Vec<usize> {
+    let per = per.max(1);
+    let mut starts = vec![0];
+    for i in 1..exhibits.len() {
+        let start = *starts.last().unwrap_or(&0);
+        if i - start == per || (looks::is_look(&exhibits[i]) && !looks::is_look(&exhibits[i - 1])) {
+            starts.push(i);
+        }
+    }
+    starts
 }
 
 /// Keeps the exhibits `only` names: `MO-20`, `mo-20`, `20` or an exhibit's
@@ -205,6 +222,8 @@ pub(crate) struct Station {
     dwell: f64,
     /// A page held by `--station-page`.
     hold: Option<usize>,
+    /// Where each page starts in `exhibits` (`page_starts`).
+    starts: Vec<usize>,
     page: usize,
     tiles: Vec<Tile>,
     /// Changes with each page, so a stale page timer does nothing.
@@ -238,9 +257,8 @@ pub(crate) struct Setup {
 impl Station {
     pub(crate) fn new(s: Setup) -> Station {
         let chrome = Look::new(&s.cfg, &s.theme, String::new(), &s.fonts);
-        let per = (s.cols * s.rows).max(1);
-        let pages = s.exhibits.len().div_ceil(per).max(1);
-        let hold = s.page.map(|p| p.clamp(1, pages) - 1);
+        let starts = page_starts(&s.exhibits, s.cols.max(1) * s.rows.max(1));
+        let hold = s.page.map(|p| p.clamp(1, starts.len()) - 1);
         Station {
             exhibits: s.exhibits,
             cfg: s.cfg,
@@ -255,6 +273,7 @@ impl Station {
             rows: s.rows.max(1),
             dwell: s.dwell.max(3.0),
             hold,
+            starts,
             page: hold.unwrap_or(0),
             tiles: Vec::new(),
             page_gen: 0,
@@ -272,7 +291,18 @@ impl Station {
     }
 
     pub(crate) fn pages(&self) -> usize {
-        self.exhibits.len().div_ceil(self.per_page()).max(1)
+        self.starts.len()
+    }
+
+    /// The exhibits on page `p`.
+    fn page_range(&self, p: usize) -> std::ops::Range<usize> {
+        let start = self.starts[p];
+        start
+            ..self
+                .starts
+                .get(p + 1)
+                .copied()
+                .unwrap_or(self.exhibits.len())
     }
 
     /// How long an offline render runs: one page when a page is held,
@@ -307,14 +337,7 @@ impl Station {
     fn open_page(&mut self, cx: &mut Cx<Msg>) {
         self.page_gen += 1;
         self.page_at = cx.t();
-        let start = self.page * self.per_page();
-        let exhibits: Vec<Exhibit> = self
-            .exhibits
-            .iter()
-            .skip(start)
-            .take(self.per_page())
-            .cloned()
-            .collect();
+        let exhibits: Vec<Exhibit> = self.exhibits[self.page_range(self.page)].to_vec();
         self.tiles = exhibits
             .into_iter()
             .map(|e| {
@@ -478,7 +501,11 @@ impl Station {
             return;
         }
         self.page = (self.page + 1) % self.pages();
-        tracing::info!(page = self.page + 1, t = cx.t(), "the station turns the page");
+        tracing::info!(
+            page = self.page + 1,
+            t = cx.t(),
+            "the station turns the page"
+        );
         self.open_page(cx);
     }
 }
@@ -661,12 +688,12 @@ impl Station {
                     .color(if self.live { accent } else { dim })
                     .margin_edges(0.0, 24.0, 0.0, 0.0),
             );
-        let per = self.per_page();
         for p in 0..self.pages() {
-            let first = self.exhibits.get(p * per).map_or("", |e| e.id);
+            let range = self.page_range(p);
+            let first = self.exhibits.get(range.start).map_or("", |e| e.id);
             let last = self
                 .exhibits
-                .get(((p + 1) * per).min(self.exhibits.len()).saturating_sub(1))
+                .get(range.end.saturating_sub(1))
                 .map_or("", |e| e.id);
             let current = p == self.page;
             let chip = Element::panel(format!("page-{p}"))
@@ -743,14 +770,18 @@ pub(crate) fn run(
         args.station_only.join(",")
     );
     if args.station_list {
-        let per = (args.station_cols * args.station_rows).max(1);
+        let starts = page_starts(
+            &exhibits,
+            args.station_cols.max(1) * args.station_rows.max(1),
+        );
         for (i, e) in exhibits.iter().enumerate() {
+            let page = starts.partition_point(|&s| s <= i);
             let moments: Vec<&str> = (0..e.moments.len().max(1))
                 .map(|n| e.moment_at(n).name())
                 .collect();
             println!(
                 "page {}  {}  {}  [{}]  features: {}  moments: {}",
-                i / per + 1,
+                page,
                 e.id,
                 e.name,
                 format!("{:?}", e.theme).to_lowercase(),
@@ -867,6 +898,8 @@ mod tests {
     fn every_exhibit_has_an_id_a_name_and_a_file() {
         let all = exhibits();
         assert!(!all.is_empty());
+        // The look exhibits (`LK-<look>`) come last; `looks.rs` checks them.
+        let all: Vec<Exhibit> = all.into_iter().filter(|e| !looks::is_look(e)).collect();
         for e in &all {
             // Motion plan concepts are `MO-NN`; engine gap exhibits `EG-NN`;
             // round 2 ideas `R2-NN-x`.
