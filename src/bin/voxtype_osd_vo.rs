@@ -2343,6 +2343,57 @@ impl Popup {
     }
 }
 
+impl Popup {
+    /// Runs an edit (a key, a paste) on the buffer while the popup owns it,
+    /// then shows the change: the new text, and a mark on each word the
+    /// edit made or changed. `act` gets the lines the look draws, so Up,
+    /// Down, Home and End move by them. Returns what `act` returned.
+    fn edit_by(
+        &mut self,
+        t: f64,
+        cx: &mut Cx<Msg>,
+        act: impl FnOnce(
+            &mut edit_focus::Focus,
+            &mut edit_link::EditLink,
+            Option<&dyn vo_core::edit::Lines>,
+            &mut Cx<Msg>,
+        ) -> bool,
+    ) -> bool {
+        let text_box = edit_site::site(self.look.theme).text_box_in(self);
+        let Some(link) = self.edit.as_mut() else {
+            return false;
+        };
+        let lines = match link.buffer() {
+            Some(b) if self.edit_view.is_some() => Some(self.edit_layer.shaped(
+                b.text(),
+                &self.measure,
+                text_box.style,
+                text_box.width,
+            ) as &dyn vo_core::edit::Lines),
+            _ => None,
+        };
+        let before: HashSet<vo_core::words::WordId> =
+            self.model.words().iter().map(|w| w.id).collect();
+        let used = act(&mut self.focus, link, lines, cx);
+        self.focus.follow(link, cx, t);
+        if used {
+            self.sync_quiet();
+            if self.edit_text(t) {
+                // A word the edit made or changed has a new id.
+                let new = self
+                    .model
+                    .words()
+                    .iter()
+                    .map(|w| w.id)
+                    .filter(|id| !before.contains(id));
+                self.edit_marks.extend(new);
+                self.mark_edits();
+            }
+        }
+        used
+    }
+}
+
 impl App for Popup {
     type Msg = Msg;
 
@@ -2564,39 +2615,17 @@ impl App for Popup {
     }
 
     fn key(&mut self, ev: &vo::scene::input::KeyEvent, cx: &mut Cx<Msg>) -> bool {
-        let text_box = edit_site::site(self.look.theme).text_box_in(self);
-        let Some(link) = self.edit.as_mut() else {
-            return false;
-        };
-        // Up, Down, Home and End move by the lines the look draws.
-        let lines = match link.buffer() {
-            Some(b) if self.edit_view.is_some() => Some(self.edit_layer.shaped(
-                b.text(),
-                &self.measure,
-                text_box.style,
-                text_box.width,
-            ) as &dyn vo_core::edit::Lines),
-            _ => None,
-        };
-        let before: HashSet<vo_core::words::WordId> =
-            self.model.words().iter().map(|w| w.id).collect();
-        let used = self.focus.key(ev, link, lines);
-        self.focus.follow(link, cx, ev.t);
-        if used {
-            self.sync_quiet();
-            if self.edit_text(ev.t) {
-                // A word the key made or changed has a new id.
-                let new = self
-                    .model
-                    .words()
-                    .iter()
-                    .map(|w| w.id)
-                    .filter(|id| !before.contains(id));
-                self.edit_marks.extend(new);
-                self.mark_edits();
-            }
-        }
-        used
+        self.edit_by(ev.t, cx, |focus, link, lines, cx| {
+            focus.key(ev, link, lines, cx)
+        })
+    }
+
+    /// Pasted text (Ctrl+V, Shift+Insert) goes in as typed text.
+    fn clipboard(&mut self, text: Option<String>, cx: &mut Cx<Msg>) {
+        let t = cx.t();
+        self.edit_by(t, cx, |focus, link, lines, _| {
+            focus.pasted(text, link, lines, t)
+        });
     }
 
     fn keyboard_focus(&mut self, gained: bool, requested: bool, cx: &mut Cx<Msg>) {
