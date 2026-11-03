@@ -721,6 +721,34 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         }
     };
 
+    // With live_preview_keep_engine the engine model loads once, now, and
+    // stays in this slot between recordings. The lock is held during the
+    // load, so a recording that starts meanwhile waits for it instead of
+    // loading a second copy.
+    let kept: KeptEngine = std::sync::Arc::new(std::sync::Mutex::new(None));
+    if config.live_preview_keep_engine && config.live_preview_final != "preview" {
+        let slot = kept.clone();
+        let engine_config = engine_config_of(config);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = locked_tx.send(());
+            let start = std::time::Instant::now();
+            match super::create_transcriber(&engine_config) {
+                Ok(t) => {
+                    eprintln!(
+                        "[worker] {} loaded in {:.2}s, kept between recordings",
+                        engine_config.model_name(),
+                        start.elapsed().as_secs_f32()
+                    );
+                    *guard = Some(t);
+                }
+                Err(e) => eprintln!("[worker] Engine preload failed: {}", e),
+            }
+        });
+        let _ = locked_rx.recv();
+    }
+
     loop {
         // A fresh streaming state per recording; the weights stay loaded.
         let unified = first
@@ -735,10 +763,24 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             &streaming_config,
             vocab.as_ref(),
             probe.as_ref(),
+            &kept,
         )? {
             return Ok(());
         }
     }
+}
+
+/// The engine model a warm worker keeps between recordings
+/// (live_preview_keep_engine).
+#[cfg(feature = "parakeet")]
+type KeptEngine = std::sync::Arc<std::sync::Mutex<Option<Box<dyn super::Transcriber>>>>;
+
+/// The engine config the live worker loads in-process.
+#[cfg(feature = "parakeet")]
+fn engine_config_of(config: &crate::config::Config) -> crate::config::Config {
+    let mut engine_config = config.clone();
+    engine_config.engine_isolation = false;
+    engine_config
 }
 
 /// Give the engine model's freed heap back to the kernel. glibc keeps it for
@@ -768,6 +810,7 @@ fn live_session(
     streaming_config: &parakeet_rs::UnifiedStreamingConfig,
     vocab: Option<&parakeet_rs::SentencePieceVocab>,
     probe: Option<&super::sound_probe::SoundProbe>,
+    kept: &KeptEngine,
 ) -> anyhow::Result<bool> {
     use super::revisions::RevisionLog;
     use parakeet_rs::ParakeetUnified;
@@ -776,8 +819,9 @@ fn live_session(
     // Engine model in the background, started by the first audio block: its
     // load is hidden behind speech, and a worker kept warm between
     // recordings (live_preview_warm_secs) holds no VRAM while it waits.
-    let mut engine_config = config.clone();
-    engine_config.engine_isolation = false;
+    let engine_config = engine_config_of(config);
+    let keep = config.live_preview_keep_engine;
+    let kept = kept.clone();
     let engine_model = engine_config.model_name().to_string();
     // Parts of the clip go in on part_tx; progress and then the joined
     // text (or the first error) come back on msg_rx.
@@ -788,27 +832,35 @@ fn live_session(
     let min_free_vram = config.live_preview_min_free_vram_mib;
     let mut start_engine = (config.live_preview_final != "preview").then_some(move || {
         std::thread::spawn(move || {
-            if let Some(free) = free_vram_mib().filter(|&f| f < min_free_vram) {
-                let _ = msg_tx.send(EngineMsg::Done(Err(format!(
-                    "{}: {} MiB free, {} needed",
-                    GPU_BUSY, free, min_free_vram
-                ))));
-                return;
-            }
-            let start = std::time::Instant::now();
-            let transcriber = match super::create_transcriber(&engine_config) {
-                Ok(t) => t,
-                Err(e) => {
-                    let _ =
-                        msg_tx.send(EngineMsg::Done(Err(format!("Failed to load model: {}", e))));
-                    return;
+            // Waits here while a preload is still running.
+            let held = kept.lock().unwrap_or_else(|e| e.into_inner()).take();
+            let transcriber = match held {
+                Some(t) => t,
+                None => {
+                    if let Some(free) = free_vram_mib().filter(|&f| f < min_free_vram) {
+                        let _ = msg_tx.send(EngineMsg::Done(Err(format!(
+                            "{}: {} MiB free, {} needed",
+                            GPU_BUSY, free, min_free_vram
+                        ))));
+                        return;
+                    }
+                    let start = std::time::Instant::now();
+                    let t = match super::create_transcriber(&engine_config) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let _ = msg_tx
+                                .send(EngineMsg::Done(Err(format!("Failed to load model: {}", e))));
+                            return;
+                        }
+                    };
+                    eprintln!(
+                        "[worker] {} loaded in {:.2}s",
+                        engine_model,
+                        start.elapsed().as_secs_f32()
+                    );
+                    t
                 }
             };
-            eprintln!(
-                "[worker] {} loaded in {:.2}s",
-                engine_model,
-                start.elapsed().as_secs_f32()
-            );
             loaded_flag.store(true, std::sync::atomic::Ordering::SeqCst);
             let mut texts: Vec<String> = Vec::new();
             let mut clips: Vec<String> = Vec::new();
@@ -860,8 +912,12 @@ fn live_session(
                 }
             }
             let language = transcriber.last_detected_language();
-            drop(transcriber);
-            release_freed_memory();
+            if keep {
+                *kept.lock().unwrap_or_else(|e| e.into_inner()) = Some(transcriber);
+            } else {
+                drop(transcriber);
+                release_freed_memory();
+            }
             let _ = msg_tx.send(EngineMsg::Done(Ok(EngineDone {
                 text: texts.join(" "),
                 language,

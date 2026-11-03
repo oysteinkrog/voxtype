@@ -17,7 +17,7 @@ use voxtype::osd::correction::CorrectionView;
 pub(crate) const NOTE_SECS: f64 = 1.6;
 
 /// The live words' opacity while the key is held.
-const DIMMED: f32 = 0.35;
+pub(crate) const DIMMED: f32 = 0.35;
 
 /// Which outcome the status row shows, and since when.
 #[derive(Debug, Default)]

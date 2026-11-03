@@ -1770,6 +1770,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the engine model only with at least this much free GPU memory (MiB); otherwise the preview text is the final text. 0: no check.",
     ),
     spec(
+        "live_preview_keep_engine",
+        "",
+        "live_preview_keep_engine",
+        KeyType::Bool,
+        "Advanced",
+        "Keep the engine loaded",
+        "Keep the engine model loaded in the warm live worker between recordings, so the final text never waits for a model load. Costs the model's memory while the worker waits.",
+    ),
+    spec(
         "live_preview_corpus_dir",
         "",
         "live_preview_corpus_dir",
@@ -2808,6 +2817,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             opt_str(cfg.live_preview_warm_release_command.as_ref())
         }
         "live_preview_min_free_vram_mib" => json!(cfg.live_preview_min_free_vram_mib),
+        "live_preview_keep_engine" => json!(cfg.live_preview_keep_engine),
         "live_preview_corpus_dir" => opt_str(cfg.live_preview_corpus_dir.as_ref()),
         "live_preview_revisions_dir" => opt_str(cfg.live_preview_revisions_dir.as_ref()),
 

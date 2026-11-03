@@ -125,6 +125,14 @@ pub struct Config {
     #[serde(default)]
     pub live_preview_min_free_vram_mib: u64,
 
+    /// Keep the engine model (e.g. Cohere) loaded in the warm live worker
+    /// between recordings, and load it as soon as the worker starts. The
+    /// final text then never waits for a model load, at the cost of the
+    /// model's VRAM and RAM while the worker waits. Off (the default)
+    /// loads it per recording and frees it after.
+    #[serde(default)]
+    pub live_preview_keep_engine: bool,
+
     /// Parakeet configuration (optional, only used when engine = "parakeet")
     #[serde(default)]
     pub parakeet: Option<ParakeetConfig>,
@@ -227,6 +235,7 @@ impl Default for Config {
             live_preview_revisions_dir: None,
             live_preview_final: default_live_preview_final(),
             live_preview_min_free_vram_mib: 0,
+            live_preview_keep_engine: false,
             parakeet: None,
             moonshine: None,
             sensevoice: None,
