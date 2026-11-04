@@ -6585,7 +6585,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vo"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=6c246b730215081e90f1a8e4452102e72319be1a#6c246b730215081e90f1a8e4452102e72319be1a"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=bb7f54738232aa65571b283c919e1fd11641f8d9#bb7f54738232aa65571b283c919e1fd11641f8d9"
 dependencies = [
  "accesskit_unix",
  "bytemuck",
@@ -6606,7 +6606,7 @@ dependencies = [
 [[package]]
 name = "vo-3d"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=6c246b730215081e90f1a8e4452102e72319be1a#6c246b730215081e90f1a8e4452102e72319be1a"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=bb7f54738232aa65571b283c919e1fd11641f8d9#bb7f54738232aa65571b283c919e1fd11641f8d9"
 dependencies = [
  "bytemuck",
  "harfrust",
@@ -6621,7 +6621,7 @@ dependencies = [
 [[package]]
 name = "vo-a11y"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=6c246b730215081e90f1a8e4452102e72319be1a#6c246b730215081e90f1a8e4452102e72319be1a"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=bb7f54738232aa65571b283c919e1fd11641f8d9#bb7f54738232aa65571b283c919e1fd11641f8d9"
 dependencies = [
  "accesskit",
  "unicode-segmentation",
@@ -6630,7 +6630,7 @@ dependencies = [
 [[package]]
 name = "vo-core"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=6c246b730215081e90f1a8e4452102e72319be1a#6c246b730215081e90f1a8e4452102e72319be1a"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=bb7f54738232aa65571b283c919e1fd11641f8d9#bb7f54738232aa65571b283c919e1fd11641f8d9"
 dependencies = [
  "serde",
  "serde_json",
@@ -6641,7 +6641,7 @@ dependencies = [
 [[package]]
 name = "vo-dots"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=6c246b730215081e90f1a8e4452102e72319be1a#6c246b730215081e90f1a8e4452102e72319be1a"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=bb7f54738232aa65571b283c919e1fd11641f8d9#bb7f54738232aa65571b283c919e1fd11641f8d9"
 dependencies = [
  "vo-core",
  "vo-scene",
@@ -6650,7 +6650,7 @@ dependencies = [
 [[package]]
 name = "vo-host"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=6c246b730215081e90f1a8e4452102e72319be1a#6c246b730215081e90f1a8e4452102e72319be1a"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=bb7f54738232aa65571b283c919e1fd11641f8d9#bb7f54738232aa65571b283c919e1fd11641f8d9"
 dependencies = [
  "vo-scene",
  "wgpu 30.0.1",
@@ -6659,7 +6659,7 @@ dependencies = [
 [[package]]
 name = "vo-host-wayland"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=6c246b730215081e90f1a8e4452102e72319be1a#6c246b730215081e90f1a8e4452102e72319be1a"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=bb7f54738232aa65571b283c919e1fd11641f8d9#bb7f54738232aa65571b283c919e1fd11641f8d9"
 dependencies = [
  "libc",
  "pollster",
@@ -6668,6 +6668,7 @@ dependencies = [
  "vo-host",
  "vo-scene",
  "wayland-client",
+ "wayland-cursor",
  "wgpu 30.0.1",
  "xkbcommon",
 ]
@@ -6675,7 +6676,7 @@ dependencies = [
 [[package]]
 name = "vo-render"
 version = "0.0.1"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=6c246b730215081e90f1a8e4452102e72319be1a#6c246b730215081e90f1a8e4452102e72319be1a"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=bb7f54738232aa65571b283c919e1fd11641f8d9#bb7f54738232aa65571b283c919e1fd11641f8d9"
 dependencies = [
  "bytemuck",
  "half",
@@ -6690,7 +6691,7 @@ dependencies = [
 [[package]]
 name = "vo-scene"
 version = "0.0.0"
-source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=6c246b730215081e90f1a8e4452102e72319be1a#6c246b730215081e90f1a8e4452102e72319be1a"
+source = "git+https://github.com/oysteinkrog/voxtype-osd-gpu?rev=bb7f54738232aa65571b283c919e1fd11641f8d9#bb7f54738232aa65571b283c919e1fd11641f8d9"
 dependencies = [
  "harfrust",
  "kurbo",
