@@ -1435,6 +1435,7 @@ mod tests {
                     backspace, text, ..
                 } => ("Replace", format!("-{}+{}", backspace, text)),
                 StreamingEvent::Ended => ("Ended", String::new()),
+                StreamingEvent::FinalPart(text) => ("FinalPart", text.clone()),
                 StreamingEvent::Error(e) => ("Error", e.to_string()),
             })
             .collect()

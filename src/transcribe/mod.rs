@@ -14,6 +14,7 @@
 //! - Optionally OpenVINO Whisper for Intel NPU/CPU/GPU (when `openvino-whisper` feature is enabled)
 
 pub mod cli;
+pub mod corpus;
 #[cfg(feature = "parakeet")]
 pub mod parakeet_streaming;
 pub mod remote;

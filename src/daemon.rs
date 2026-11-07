@@ -1340,6 +1340,10 @@ pub struct Daemon {
     // stop, and the stream's error if it failed: together they let a
     // failed stream be transcribed again instead of lost.
     streaming_samples: Option<Vec<f32>>,
+    // A live preview session's running transcript and the final model's
+    // text of the parts it has done: saved to the corpus with the audio
+    // when the session is cancelled.
+    live_texts: crate::transcribe::corpus::CancelledTexts,
     // The streaming session's audio gate: holds or drops the mic audio for
     // a keyboard edit, and says which audio the backend really got.
     audio_gate: Option<audio::levels::SharedGate>,
@@ -1498,6 +1502,7 @@ impl Daemon {
             transcriber_preloaded: None,
             rescued_audio: Arc::new(std::sync::Mutex::new(None)),
             streaming_samples: None,
+            live_texts: Default::default(),
             audio_gate: None,
             keyboard_edit,
             edit: EditPause::default(),
@@ -1922,6 +1927,7 @@ impl Daemon {
         let file_output_path = self.resolve_file_output_path(&output_override, None);
 
         clear_live_preview();
+        self.live_texts = Default::default();
         *audio_capture = Some(capture);
         *streaming_handle = Some(handle);
         *streaming_session = Some(StreamingSession::new());
@@ -2933,6 +2939,7 @@ impl Daemon {
             .await;
         }
         self.streaming_samples = None;
+        self.live_texts = Default::default();
 
         // File-output sessions (`--file=path`) never typed anything as
         // they went — see the event pump's `file_output` branch — so the
@@ -3146,14 +3153,16 @@ impl Daemon {
     ) {
         self.edit_keep_discarded(state);
         clear_live_preview();
+        if let Some(h) = streaming_handle.as_mut() {
+            self.note_live_events(&mut h.events);
+        }
         let backend_task = streaming_handle.take().map(|h| {
             let _ = h.cancel.send(());
             h.task
         });
         self.cut_streaming_audio();
-        if let Some(mut c) = audio_capture.take() {
-            let _ = c.stop().await;
-        }
+        // The save runs on its own; the cancel does not wait for the disk.
+        drop(self.keep_cancelled_stream(audio_capture).await);
         self.restore_recording_media();
         if let Some(task) = backend_task {
             let _ = task.await;
@@ -3189,6 +3198,38 @@ impl Daemon {
             )
             .await;
         }
+    }
+
+    /// Live preview texts the event loop has not read yet, kept for a
+    /// cancel. The other events are dropped, as the cancel drops them.
+    fn note_live_events(&mut self, events: &mut tokio::sync::mpsc::Receiver<StreamingEvent>) {
+        while let Ok(event) = events.try_recv() {
+            match event {
+                StreamingEvent::Partial { text, .. } if self.config.live_preview_active() => {
+                    self.live_texts.preview_text = text;
+                }
+                StreamingEvent::FinalPart(text) => self.live_texts.final_parts.push(text),
+                _ => {}
+            }
+        }
+    }
+
+    /// A cancelled live preview session: stop the capture and save its
+    /// audio and texts to the corpus (`live_preview_corpus_dir`) on a
+    /// blocking thread. Nothing is typed. Returns the save, if there is one.
+    async fn keep_cancelled_stream(
+        &mut self,
+        audio_capture: &mut Option<Box<dyn AudioCapture>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        // Cancelled while recording; in the final pass the capture already
+        // stopped and its samples are kept.
+        if let Some(mut c) = audio_capture.take() {
+            self.keep_streaming_samples(c.stop().await.ok());
+        }
+        let texts = std::mem::take(&mut self.live_texts);
+        let samples = self.streaming_samples.take()?;
+        let save = crate::transcribe::corpus::save_cancelled(&self.config, samples, &texts)?;
+        Some(tokio::task::spawn_blocking(save))
     }
 
     /// Start a streaming-mode audio capture.
@@ -6102,6 +6143,7 @@ impl Daemon {
                             // always shows it; with live_typing the new
                             // words are also typed at the cursor.
                             write_live_preview(&text);
+                            self.live_texts.preview_text.clone_from(&text);
                             if self.config.live_typing && !file_output {
                                 if let (Some(s), Some(chain)) =
                                     (streaming_session.as_mut(), streaming_chain.as_ref())
@@ -6326,6 +6368,9 @@ impl Daemon {
                                 &mut streaming_session,
                                 &mut streaming_chain,
                             ).await;
+                        }
+                        Some(StreamingEvent::FinalPart(text)) => {
+                            self.live_texts.final_parts.push(text);
                         }
                         Some(StreamingEvent::Ended) | None => {
                             self.end_streaming(
@@ -8834,5 +8879,95 @@ mod tests {
             let holder = std::fs::read_to_string(dir.join("voxtype.lock")).unwrap();
             assert_eq!(holder.trim(), std::process::id().to_string());
         });
+    }
+
+    /// A capture that hands back fixed samples at stop.
+    struct FakeCapture(Vec<f32>);
+
+    #[async_trait::async_trait]
+    impl AudioCapture for FakeCapture {
+        async fn start(
+            &mut self,
+        ) -> std::result::Result<tokio::sync::mpsc::Receiver<Vec<f32>>, crate::error::AudioError>
+        {
+            Ok(tokio::sync::mpsc::channel(1).1)
+        }
+        async fn stop(&mut self) -> std::result::Result<Vec<f32>, crate::error::AudioError> {
+            Ok(std::mem::take(&mut self.0))
+        }
+        async fn get_samples(&mut self) -> Vec<f32> {
+            Vec::new()
+        }
+    }
+
+    fn corpus_daemon(dir: Option<&Path>) -> Daemon {
+        let mut config = Config::default();
+        config.audio.feedback.enabled = false;
+        config.set_model_for(TranscriptionEngine::Parakeet, "parakeet-tdt-0.6b-v2");
+        config.live_preview_model = Some("parakeet-unified-en-0.6b-int8".into());
+        config.engine_isolation = true;
+        config.live_preview_corpus_dir = dir.map(|d| d.display().to_string());
+        Daemon::new(config, None)
+    }
+
+    /// A dictation cancelled while recording keeps its audio and texts in
+    /// the corpus, with the texts still queued in the stream's events.
+    #[tokio::test]
+    async fn a_cancelled_recording_is_saved_to_the_corpus() {
+        let dir = TempDir::new().unwrap();
+        let mut daemon = corpus_daemon(Some(dir.path()));
+        daemon.live_texts.preview_text = "open the".into();
+        let (tx, mut events) = tokio::sync::mpsc::channel(8);
+        tx.try_send(StreamingEvent::FinalPart("Open the file.".into()))
+            .unwrap();
+        tx.try_send(StreamingEvent::Partial {
+            text: "open the file and".into(),
+            segment_id: 0,
+        })
+        .unwrap();
+        daemon.note_live_events(&mut events);
+        let mut capture: Option<Box<dyn AudioCapture>> =
+            Some(Box::new(FakeCapture(vec![0.1; 32000])));
+        let save = daemon.keep_cancelled_stream(&mut capture).await;
+        save.expect("a save").await.unwrap();
+        assert!(capture.is_none());
+        let (len, meta) = crate::transcribe::corpus::only_recording(dir.path()).unwrap();
+        assert_eq!(len, 32000);
+        assert_eq!(meta["outcome"], "cancelled");
+        assert_eq!(meta["preview_text"], "open the file and");
+        assert_eq!(meta["final_parts"], serde_json::json!(["Open the file."]));
+        assert!(meta["final_text"].is_null());
+        // The next session starts with no texts.
+        assert_eq!(daemon.live_texts, Default::default());
+    }
+
+    /// Cancelled in the final pass: the capture already stopped and its
+    /// samples were kept for a rescue; they are saved instead.
+    #[tokio::test]
+    async fn a_dictation_cancelled_in_the_final_pass_is_saved() {
+        let dir = TempDir::new().unwrap();
+        let mut daemon = corpus_daemon(Some(dir.path()));
+        daemon.streaming_samples = Some(vec![0.1; 16000]);
+        daemon.live_texts.preview_text = "hello".into();
+        let save = daemon.keep_cancelled_stream(&mut None).await;
+        save.expect("a save").await.unwrap();
+        let (len, meta) = crate::transcribe::corpus::only_recording(dir.path()).unwrap();
+        assert_eq!(len, 16000);
+        assert_eq!(meta["preview_text"], "hello");
+        assert!(daemon.streaming_samples.is_none());
+    }
+
+    /// No corpus dir, or no audio: nothing is saved, as before.
+    #[tokio::test]
+    async fn a_cancel_saves_nothing_without_a_corpus_or_audio() {
+        let mut daemon = corpus_daemon(None);
+        let mut capture: Option<Box<dyn AudioCapture>> =
+            Some(Box::new(FakeCapture(vec![0.1; 16000])));
+        assert!(daemon.keep_cancelled_stream(&mut capture).await.is_none());
+        let dir = TempDir::new().unwrap();
+        let mut daemon = corpus_daemon(Some(dir.path()));
+        let mut capture: Option<Box<dyn AudioCapture>> = Some(Box::new(FakeCapture(vec![])));
+        assert!(daemon.keep_cancelled_stream(&mut capture).await.is_none());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

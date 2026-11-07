@@ -17,7 +17,9 @@
 //! - Perceived latency is just transcription time, not model load + transcription
 
 use super::streaming::{StreamHandle, StreamingEvent, StreamingTranscriber};
-use super::worker::{PARTIAL_PREFIX, READY_SIGNAL, SIGNALS_PREFIX, STATUS_PREFIX, WORDS_PREFIX};
+use super::worker::{
+    FINAL_PART_PREFIX, PARTIAL_PREFIX, READY_SIGNAL, SIGNALS_PREFIX, STATUS_PREFIX, WORDS_PREFIX,
+};
 use super::Transcriber;
 use crate::config::WhisperConfig;
 use crate::error::TranscribeError;
@@ -235,9 +237,15 @@ impl SubprocessTranscriber {
             stdout.read_line(&mut line).map_err(|e| {
                 TranscribeError::InferenceFailed(format!("Failed to read worker output: {}", e))
             })?;
-            if ![PARTIAL_PREFIX, STATUS_PREFIX, WORDS_PREFIX, SIGNALS_PREFIX]
-                .iter()
-                .any(|p| line.starts_with(p))
+            if ![
+                PARTIAL_PREFIX,
+                STATUS_PREFIX,
+                WORDS_PREFIX,
+                SIGNALS_PREFIX,
+                FINAL_PART_PREFIX,
+            ]
+            .iter()
+            .any(|p| line.starts_with(p))
             {
                 break;
             }
@@ -1217,6 +1225,11 @@ impl StreamingTranscriber for SubprocessTranscriber {
                         });
                     }
                     continue;
+                } else if let Some(json) = trimmed.strip_prefix(FINAL_PART_PREFIX) {
+                    if let Ok(text) = serde_json::from_str::<String>(json) {
+                        send(StreamingEvent::FinalPart(text));
+                    }
+                    continue;
                 } else if let Some(json) = trimmed.strip_prefix(STATUS_PREFIX) {
                     write_live_status(json);
                     continue;
@@ -1646,6 +1659,46 @@ mod tests {
             }
         }
         assert!(error.is_some_and(|e| e.contains(LIVE_WORKER_DIED)));
+    }
+
+    /// The live worker's final part lines, as `write_final_part` writes
+    /// them, reach the daemon as FinalPart events, in order, beside the
+    /// final text. A stand-in worker replays the lines from a file.
+    #[cfg(feature = "parakeet")]
+    #[tokio::test]
+    async fn final_part_lines_become_final_part_events() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut lines = format!("{}\n", READY_SIGNAL).into_bytes();
+        crate::transcribe::worker::write_final_part(&mut lines, "Open the \"file\".").unwrap();
+        crate::transcribe::worker::write_final_part(&mut lines, "Æ, ø og å.").unwrap();
+        lines.extend_from_slice(b"{\"ok\": true, \"text\": \"all of it\"}\n");
+        let script = dir.path().join("worker-output");
+        std::fs::write(&script, lines).unwrap();
+        let mut t = SubprocessTranscriber::new(&WhisperConfig::default(), None).unwrap();
+        t.live_model = Some("stand-in".into());
+        let mut cmd = Command::new("cat");
+        cmd.arg(&script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let (child, stdin, stdout) = WarmWorker::spawn(cmd).unwrap();
+        t.warm
+            .park(child, stdin, stdout, Instant::now(), HOUR, None);
+        let (tx, rx) = mpsc::channel(4);
+        let mut handle = t.start_stream(rx).unwrap();
+        drop(tx);
+        let mut parts = Vec::new();
+        let mut finals = Vec::new();
+        while let Some(event) = handle.events.recv().await {
+            match event {
+                StreamingEvent::FinalPart(text) => parts.push(text),
+                StreamingEvent::Final { text, .. } => finals.push(text),
+                StreamingEvent::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        assert_eq!(parts, ["Open the \"file\".", "Æ, ø og å."]);
+        assert_eq!(finals, ["all of it"]);
     }
 
     /// Env var that makes [`self_command_survives_a_deleted_binary`] the

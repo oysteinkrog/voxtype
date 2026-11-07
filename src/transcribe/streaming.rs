@@ -89,6 +89,11 @@ pub enum StreamingEvent {
     /// samples sender and the backend has flushed).
     Ended,
 
+    /// The final model's text of one part of the recording, sent by the
+    /// live preview worker as each part is done. Never typed: the daemon
+    /// keeps it so a cancelled dictation is saved with it.
+    FinalPart(String),
+
     /// A non-recoverable error occurred. The daemon should treat this
     /// like `Ended` for state purposes and surface the error to the user.
     Error(TranscribeError),

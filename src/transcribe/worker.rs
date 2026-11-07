@@ -228,6 +228,11 @@ pub const STATUS_PREFIX: &str = "S ";
 /// [`crate::osd::live::SignalsStep`]. It never carries text that gets typed.
 pub const SIGNALS_PREFIX: &str = "G ";
 
+/// Prefix of a final part line: `F <json string>`, the engine model's text
+/// of one part of the recording, sent as each part is done. Never typed:
+/// the daemon keeps it so a cancelled dictation is saved with it.
+pub const FINAL_PART_PREFIX: &str = "F ";
+
 /// Error text of a final response when the recording held no words, as when a
 /// dictation is started and stopped again without speaking. The daemon treats
 /// it as "no speech", not as a failure.
@@ -258,6 +263,8 @@ fn free_vram_mib() -> Option<u64> {
 enum EngineMsg {
     /// A part is done: seconds of audio, seconds it took.
     Part(f32, f32),
+    /// A part's text, when it has any.
+    Text(String),
     /// All parts done, or the first error.
     Done(Result<EngineDone, String>),
 }
@@ -917,6 +924,7 @@ fn live_session(
                         let _ = msg_tx.send(EngineMsg::Part(audio, took));
                         let text = text.trim().to_string();
                         if !text.is_empty() {
+                            let _ = msg_tx.send(EngineMsg::Text(text.clone()));
                             texts.push(text);
                         }
                     }
@@ -1010,6 +1018,7 @@ fn live_session(
         while let Ok(msg) = msg_rx.try_recv() {
             match msg {
                 EngineMsg::Part(audio, took) => progress.part_done(audio, took),
+                EngineMsg::Text(text) => write_final_part(out, &text)?,
                 EngineMsg::Done(r) => early_done = Some(r),
             }
         }
@@ -1269,6 +1278,10 @@ fn live_session(
         }
         match msg_rx.recv() {
             Ok(EngineMsg::Part(audio, took)) => progress.part_done(audio, took),
+            Ok(EngineMsg::Text(text)) => {
+                write_final_part(out, &text)?;
+                out.flush()?;
+            }
             Ok(EngineMsg::Done(r)) => break Some(r),
             Err(_) => break None,
         }
@@ -1837,41 +1850,25 @@ fn save_to_corpus(
         return;
     };
     let dir = super::revisions::expand_home(dir);
-    let now = chrono::Local::now();
-    let dir = dir.join(now.format("%Y-%m").to_string());
-    let stem = dir.join(now.format("%Y%m%d-%H%M%S%.3f").to_string());
-    let result = (|| -> anyhow::Result<()> {
-        std::fs::create_dir_all(&dir)?;
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: 16000,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut wav = hound::WavWriter::create(stem.with_extension("wav"), spec)?;
-        for &x in samples {
-            wav.write_sample((x.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
-        }
-        wav.finalize()?;
-        let meta = serde_json::json!({
-            "time": now.to_rfc3339(),
-            "seconds": samples.len() as f32 / 16000.0,
-            "final_text": final_text,
-            "final_model": final_model,
-            "preview_text": preview_text,
-            "preview_model": config.live_preview_model,
-            "corrected_text": serde_json::Value::Null,
-        });
-        std::fs::write(
-            stem.with_extension("json"),
-            serde_json::to_string_pretty(&meta)?,
-        )?;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => eprintln!("[worker] Saved recording to {}.wav", stem.display()),
+    let meta = serde_json::json!({
+        "outcome": super::corpus::OUTCOME_DONE,
+        "final_text": final_text,
+        "final_model": final_model,
+        "preview_text": preview_text,
+        "preview_model": config.live_preview_model,
+        "corrected_text": serde_json::Value::Null,
+    });
+    match super::corpus::save(&dir, samples, meta) {
+        Ok(stem) => eprintln!("[worker] Saved recording to {}.wav", stem.display()),
         Err(e) => eprintln!("[worker] Could not save recording: {}", e),
     }
+}
+
+/// Send one part's final text to the daemon (see [`FINAL_PART_PREFIX`]).
+#[cfg(feature = "parakeet")]
+pub(crate) fn write_final_part<W: Write>(out: &mut W, text: &str) -> anyhow::Result<()> {
+    writeln!(out, "{}{}", FINAL_PART_PREFIX, serde_json::to_string(text)?)?;
+    Ok(())
 }
 
 #[cfg(not(feature = "parakeet"))]
