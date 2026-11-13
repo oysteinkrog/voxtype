@@ -2120,7 +2120,7 @@ If any of these is missing, voxtype logs why and uses CUDA. If TensorRT fails to
 
 The first load on a card builds the TensorRT engines, which takes minutes; the dictation that waits for it shows the loading state. The engines are kept under `tensorrt_cache_dir`, so later loads read them in seconds.
 
-TensorRT cannot take ONNX Runtime's own fused operators, such as `com.microsoft:MultiHeadAttention` and the int4 `com.microsoft:MatMulNBits`. Those nodes stay on CUDA, and the graph is split into many TensorRT pieces between them. For the Cohere models the gain therefore depends on the export: measure before switching.
+TensorRT cannot take ONNX Runtime's own fused operators, such as `com.microsoft:MultiHeadAttention` and the int4 `com.microsoft:MatMulNBits`. Those nodes stay on CUDA, and the graph is split into many TensorRT pieces between them. A Cohere model with `MatMulNBits` nodes (the q4 and q4f16 exports, including the default `cohere-transcribe-q4f16`) skips TensorRT and runs on CUDA. For the other exports, measure before switching: on an RTX 3060 Ti the GPU encoder takes about 1 s of a 20 s dictation's 2.4 s, and the rest is the decoder on the CPU.
 
 Cohere's encoder engine is built for inputs of up to 60 s, so it fits an 8 GB card with a desktop running. On TensorRT, a longer recording is cut into equal windows of at most 60 s and their text is joined; a word on a window edge may be cut.
 
