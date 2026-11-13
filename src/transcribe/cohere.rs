@@ -58,7 +58,7 @@ use ort::session::Session;
 use ort::value::{DynTensor, DynValue, Tensor, TensorElementType, ValueType};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tokenizers::Tokenizer;
 
@@ -152,6 +152,10 @@ pub struct CohereTranscriber {
     threads: usize,
     /// The encoder's TensorRT engine folder name.
     trt_key: String,
+    /// The decoder model, to load it again on the CPU if the GPU fails.
+    decoder_file: PathBuf,
+    /// The decoder runs on the GPU (`decoder_gpu`, and it loaded there).
+    decoder_on_gpu: AtomicBool,
     /// The longest encoder input in frames while the encoder runs on
     /// TensorRT; 0 when it does not, and any length goes.
     encoder_max_frames: AtomicUsize,
@@ -228,18 +232,24 @@ impl CohereTranscriber {
         // for ORT 1.29 and later, which added that input (PR #29525).
         // The decoder's threads spin: it runs once per token, and sleeping
         // between those small runs made the final pass 4 to 6 % slower.
-        let decoder = if decoder_gpu {
+        let (decoder, decoder_on_gpu) = if decoder_gpu {
             match build_session(&decoder_file, threads, "decoder", true, false, None) {
-                Ok(session) => session,
+                Ok(session) => (session, true),
                 Err(e) => {
                     tracing::warn!(
                         "Cohere decoder: cannot load it on the GPU ({e}); using the CPU"
                     );
-                    build_session(&decoder_file, threads, "decoder", false, false, None)?
+                    (
+                        build_session(&decoder_file, threads, "decoder", false, false, None)?,
+                        false,
+                    )
                 }
             }
         } else {
-            build_session(&decoder_file, threads, "decoder", false, false, None)?
+            (
+                build_session(&decoder_file, threads, "decoder", false, false, None)?,
+                false,
+            )
         };
 
         // The HF Optimum exports use mixed precision: `encoder_hidden_states`
@@ -301,6 +311,8 @@ impl CohereTranscriber {
             encoder_file,
             threads,
             trt_key,
+            decoder_file,
+            decoder_on_gpu: AtomicBool::new(decoder_on_gpu),
             encoder_max_frames: AtomicUsize::new(if on_trt { TRT_MAX_FRAMES } else { 0 }),
         })
     }
@@ -374,7 +386,7 @@ impl CohereTranscriber {
         avoid: &[Vec<i64>],
         push_down: f32,
     ) -> Result<String, TranscribeError> {
-        self.decode_samples(samples, avoid, push_down, false)
+        self.decode_with_fallback(samples, avoid, push_down, false)
     }
 
     /// Run the encoder and the whole decoder loop once on the longest part
@@ -396,7 +408,44 @@ impl CohereTranscriber {
                 (seed as f32 / u32::MAX as f32 - 0.5) * 0.002
             })
             .collect();
-        self.decode_samples(&samples, &[], 0.0, true).map(|_| ())
+        self.decode_with_fallback(&samples, &[], 0.0, true)
+            .map(|_| ())
+    }
+
+    /// [`Self::decode_samples`], moving the decoder to the CPU and running
+    /// again when its GPU run fails.
+    fn decode_with_fallback(
+        &self,
+        samples: &[f32],
+        avoid: &[Vec<i64>],
+        push_down: f32,
+        full_length: bool,
+    ) -> Result<String, TranscribeError> {
+        match self.decode_samples(samples, avoid, push_down, full_length) {
+            Err(TranscribeError::InferenceFailed(e))
+                if e.starts_with("decoder step") && self.decoder_on_gpu.load(Ordering::Relaxed) =>
+            {
+                // ONNX Runtime before 1.29 loads the decoder on CUDA but
+                // fails its first step: "attention_bias is not supported
+                // in GroupQueryAttention cuda kernel". Move it to the CPU
+                // for the life of this process and transcribe again.
+                tracing::warn!("Cohere decoder: GPU run failed ({e}); using the CPU");
+                let cpu = build_session(
+                    &self.decoder_file,
+                    self.threads,
+                    "decoder",
+                    false,
+                    false,
+                    None,
+                )?;
+                *self.decoder.lock().map_err(|e| {
+                    TranscribeError::InferenceFailed(format!("decoder lock: {e}"))
+                })? = cpu;
+                self.decoder_on_gpu.store(false, Ordering::Relaxed);
+                self.decode_samples(samples, avoid, push_down, full_length)
+            }
+            other => other,
+        }
     }
 
     /// The decoder runs until EOS, or with `full_length` for all
