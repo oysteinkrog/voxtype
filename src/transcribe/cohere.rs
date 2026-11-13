@@ -161,7 +161,7 @@ impl CohereTranscriber {
     pub fn new(config: &CohereConfig) -> Result<Self, TranscribeError> {
         let model_dir = resolve_model_path(&config.model)?;
         let threads = config.threads.unwrap_or_else(|| num_cpus::get().min(4));
-        Self::with_threads_and_lang(&model_dir, threads, &config.language)
+        Self::load(&model_dir, threads, &config.language, config.decoder_gpu)
     }
 
     pub fn from_dir(model_dir: &Path) -> Result<Self, TranscribeError> {
@@ -176,6 +176,15 @@ impl CohereTranscriber {
         model_dir: &Path,
         threads: usize,
         language: &str,
+    ) -> Result<Self, TranscribeError> {
+        Self::load(model_dir, threads, language, false)
+    }
+
+    fn load(
+        model_dir: &Path,
+        threads: usize,
+        language: &str,
+        decoder_gpu: bool,
     ) -> Result<Self, TranscribeError> {
         tracing::info!("Loading Cohere Transcribe model from {:?}", model_dir);
         let start = std::time::Instant::now();
@@ -212,15 +221,26 @@ impl CohereTranscriber {
         let trt_key = encoder_cache_key(model_dir);
         let profile = encoder_profile();
         let (encoder, on_trt) = build_encoder(&encoder_file, threads, &trt_key, &profile)?;
-        // Decoder pinned to CPU: ORT's CUDA GroupQueryAttention kernel rejects
-        // the `attention_bias` input that the HF Optimum decoder export uses
-        // (validated on GTX 1660 Ti, ORT 1.20 via pyke ort 2.0.0-rc.12). The
-        // encoder still runs on GPU, where the 1.4GB-weight matmuls dominate
-        // wall time; the smaller decoder runs CPU-side until ORT lands the
-        // attention_bias kernel.
+        // Decoder on the CPU by default: before ONNX Runtime 1.29, the CUDA
+        // GroupQueryAttention kernel rejects the `attention_bias` input that
+        // the HF Optimum decoder export uses (validated on GTX 1660 Ti, ORT
+        // 1.20 via pyke ort 2.0.0-rc.12). `decoder_gpu` puts it on the GPU
+        // for ORT 1.29 and later, which added that input (PR #29525).
         // The decoder's threads spin: it runs once per token, and sleeping
         // between those small runs made the final pass 4 to 6 % slower.
-        let decoder = build_session(&decoder_file, threads, "decoder", false, false, None)?;
+        let decoder = if decoder_gpu {
+            match build_session(&decoder_file, threads, "decoder", true, false, None) {
+                Ok(session) => session,
+                Err(e) => {
+                    tracing::warn!(
+                        "Cohere decoder: cannot load it on the GPU ({e}); using the CPU"
+                    );
+                    build_session(&decoder_file, threads, "decoder", false, false, None)?
+                }
+            }
+        } else {
+            build_session(&decoder_file, threads, "decoder", false, false, None)?
+        };
 
         // The HF Optimum exports use mixed precision: `encoder_hidden_states`
         // stays Float32 across every variant (q4/int8/FP32 keep encoder

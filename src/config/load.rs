@@ -1,6 +1,7 @@
 use super::parse::{merge_toml_values, parse_config_salvaging};
 use super::{
-    Config, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig, TranscriptionEngine,
+    CohereConfig, Config, LanguageConfig, OpenVinoConfig, OutputMode, SonioxConfig,
+    TranscriptionEngine,
 };
 use crate::error::VoxtypeError;
 use std::path::{Path, PathBuf};
@@ -278,6 +279,13 @@ fn load_config_with_env(path: Option<&Path>, env: Env) -> Result<Config, Voxtype
             .openvino
             .get_or_insert_with(OpenVinoConfig::default)
             .openvino_dir = Some(dir);
+    }
+
+    if let Ok(val) = env("VOXTYPE_COHERE_DECODER_GPU") {
+        config
+            .cohere
+            .get_or_insert_with(CohereConfig::default)
+            .decoder_gpu = parse_bool_env(&val);
     }
 
     // ONNX GPU provider

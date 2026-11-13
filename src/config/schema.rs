@@ -676,6 +676,16 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the model when recording starts and unload at idle.",
     )
     .for_onnx_engine("cohere"),
+    spec(
+        "cohere.decoder_gpu",
+        "cohere",
+        "decoder_gpu",
+        KeyType::Bool,
+        "Engine",
+        "Decoder on GPU",
+        "Run the decoder on the GPU too. Needs ONNX Runtime 1.29 or later; off keeps it on the CPU.",
+    )
+    .for_onnx_engine("cohere"),
     // onnx
     spec(
         "onnx.gpu_provider",
@@ -2928,6 +2938,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             None => Json::Null,
         },
         "cohere.on_demand_loading" => json!(co().on_demand_loading),
+        "cohere.decoder_gpu" => json!(co().decoder_gpu),
 
         "onnx.gpu_provider" => json!(cfg.onnx.gpu_provider),
         "onnx.tensorrt_fp16" => json!(cfg.onnx.tensorrt_fp16),

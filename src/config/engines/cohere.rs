@@ -30,6 +30,13 @@ pub struct CohereConfig {
     /// Load model on-demand when recording starts (true) or keep loaded (false)
     #[serde(default = "default_on_demand_loading")]
     pub on_demand_loading: bool,
+
+    /// Run the decoder on the GPU too. Needs ONNX Runtime 1.29 or later,
+    /// whose CUDA GroupQueryAttention kernel takes the `attention_bias`
+    /// input these exports use. Off (the default): the decoder runs on the
+    /// CPU, as before.
+    #[serde(default)]
+    pub decoder_gpu: bool,
 }
 
 fn default_cohere_language() -> String {
@@ -43,6 +50,7 @@ impl Default for CohereConfig {
             language: default_cohere_language(),
             threads: None,
             on_demand_loading: false,
+            decoder_gpu: false,
         }
     }
 }

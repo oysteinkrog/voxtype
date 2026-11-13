@@ -1955,6 +1955,7 @@ on_demand_loading = true  # Free memory when not transcribing
 | `model` | `--model` | `VOXTYPE_MODEL` | `"base"` | Moonshine model name or path |
 | `quantized` | - | - | `true` | Use quantized model files when available |
 | `on_demand_loading` | - | - | `false` | Load model only when recording starts |
+| `decoder_gpu` | - | `VOXTYPE_COHERE_DECODER_GPU` | `false` | Run the decoder on the GPU (ONNX Runtime 1.29 or later) |
 
 ### Complete Example
 
@@ -2064,6 +2065,19 @@ Same behavior as `[whisper].on_demand_loading`. When `true`, loads the model onl
 ```toml
 [cohere]
 on_demand_loading = true
+```
+
+### decoder_gpu
+
+**Type:** Boolean
+**Default:** `false`
+**Environment variable:** `VOXTYPE_COHERE_DECODER_GPU`
+
+Run the decoder on the GPU as well as the encoder. ONNX Runtime before 1.29 cannot run these exports' decoder on CUDA (its GroupQueryAttention kernel rejects the `attention_bias` input), so the default keeps the decoder on the CPU. If the decoder cannot be loaded on the GPU, voxtype logs why and uses the CPU.
+
+```toml
+[cohere]
+decoder_gpu = true
 ```
 
 ### Configuration Summary
