@@ -824,6 +824,16 @@ fn build_encoder(
             false,
         ));
     }
+    if graph_has_op(path, "MatMulNBits") {
+        tracing::warn!(
+            "Cohere encoder: this model's int4 MatMulNBits nodes cannot run on TensorRT; \
+             using CUDA (cohere-transcribe-fp16 has none)"
+        );
+        return Ok((
+            build_session(path, threads, "encoder", true, true, None)?,
+            false,
+        ));
+    }
     if let Some(why) = super::onnx_ep::tensorrt_failed_before(cache_key) {
         tracing::warn!("Cohere encoder: TensorRT failed for this model before: {why}; using CUDA");
         return Ok((
@@ -859,6 +869,14 @@ fn build_encoder(
             ))
         }
     }
+}
+
+/// Does the ONNX graph file name this operator? Op types are plain strings
+/// in the protobuf, and the weights live in separate `.onnx_data` files, so
+/// this reads about 1.5 MB. TensorRT cannot parse ORT's int4 MatMulNBits;
+/// trying costs about a minute and floods the log before ORT gives up.
+fn graph_has_op(path: &Path, op: &str) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| bytes.windows(op.len()).any(|w| w == op.as_bytes()))
 }
 
 fn count_engines(dir: &Path) -> usize {
@@ -907,6 +925,18 @@ fn build_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn graph_has_op_finds_the_op_name() {
+        let dir = std::env::temp_dir().join(format!("voxtype-op-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("m.onnx");
+        std::fs::write(&file, b"\x0a\x0bMatMulNBits\x12\x03com").unwrap();
+        assert!(graph_has_op(&file, "MatMulNBits"));
+        assert!(!graph_has_op(&file, "MultiHeadAttention"));
+        assert!(!graph_has_op(&dir.join("missing.onnx"), "MatMulNBits"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn pushed_down_continues_the_longest_started_sequence() {
