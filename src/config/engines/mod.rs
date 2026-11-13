@@ -6,6 +6,7 @@ mod cohere;
 mod dolphin;
 mod moonshine;
 mod omnilingual;
+mod onnx;
 mod openvino;
 mod paraformer;
 mod parakeet;
@@ -16,6 +17,7 @@ pub use cohere::CohereConfig;
 pub use dolphin::DolphinConfig;
 pub use moonshine::MoonshineConfig;
 pub use omnilingual::OmnilingualConfig;
+pub use onnx::{OnnxConfig, OnnxGpuProvider};
 pub use openvino::OpenVinoConfig;
 pub use paraformer::ParaformerConfig;
 pub use parakeet::{

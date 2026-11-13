@@ -126,6 +126,34 @@ pub struct Cli {
     #[arg(long, help_heading = "Transcription", hide_short_help = true)]
     pub eager_processing: bool,
 
+    /// GPU execution provider for the ONNX engines: cuda or tensorrt
+    #[arg(
+        long,
+        value_name = "PROVIDER",
+        help_heading = "Transcription",
+        hide_short_help = true,
+        long_help = "GPU execution provider for the ONNX engines: cuda (default) or tensorrt.\n\
+        tensorrt needs a build with a *-tensorrt feature and libnvinfer.so.10 on the\n\
+        library path; without them voxtype uses CUDA and logs why.\n\
+        Config: [onnx] gpu_provider. Env: VOXTYPE_ONNX_GPU_PROVIDER."
+    )]
+    pub onnx_gpu_provider: Option<String>,
+
+    /// TensorRT: build fp32 engines instead of fp16
+    #[arg(long, help_heading = "Transcription", hide_short_help = true)]
+    pub no_tensorrt_fp16: bool,
+
+    /// TensorRT: folder for built engines and the timing cache
+    #[arg(
+        long,
+        value_name = "DIR",
+        help_heading = "Transcription",
+        hide_short_help = true,
+        long_help = "Folder for TensorRT engines and the timing cache.\n\
+        Default: ~/.cache/voxtype/tensorrt. Config: [onnx] tensorrt_cache_dir."
+    )]
+    pub tensorrt_cache_dir: Option<std::path::PathBuf>,
+
     // -- Whisper-specific --
     /// Disable context window optimization for short recordings
     #[arg(long, help_heading = "Whisper", hide_short_help = true)]

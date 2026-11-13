@@ -280,6 +280,20 @@ fn load_config_with_env(path: Option<&Path>, env: Env) -> Result<Config, Voxtype
             .openvino_dir = Some(dir);
     }
 
+    // ONNX GPU provider
+    if let Ok(val) = env("VOXTYPE_ONNX_GPU_PROVIDER") {
+        match val.parse() {
+            Ok(p) => config.onnx.gpu_provider = p,
+            Err(e) => tracing::warn!("VOXTYPE_ONNX_GPU_PROVIDER: {e}"),
+        }
+    }
+    if let Ok(val) = env("VOXTYPE_ONNX_TENSORRT_FP16") {
+        config.onnx.tensorrt_fp16 = parse_bool_env(&val);
+    }
+    if let Ok(dir) = env("VOXTYPE_ONNX_TENSORRT_CACHE_DIR") {
+        config.onnx.tensorrt_cache_dir = Some(PathBuf::from(dir));
+    }
+
     // Audio
     if let Ok(device) = env("VOXTYPE_AUDIO_DEVICE") {
         config.audio.device = device;

@@ -2093,10 +2093,64 @@ Source builds need the `cohere` Cargo feature. Optional GPU acceleration via `co
 ```bash
 cargo build --release --features cohere           # CPU
 cargo build --release --features cohere-cuda      # NVIDIA GPU
-cargo build --release --features cohere-tensorrt  # NVIDIA + TensorRT EP
+cargo build --release --features cohere-cuda,cohere-tensorrt  # NVIDIA + TensorRT EP
 ```
 
+A TensorRT build still uses CUDA until the config sets `[onnx] gpu_provider = "tensorrt"`; see [\[onnx\]](#onnx).
+
 The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so users installing via AUR/.deb/.rpm don't need to rebuild.
+
+## [onnx]
+
+GPU execution provider for the ONNX engines (Cohere, Moonshine, SenseVoice, Paraformer, Dolphin, Omnilingual). Parakeet uses its own runtime settings and ignores this section. The defaults keep the CUDA provider, so a config without `[onnx]` behaves as before.
+
+### gpu_provider
+
+**Type:** String
+**Default:** `"cuda"`
+**Values:** `"cuda"`, `"tensorrt"`
+
+`"tensorrt"` runs the parts of the model that TensorRT supports on TensorRT and the rest on CUDA. It needs:
+
+- a binary built with a `*-tensorrt` feature (for example `cohere-tensorrt`, together with `cohere-cuda`);
+- the TensorRT 10 libraries (`libnvinfer.so.10`, `libnvonnxparser.so.10`, `libnvinfer_plugin.so.10`) for your CUDA major version on the library path;
+- ONNX Runtime's TensorRT provider (`libonnxruntime_providers_tensorrt.so`) next to `libonnxruntime.so`.
+
+If any of these is missing, voxtype logs why and uses CUDA. If TensorRT fails to build an engine or to run it, that session moves to CUDA for the rest of the process.
+
+The first load on a card builds the TensorRT engines, which takes minutes; the dictation that waits for it shows the loading state. The engines are kept under `tensorrt_cache_dir`, so later loads read them in seconds.
+
+TensorRT cannot take ONNX Runtime's own fused operators, such as `com.microsoft:MultiHeadAttention` and the int4 `com.microsoft:MatMulNBits`. Those nodes stay on CUDA, and the graph is split into many TensorRT pieces between them. For the Cohere models the gain therefore depends on the export: measure before switching.
+
+Cohere's encoder engine is built for inputs of up to 60 s, so it fits an 8 GB card with a desktop running. On TensorRT, a longer recording is cut into equal windows of at most 60 s and their text is joined; a word on a window edge may be cut.
+
+**Example:**
+```toml
+[onnx]
+gpu_provider = "tensorrt"
+```
+
+### tensorrt_fp16
+
+**Type:** Boolean
+**Default:** `true`
+
+Let TensorRT use fp16 kernels. `false` builds fp32 engines, which are slower and larger. Only used with `gpu_provider = "tensorrt"`.
+
+### tensorrt_cache_dir
+
+**Type:** Path
+**Default:** `~/.cache/voxtype/tensorrt` (`$XDG_CACHE_HOME/voxtype/tensorrt`)
+
+Where TensorRT engines and the timing cache are kept. Inside it, voxtype makes a folder per card and compute capability, then per TensorRT version and ONNX Runtime build, then per model, because an engine is only valid for those. A new TensorRT or ONNX Runtime version, or a new card, gets a new folder. Remove old folders by hand when you no longer need them.
+
+### Configuration Summary
+
+| Option | CLI Flag | Environment Variable | Default | Description |
+|--------|----------|---------------------|---------|-------------|
+| `gpu_provider` | `--onnx-gpu-provider` | `VOXTYPE_ONNX_GPU_PROVIDER` | `"cuda"` | `cuda` or `tensorrt` |
+| `tensorrt_fp16` | `--no-tensorrt-fp16` (sets `false`) | `VOXTYPE_ONNX_TENSORRT_FP16` | `true` | fp16 TensorRT kernels |
+| `tensorrt_cache_dir` | `--tensorrt-cache-dir` | `VOXTYPE_ONNX_TENSORRT_CACHE_DIR` | `~/.cache/voxtype/tensorrt` | Engine and timing cache folder |
 
 ---
 
@@ -4151,6 +4205,9 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_GPU_ISOLATION` | bool | `whisper.gpu_isolation` |
 | `VOXTYPE_GPU_DEVICE` | integer | `whisper.gpu_device` |
 | `VOXTYPE_ON_DEMAND_LOADING` | bool | `whisper.on_demand_loading` |
+| `VOXTYPE_ONNX_GPU_PROVIDER` | string | `onnx.gpu_provider` |
+| `VOXTYPE_ONNX_TENSORRT_FP16` | bool | `onnx.tensorrt_fp16` |
+| `VOXTYPE_ONNX_TENSORRT_CACHE_DIR` | path | `onnx.tensorrt_cache_dir` |
 | `VOXTYPE_REMOTE_ENDPOINT` | string | `whisper.remote_endpoint` |
 | `VOXTYPE_WHISPER_API_KEY` | string | `whisper.remote_api_key` |
 

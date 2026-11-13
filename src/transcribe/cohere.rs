@@ -58,6 +58,7 @@ use ort::session::Session;
 use ort::value::{DynTensor, DynValue, Tensor, TensorElementType, ValueType};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tokenizers::Tokenizer;
 
@@ -109,6 +110,16 @@ const ABSOLUTE_MAX_TOKENS: usize = 1024;
 /// (`SPLIT_MAX_SECS` in the worker's pause splitter).
 const WARM_UP_SECS: f32 = 30.0;
 
+/// The encoder's TensorRT profile, in fbank frames (100 per second). The
+/// engine's memory follows the longest input it takes, so it stops at 60 s
+/// to fit an 8 GB card with a desktop running; longer audio is cut into
+/// windows of at most this length (see `transcribe_windows`).
+const TRT_MIN_FRAMES: usize = 1;
+const TRT_OPT_FRAMES: usize = 1000;
+const TRT_MAX_FRAMES: usize = 6000;
+/// fbank frames per sample, rounded up: one frame every 10 ms.
+const SAMPLES_PER_FRAME: usize = SAMPLE_RATE / 100;
+
 // ---------------------------------------------------------------------------
 // Transcriber
 // ---------------------------------------------------------------------------
@@ -136,6 +147,14 @@ pub struct CohereTranscriber {
     /// matching empty caches and we can extract the encoder output
     /// against the right primitive.
     float_dtype: TensorElementType,
+    /// The encoder model, to load it again on CUDA if TensorRT fails.
+    encoder_file: PathBuf,
+    threads: usize,
+    /// The encoder's TensorRT engine folder name.
+    trt_key: String,
+    /// The longest encoder input in frames while the encoder runs on
+    /// TensorRT; 0 when it does not, and any length goes.
+    encoder_max_frames: AtomicUsize,
 }
 
 impl CohereTranscriber {
@@ -190,7 +209,9 @@ impl CohereTranscriber {
             ))
         })?;
 
-        let encoder = build_session(&encoder_file, threads, "encoder", true, true)?;
+        let trt_key = encoder_cache_key(model_dir);
+        let profile = encoder_profile();
+        let (encoder, on_trt) = build_encoder(&encoder_file, threads, &trt_key, &profile)?;
         // Decoder pinned to CPU: ORT's CUDA GroupQueryAttention kernel rejects
         // the `attention_bias` input that the HF Optimum decoder export uses
         // (validated on GTX 1660 Ti, ORT 1.20 via pyke ort 2.0.0-rc.12). The
@@ -199,7 +220,7 @@ impl CohereTranscriber {
         // attention_bias kernel.
         // The decoder's threads spin: it runs once per token, and sleeping
         // between those small runs made the final pass 4 to 6 % slower.
-        let decoder = build_session(&decoder_file, threads, "decoder", false, false)?;
+        let decoder = build_session(&decoder_file, threads, "decoder", false, false, None)?;
 
         // The HF Optimum exports use mixed precision: `encoder_hidden_states`
         // stays Float32 across every variant (q4/int8/FP32 keep encoder
@@ -257,6 +278,10 @@ impl CohereTranscriber {
             fbank: CohereFbank::new(),
             prefix,
             float_dtype,
+            encoder_file,
+            threads,
+            trt_key,
+            encoder_max_frames: AtomicUsize::new(if on_trt { TRT_MAX_FRAMES } else { 0 }),
         })
     }
 
@@ -293,6 +318,34 @@ impl CohereTranscriber {
             }
         }
         out
+    }
+
+    /// Transcribes audio longer than the TensorRT profile in equal windows
+    /// that each fit it, and joins their text. A word on a window edge may
+    /// be cut; this only runs for dictations over a minute.
+    fn transcribe_windows(
+        &self,
+        samples: &[f32],
+        avoid: &[Vec<i64>],
+        push_down: f32,
+        max_frames: usize,
+    ) -> Result<String, TranscribeError> {
+        let max_samples = (max_frames - 2) * SAMPLES_PER_FRAME;
+        let windows = samples.len().div_ceil(max_samples);
+        let len = samples.len().div_ceil(windows);
+        tracing::info!(
+            "Cohere: {:.1} s of audio is longer than the TensorRT profile, transcribing {windows} windows",
+            samples.len() as f32 / SAMPLE_RATE as f32
+        );
+        let mut parts = Vec::with_capacity(windows);
+        for window in samples.chunks(len) {
+            let text = self.transcribe_samples(window, avoid, push_down)?;
+            let text = text.trim();
+            if !text.is_empty() {
+                parts.push(text.to_string());
+            }
+        }
+        Ok(parts.join(" "))
     }
 
     fn transcribe_samples(
@@ -336,6 +389,10 @@ impl CohereTranscriber {
         full_length: bool,
     ) -> Result<String, TranscribeError> {
         // 1. Feature extraction.
+        let max_frames = self.encoder_max_frames.load(Ordering::Relaxed);
+        if max_frames > 0 && samples.len() / SAMPLES_PER_FRAME + 2 > max_frames {
+            return self.transcribe_windows(samples, avoid, push_down, max_frames);
+        }
         let features_2d = self.fbank.extract(samples);
         let n_frames = features_2d.nrows();
         if n_frames == 0 {
@@ -355,10 +412,50 @@ impl CohereTranscriber {
                 .encoder
                 .lock()
                 .map_err(|e| TranscribeError::InferenceFailed(format!("encoder lock: {e}")))?;
-            let mut enc_outputs = enc
-                .run(ort::inputs!["input_features" => enc_input])
-                .map_err(|e| TranscribeError::InferenceFailed(format!("encoder run: {e}")))?;
-            enc_outputs.remove("last_hidden_state").ok_or_else(|| {
+            let run = |enc: &mut Session, input: Tensor<f32>| {
+                enc.run(ort::inputs!["input_features" => input])
+                    .map(|mut out| out.remove("last_hidden_state"))
+            };
+            let enc_start = std::time::Instant::now();
+            let hidden = match run(&mut enc, enc_input) {
+                Ok(hidden) => hidden,
+                Err(e) if self.encoder_max_frames.load(Ordering::Relaxed) > 0 => {
+                    // TensorRT built the engine but could not run it. Move
+                    // the encoder to CUDA for the life of this process.
+                    tracing::warn!(
+                        "Cohere encoder: TensorRT run failed ({e}); loading it on CUDA instead"
+                    );
+                    *enc = build_session(
+                        &self.encoder_file,
+                        self.threads,
+                        "encoder",
+                        true,
+                        true,
+                        None,
+                    )?;
+                    self.encoder_max_frames.store(0, Ordering::Relaxed);
+                    super::onnx_ep::mark_tensorrt_failed(&self.trt_key, &e.to_string());
+                    let features_flat: Vec<f32> = features_2d.iter().copied().collect();
+                    let enc_input =
+                        Tensor::<f32>::from_array(([1usize, n_frames, N_MELS], features_flat))
+                            .map_err(|e| {
+                                TranscribeError::InferenceFailed(format!("encoder input: {e}"))
+                            })?;
+                    run(&mut enc, enc_input).map_err(|e| {
+                        TranscribeError::InferenceFailed(format!("encoder run: {e}"))
+                    })?
+                }
+                Err(e) => {
+                    return Err(TranscribeError::InferenceFailed(format!(
+                        "encoder run: {e}"
+                    )))
+                }
+            };
+            tracing::debug!(
+                "Cohere encoder: {n_frames} frames in {:.0} ms",
+                enc_start.elapsed().as_secs_f64() * 1000.0
+            );
+            hidden.ok_or_else(|| {
                 TranscribeError::InferenceFailed("encoder missing last_hidden_state".to_string())
             })?
         };
@@ -666,12 +763,120 @@ fn resolve_model_path(name: &str) -> Result<PathBuf, TranscribeError> {
     Ok(crate::config::Config::models_dir().join(name))
 }
 
+/// The encoder's TensorRT engine folder name: the model folder plus a hash
+/// of the encoder files' sizes and times, because ORT names engine files
+/// after the graph's structure and a new download of the same export keeps
+/// that structure.
+fn encoder_cache_key(model_dir: &Path) -> String {
+    let name = model_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cohere".into());
+    let mut files: Vec<(String, u64, u64)> = std::fs::read_dir(model_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let file = e.file_name().to_string_lossy().into_owned();
+            if !file.starts_with("encoder_model") {
+                return None;
+            }
+            let meta = e.metadata().ok()?;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs());
+            Some((file, meta.len(), mtime))
+        })
+        .collect();
+    files.sort();
+    // FNV-1a: stable across Rust releases, unlike DefaultHasher.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in format!("{files:?}").bytes() {
+        h ^= u64::from(byte);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{name}-{:08x}-encoder", h as u32)
+}
+
+fn encoder_profile() -> super::onnx_ep::TrtProfile {
+    let shape = |t: usize| format!("input_features:1x{t}x{N_MELS}");
+    super::onnx_ep::TrtProfile {
+        min: shape(TRT_MIN_FRAMES),
+        opt: shape(TRT_OPT_FRAMES),
+        max: shape(TRT_MAX_FRAMES),
+    }
+}
+
+/// Loads the encoder on TensorRT when it is in use, and on CUDA when it is
+/// not or when TensorRT fails to build it. Returns whether it is on
+/// TensorRT.
+fn build_encoder(
+    path: &Path,
+    threads: usize,
+    cache_key: &str,
+    profile: &super::onnx_ep::TrtProfile,
+) -> Result<(Session, bool), TranscribeError> {
+    if !super::onnx_ep::tensorrt_available() {
+        return Ok((
+            build_session(path, threads, "encoder", true, true, None)?,
+            false,
+        ));
+    }
+    if let Some(why) = super::onnx_ep::tensorrt_failed_before(cache_key) {
+        tracing::warn!("Cohere encoder: TensorRT failed for this model before: {why}; using CUDA");
+        return Ok((
+            build_session(path, threads, "encoder", true, true, None)?,
+            false,
+        ));
+    }
+    let trt = super::onnx_ep::TrtSession {
+        cache_key,
+        profile: Some(profile),
+    };
+    let dir = super::onnx_ep::tensorrt_engine_dir(cache_key);
+    let engines_before = dir.as_deref().map_or(0, count_engines);
+    let start = std::time::Instant::now();
+    match build_session(path, threads, "encoder", true, true, Some(&trt)) {
+        Ok(session) => {
+            let engines = dir.as_deref().map_or(0, count_engines);
+            tracing::info!(
+                "Cohere encoder on TensorRT in {:.1} s: {engines} cached engines ({} new) in {}",
+                start.elapsed().as_secs_f32(),
+                engines.saturating_sub(engines_before),
+                dir.as_deref()
+                    .map_or_else(String::new, |d| d.display().to_string()),
+            );
+            Ok((session, true))
+        }
+        Err(e) => {
+            tracing::warn!("Cohere encoder: TensorRT could not build it ({e}); using CUDA");
+            super::onnx_ep::mark_tensorrt_failed(cache_key, &e.to_string());
+            Ok((
+                build_session(path, threads, "encoder", true, true, None)?,
+                false,
+            ))
+        }
+    }
+}
+
+fn count_engines(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".engine"))
+        .count()
+}
+
 fn build_session(
     path: &Path,
     threads: usize,
     label: &str,
     use_gpu: bool,
     sleep: bool,
+    trt: Option<&super::onnx_ep::TrtSession>,
 ) -> Result<Session, TranscribeError> {
     let builder = Session::builder()
         .map_err(|e| TranscribeError::InitFailed(format!("{label} builder: {e}")))?
@@ -685,7 +890,7 @@ fn build_session(
     };
 
     let mut builder = if use_gpu {
-        super::onnx_ep::register_gpu_eps(builder, "Cohere", label)
+        super::onnx_ep::register_gpu_eps_with(builder, "Cohere", label, trt)
             .map_err(|e| TranscribeError::InitFailed(format!("{label} EPs: {e}")))?
     } else {
         builder

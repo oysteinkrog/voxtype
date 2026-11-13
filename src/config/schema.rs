@@ -676,6 +676,34 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the model when recording starts and unload at idle.",
     )
     .for_onnx_engine("cohere"),
+    // onnx
+    spec(
+        "onnx.gpu_provider",
+        "onnx",
+        "gpu_provider",
+        closed(&["cuda", "tensorrt"]),
+        "Engine",
+        "ONNX GPU provider",
+        "GPU execution provider for the ONNX engines. tensorrt needs a TensorRT build and libnvinfer.so.10; without them voxtype uses CUDA.",
+    ),
+    spec(
+        "onnx.tensorrt_fp16",
+        "onnx",
+        "tensorrt_fp16",
+        KeyType::Bool,
+        "Engine",
+        "TensorRT fp16",
+        "Let TensorRT use fp16 kernels. Off: fp32 engines.",
+    ),
+    spec(
+        "onnx.tensorrt_cache_dir",
+        "onnx",
+        "tensorrt_cache_dir",
+        KeyType::String,
+        "Engine",
+        "TensorRT cache folder",
+        "Where TensorRT engines and the timing cache are kept. Unset: ~/.cache/voxtype/tensorrt.",
+    ),
     // openvino
     spec(
         "openvino.model",
@@ -2900,6 +2928,13 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             None => Json::Null,
         },
         "cohere.on_demand_loading" => json!(co().on_demand_loading),
+
+        "onnx.gpu_provider" => json!(cfg.onnx.gpu_provider),
+        "onnx.tensorrt_fp16" => json!(cfg.onnx.tensorrt_fp16),
+        "onnx.tensorrt_cache_dir" => match &cfg.onnx.tensorrt_cache_dir {
+            Some(p) => json!(p.to_string_lossy()),
+            None => Json::Null,
+        },
 
         "openvino.model" => json!(ov().model),
         "openvino.device" => json!(ov().device),

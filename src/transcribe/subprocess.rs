@@ -310,6 +310,9 @@ fn worker_command(
         // logs to stderr, so let it through to the daemon's log rather
         // than into a pipe nobody drains.
         cmd.arg("--engine").arg(engine).arg("--model").arg(model);
+        // The worker reads the config file again; these carry any
+        // --onnx-gpu-provider style flags the daemon was started with.
+        cmd.envs(super::onnx_ep::worker_env());
         cmd.arg("transcribe-worker")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

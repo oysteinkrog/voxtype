@@ -28,9 +28,9 @@ mod whisper;
 pub use audio::{AudioConfig, AudioFeedbackConfig};
 pub use default_config::{default_config_content, DEFAULT_CONFIG};
 pub use engines::{
-    CohereConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig, OpenVinoConfig,
-    ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig, SonioxConfig,
-    StreamingWindow, TranscriptionEngine, DEFAULT_STREAMING_PAUSE_COMMIT_SECS,
+    CohereConfig, DolphinConfig, MoonshineConfig, OmnilingualConfig, OnnxConfig, OnnxGpuProvider,
+    OpenVinoConfig, ParaformerConfig, ParakeetConfig, ParakeetModelType, SenseVoiceConfig,
+    SonioxConfig, StreamingWindow, TranscriptionEngine, DEFAULT_STREAMING_PAUSE_COMMIT_SECS,
     DEFAULT_STREAMING_TAIL_SECS,
 };
 pub use hotkey::{ActivationMode, HotkeyConfig};

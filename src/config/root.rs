@@ -1,8 +1,8 @@
 use super::{
     AudioConfig, CohereConfig, DolphinConfig, HotkeyConfig, MeetingConfig, MoonshineConfig,
-    OmnilingualConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig, Profile,
-    SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig, TranscriptionEngine,
-    VadConfig, WhisperConfig,
+    OmnilingualConfig, OnnxConfig, OpenVinoConfig, OutputConfig, ParaformerConfig, ParakeetConfig,
+    Profile, SenseVoiceConfig, SonioxConfig, StatusConfig, StreamingConfig, TextConfig,
+    TranscriptionEngine, VadConfig, WhisperConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -161,6 +161,10 @@ pub struct Config {
     #[serde(default)]
     pub cohere: Option<CohereConfig>,
 
+    /// GPU execution provider settings for every ONNX engine
+    #[serde(default)]
+    pub onnx: OnnxConfig,
+
     /// OpenVINO Whisper configuration (optional, only used when engine = "openvino")
     #[serde(default)]
     pub openvino: Option<OpenVinoConfig>,
@@ -243,6 +247,7 @@ impl Default for Config {
             dolphin: None,
             omnilingual: None,
             cohere: None,
+            onnx: OnnxConfig::default(),
             openvino: None,
             soniox: None,
             streaming: None,

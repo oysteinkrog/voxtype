@@ -45,5 +45,6 @@ pub(crate) async fn run(
     mut config: config::Config,
 ) -> anyhow::Result<()> {
     let top_level_model = overrides::apply_cli_overrides(&mut config, &cli);
+    voxtype::transcribe::onnx_ep::set_options(&config.onnx);
     dispatch::dispatch(cli, config_path, config, top_level_model).await
 }

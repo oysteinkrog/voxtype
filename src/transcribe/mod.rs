@@ -41,8 +41,8 @@ pub use streaming::{SegmentId, StreamHandle, StreamingEvent, StreamingTranscribe
 ))]
 pub mod fbank;
 
-/// Shared GPU execution-provider registration for ONNX-based engines.
-#[cfg(feature = "onnx-common")]
+/// Shared GPU execution-provider registration for ONNX-based engines,
+/// and the `[onnx]` options every process sets at startup.
 pub mod onnx_ep;
 
 /// Shared CTC greedy decoder for CTC-based ASR engines

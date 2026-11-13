@@ -182,6 +182,18 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if let Some(threads) = cli.threads {
         config.whisper.threads = Some(threads);
     }
+    if let Some(ref provider) = cli.onnx_gpu_provider {
+        match provider.parse() {
+            Ok(p) => config.onnx.gpu_provider = p,
+            Err(e) => tracing::warn!("--onnx-gpu-provider: {e}"),
+        }
+    }
+    if cli.no_tensorrt_fp16 {
+        config.onnx.tensorrt_fp16 = false;
+    }
+    if let Some(ref dir) = cli.tensorrt_cache_dir {
+        config.onnx.tensorrt_cache_dir = Some(dir.clone());
+    }
     if cli.gpu_isolation {
         config.whisper.gpu_isolation = true;
     }
