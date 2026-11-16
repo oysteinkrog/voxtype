@@ -105,6 +105,9 @@ const SUPPORTED_LANGUAGES: &[&str] = &[
 
 const MAX_TOKENS_PER_SECOND: f32 = 8.0;
 const ABSOLUTE_MAX_TOKENS: usize = 1024;
+/// The warm-up's clip length: the live worker's longest part
+/// (`SPLIT_MAX_SECS` in the worker's pause splitter).
+const WARM_UP_SECS: f32 = 30.0;
 
 // ---------------------------------------------------------------------------
 // Transcriber
@@ -298,6 +301,40 @@ impl CohereTranscriber {
         avoid: &[Vec<i64>],
         push_down: f32,
     ) -> Result<String, TranscribeError> {
+        self.decode_samples(samples, avoid, push_down, false)
+    }
+
+    /// Run the encoder and the whole decoder loop once on the longest part
+    /// the live worker sends ([`WARM_UP_SECS`]), ignoring EOS so the KV
+    /// caches reach their largest size. The CUDA arena and cuDNN then
+    /// already hold what a real part needs, so dictation does not allocate
+    /// GPU memory or pick kernels.
+    fn warm_up_run(&self) -> Result<(), TranscribeError> {
+        // Quiet noise, not zeros: the fbank's log of an all-zero signal
+        // is a constant, which is a valid input too, but noise is closer
+        // to what the encoder sees.
+        let n = (WARM_UP_SECS * SAMPLE_RATE as f32) as usize;
+        let mut seed = 0x2545_f491_u32;
+        let samples: Vec<f32> = (0..n)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (seed as f32 / u32::MAX as f32 - 0.5) * 0.002
+            })
+            .collect();
+        self.decode_samples(&samples, &[], 0.0, true).map(|_| ())
+    }
+
+    /// The decoder runs until EOS, or with `full_length` for all
+    /// `max_new` steps (warm-up only).
+    fn decode_samples(
+        &self,
+        samples: &[f32],
+        avoid: &[Vec<i64>],
+        push_down: f32,
+        full_length: bool,
+    ) -> Result<String, TranscribeError> {
         // 1. Feature extraction.
         let features_2d = self.fbank.extract(samples);
         let n_frames = features_2d.nrows();
@@ -481,7 +518,7 @@ impl CohereTranscriber {
                 }
             };
 
-            if best_token == TOK_EOS {
+            if best_token == TOK_EOS && !full_length {
                 break;
             }
             generated.push(best_token);
@@ -591,6 +628,10 @@ fn check_logits_shape(shape: &[i64]) -> Result<(), TranscribeError> {
 }
 
 impl Transcriber for CohereTranscriber {
+    fn warm_up(&self) -> Result<(), TranscribeError> {
+        self.warm_up_run()
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         let start = std::time::Instant::now();
         let text = self.transcribe_samples(samples, &[], 0.0)?;

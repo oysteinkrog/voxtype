@@ -18,7 +18,8 @@
 
 use super::streaming::{StreamHandle, StreamingEvent, StreamingTranscriber};
 use super::worker::{
-    FINAL_PART_PREFIX, PARTIAL_PREFIX, READY_SIGNAL, SIGNALS_PREFIX, STATUS_PREFIX, WORDS_PREFIX,
+    CANCEL_BLOCK, CANCEL_FINAL_BLOCK, FINAL_PART_PREFIX, PARTIAL_PREFIX, READY_SIGNAL,
+    SIGNALS_PREFIX, STATUS_PREFIX, WORDS_PREFIX,
 };
 use super::Transcriber;
 use crate::config::WhisperConfig;
@@ -1075,6 +1076,84 @@ fn keep_warm(
 /// The error a live stream ends with when its worker gave no answer.
 pub const LIVE_WORKER_DIED: &str = "The live worker ended without a final text";
 
+/// How long a cancelled live worker has to answer before it is killed. It
+/// finishes the engine part it is running (about 2 s for a 30 s part) and
+/// skips the rest. Killing it instead throws away its CUDA context, and the
+/// next worker's new one stalled the desktop for seconds (2026-11-16).
+const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// A live worker's stdin, shared by the audio pump, the cancel and the
+/// reader that hands the worker back.
+struct LiveInput {
+    /// None once the reader took it back for the next recording.
+    stdin: Option<ChildStdin>,
+    /// The end-of-recording block went out.
+    ended: bool,
+}
+
+/// Who owns a live worker after its recording: the reader (to hand it
+/// back) or the cancel (to kill it). Whoever moves it from RUNNING first
+/// wins, so a late cancel never kills a worker that was handed back.
+const LIVE_RUNNING: u8 = 0;
+const LIVE_READER_DONE: u8 = 1;
+const LIVE_KILLED: u8 = 2;
+
+/// Kill the worker unless the reader got there first.
+fn claim_and_kill(owner: &std::sync::atomic::AtomicU8, pid: nix::unistd::Pid, warn: bool) {
+    if owner
+        .compare_exchange(
+            LIVE_RUNNING,
+            LIVE_KILLED,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok()
+    {
+        if warn {
+            tracing::warn!(
+                "The cancelled live worker did not answer within {}s; stopping it",
+                CANCEL_GRACE.as_secs()
+            );
+        }
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+    }
+}
+
+impl LiveInput {
+    /// Send the end-of-recording block once.
+    fn end(&mut self) -> bool {
+        if self.ended {
+            return true;
+        }
+        let Some(stdin) = self.stdin.as_mut() else {
+            return false;
+        };
+        let ok = SubprocessTranscriber::write_audio_to_worker(stdin, &[]).is_ok();
+        self.ended = ok;
+        ok
+    }
+
+    /// Ask the worker to drop the recording: while it is still being sent,
+    /// a cancel block and the end block; after its end block, the final-pass
+    /// cancel.
+    fn cancel(&mut self) -> bool {
+        let ended = self.ended;
+        let Some(stdin) = self.stdin.as_mut() else {
+            return false;
+        };
+        let block = if ended {
+            CANCEL_FINAL_BLOCK
+        } else {
+            CANCEL_BLOCK
+        };
+        let sent = stdin
+            .write_all(&block.to_le_bytes())
+            .and_then(|()| stdin.flush())
+            .is_ok();
+        sent && self.end()
+    }
+}
+
 /// What happens to a live worker after its recording.
 enum Refill {
     /// Stop it.
@@ -1099,7 +1178,7 @@ impl StreamingTranscriber for SubprocessTranscriber {
         if kept {
             crate::presence::global().mark(crate::presence::Activity::Recording);
         }
-        let (mut child, mut stdin, stdout, spawned_at) = match taken {
+        let (mut child, stdin, stdout, spawned_at) = match taken {
             Some(w) => {
                 if w.loaded() {
                     tracing::info!(
@@ -1167,31 +1246,74 @@ impl StreamingTranscriber for SubprocessTranscriber {
 
         // Audio pump. The worker reads stdin on its own thread from the
         // start, so these writes do not wait for the models to load.
-        let (stdin_back_tx, stdin_back_rx) = std::sync::mpsc::channel::<ChildStdin>();
+        let input = Arc::new(Mutex::new(LiveInput {
+            stdin: Some(stdin),
+            ended: false,
+        }));
+        let owner = Arc::new(std::sync::atomic::AtomicU8::new(LIVE_RUNNING));
+        let pump_input = Arc::clone(&input);
         std::thread::spawn(move || {
             while let Some(chunk) = samples_rx.blocking_recv() {
                 if chunk.is_empty() {
                     continue;
                 }
-                if Self::write_audio_to_worker(&mut stdin, &chunk).is_err() {
+                let Ok(mut inp) = pump_input.lock() else {
+                    return;
+                };
+                // A cancel ended the recording already.
+                if inp.ended {
+                    return;
+                }
+                let Some(stdin) = inp.stdin.as_mut() else {
+                    return;
+                };
+                if Self::write_audio_to_worker(stdin, &chunk).is_err() {
                     return;
                 }
             }
             // An empty block ends the recording; the worker then stays up
-            // for the next one, so stdin goes back for reuse.
-            if Self::write_audio_to_worker(&mut stdin, &[]).is_ok() {
-                let _ = stdin_back_tx.send(stdin);
+            // for the next one, and the reader takes stdin back for reuse.
+            if let Ok(mut inp) = pump_input.lock() {
+                inp.end();
             }
         });
 
-        // Cancel kills the worker; the reader below then sees EOF.
+        // Cancel asks the worker to drop the recording, so it stays loaded
+        // for the next one. If it does not answer within CANCEL_GRACE (or
+        // the request cannot be sent), it is killed and the reader below
+        // sees EOF.
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel_flag = Arc::clone(&cancelled);
+        let cancel_input = Arc::clone(&input);
+        let cancel_owner = Arc::clone(&owner);
         tokio::spawn(async move {
-            if cancel_rx.await.is_ok() {
-                cancel_flag.store(true, Ordering::SeqCst);
-                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+            if cancel_rx.await.is_err() {
+                return;
             }
+            cancel_flag.store(true, Ordering::SeqCst);
+            // The deadline runs from now, apart from the writes below: a
+            // worker that stopped reading stdin blocks the writer that holds
+            // the lock, and only the kill frees it. No lock needed here.
+            let watch_owner = Arc::clone(&cancel_owner);
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + CANCEL_GRACE;
+                while std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    if watch_owner.load(Ordering::SeqCst) != LIVE_RUNNING {
+                        return;
+                    }
+                }
+                claim_and_kill(&watch_owner, pid, true);
+            });
+            let _ = tokio::task::spawn_blocking(move || {
+                let Ok(mut inp) = cancel_input.lock() else {
+                    return;
+                };
+                if cancel_owner.load(Ordering::SeqCst) == LIVE_RUNNING && !inp.cancel() {
+                    claim_and_kill(&cancel_owner, pid, false);
+                }
+            })
+            .await;
         });
 
         let last_language = Arc::clone(&self.last_language);
@@ -1245,6 +1367,8 @@ impl StreamingTranscriber for SubprocessTranscriber {
                     continue;
                 }
                 match serde_json::from_str::<WorkerResponse>(trimmed) {
+                    // A cancelled recording's answer: nothing to deliver.
+                    Ok(_) if cancelled.load(Ordering::SeqCst) => answered = true,
                     Ok(r) if r.ok => {
                         if let Ok(mut guard) = last_language.lock() {
                             *guard = r.language.clone();
@@ -1285,15 +1409,49 @@ impl StreamingTranscriber for SubprocessTranscriber {
                 )));
             }
             loading.ready();
-            // The pump hands stdin back right after the end marker, which
-            // the worker needed before it could answer.
-            let stdin = answered
-                .then(|| {
-                    stdin_back_rx
-                        .recv_timeout(std::time::Duration::from_secs(2))
-                        .ok()
-                })
-                .flatten();
+            // The worker needed the end marker before it could answer, so it
+            // went out already; wait briefly in case the pump still holds
+            // the lock. The cancel never kills the worker after this.
+            let stdin = {
+                let wait_until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                // try_lock: a pump stuck writing to a worker that stopped
+                // reading must not hold the reader past the deadline.
+                loop {
+                    if !answered {
+                        break None;
+                    }
+                    let past = std::time::Instant::now() >= wait_until;
+                    match input.try_lock() {
+                        Ok(mut inp) if inp.ended => break inp.stdin.take(),
+                        Err(std::sync::TryLockError::Poisoned(_)) => break None,
+                        _ if past => break None,
+                        _ => {}
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            };
+            // Claim the worker; a cancel that killed it first wins.
+            let stdin = stdin.filter(|_| {
+                owner
+                    .compare_exchange(
+                        LIVE_RUNNING,
+                        LIVE_READER_DONE,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
+                    .is_ok()
+            });
+            owner
+                .compare_exchange(
+                    LIVE_RUNNING,
+                    LIVE_READER_DONE,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .ok();
+            if cancelled.load(Ordering::SeqCst) && stdin.is_some() {
+                tracing::info!("Cancelled; the live worker stays loaded");
+            }
             let alive = matches!(child.try_wait(), Ok(None));
             match (stdin.filter(|_| alive), refill) {
                 (Some(stdin), Refill::Timer(_, slot, keep, release)) => {
@@ -1659,6 +1817,52 @@ mod tests {
             }
         }
         assert!(error.is_some_and(|e| e.contains(LIVE_WORKER_DIED)));
+    }
+
+    /// A cancel sends the cancel block and the end block instead of
+    /// killing the worker; a worker that answers is kept for the next
+    /// recording, with its loaded models and CUDA context.
+    #[tokio::test]
+    async fn a_cancelled_live_worker_is_kept() {
+        let mut t = SubprocessTranscriber::new(&WhisperConfig::default(), None).unwrap();
+        t.live_model = Some("stand-in".into());
+        // Keep a finished recording's worker (live_preview_warm_secs).
+        t.warm_secs = 3600;
+        // A stand-in worker: READY, then it reads the two 4-byte headers
+        // (cancel, end), answers and waits for the next recording.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("echo READY; head -c 8 > /dev/null; echo '{\"ok\": false, \"error\": \"Cancelled\"}'; cat > /dev/null")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let (child, stdin, stdout) = WarmWorker::spawn(cmd).unwrap();
+        let pid = child.id();
+        t.warm
+            .park(child, stdin, stdout, Instant::now(), HOUR, None);
+        let (tx, rx) = mpsc::channel(4);
+        let mut handle = t.start_stream(rx).unwrap();
+        handle.cancel.send(()).unwrap();
+        let started = Instant::now();
+        handle.task.await.unwrap().unwrap();
+        assert!(
+            started.elapsed() < CANCEL_GRACE,
+            "the worker answered, so no wait"
+        );
+        while let Some(event) = handle.events.recv().await {
+            assert!(
+                !matches!(
+                    event,
+                    StreamingEvent::Error(_) | StreamingEvent::Final { .. }
+                ),
+                "a cancel delivers nothing"
+            );
+        }
+        drop(tx);
+        let mut kept = t.warm.take_alive().expect("the worker is kept");
+        assert_eq!(kept.child.id(), pid);
+        assert!(matches!(kept.child.try_wait(), Ok(None)));
+        kept.stop();
     }
 
     /// The live worker's final part lines, as `write_final_part` writes

@@ -233,6 +233,21 @@ pub const SIGNALS_PREFIX: &str = "G ";
 /// the daemon keeps it so a cancelled dictation is saved with it.
 pub const FINAL_PART_PREFIX: &str = "F ";
 
+/// A block header with this sample count and no samples cancels the
+/// recording the daemon is still sending; its end block follows. The worker
+/// skips the engine parts not yet started, answers with [`CANCELLED`] and
+/// stays up for the next one. The daemon sends it instead of killing the
+/// worker, so the engine model and its CUDA context stay loaded.
+pub const CANCEL_BLOCK: u32 = u32::MAX;
+
+/// Like [`CANCEL_BLOCK`], for the recording whose end block already went
+/// (its final pass). It names no recording on the wire: the worker counts
+/// end blocks, so one that comes late cannot cancel the next recording.
+pub const CANCEL_FINAL_BLOCK: u32 = u32::MAX - 1;
+
+/// The live worker's answer to a cancelled recording.
+pub const CANCELLED: &str = "Cancelled";
+
 /// Error text of a final response when the recording held no words, as when a
 /// dictation is started and stopped again without speaking. The daemon treats
 /// it as "no speech", not as a failure.
@@ -655,14 +670,29 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     // Read stdin from the start, so the parent never blocks on a full pipe
     // while the models load.
     // None marks the end of one recording.
-    let (blocks_tx, blocks_rx) = mpsc::channel::<Option<Vec<f32>>>();
+    let (blocks_tx, blocks_rx) = mpsc::channel::<Incoming>();
+    // A final-pass cancel, read while nothing reads blocks_rx: the number
+    // of the recording it cancels (recordings count from 1, one per end
+    // block), 0 for none. A late one names a recording already answered.
+    let final_cancel = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let final_cancel_in = final_cancel.clone();
     std::thread::spawn(move || {
         let mut stdin = io::stdin().lock();
+        let mut ends = 0u64;
         while let Ok(Some(block)) = read_block(&mut stdin) {
-            if blocks_tx
-                .send((!block.is_empty()).then_some(block))
-                .is_err()
-            {
+            let msg = match block {
+                Block::CancelFinal => {
+                    final_cancel_in.store(ends, std::sync::atomic::Ordering::SeqCst);
+                    continue;
+                }
+                Block::Cancel => Incoming::Cancel,
+                Block::Audio(b) if b.is_empty() => {
+                    ends += 1;
+                    Incoming::End
+                }
+                Block::Audio(b) => Incoming::Audio(b),
+            };
+            if blocks_tx.send(msg).is_err() {
                 break;
             }
         }
@@ -765,6 +795,16 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
                         engine_config.model_name(),
                         start.elapsed().as_secs_f32()
                     );
+                    // One run at the largest part now, while nobody
+                    // dictates, so a recording allocates no GPU memory.
+                    let warm = std::time::Instant::now();
+                    match t.warm_up() {
+                        Ok(()) => eprintln!(
+                            "[worker] Warm-up run done in {:.2}s",
+                            warm.elapsed().as_secs_f32()
+                        ),
+                        Err(e) => eprintln!("[worker] Warm-up run failed: {}", e),
+                    }
                     *guard = Some(t);
                 }
                 Err(e) => eprintln!("[worker] Engine preload failed: {}", e),
@@ -773,7 +813,9 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         let _ = locked_rx.recv();
     }
 
+    let mut recording = 0u64;
     loop {
+        recording += 1;
         // A fresh streaming state per recording; the weights stay loaded.
         let unified = first
             .take()
@@ -788,6 +830,11 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             vocab.as_ref(),
             probe.as_ref(),
             &kept,
+            Cancel {
+                recording,
+                final_cancel: final_cancel.clone(),
+                now: Default::default(),
+            },
         )? {
             return Ok(());
         }
@@ -820,6 +867,29 @@ fn release_freed_memory() {
     }
 }
 
+/// Whether the daemon cancelled one recording: in-band ([`Incoming::Cancel`])
+/// or, during its final pass, by [`CANCEL_FINAL_BLOCK`].
+#[cfg(feature = "parakeet")]
+#[derive(Clone)]
+struct Cancel {
+    /// This recording's number (from 1, one per end block).
+    recording: u64,
+    final_cancel: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    now: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "parakeet")]
+impl Cancel {
+    fn set(&self) {
+        self.now.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_set(&self) -> bool {
+        self.now.load(std::sync::atomic::Ordering::SeqCst)
+            || self.final_cancel.load(std::sync::atomic::Ordering::SeqCst) == self.recording
+    }
+}
+
 /// One recording of the live worker: READY, audio until an empty block or
 /// EOF, then the response. Returns whether another recording may follow
 /// (false after EOF).
@@ -828,13 +898,14 @@ fn release_freed_memory() {
 fn live_session(
     config: &crate::config::Config,
     out: &mut io::StdoutLock<'_>,
-    blocks_rx: &std::sync::mpsc::Receiver<Option<Vec<f32>>>,
+    blocks_rx: &std::sync::mpsc::Receiver<Incoming>,
     mut unified: Option<parakeet_rs::ParakeetUnified>,
     handle: &Result<parakeet_rs::ParakeetUnifiedHandle, String>,
     streaming_config: &parakeet_rs::UnifiedStreamingConfig,
     vocab: Option<&parakeet_rs::SentencePieceVocab>,
     probe: Option<&super::sound_probe::SoundProbe>,
     kept: &KeptEngine,
+    abort: Cancel,
 ) -> anyhow::Result<bool> {
     use super::revisions::RevisionLog;
     use parakeet_rs::ParakeetUnified;
@@ -854,6 +925,7 @@ fn live_session(
     let engine_loaded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let loaded_flag = engine_loaded.clone();
     let min_free_vram = config.live_preview_min_free_vram_mib;
+    let skip = abort.clone();
     let mut start_engine = (config.live_preview_final != "preview").then_some(move || {
         std::thread::spawn(move || {
             // Waits here while a preload is still running.
@@ -890,6 +962,10 @@ fn live_session(
             let mut clips: Vec<String> = Vec::new();
             let mut resumed = None;
             for job in part_rx {
+                // Cancelled: the parts left are not needed.
+                if skip.is_set() {
+                    continue;
+                }
                 let part = match job {
                     Job::Part(part) => part,
                     Job::Resumed(clip) => {
@@ -988,10 +1064,21 @@ fn live_session(
     );
     let mut more = false;
     for msg in blocks_rx.iter() {
-        let Some(block) = msg else {
-            more = true;
-            break;
+        let block = match msg {
+            Incoming::Audio(block) => block,
+            Incoming::End => {
+                more = true;
+                break;
+            }
+            Incoming::Cancel => {
+                abort.set();
+                continue;
+            }
         };
+        // Cancelled: the end block follows; take no more audio.
+        if abort.is_set() {
+            continue;
+        }
         if let Some(start) = start_engine.take() {
             start();
         }
@@ -1094,6 +1181,22 @@ fn live_session(
     // EOF between recordings: the daemon let the worker go.
     if samples.is_empty() && !more {
         return Ok(false);
+    }
+    if abort.is_set() {
+        // The daemon keeps the audio of a cancel itself; here only the
+        // engine thread has to finish (or skip) its parts and hand the
+        // model back.
+        drop(part_tx);
+        if start_engine.is_none() {
+            while let Ok(msg) = msg_rx.recv() {
+                if matches!(msg, EngineMsg::Done(_)) {
+                    break;
+                }
+            }
+        }
+        eprintln!("[worker] Recording cancelled ({:.2}s of audio)", secs);
+        write_response_to(out, WorkerResponse::error(CANCELLED));
+        return Ok(more);
     }
     eprintln!("[worker] Received {:.2}s of audio", secs);
     if samples.is_empty() {
@@ -1330,6 +1433,11 @@ fn live_session(
         None if !preview_final.is_empty() => WorkerResponse::success(preview_final.clone(), None),
         None => WorkerResponse::error("Engine thread ended without a result"),
     };
+    if abort.is_set() {
+        eprintln!("[worker] Final pass cancelled");
+        write_response_to(out, WorkerResponse::error(CANCELLED));
+        return Ok(more);
+    }
     let final_text = match &response {
         WorkerResponse::Success { text, .. } => Some(text.clone()),
         _ => None,
@@ -1876,16 +1984,45 @@ pub fn run_live_worker(_config: &crate::config::Config, _live_model: &str) -> an
     anyhow::bail!("live_preview_model needs voxtype built with the parakeet feature")
 }
 
+/// One message on the live worker's stdin.
+#[cfg(feature = "parakeet")]
+#[derive(Debug, PartialEq)]
+enum Block {
+    /// Audio; empty ends the recording.
+    Audio(Vec<f32>),
+    /// [`CANCEL_BLOCK`].
+    Cancel,
+    /// [`CANCEL_FINAL_BLOCK`].
+    CancelFinal,
+}
+
+/// What the live worker's stdin thread hands a recording, in stdin order.
+#[cfg(feature = "parakeet")]
+enum Incoming {
+    Audio(Vec<f32>),
+    /// The end block.
+    End,
+    /// [`Block::Cancel`]: this recording is cancelled.
+    Cancel,
+}
+
 /// Read one `[u32 count][f32 samples]` block. `Ok(None)` at a clean EOF.
 #[cfg(feature = "parakeet")] // only the parakeet live worker uses this
-fn read_block<R: Read>(reader: &mut R) -> io::Result<Option<Vec<f32>>> {
+fn read_block<R: Read>(reader: &mut R) -> io::Result<Option<Block>> {
     let mut count_buf = [0u8; 4];
     match reader.read_exact(&mut count_buf) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
-    let count = u32::from_le_bytes(count_buf) as usize;
+    let raw = u32::from_le_bytes(count_buf);
+    if raw == CANCEL_BLOCK {
+        return Ok(Some(Block::Cancel));
+    }
+    if raw == CANCEL_FINAL_BLOCK {
+        return Ok(Some(Block::CancelFinal));
+    }
+    let count = raw as usize;
     if count > 16000 * 60 * 10 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1894,14 +2031,14 @@ fn read_block<R: Read>(reader: &mut R) -> io::Result<Option<Vec<f32>>> {
     }
     let mut bytes = vec![0u8; count * 4];
     reader.read_exact(&mut bytes)?;
-    Ok(Some(
+    Ok(Some(Block::Audio(
         bytes
             .as_chunks::<4>()
             .0
             .iter()
             .map(|b| f32::from_le_bytes(*b))
             .collect(),
-    ))
+    )))
 }
 
 /// Write a JSON response to the given writer
@@ -2071,6 +2208,27 @@ mod tests {
         let json = serde_json::to_string(&success).unwrap();
         assert!(json.contains(r#""ok":true"#));
         assert!(json.contains(r#""language":"ru""#));
+    }
+
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn read_block_tells_audio_end_and_cancel_apart() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&0.5f32.to_le_bytes());
+        bytes.extend_from_slice(&(-0.25f32).to_le_bytes());
+        bytes.extend_from_slice(&CANCEL_BLOCK.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&CANCEL_FINAL_BLOCK.to_le_bytes());
+        let mut r = std::io::Cursor::new(bytes);
+        assert_eq!(
+            read_block(&mut r).unwrap(),
+            Some(Block::Audio(vec![0.5, -0.25]))
+        );
+        assert_eq!(read_block(&mut r).unwrap(), Some(Block::Cancel));
+        assert_eq!(read_block(&mut r).unwrap(), Some(Block::Audio(vec![])));
+        assert_eq!(read_block(&mut r).unwrap(), Some(Block::CancelFinal));
+        assert_eq!(read_block(&mut r).unwrap(), None);
     }
 
     #[test]

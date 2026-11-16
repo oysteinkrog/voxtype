@@ -73,8 +73,19 @@ fn compiled_providers() -> Vec<(&'static str, ExecutionProviderDispatch)> {
     }
     #[cfg(feature = "onnx-cuda-enabled")]
     {
-        use ort::execution_providers::CUDAExecutionProvider;
-        providers.push(("CUDA", CUDAExecutionProvider::default().build()));
+        use ort::ep::{cuda::ConvAlgorithmSearch, ArenaExtendStrategy, CUDA};
+        // HEURISTIC: cuDNN's default EXHAUSTIVE search benchmarks every Conv
+        // algorithm on each new input shape, with a large scratch buffer. That
+        // runs mid-dictation the first time a part has a new length.
+        // kSameAsRequested: the arena grows by what a run needs instead of
+        // doubling, so it does not grab hundreds of MiB more in one step.
+        providers.push((
+            "CUDA",
+            CUDA::default()
+                .with_conv_algorithm_search(ConvAlgorithmSearch::Heuristic)
+                .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)
+                .build(),
+        ));
     }
     #[cfg(feature = "onnx-migraphx-enabled")]
     {

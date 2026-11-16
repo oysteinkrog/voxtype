@@ -149,6 +149,14 @@ pub trait Transcriber: Send + Sync {
     /// once for the transcriber it keeps; default: nothing.
     fn keep_warm(&self) {}
 
+    /// Run one throwaway inference at the largest input the backend will
+    /// get, so its first real run allocates nothing new (GPU memory,
+    /// cuDNN kernel choice). Called once after a long-lived load; default:
+    /// nothing.
+    fn warm_up(&self) -> Result<(), TranscribeError> {
+        Ok(())
+    }
+
     /// Streaming-capable view of this transcriber, if it supports streaming.
     ///
     /// Returns `None` by default. Streaming-capable backends override this to
