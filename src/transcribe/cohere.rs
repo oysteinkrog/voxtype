@@ -1050,6 +1050,26 @@ mod tests {
     }
 
     #[test]
+    fn a_decode_that_succeeds_moves_nothing() {
+        let on_gpu = AtomicBool::new(true);
+        let moves = std::cell::Cell::new(0);
+        let got = with_decoder_fallback(
+            &on_gpu,
+            || Ok::<_, TranscribeError>("text"),
+            || {
+                moves.set(moves.get() + 1);
+                Ok(())
+            },
+        );
+        assert_eq!(got.unwrap(), "text");
+        assert_eq!(moves.get(), 0);
+        assert!(
+            on_gpu.load(Ordering::Relaxed),
+            "the decoder stays on the GPU"
+        );
+    }
+
+    #[test]
     fn other_failures_and_a_cpu_decoder_do_not_fall_back() {
         use std::cell::Cell;
         // Already on the CPU: the error comes back, nothing moves.
