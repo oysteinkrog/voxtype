@@ -421,15 +421,10 @@ impl CohereTranscriber {
         push_down: f32,
         full_length: bool,
     ) -> Result<String, TranscribeError> {
-        match self.decode_samples(samples, avoid, push_down, full_length) {
-            Err(TranscribeError::InferenceFailed(e))
-                if e.starts_with("decoder step") && self.decoder_on_gpu.load(Ordering::Relaxed) =>
-            {
-                // ONNX Runtime before 1.29 loads the decoder on CUDA but
-                // fails its first step: "attention_bias is not supported
-                // in GroupQueryAttention cuda kernel". Move it to the CPU
-                // for the life of this process and transcribe again.
-                tracing::warn!("Cohere decoder: GPU run failed ({e}); using the CPU");
+        with_decoder_fallback(
+            &self.decoder_on_gpu,
+            || self.decode_samples(samples, avoid, push_down, full_length),
+            || {
                 let cpu = build_session(
                     &self.decoder_file,
                     self.threads,
@@ -441,11 +436,9 @@ impl CohereTranscriber {
                 *self.decoder.lock().map_err(|e| {
                     TranscribeError::InferenceFailed(format!("decoder lock: {e}"))
                 })? = cpu;
-                self.decoder_on_gpu.store(false, Ordering::Relaxed);
-                self.decode_samples(samples, avoid, push_down, full_length)
-            }
-            other => other,
-        }
+                Ok(())
+            },
+        )
     }
 
     /// The decoder runs until EOS, or with `full_length` for all
@@ -991,9 +984,86 @@ fn build_session(
     })
 }
 
+/// Runs `decode`. When the decoder is on the GPU (`on_gpu`) and a decoder
+/// step fails, moves it to the CPU with `to_cpu` for the life of the
+/// process and runs `decode` again. ONNX Runtime before 1.29 loads the
+/// decoder on CUDA but fails its first step: "attention_bias is not
+/// supported in GroupQueryAttention cuda kernel".
+fn with_decoder_fallback<T>(
+    on_gpu: &AtomicBool,
+    decode: impl Fn() -> Result<T, TranscribeError>,
+    to_cpu: impl FnOnce() -> Result<(), TranscribeError>,
+) -> Result<T, TranscribeError> {
+    match decode() {
+        Err(TranscribeError::InferenceFailed(e))
+            if e.starts_with("decoder step") && on_gpu.load(Ordering::Relaxed) =>
+        {
+            tracing::warn!("Cohere decoder: GPU run failed ({e}); using the CPU");
+            to_cpu()?;
+            on_gpu.store(false, Ordering::Relaxed);
+            decode()
+        }
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A decode that fails with `fail` until the decoder moves to the CPU.
+    fn fake(
+        on_gpu: &AtomicBool,
+        fail: &str,
+        runs: &std::cell::Cell<u32>,
+        moves: &std::cell::Cell<u32>,
+    ) -> Result<&'static str, TranscribeError> {
+        with_decoder_fallback(
+            on_gpu,
+            || {
+                runs.set(runs.get() + 1);
+                if moves.get() == 0 {
+                    Err(TranscribeError::InferenceFailed(fail.to_string()))
+                } else {
+                    Ok("text")
+                }
+            },
+            || {
+                moves.set(moves.get() + 1);
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn a_failed_gpu_decoder_step_moves_the_decoder_to_the_cpu_once() {
+        use std::cell::Cell;
+        let on_gpu = AtomicBool::new(true);
+        let (runs, moves) = (Cell::new(0), Cell::new(0));
+        let got = fake(&on_gpu, "decoder step 0: attention_bias", &runs, &moves);
+        assert_eq!(got.unwrap(), "text");
+        assert_eq!((runs.get(), moves.get()), (2, 1));
+        assert!(
+            !on_gpu.load(Ordering::Relaxed),
+            "the decoder stays on the CPU"
+        );
+    }
+
+    #[test]
+    fn other_failures_and_a_cpu_decoder_do_not_fall_back() {
+        use std::cell::Cell;
+        // Already on the CPU: the error comes back, nothing moves.
+        let on_cpu = AtomicBool::new(false);
+        let (runs, moves) = (Cell::new(0), Cell::new(0));
+        assert!(fake(&on_cpu, "decoder step 3: oom", &runs, &moves).is_err());
+        assert_eq!((runs.get(), moves.get()), (1, 0));
+        // On the GPU but not a decoder step (the encoder): no fallback.
+        let on_gpu = AtomicBool::new(true);
+        let (runs, moves) = (Cell::new(0), Cell::new(0));
+        assert!(fake(&on_gpu, "encoder: oom", &runs, &moves).is_err());
+        assert_eq!((runs.get(), moves.get()), (1, 0));
+        assert!(on_gpu.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn graph_has_op_finds_the_op_name() {
