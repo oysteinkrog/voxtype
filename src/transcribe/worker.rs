@@ -2335,11 +2335,13 @@ mod tests {
     #[cfg(feature = "parakeet")]
     #[test]
     fn a_preview_without_gpu_room_loads_the_cpu_model() {
-        let mut c = crate::config::Config::default();
-        c.live_preview_gpu = true;
-        c.live_preview_min_free_vram_mib = 2662;
-        c.live_preview_gpu_vram_mib = 3500;
-        c.live_preview_cpu_model = Some("int8".into());
+        let mut c = crate::config::Config {
+            live_preview_gpu: true,
+            live_preview_min_free_vram_mib: 2662,
+            live_preview_gpu_vram_mib: 3500,
+            live_preview_cpu_model: Some("int8".into()),
+            ..Default::default()
+        };
         let cuda = || Some(());
         // Room on the GPU: the live model goes there.
         assert_eq!(
