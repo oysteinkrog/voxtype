@@ -406,15 +406,37 @@ This command is designed for use with compositor keybindings (Hyprland, Sway) in
 
 ### `voxtype history`
 
-Get the last dictation back when its text did not land: the paste went to the wrong window, no text field had focus, or `restore_clipboard` put your old clipboard back.
+List your recent dictations, and get one back when its text did not land: the paste went to the wrong window, no text field had focus, or `restore_clipboard` put your old clipboard back.
+
+History is off by default. Without it, voxtype keeps only the last dictation, so `voxtype history` shows that one and `voxtype history copy` copies it. Turn history on to keep a list:
 
 ```bash
-voxtype history                  # Show the last dictation and how its delivery went
-voxtype history copy             # Copy the last dictation to the clipboard
-voxtype history copy --json      # The same, with a JSON result
+voxtype history enable           # sets [history] enabled = true
 ```
 
-Voxtype keeps the last dictation's final text in `$XDG_RUNTIME_DIR/voxtype/last-dictation.json`, readable by you alone, whether or not it was delivered. It stays until the next dictation replaces it and is gone at logout. Nothing is written to your home folder.
+The daemon picks the change up on the next dictation, without a restart. See [`[history]`](CONFIGURATION.md#history) for the settings: how many days and how many dictations to keep.
+
+```bash
+voxtype history                  # Recent dictations, newest first (the last one when history is off)
+voxtype history -n 50 --failed   # The last 50 whose delivery failed
+voxtype history show last        # One dictation in full: text, what the engine heard, edits, how it was delivered
+voxtype history copy             # Copy the last dictation to the clipboard
+voxtype history copy 3           # Copy the third newest
+voxtype history copy 20261114-093012-a1b2c3
+voxtype history delete last      # Remove one dictation
+voxtype history clear --before 2026-11-01   # Remove whole days (asks first; --yes to skip)
+voxtype history pause            # Stop recording, for example before something private
+voxtype history resume
+voxtype history retention 7      # Keep 7 days (0 keeps everything)
+voxtype history status           # On or off, paused, limits and how many are stored
+voxtype history disable          # Turn history off; what is stored stays
+```
+
+Every command takes `--json`. An ID is what `voxtype history` lists, `last`, or a position in that list (1 is the newest). `voxtype history copy` copies the text even when its delivery failed.
+
+With history on, each dictation is one JSON line in `~/.local/share/voxtype/history/YYYY-MM-DD.jsonl`, readable by you alone. Days older than a week are gzipped. The format is the same as upstream voxtype 1.3's history.
+
+Whether history is on or off, voxtype also keeps the last dictation's final text in `$XDG_RUNTIME_DIR/voxtype/last-dictation.json`, readable by you alone, delivered or not. It stays until the next dictation replaces it and is gone at logout. While history is off or paused, `voxtype history copy` copies this one. `voxtype history clear` without `--before` removes it too.
 
 Bind `voxtype history copy` to a key so the text is one key press away:
 

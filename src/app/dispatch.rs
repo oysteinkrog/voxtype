@@ -478,7 +478,7 @@ pub(crate) async fn dispatch(
         }
 
         Commands::History { action, json } => {
-            run_history_command(action, json).await?;
+            run_history_command(&config, config_path.clone(), action, json).await?;
         }
 
         Commands::CheckUpdate => {

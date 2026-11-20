@@ -186,7 +186,7 @@ pub enum Commands {
     /// Check for updates
     CheckUpdate,
 
-    /// Get the last dictation back: show it or copy it to the clipboard
+    /// List recent dictations, or copy one back to the clipboard
     #[command(after_help = super::HISTORY_AFTER_HELP)]
     History {
         #[command(subcommand)]
