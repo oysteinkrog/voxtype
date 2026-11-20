@@ -1293,6 +1293,10 @@ pub struct Daemon {
     /// Dictation history (`[history]`): records each delivered or failed
     /// dictation while history is on.
     history: HistoryRecorder,
+    /// The tray icon (`[tray] enabled`), started in `run()` once the
+    /// single-instance lock is held.
+    #[cfg(target_os = "linux")]
+    tray: Option<crate::tray::TrayRuntime>,
     /// Audio level broadcaster for the OSD (None when disabled or bind failed)
     level_hub: Option<audio::levels::LevelHub>,
     /// Active per-recording level emitter task; aborted when recording stops
@@ -1502,6 +1506,8 @@ impl Daemon {
             post_processor,
             last_dictation: None,
             history,
+            #[cfg(target_os = "linux")]
+            tray: None,
             level_hub: None,
             level_emitter_task: None,
             silence_tracker: None,
@@ -1661,8 +1667,20 @@ impl Daemon {
         self.resume_media_players();
     }
 
+    /// Show the error icon until the next state change.
+    fn show_tray_error(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            tray.update(crate::tray::TrayState::Error);
+        }
+    }
+
     /// Update the state file if configured
     fn update_state(&self, state_name: &str) {
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = &self.tray {
+            tray.update(crate::tray::TrayState::from_state_name(state_name));
+        }
         if let Some(ref path) = self.state_file_path {
             write_state_file(path, state_name);
         }
@@ -1768,12 +1786,14 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
+                    self.show_tray_error();
                     self.play_feedback(SoundEvent::Error);
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
+                self.show_tray_error();
                 self.play_feedback(SoundEvent::Error);
                 Err(())
             }
@@ -3347,12 +3367,14 @@ impl Daemon {
                 }
                 Err(e) => {
                     tracing::error!("Failed to start audio: {}", e);
+                    self.show_tray_error();
                     self.play_feedback(SoundEvent::Error);
                     Err(())
                 }
             },
             Err(e) => {
                 tracing::error!("Failed to create audio capture: {}", e);
+                self.show_tray_error();
                 self.play_feedback(SoundEvent::Error);
                 Err(())
             }
@@ -4603,7 +4625,15 @@ impl Daemon {
         state: &mut State,
         result: std::result::Result<TranscriptionResult, tokio::task::JoinError>,
     ) {
+        let failed = match &result {
+            Ok(Err(_)) => true,
+            Err(error) => !error.is_cancelled(),
+            _ => false,
+        };
         self.handle_transcription_result_inner(state, result).await;
+        if failed {
+            self.show_tray_error();
+        }
         // The inner handler owns the last reference to an on-demand
         // transcriber, so by here the model has been dropped.
         if self.config.on_demand_loading() {
@@ -5107,6 +5137,13 @@ impl Daemon {
         // History retention, compression and the entry cap, in the
         // background. Nothing happens while history is off.
         let _ = self.history.maintain();
+
+        // The single-instance lock is already held. Never register a duplicate tray.
+        #[cfg(target_os = "linux")]
+        if self.tray.is_none() {
+            self.tray =
+                crate::tray::TrayRuntime::start_for_daemon(&self.config, self.config_path.clone());
+        }
 
         // Engine-vs-binary mismatch check at startup so users see a desktop
         // notification before the first transcription attempt would fail.
@@ -6692,6 +6729,11 @@ impl Daemon {
         // confuse the next daemon start.
         if let Some(ref hub) = self.level_hub {
             hub.cleanup();
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(tray) = self.tray.take() {
+            tray.shutdown().await;
         }
 
         tracing::info!("Daemon stopped");
