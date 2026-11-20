@@ -8,6 +8,7 @@ use crate::audio::{self, AudioCapture};
 use crate::config::{ActivationMode, Config, FileMode, OutputMode};
 use crate::eager::{self, EagerConfig};
 use crate::error::Result;
+use crate::history::recorder::{Delivery as HistoryDelivery, Recorder as HistoryRecorder};
 #[cfg(target_os = "linux")]
 use crate::hotkey::{self, HotkeyEvent};
 #[cfg(target_os = "macos")]
@@ -391,6 +392,16 @@ fn stream_end_signals(outcome: HookOutcome) -> (SoundEvent, crate::osd::outcome:
         HookOutcome::Done | HookOutcome::NotPasted => {
             (SoundEvent::TranscriptionComplete, Outcome::Done)
         }
+    }
+}
+
+/// `[output] mode` as history records it.
+fn output_mode_name(mode: &OutputMode) -> &'static str {
+    match mode {
+        OutputMode::Type => "type",
+        OutputMode::Clipboard => "clipboard",
+        OutputMode::Paste => "paste",
+        OutputMode::File => "file",
     }
 }
 
@@ -1279,6 +1290,9 @@ pub struct Daemon {
     post_processor: Option<PostProcessor>,
     /// Last post-processed text and when it was produced, for context in subsequent dictations
     last_dictation: Option<(String, Instant)>,
+    /// Dictation history (`[history]`): records each delivered or failed
+    /// dictation while history is on.
+    history: HistoryRecorder,
     /// Audio level broadcaster for the OSD (None when disabled or bind failed)
     level_hub: Option<audio::levels::LevelHub>,
     /// Active per-recording level emitter task; aborted when recording stops
@@ -1475,6 +1489,7 @@ impl Daemon {
         };
 
         let keyboard_edit = keyboard_edit_on(&config);
+        let history = HistoryRecorder::new(&config, config_path.clone());
         Self {
             start_request: None,
             config,
@@ -1486,6 +1501,7 @@ impl Daemon {
             learning,
             post_processor,
             last_dictation: None,
+            history,
             level_hub: None,
             level_emitter_task: None,
             silence_tracker: None,
@@ -2702,6 +2718,16 @@ impl Daemon {
                 Err(e.to_string()),
             ));
         }
+        if d.result.is_ok() && !d.paste.confirmed() {
+            // Copied, not pasted: the clipboard has it.
+            self.record_history(HistoryDelivery {
+                streaming: true,
+                ..HistoryDelivery::new(edited, Ok("clipboard"), "clipboard")
+            });
+        } else {
+            let result = d.result.as_ref().map(|_| ()).map_err(|e| e.to_string());
+            self.record_stream_history(session, edited, result);
+        }
         if !d.paste.confirmed() && d.result.is_ok() {
             self.report_not_pasted(edited, d.paste, started).await;
         } else if d.result.is_ok() {
@@ -2738,6 +2764,39 @@ impl Daemon {
             tracing::error!("Edited text delivery failed: {}", e);
         }
         true
+    }
+
+    /// Record a dictation in history, delivered or not. Does nothing while
+    /// history is off or paused; the file is written in the background.
+    fn record_history(&mut self, mut delivery: HistoryDelivery<'_>) {
+        if delivery.since_stop_ms.is_none() {
+            delivery.since_stop_ms = crate::osd::outcome::since_stop_ms();
+        }
+        let _ = self.history.record_delivery(&self.config, &delivery);
+    }
+
+    /// Record a live preview dictation's final text in history: what the
+    /// session delivered, or `text` when the delivery failed.
+    fn record_stream_history(
+        &mut self,
+        session: &StreamingSession,
+        text: &str,
+        result: std::result::Result<(), String>,
+    ) {
+        let mode = output_mode_name(&self.config.output.mode);
+        let auto_submit = self.config.output.auto_submit;
+        let delivery = match (&result, session.delivered()) {
+            (Ok(()), Some((method, delivered))) => {
+                HistoryDelivery::new(delivered, Ok(method), mode)
+            }
+            (Ok(()), None) => return,
+            (Err(e), _) => HistoryDelivery::new(text, Err(e.clone()), mode),
+        };
+        self.record_history(HistoryDelivery {
+            streaming: true,
+            auto_submit,
+            ..delivery
+        });
     }
 
     /// Tell the popup what a live preview dictation delivered, as the batch
@@ -4724,7 +4783,21 @@ impl Daemon {
                             text: final_text.clone(),
                         };
 
-                        match self.deliver_file_output(&output_path, &final_text).await {
+                        let delivered = self.deliver_file_output(&output_path, &final_text).await;
+                        self.record_history(HistoryDelivery {
+                            raw_text: Some(&text),
+                            audio_ms: audio_s.map(|s| (s * 1000.0) as u64),
+                            ..HistoryDelivery::new(
+                                &final_text,
+                                match &delivered {
+                                    FileDelivery::Written => Ok("file"),
+                                    FileDelivery::FellBack(_) => Ok("clipboard"),
+                                    FileDelivery::Lost(err) => Err(err.clone()),
+                                },
+                                "file",
+                            )
+                        });
+                        match delivered {
                             FileDelivery::Written => {
                                 let mode_str = match self.config.output.file_mode {
                                     FileMode::Overwrite => "wrote",
@@ -4866,6 +4939,16 @@ impl Daemon {
                     let output_started = Instant::now();
                     let delivered =
                         output::output_via(&output_chain, &final_text, output_options).await;
+                    self.record_history(HistoryDelivery {
+                        raw_text: Some(&text),
+                        auto_submit: output_config.auto_submit,
+                        audio_ms: audio_s.map(|s| (s * 1000.0) as u64),
+                        ..HistoryDelivery::new(
+                            &final_text,
+                            delivered.as_ref().copied().map_err(|e| e.to_string()),
+                            output_mode_name(&output_config.mode),
+                        )
+                    });
                     if let Err(e) = &delivered {
                         tracing::error!("Output failed: {}", e);
                         // Nothing took the text: keep it for `voxtype history copy`.
@@ -5020,6 +5103,10 @@ impl Daemon {
         // Before anything clears the edit files: offer back an edit a crash
         // left undelivered.
         self.offer_crashed_edit(&Config::runtime_dir()).await;
+
+        // History retention, compression and the entry cap, in the
+        // background. Nothing happens while history is off.
+        let _ = self.history.maintain();
 
         // Engine-vs-binary mismatch check at startup so users see a desktop
         // notification before the first transcription attempt would fail.
@@ -6304,6 +6391,11 @@ impl Daemon {
                                             // Live preview sends the whole text as one Final.
                                             if r.is_ok() && self.config.live_preview_active() {
                                                 self.report_stream_delivery(s, started);
+                                            }
+                                            if self.config.live_preview_active() {
+                                                let result = r.as_ref().map(|_| ()).map_err(|e| e.to_string());
+                                                let processed = self.text_processor.process(text);
+                                                self.record_stream_history(s, &processed, result);
                                             }
                                             r
                                         }

@@ -4029,6 +4029,8 @@ History is off by default. When it is on, each dictation is one JSON line in `~/
 
 The daemon reads `[history]` again when the config file changes, so `voxtype history pause`, `enable` and the other commands that write it take effect on the next dictation, without a restart. A daemon flag or environment variable still wins over the file.
 
+Recorded: dictations typed, pasted, copied or written to a file once the recording stops, live preview dictations (with or without a keyboard edit), and deliveries that failed. Not recorded yet: streaming that types segment by segment while you speak (`streaming = true` without a live preview), and recordings that produced no text.
+
 With history off, voxtype still keeps the last dictation in `$XDG_RUNTIME_DIR/voxtype/last-dictation.json` for `voxtype history copy`.
 
 ### enabled
@@ -4075,7 +4077,7 @@ voxtype --no-history-paused daemon   # record although the file says paused
 **Default:** `30`
 **Required:** No
 
-Days of history to keep, counting today. Older day files are deleted when the daemon starts, after the first dictation of each day and once a day while it runs. `0` keeps history forever. `voxtype history retention DAYS` sets this key.
+Days of history to keep, counting today. Older day files are deleted when the daemon starts and with the first dictation of each day. `0` keeps history forever. `voxtype history retention DAYS` sets this key.
 
 **Example:**
 ```toml
