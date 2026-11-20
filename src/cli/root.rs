@@ -154,6 +154,44 @@ pub struct Cli {
     )]
     pub tensorrt_cache_dir: Option<std::path::PathBuf>,
 
+    /// Run the live preview model on the GPU (CUDA)
+    #[arg(
+        long,
+        help_heading = "Transcription",
+        hide_short_help = true,
+        long_help = "Run the live preview model on the GPU (CUDA) instead of the CPU, when the\n\
+        build has CUDA and the GPU has live_preview_gpu_vram_mib free on top of\n\
+        live_preview_min_free_vram_mib. Use the fp32 model there.\n\
+        Config: live_preview_gpu. Env: VOXTYPE_LIVE_PREVIEW_GPU."
+    )]
+    pub live_preview_gpu: bool,
+
+    /// GPU memory the live preview model needs on the GPU [default: 3500]
+    #[arg(
+        long,
+        value_name = "MIB",
+        help_heading = "Transcription",
+        hide_short_help = true,
+        long_help = "GPU memory (MiB) the live preview model needs with --live-preview-gpu. It\n\
+        goes on the GPU only with this much free on top of live_preview_min_free_vram_mib.\n\
+        Default 3500 (the fp32 parakeet-unified-en-0.6b).\n\
+        Config: live_preview_gpu_vram_mib. Env: VOXTYPE_LIVE_PREVIEW_GPU_VRAM_MIB."
+    )]
+    pub live_preview_gpu_vram_mib: Option<u64>,
+
+    /// Preview model to use on the CPU when the GPU preview cannot run
+    #[arg(
+        long,
+        value_name = "MODEL",
+        help_heading = "Transcription",
+        hide_short_help = true,
+        long_help = "With --live-preview-gpu, the preview model to load when the preview stays on\n\
+        the CPU (too little GPU memory, or the GPU load failed), e.g.\n\
+        parakeet-unified-en-0.6b-int8. Default: the live_preview_model.\n\
+        Config: live_preview_cpu_model. Env: VOXTYPE_LIVE_PREVIEW_CPU_MODEL."
+    )]
+    pub live_preview_cpu_model: Option<String>,
+
     // -- Whisper-specific --
     /// Disable context window optimization for short recordings
     #[arg(long, help_heading = "Whisper", hide_short_help = true)]

@@ -191,6 +191,15 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     if cli.no_tensorrt_fp16 {
         config.onnx.tensorrt_fp16 = false;
     }
+    if cli.live_preview_gpu {
+        config.live_preview_gpu = true;
+    }
+    if let Some(mib) = cli.live_preview_gpu_vram_mib {
+        config.live_preview_gpu_vram_mib = mib;
+    }
+    if let Some(ref model) = cli.live_preview_cpu_model {
+        config.live_preview_cpu_model = Some(model.clone());
+    }
     if let Some(ref dir) = cli.tensorrt_cache_dir {
         config.onnx.tensorrt_cache_dir = Some(dir.clone());
     }

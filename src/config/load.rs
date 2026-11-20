@@ -281,6 +281,20 @@ fn load_config_with_env(path: Option<&Path>, env: Env) -> Result<Config, Voxtype
             .openvino_dir = Some(dir);
     }
 
+    // Live preview on the GPU
+    if let Ok(val) = env("VOXTYPE_LIVE_PREVIEW_GPU") {
+        config.live_preview_gpu = parse_bool_env(&val);
+    }
+    if let Ok(val) = env("VOXTYPE_LIVE_PREVIEW_GPU_VRAM_MIB") {
+        match val.trim().parse() {
+            Ok(mib) => config.live_preview_gpu_vram_mib = mib,
+            Err(e) => tracing::warn!("VOXTYPE_LIVE_PREVIEW_GPU_VRAM_MIB: {e}"),
+        }
+    }
+    if let Ok(val) = env("VOXTYPE_LIVE_PREVIEW_CPU_MODEL") {
+        config.live_preview_cpu_model = Some(val).filter(|v| !v.trim().is_empty());
+    }
+
     if let Ok(val) = env("VOXTYPE_COHERE_DECODER_GPU") {
         config
             .cohere

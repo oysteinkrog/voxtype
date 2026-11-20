@@ -200,6 +200,8 @@ live_preview_model = "parakeet-unified-en-0.6b"
 live_preview_gpu = true
 ```
 
+**CLI:** `--live-preview-gpu`. **Environment:** `VOXTYPE_LIVE_PREVIEW_GPU=true`.
+
 ## live_preview_gpu_vram_mib
 
 **Type:** Integer (MiB)
@@ -211,6 +213,8 @@ GPU memory the live preview model needs with `live_preview_gpu = true`. The prev
 ```toml
 live_preview_gpu_vram_mib = 3500
 ```
+
+**CLI:** `--live-preview-gpu-vram-mib 3500`. **Environment:** `VOXTYPE_LIVE_PREVIEW_GPU_VRAM_MIB=3500`.
 
 ## live_preview_cpu_model
 
@@ -225,6 +229,8 @@ live_preview_model = "parakeet-unified-en-0.6b"
 live_preview_gpu = true
 live_preview_cpu_model = "parakeet-unified-en-0.6b-int8"
 ```
+
+**CLI:** `--live-preview-cpu-model parakeet-unified-en-0.6b-int8`. **Environment:** `VOXTYPE_LIVE_PREVIEW_CPU_MODEL=parakeet-unified-en-0.6b-int8`.
 
 ## live_preview_keep_engine
 

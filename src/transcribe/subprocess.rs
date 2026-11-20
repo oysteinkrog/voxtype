@@ -79,6 +79,10 @@ pub struct SubprocessTranscriber {
     /// Live preview model (`live_preview_model`). When set, the transcriber
     /// streams: see the [`StreamingTranscriber`] impl.
     live_model: Option<String>,
+    /// The live preview's GPU settings as environment variables
+    /// ([`live_worker_env`]), so CLI flags given to the daemon reach the
+    /// live worker, which reads the config file again.
+    live_env: Vec<(&'static str, String)>,
     /// Live worker started ahead of the next recording, and how long it may
     /// wait for one (`live_preview_warm_secs`, 0 = off).
     warm: WarmSlot,
@@ -108,6 +112,7 @@ impl SubprocessTranscriber {
             config_path,
             engine_args: None,
             live_model: None,
+            live_env: Vec::new(),
             warm: WarmSlot::default(),
             warm_secs: 0,
             keep_policy: None,
@@ -131,6 +136,7 @@ impl SubprocessTranscriber {
                 .live_preview_active()
                 .then(|| config.live_preview_model.clone())
                 .flatten(),
+            live_env: live_worker_env(config),
             warm: WarmSlot::default(),
             warm_secs: config.live_preview_warm_secs,
             keep_policy: KeepPolicy::from_config(config),
@@ -147,6 +153,7 @@ impl SubprocessTranscriber {
             self.config_path.as_deref(),
             self.engine_args.as_ref(),
             self.live_model.as_deref(),
+            &self.live_env,
         )
     }
 
@@ -288,12 +295,33 @@ pub fn self_command() -> std::io::Result<Command> {
     Ok(Command::new(exe?))
 }
 
+/// The live preview's GPU settings (`live_preview_gpu`,
+/// `live_preview_gpu_vram_mib`, `live_preview_cpu_model`) as the environment
+/// variables the worker's config loader reads.
+pub fn live_worker_env(config: &crate::config::Config) -> Vec<(&'static str, String)> {
+    let mut env = vec![
+        (
+            "VOXTYPE_LIVE_PREVIEW_GPU",
+            config.live_preview_gpu.to_string(),
+        ),
+        (
+            "VOXTYPE_LIVE_PREVIEW_GPU_VRAM_MIB",
+            config.live_preview_gpu_vram_mib.to_string(),
+        ),
+    ];
+    if let Some(m) = &config.live_preview_cpu_model {
+        env.push(("VOXTYPE_LIVE_PREVIEW_CPU_MODEL", m.clone()));
+    }
+    env
+}
+
 /// The command that starts a `transcribe-worker`.
 fn worker_command(
     config: &WhisperConfig,
     config_path: Option<&std::path::Path>,
     engine_args: Option<&(String, String)>,
     live_model: Option<&str>,
+    live_env: &[(&'static str, String)],
 ) -> Result<Command, TranscribeError> {
     let mut cmd = self_command().map_err(|e| {
         TranscribeError::InitFailed(format!("Cannot find voxtype executable: {}", e))
@@ -319,6 +347,7 @@ fn worker_command(
             .stderr(Stdio::inherit());
         if let Some(live) = live_model {
             cmd.arg("--live-model").arg(live);
+            cmd.envs(live_env.iter().map(|(k, v)| (*k, v.as_str())));
         }
         return Ok(cmd);
     }
@@ -463,6 +492,7 @@ impl Transcriber for SubprocessTranscriber {
             let config_path = self.config_path.clone();
             let engine_args = self.engine_args.clone();
             let live_model = self.live_model.clone();
+            let live_env = self.live_env.clone();
             self.warm.start_keeper(
                 move || {
                     worker_command(
@@ -470,6 +500,7 @@ impl Transcriber for SubprocessTranscriber {
                         config_path.as_deref(),
                         engine_args.as_ref(),
                         live_model.as_deref(),
+                        &live_env,
                     )
                 },
                 policy.clone(),
