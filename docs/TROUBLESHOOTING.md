@@ -881,6 +881,18 @@ Some applications (terminals, games) may block simulated input.
 mode = "clipboard"
 ```
 
+### The dictation was lost (paste did not land)
+
+The output driver can report success while no text field received the text, for example when no field had focus or the window ignored the paste. With `restore_clipboard = true` the clipboard then holds your old content again.
+
+**Solution:** Copy the last dictation back to the clipboard and paste it yourself:
+
+```bash
+voxtype history copy
+```
+
+This works whether or not the delivery succeeded, until the next dictation replaces it. Bind it to a key (see [`voxtype history`](USER_MANUAL.md#voxtype-history)).
+
 ### First CJK character dropped (wtype)
 
 **Symptom:** When using wtype, the first Chinese, Japanese, or Korean character is missing from the output. This happens in some apps like Discord.

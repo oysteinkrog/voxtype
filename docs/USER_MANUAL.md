@@ -404,6 +404,29 @@ For persistent file output without the CLI flag, use `mode = "file"` with `file_
 
 This command is designed for use with compositor keybindings (Hyprland, Sway) instead of the built-in hotkey detection. See [Compositor Keybindings](#compositor-keybindings) for setup instructions.
 
+### `voxtype history`
+
+Get the last dictation back when its text did not land: the paste went to the wrong window, no text field had focus, or `restore_clipboard` put your old clipboard back.
+
+```bash
+voxtype history                  # Show the last dictation and how its delivery went
+voxtype history copy             # Copy the last dictation to the clipboard
+voxtype history copy --json      # The same, with a JSON result
+```
+
+Voxtype keeps the last dictation's final text in `$XDG_RUNTIME_DIR/voxtype/last-dictation.json`, readable by you alone, whether or not it was delivered. It stays until the next dictation replaces it and is gone at logout. Nothing is written to your home folder.
+
+Bind `voxtype history copy` to a key so the text is one key press away:
+
+```bash
+# Hyprland
+bind = SUPER SHIFT, V, exec, voxtype history copy
+# Sway
+bindsym $mod+Shift+v exec voxtype history copy
+```
+
+On KDE Plasma, add it under System Settings > Keyboard > Shortcuts > Add New > Command or Script.
+
 ### `voxtype meeting`
 
 Continuous meeting transcription with chunked processing and speaker diarization. See [Meeting Mode](#meeting-mode) for full details.

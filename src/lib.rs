@@ -81,6 +81,7 @@ pub mod error;
 pub mod hotkey;
 #[cfg(target_os = "macos")]
 pub mod hotkey_macos;
+pub mod last_dictation;
 pub mod meeting;
 #[cfg(target_os = "macos")]
 pub mod menubar;
@@ -100,8 +101,8 @@ pub mod tui;
 pub mod vad;
 
 pub use cli::{
-    Cli, Commands, CompositorType, ConfigAction, GlossaryAction, InfoAction, MeetingAction,
-    OutputModeOverride, RecordAction, SetupAction,
+    Cli, Commands, CompositorType, ConfigAction, GlossaryAction, HistoryAction, InfoAction,
+    MeetingAction, OutputModeOverride, RecordAction, SetupAction,
 };
 pub use config::Config;
 pub use daemon::Daemon;

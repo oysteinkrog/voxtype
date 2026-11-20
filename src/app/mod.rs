@@ -22,6 +22,7 @@ mod config_set;
 mod config_show;
 mod dispatch;
 mod glossary;
+mod history;
 mod info;
 #[cfg(target_os = "macos")]
 mod macos;

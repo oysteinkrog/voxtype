@@ -2695,6 +2695,13 @@ impl Daemon {
         if d.result.is_ok() {
             self.edit_learn(edited);
         }
+        if let Err(e) = &d.result {
+            // Nothing took the edited text: keep it for `voxtype history copy`.
+            crate::last_dictation::write(&crate::last_dictation::LastDictation::now(
+                edited,
+                Err(e.to_string()),
+            ));
+        }
         if !d.paste.confirmed() && d.result.is_ok() {
             self.report_not_pasted(edited, d.paste, started).await;
         } else if d.result.is_ok() {
@@ -4861,6 +4868,11 @@ impl Daemon {
                         output::output_via(&output_chain, &final_text, output_options).await;
                     if let Err(e) = &delivered {
                         tracing::error!("Output failed: {}", e);
+                        // Nothing took the text: keep it for `voxtype history copy`.
+                        crate::last_dictation::write(&crate::last_dictation::LastDictation::now(
+                            &final_text,
+                            Err(e.to_string()),
+                        ));
                     } else if let Ok(method) = delivered {
                         // Before the outcome, so a popup that sees "done" finds it.
                         crate::osd::outcome::write_delivery(&crate::osd::outcome::Delivery {

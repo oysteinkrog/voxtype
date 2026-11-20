@@ -2652,6 +2652,8 @@ restore_clipboard = true  # Preserve original clipboard content
 
 **Note:** This only works in `mode = "paste"`. In `mode = "clipboard"`, the user manually pastes the content, so restoration would interfere with the intended workflow.
 
+If the paste did not land (no text field had focus, or the target window ignored the keystroke), the restored clipboard no longer holds the dictation. Run `voxtype history copy` to put the last dictation back on the clipboard. See [`voxtype history`](USER_MANUAL.md#voxtype-history).
+
 ### restore_clipboard_delay_ms
 
 **Type:** Integer

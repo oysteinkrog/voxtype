@@ -12,6 +12,7 @@ use super::config_schema::run_config_schema;
 use super::config_set::{run_config_set, run_config_unset, run_setup_osd};
 use super::config_show::show_config;
 use super::glossary::run_glossary_command;
+use super::history::run_history_command;
 use super::info::run_info_command;
 use super::meeting::run_meeting_command;
 use super::record::send_record_command;
@@ -474,6 +475,10 @@ pub(crate) async fn dispatch(
 
         Commands::Meeting { action } => {
             run_meeting_command(&config, action).await?;
+        }
+
+        Commands::History { action, json } => {
+            run_history_command(action, json).await?;
         }
 
         Commands::CheckUpdate => {

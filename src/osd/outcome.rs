@@ -122,15 +122,17 @@ pub fn result_path() -> PathBuf {
     crate::config::Config::runtime_dir().join("result.json")
 }
 
+/// Written readable by the user alone (0600): it holds the dictated text.
 pub fn write_delivery(delivery: &Delivery) {
-    let path = result_path();
-    let tmp = path.with_extension("json.tmp");
     let Ok(json) = serde_json::to_string(delivery) else {
         return;
     };
-    if std::fs::write(&tmp, json).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    let _ = crate::last_dictation::write_private(&result_path(), json.as_bytes());
+    // The next recording removes result.json; `voxtype history copy` needs the text longer.
+    crate::last_dictation::write(&crate::last_dictation::LastDictation::now(
+        &delivery.text,
+        Ok(&delivery.method),
+    ));
 }
 
 /// `not-pasted` in the runtime folder.

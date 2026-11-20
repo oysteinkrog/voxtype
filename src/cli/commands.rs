@@ -3,7 +3,10 @@
 use clap::builder::PossibleValuesParser;
 use clap::Subcommand;
 
-use super::{ConfigAction, GlossaryAction, InfoAction, MeetingAction, RecordAction, SetupAction};
+use super::{
+    ConfigAction, GlossaryAction, HistoryAction, InfoAction, MeetingAction, RecordAction,
+    SetupAction,
+};
 
 #[derive(Subcommand)]
 pub enum Commands {
@@ -182,4 +185,15 @@ pub enum Commands {
 
     /// Check for updates
     CheckUpdate,
+
+    /// Get the last dictation back: show it or copy it to the clipboard
+    #[command(after_help = super::HISTORY_AFTER_HELP)]
+    History {
+        #[command(subcommand)]
+        action: Option<HistoryAction>,
+
+        /// Machine-readable output (accepted by every subcommand)
+        #[arg(long, global = true)]
+        json: bool,
+    },
 }
