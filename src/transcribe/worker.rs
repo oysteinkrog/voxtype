@@ -738,16 +738,27 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
     // With live_preview_gpu, a preview that stays on the CPU (no room on the
     // GPU, or its load failed there) uses live_preview_cpu_model when set:
     // the GPU model may be one the CPU runs too slowly.
-    let cpu_model = cpu_preview_model(config, live_model);
-    let loaded = match live_gpu_config(config) {
-        Some(gpu) => load(live_model, gpu).or_else(|e| {
-            eprintln!(
-                "[worker] Live preview model failed to load on the GPU ({}); using {} on the CPU",
-                e, cpu_model
-            );
-            load(cpu_model, live_execution_config())
-        }),
-        None => {
+    let loaded = match preview_load(
+        config,
+        live_model,
+        free_vram_mib,
+        super::parakeet::live_gpu_execution_config,
+    ) {
+        PreviewLoad::Gpu(model, gpu) => {
+            eprintln!("[worker] Live preview model on the GPU (CUDA)");
+            load(model, gpu).or_else(|e| {
+                let cpu_model = cpu_preview_model(config, live_model);
+                eprintln!(
+                    "[worker] Live preview model failed to load on the GPU ({}); using {} on the CPU",
+                    e, cpu_model
+                );
+                load(cpu_model, live_execution_config())
+            })
+        }
+        PreviewLoad::Cpu(cpu_model, why) => {
+            if let Some(why) = why {
+                eprintln!("[worker] Live preview on the CPU: {}", why);
+            }
             if cpu_model != live_model {
                 eprintln!(
                     "[worker] Live preview on the CPU uses {} (live_preview_cpu_model)",
@@ -1662,32 +1673,47 @@ impl PauseCommit {
     }
 }
 
-/// The CUDA settings for the live model when `live_preview_gpu` is on, the
-/// build has CUDA, and the GPU has room for it ([`preview_gpu_room`]).
-/// `None` keeps the model on the CPU, with one line in the log saying why
-/// when the key is on.
+/// Where the live preview model loads first, and which model.
 #[cfg(feature = "parakeet")]
-fn live_gpu_config(config: &crate::config::Config) -> Option<parakeet_rs::ExecutionConfig> {
+#[derive(Debug, PartialEq)]
+enum PreviewLoad<'a, G> {
+    /// `live_preview_gpu` is on, the GPU has room and the build has CUDA:
+    /// the live model with these GPU settings.
+    Gpu(&'a str, G),
+    /// On the CPU: this model, and why it is not on the GPU when
+    /// `live_preview_gpu` is on.
+    Cpu(&'a str, Option<String>),
+}
+
+/// Decides [`PreviewLoad`]. `free` gives the free GPU memory and `gpu` the
+/// CUDA settings (`None`: no CUDA); each is asked only when needed. The GPU
+/// needs room for the preview on top of the engine's ([`preview_gpu_room`]);
+/// on the CPU the model is [`cpu_preview_model`].
+#[cfg(feature = "parakeet")]
+fn preview_load<'a, G>(
+    config: &'a crate::config::Config,
+    live_model: &'a str,
+    free: impl FnOnce() -> Option<u64>,
+    gpu: impl FnOnce() -> Option<G>,
+) -> PreviewLoad<'a, G> {
+    let cpu_model = cpu_preview_model(config, live_model);
     if !config.live_preview_gpu {
-        return None;
+        return PreviewLoad::Cpu(cpu_model, None);
     }
     if let Err(why) = preview_gpu_room(
-        free_vram_mib(),
+        free(),
         config.live_preview_min_free_vram_mib,
         config.live_preview_gpu_vram_mib,
     ) {
-        eprintln!("[worker] Live preview on the CPU: {}", why);
-        return None;
+        return PreviewLoad::Cpu(cpu_model, Some(why));
     }
-    let gpu = super::parakeet::live_gpu_execution_config();
-    match &gpu {
-        Some(_) => eprintln!("[worker] Live preview model on the GPU (CUDA)"),
-        None => eprintln!(
-            "[worker] Live preview on the CPU: this build has no CUDA, or the CUDA \
-             runtime did not load"
+    match gpu() {
+        Some(g) => PreviewLoad::Gpu(live_model, g),
+        None => PreviewLoad::Cpu(
+            cpu_model,
+            Some("this build has no CUDA, or the CUDA runtime did not load".into()),
         ),
     }
-    gpu
 }
 
 /// The preview model to load when it runs on the CPU: with `live_preview_gpu`,
@@ -2304,6 +2330,50 @@ mod tests {
         assert_eq!(cpu_preview_model(&c, "fp32"), "int8");
         c.live_preview_cpu_model = Some(" ".into());
         assert_eq!(cpu_preview_model(&c, "fp32"), "fp32");
+    }
+
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn a_preview_without_gpu_room_loads_the_cpu_model() {
+        let mut c = crate::config::Config::default();
+        c.live_preview_gpu = true;
+        c.live_preview_min_free_vram_mib = 2662;
+        c.live_preview_gpu_vram_mib = 3500;
+        c.live_preview_cpu_model = Some("int8".into());
+        let cuda = || Some(());
+        // Room on the GPU: the live model goes there.
+        assert_eq!(
+            preview_load(&c, "fp32", || Some(12_000), cuda),
+            PreviewLoad::Gpu("fp32", ())
+        );
+        // Too little free GPU memory: the CPU model, with the reason.
+        match preview_load(&c, "fp32", || Some(5000), cuda) {
+            PreviewLoad::Cpu("int8", Some(why)) => assert!(why.contains("6162 needed"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        // No CUDA: the CPU model too.
+        assert!(matches!(
+            preview_load(&c, "fp32", || Some(12_000), || None::<()>),
+            PreviewLoad::Cpu("int8", Some(_))
+        ));
+        // live_preview_cpu_model unset: the CPU load uses the live model.
+        c.live_preview_cpu_model = None;
+        assert!(matches!(
+            preview_load(&c, "fp32", || Some(5000), cuda),
+            PreviewLoad::Cpu("fp32", Some(_))
+        ));
+        // live_preview_gpu off: today's CPU load, no GPU checks at all.
+        c.live_preview_gpu = false;
+        c.live_preview_cpu_model = Some("int8".into());
+        assert_eq!(
+            preview_load(
+                &c,
+                "fp32",
+                || panic!("free asked"),
+                || -> Option<()> { panic!("gpu asked") }
+            ),
+            PreviewLoad::Cpu("fp32", None)
+        );
     }
 
     #[cfg(feature = "parakeet")]
