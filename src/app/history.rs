@@ -158,7 +158,7 @@ async fn run(
 /// the runtime folder.
 #[derive(Debug)]
 pub(crate) enum Picked {
-    Entry(HistoryEntry),
+    Entry(Box<HistoryEntry>),
     Last(LastDictation),
 }
 
@@ -180,20 +180,20 @@ pub(crate) fn pick(
     if is_last(id) {
         if history.recording() {
             if let Some(entry) = store.recent(1)?.into_iter().next() {
-                return Ok(Picked::Entry(entry));
+                return Ok(Picked::Entry(Box::new(entry)));
             }
         }
         if let Some(last) = kept {
             return Ok(Picked::Last(last));
         }
         if let Some(entry) = store.recent(1)?.into_iter().next() {
-            return Ok(Picked::Entry(entry));
+            return Ok(Picked::Entry(Box::new(entry)));
         }
         bail!("{NOTHING_KEPT}");
     }
     let id = id.unwrap_or("last");
     match find(store, id) {
-        Ok(entry) => Ok(Picked::Entry(entry)),
+        Ok(entry) => Ok(Picked::Entry(Box::new(entry))),
         Err(_) if !history.enabled => bail!(
             "Only the last dictation is kept while history is off, so `{id}` cannot be \
              found. Use `voxtype history copy`, or turn history on with `voxtype history \
