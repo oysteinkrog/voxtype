@@ -212,6 +212,20 @@ GPU memory the live preview model needs with `live_preview_gpu = true`. The prev
 live_preview_gpu_vram_mib = 3500
 ```
 
+## live_preview_cpu_model
+
+**Type:** String (model name)
+**Default:** unset (`live_preview_model`)
+**Required:** No
+
+With `live_preview_gpu = true`, the preview model to load when the preview stays on the CPU: the GPU has too little free memory, or the GPU load failed. Set it to the int8 copy when the GPU runs the fp32 model. On a busy CPU the fp32 model falls far behind: at load 43 on a 32-thread CPU it lagged 11 s behind the speech. The int8 copy kept a median lag under 1 s on the same machine at load 18.
+
+```toml
+live_preview_model = "parakeet-unified-en-0.6b"
+live_preview_gpu = true
+live_preview_cpu_model = "parakeet-unified-en-0.6b-int8"
+```
+
 ## live_preview_keep_engine
 
 **Type:** Boolean

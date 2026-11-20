@@ -716,38 +716,49 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             UnifiedStreamingConfig::default()
         }
     };
-    let model_path = super::parakeet::resolve_model_path(live_model).map_err(|e| e.to_string());
-    // The sound strip runs an encoder with one more output and a probe on
-    // it; without it the worker loads the plain encoder as before.
-    let probe = model_path
-        .as_ref()
-        .ok()
-        .and_then(|path| sound_probe(config, path));
-    let load = |exec: parakeet_rs::ExecutionConfig| {
-        model_path.clone().and_then(|path| {
-            match &probe {
-                Some(p) => ParakeetUnifiedHandle::load_with_layer(
-                    &path,
-                    Some((
-                        &path.join(super::sound_probe::ENCODER_FILE),
-                        p.output.as_str(),
-                    )),
-                    Some(exec),
-                ),
-                None => ParakeetUnifiedHandle::load(&path, Some(exec)),
-            }
-            .map_err(|e| e.to_string())
-        })
+    let load = |name: &str, exec: parakeet_rs::ExecutionConfig| {
+        let path = super::parakeet::resolve_model_path(name).map_err(|e| e.to_string())?;
+        // The sound strip runs an encoder with one more output and a probe
+        // on it; without it the worker loads the plain encoder as before.
+        match sound_probe(config, &path) {
+            Some(p) => ParakeetUnifiedHandle::load_with_layer(
+                &path,
+                Some((
+                    &path.join(super::sound_probe::ENCODER_FILE),
+                    p.output.as_str(),
+                )),
+                Some(exec),
+            ),
+            None => ParakeetUnifiedHandle::load(&path, Some(exec)),
+        }
+        .map(|handle| (handle, path))
+        .map_err(|e| e.to_string())
     };
-    let handle = match live_gpu_config(config) {
-        Some(gpu) => load(gpu).or_else(|e| {
+    // With live_preview_gpu, a preview that stays on the CPU (no room on the
+    // GPU, or its load failed there) uses live_preview_cpu_model when set:
+    // the GPU model may be one the CPU runs too slowly.
+    let cpu_model = cpu_preview_model(config, live_model);
+    let loaded = match live_gpu_config(config) {
+        Some(gpu) => load(live_model, gpu).or_else(|e| {
             eprintln!(
-                "[worker] Live preview model failed to load on the GPU ({}); using the CPU",
-                e
+                "[worker] Live preview model failed to load on the GPU ({}); using {} on the CPU",
+                e, cpu_model
             );
-            load(live_execution_config())
+            load(cpu_model, live_execution_config())
         }),
-        None => load(live_execution_config()),
+        None => {
+            if cpu_model != live_model {
+                eprintln!(
+                    "[worker] Live preview on the CPU uses {} (live_preview_cpu_model)",
+                    cpu_model
+                );
+            }
+            load(cpu_model, live_execution_config())
+        }
+    };
+    let (handle, model_path) = match loaded {
+        Ok((handle, path)) => (Ok(handle), Ok(path)),
+        Err(e) => (Err(e.clone()), Err(e)),
     };
     // The model signals (word details, frame levels, the lookahead tail)
     // are for the OSD: without it the worker sends none, and skips the
@@ -1678,6 +1689,19 @@ fn live_gpu_config(config: &crate::config::Config) -> Option<parakeet_rs::Execut
     gpu
 }
 
+/// The preview model to load when it runs on the CPU: with `live_preview_gpu`,
+/// `live_preview_cpu_model` if set (for example the int8 copy of the fp32
+/// model the GPU runs), else `live_model`.
+#[cfg(feature = "parakeet")]
+fn cpu_preview_model<'a>(config: &'a crate::config::Config, live_model: &'a str) -> &'a str {
+    config
+        .live_preview_cpu_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| config.live_preview_gpu && !m.is_empty())
+        .unwrap_or(live_model)
+}
+
 /// Whether the preview model may go on the GPU: `free` MiB (from nvidia-smi;
 /// `None` when it cannot tell) must hold the preview (`preview_mib`) and still
 /// leave the engine model's `min_free` MiB, so a GPU preview never pushes the
@@ -2265,6 +2289,20 @@ mod tests {
         let json = serde_json::to_string(&success).unwrap();
         assert!(json.contains(r#""ok":true"#));
         assert!(json.contains(r#""language":"ru""#));
+    }
+
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn the_cpu_preview_model_is_used_only_with_the_gpu_preview_on() {
+        let mut c = crate::config::Config::default();
+        assert_eq!(cpu_preview_model(&c, "fp32"), "fp32");
+        c.live_preview_cpu_model = Some("int8".into());
+        // Without live_preview_gpu the key changes nothing.
+        assert_eq!(cpu_preview_model(&c, "fp32"), "fp32");
+        c.live_preview_gpu = true;
+        assert_eq!(cpu_preview_model(&c, "fp32"), "int8");
+        c.live_preview_cpu_model = Some(" ".into());
+        assert_eq!(cpu_preview_model(&c, "fp32"), "fp32");
     }
 
     #[cfg(feature = "parakeet")]

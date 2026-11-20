@@ -141,6 +141,13 @@ pub struct Config {
     #[serde(default = "default_live_preview_gpu_vram_mib")]
     pub live_preview_gpu_vram_mib: u64,
 
+    /// With `live_preview_gpu`, the preview model to load when the preview
+    /// stays on the CPU (too little GPU memory free, or the GPU load
+    /// failed), e.g. the int8 copy of the fp32 model the GPU runs. Unset:
+    /// `live_preview_model` on the CPU too.
+    #[serde(default)]
+    pub live_preview_cpu_model: Option<String>,
+
     /// Keep the engine model (e.g. Cohere) loaded in the warm live worker
     /// between recordings, and load it as soon as the worker starts. The
     /// final text then never waits for a model load, at the cost of the
@@ -257,6 +264,7 @@ impl Default for Config {
             live_preview_min_free_vram_mib: 0,
             live_preview_gpu: false,
             live_preview_gpu_vram_mib: default_live_preview_gpu_vram_mib(),
+            live_preview_cpu_model: None,
             live_preview_keep_engine: false,
             parakeet: None,
             moonshine: None,
