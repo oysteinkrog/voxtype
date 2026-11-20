@@ -133,6 +133,14 @@ pub struct Config {
     #[serde(default)]
     pub live_preview_gpu: bool,
 
+    /// GPU memory the live preview model needs there (MiB). With
+    /// `live_preview_gpu`, the preview goes on the GPU only when the GPU has
+    /// this much free on top of `live_preview_min_free_vram_mib`, so the
+    /// engine model keeps its room. The default fits the fp32
+    /// parakeet-unified-en-0.6b (about 3.4 GB measured).
+    #[serde(default = "default_live_preview_gpu_vram_mib")]
+    pub live_preview_gpu_vram_mib: u64,
+
     /// Keep the engine model (e.g. Cohere) loaded in the warm live worker
     /// between recordings, and load it as soon as the worker starts. The
     /// final text then never waits for a model load, at the cost of the
@@ -248,6 +256,7 @@ impl Default for Config {
             live_preview_final: default_live_preview_final(),
             live_preview_min_free_vram_mib: 0,
             live_preview_gpu: false,
+            live_preview_gpu_vram_mib: default_live_preview_gpu_vram_mib(),
             live_preview_keep_engine: false,
             parakeet: None,
             moonshine: None,
@@ -692,6 +701,10 @@ fn default_warm_presence_keep() -> Vec<String> {
 
 fn default_warm_presence_grace_secs() -> u64 {
     600
+}
+
+fn default_live_preview_gpu_vram_mib() -> u64 {
+    3500
 }
 
 fn default_live_preview_final() -> String {

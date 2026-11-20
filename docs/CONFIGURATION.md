@@ -189,12 +189,27 @@ live_preview_min_free_vram_mib = 4096
 **Default:** `false`
 **Required:** No
 
-Run the live preview model on the GPU (the CUDA execution provider) instead of the CPU. Use it when the preview falls behind your speech on a busy CPU. It needs a voxtype build with CUDA (`parakeet-cuda`). The worker checks `live_preview_min_free_vram_mib` first: with less free GPU memory, or without CUDA, the preview stays on the CPU and the log says why. If the GPU load fails, the worker loads the model on the CPU.
+Run the live preview model on the GPU (the CUDA execution provider) instead of the CPU. Use it when the preview falls behind your speech on a busy CPU. It needs a voxtype build with CUDA (`parakeet-cuda`). The preview goes on the GPU only when the GPU has `live_preview_gpu_vram_mib` free on top of `live_preview_min_free_vram_mib`, so the engine model always keeps its room and the final text never falls back to the preview's because of it. With less free GPU memory, or without CUDA, the preview stays on the CPU and the log says why. If the GPU load fails, the worker loads the model on the CPU.
 
-On the GPU the preview model holds GPU memory as long as its worker is loaded, also while a warm worker waits (`live_preview_warm_secs`, `live_preview_warm_idle_secs`). The preview loads before the engine model, so the engine's own `live_preview_min_free_vram_mib` check sees that memory as used.
+On the GPU the preview model holds GPU memory as long as its worker is loaded, also while a warm worker waits (`live_preview_warm_secs`, `live_preview_warm_idle_secs`).
+
+Use the fp32 model (`parakeet-unified-en-0.6b`) on the GPU, not the int8 copy: ONNX Runtime keeps the int8 model's quantized matrix multiplies on the CPU, so it saves little CPU there. Measured on a 60 s clip (RTX 3060 Ti, home desktop at load about 10): the fp32 model on the GPU used 20 CPU-seconds and about 3.4 GB of GPU memory, against 63 to 79 CPU-seconds for the int8 model on the CPU, with the same words.
 
 ```toml
+live_preview_model = "parakeet-unified-en-0.6b"
 live_preview_gpu = true
+```
+
+## live_preview_gpu_vram_mib
+
+**Type:** Integer (MiB)
+**Default:** `3500`
+**Required:** No
+
+GPU memory the live preview model needs with `live_preview_gpu = true`. The preview goes on the GPU only when this much is free on top of `live_preview_min_free_vram_mib`. The default fits the fp32 `parakeet-unified-en-0.6b` (about 3.4 GB measured). For the int8 copy, about 900 is enough.
+
+```toml
+live_preview_gpu_vram_mib = 3500
 ```
 
 ## live_preview_keep_engine

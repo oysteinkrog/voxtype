@@ -1651,21 +1651,20 @@ impl PauseCommit {
 }
 
 /// The CUDA settings for the live model when `live_preview_gpu` is on, the
-/// build has CUDA, and the GPU has `live_preview_min_free_vram_mib` free
-/// (when nvidia-smi can tell). `None` keeps the model on the CPU, with one
-/// line in the log saying why when the key is on.
+/// build has CUDA, and the GPU has room for it ([`preview_gpu_room`]).
+/// `None` keeps the model on the CPU, with one line in the log saying why
+/// when the key is on.
 #[cfg(feature = "parakeet")]
 fn live_gpu_config(config: &crate::config::Config) -> Option<parakeet_rs::ExecutionConfig> {
     if !config.live_preview_gpu {
         return None;
     }
-    let min_free = config.live_preview_min_free_vram_mib;
-    if let Some(free) = free_vram_mib().filter(|&f| f < min_free) {
-        eprintln!(
-            "[worker] Live preview on the CPU: {} MiB of GPU memory free, {} needed \
-             (live_preview_min_free_vram_mib)",
-            free, min_free
-        );
+    if let Err(why) = preview_gpu_room(
+        free_vram_mib(),
+        config.live_preview_min_free_vram_mib,
+        config.live_preview_gpu_vram_mib,
+    ) {
+        eprintln!("[worker] Live preview on the CPU: {}", why);
         return None;
     }
     let gpu = super::parakeet::live_gpu_execution_config();
@@ -1677,6 +1676,23 @@ fn live_gpu_config(config: &crate::config::Config) -> Option<parakeet_rs::Execut
         ),
     }
     gpu
+}
+
+/// Whether the preview model may go on the GPU: `free` MiB (from nvidia-smi;
+/// `None` when it cannot tell) must hold the preview (`preview_mib`) and still
+/// leave the engine model's `min_free` MiB, so a GPU preview never pushes the
+/// engine off the GPU and the final text never falls back to the preview's.
+#[cfg(feature = "parakeet")]
+fn preview_gpu_room(free: Option<u64>, min_free: u64, preview_mib: u64) -> Result<(), String> {
+    let need = min_free.saturating_add(preview_mib);
+    match free {
+        Some(free) if free < need => Err(format!(
+            "{} MiB of GPU memory free, {} needed (live_preview_gpu_vram_mib {} + \
+             live_preview_min_free_vram_mib {})",
+            free, need, preview_mib, min_free
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The live model's ONNX Runtime settings on the CPU (the default: the GPU
@@ -2249,6 +2265,19 @@ mod tests {
         let json = serde_json::to_string(&success).unwrap();
         assert!(json.contains(r#""ok":true"#));
         assert!(json.contains(r#""language":"ru""#));
+    }
+
+    #[cfg(feature = "parakeet")]
+    #[test]
+    fn a_gpu_preview_leaves_the_engine_its_room() {
+        // 12 GB free: room for a 3500 MiB preview and the engine's 2662.
+        assert_eq!(preview_gpu_room(Some(12_000), 2662, 3500), Ok(()));
+        // 5 GB free would fit the preview but leave the engine 1.5 GB.
+        let why = preview_gpu_room(Some(5000), 2662, 3500).unwrap_err();
+        assert!(why.contains("6162 needed"), "{why}");
+        // Exactly enough is enough; unknown free memory never blocks.
+        assert_eq!(preview_gpu_room(Some(6162), 2662, 3500), Ok(()));
+        assert_eq!(preview_gpu_room(None, 2662, 3500), Ok(()));
     }
 
     #[cfg(feature = "parakeet")]
