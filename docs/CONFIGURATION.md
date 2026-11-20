@@ -4021,6 +4021,100 @@ Timeout for summarization requests.
 
 ---
 
+## [history]
+
+Dictation history: a record of every dictation, delivered or not, so `voxtype history` can list them and `voxtype history copy` can put any of them back on the clipboard. See [`voxtype history`](USER_MANUAL.md#voxtype-history).
+
+History is off by default. When it is on, each dictation is one JSON line in `~/.local/share/voxtype/history/YYYY-MM-DD.jsonl` (one file per local day, `$XDG_DATA_HOME` moves it). The folder is readable by you alone (0700) and so is each file (0600). Day files older than a week are gzipped, so `zgrep` still reads them. The file format is the same as upstream voxtype 1.3's history, so the files move between the two.
+
+The daemon reads `[history]` again when the config file changes, so `voxtype history pause`, `enable` and the other commands that write it take effect on the next dictation, without a restart. A daemon flag or environment variable still wins over the file.
+
+With history off, voxtype still keeps the last dictation in `$XDG_RUNTIME_DIR/voxtype/last-dictation.json` for `voxtype history copy`.
+
+### enabled
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Record each dictation to the history folder: its final text, what the engine heard, the engine and model, how it was delivered (the output mode and driver) and whether delivery failed, with the error. A failed delivery keeps its text, so it can still be copied.
+
+**Example:**
+```toml
+[history]
+enabled = true
+```
+
+**CLI override:**
+```bash
+voxtype --history daemon       # on for this run
+voxtype --no-history daemon    # off for this run
+```
+
+**Environment variable:** `VOXTYPE_HISTORY_ENABLED=true`
+
+### paused
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Stop recording without turning history off, for example before dictating something private. Nothing dictated while paused is written. `voxtype history pause` and `voxtype history resume` set this key.
+
+**CLI override:**
+```bash
+voxtype --history-paused daemon
+voxtype --no-history-paused daemon   # record although the file says paused
+```
+
+**Environment variable:** `VOXTYPE_HISTORY_PAUSED=true`
+
+### retention_days
+
+**Type:** Integer (0 - 36500)
+**Default:** `30`
+**Required:** No
+
+Days of history to keep, counting today. Older day files are deleted when the daemon starts, after the first dictation of each day and once a day while it runs. `0` keeps history forever. `voxtype history retention DAYS` sets this key.
+
+**Example:**
+```toml
+[history]
+enabled = true
+retention_days = 7
+```
+
+**CLI override:**
+```bash
+voxtype --history-retention-days 7 daemon
+```
+
+**Environment variable:** `VOXTYPE_HISTORY_RETENTION_DAYS=7`
+
+### max_entries
+
+**Type:** Integer (0 - 1000000)
+**Default:** `200`
+**Required:** No
+
+The most dictations to keep. After each dictation, the oldest ones beyond this many are deleted: whole older days first, then the oldest entries of the day where the limit falls. `0` keeps any number (only `retention_days` applies). Both limits apply, so with the defaults history holds at most 200 dictations from the last 30 days.
+
+**Example:**
+```toml
+[history]
+enabled = true
+max_entries = 1000
+```
+
+**CLI override:**
+```bash
+voxtype --history-max-entries 1000 daemon
+```
+
+**Environment variable:** `VOXTYPE_HISTORY_MAX_ENTRIES=1000`
+
+---
+
 ## [status]
 
 Controls status display icons for Waybar and other tray integrations.
@@ -4202,6 +4296,10 @@ Most configuration options can be overridden via command line:
 | output.mode = "clipboard" | `--clipboard` |
 | output.mode = "paste" | `--paste` |
 | status.icon_theme | `--icon-theme` (status subcommand) |
+| history.enabled | `--history`, `--no-history` |
+| history.paused | `--history-paused`, `--no-history-paused` |
+| history.retention_days | `--history-retention-days` |
+| history.max_entries | `--history-max-entries` |
 | Verbosity | `-v`, `-vv`, `-q` |
 
 **Example:**
@@ -4306,6 +4404,15 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_SPOKEN_PUNCTUATION` | bool | `text.spoken_punctuation` |
 | `VOXTYPE_SMART_AUTO_SUBMIT` | bool | `text.smart_auto_submit` |
 | `VOXTYPE_FILTER_FILLERS` | bool | `text.filter_filler_words` |
+
+**History:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_HISTORY_ENABLED` | bool | `history.enabled` |
+| `VOXTYPE_HISTORY_PAUSED` | bool | `history.paused` |
+| `VOXTYPE_HISTORY_RETENTION_DAYS` | integer | `history.retention_days` |
+| `VOXTYPE_HISTORY_MAX_ENTRIES` | integer | `history.max_entries` |
 
 Boolean values: `true`, `1` to enable; `false`, `0` to disable.
 

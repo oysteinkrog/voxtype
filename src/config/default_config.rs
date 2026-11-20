@@ -400,6 +400,18 @@ layout = "compact"
 # transcribing = "⏳"
 # stopped = ""
 
+# [history]
+# Dictation history: every dictation, delivered or not, as one JSON line in
+# ~/.local/share/voxtype/history/YYYY-MM-DD.jsonl (readable by you alone).
+# List it with `voxtype history`, copy one with `voxtype history copy`.
+# Off by default.
+# enabled = false
+# paused = false
+# Days to keep; 0 keeps history forever.
+# retention_days = 30
+# Most dictations to keep; 0 keeps any number.
+# max_entries = 200
+
 # [profiles]
 # Named profiles for context-specific post-processing
 # Use with: voxtype record start --profile slack

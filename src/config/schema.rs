@@ -42,6 +42,7 @@ pub const SECTIONS: &[&str] = &[
     "Text",
     "VAD",
     "Meeting",
+    "History",
     "Notifications",
     "OSD",
     "Status",
@@ -1362,6 +1363,49 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Speaker diarization",
         "Split the transcript by speaker.",
     ),
+    // -- History ------------------------------------------------------------
+    // The daemon re-reads [history] when the file changes, so none of these
+    // needs a restart.
+    spec(
+        "history.enabled",
+        "history",
+        "enabled",
+        KeyType::Bool,
+        "History",
+        "Dictation history",
+        "Keep a record of every dictation, delivered or not, in ~/.local/share/voxtype/history/. List it with `voxtype history`.",
+    )
+    .live(),
+    spec(
+        "history.paused",
+        "history",
+        "paused",
+        KeyType::Bool,
+        "History",
+        "Pause history",
+        "Stop recording dictations until resumed. Nothing dictated while paused is written.",
+    )
+    .live(),
+    spec(
+        "history.retention_days",
+        "history",
+        "retention_days",
+        KeyType::Int { min: 0, max: 36500 },
+        "History",
+        "Keep history for (days)",
+        "Days of history to keep; older days are deleted. 0 keeps history forever.",
+    )
+    .live(),
+    spec(
+        "history.max_entries",
+        "history",
+        "max_entries",
+        KeyType::Int { min: 0, max: 1_000_000 },
+        "History",
+        "Most dictations kept",
+        "The oldest dictations beyond this many are deleted. 0 keeps any number.",
+    )
+    .live(),
     // -- Notifications ------------------------------------------------------
     spec(
         "output.notification.on_recording_start",
@@ -3218,6 +3262,11 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "meeting.summary.remote_endpoint" => opt_str(cfg.meeting.summary.remote_endpoint.as_ref()),
         "meeting.summary.remote_api_key" => opt_str(cfg.meeting.summary.remote_api_key.as_ref()),
         "meeting.summary.timeout_secs" => json!(cfg.meeting.summary.timeout_secs),
+
+        "history.enabled" => json!(cfg.history.enabled),
+        "history.paused" => json!(cfg.history.paused),
+        "history.retention_days" => json!(cfg.history.retention_days),
+        "history.max_entries" => json!(cfg.history.max_entries),
 
         _ => return None,
     };

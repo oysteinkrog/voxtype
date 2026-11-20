@@ -673,6 +673,52 @@ pub struct Cli {
     #[arg(long, value_name = "MS", help_heading = "VAD", hide_short_help = true)]
     pub vad_min_speech_ms: Option<u32>,
 
+    // -- History --
+    /// Record dictations to history (~/.local/share/voxtype/history/)
+    #[arg(
+        long,
+        help_heading = "History",
+        long_help = "Record each dictation, delivered or not, to\n\
+        ~/.local/share/voxtype/history/ ([history] enabled). Browse it with\n\
+        `voxtype history`."
+    )]
+    pub history: bool,
+
+    /// Do not record dictations to history for this run
+    #[arg(long, help_heading = "History", conflicts_with = "history")]
+    pub no_history: bool,
+
+    /// Pause history: nothing dictated is written until resumed
+    #[arg(long, help_heading = "History", hide_short_help = true)]
+    pub history_paused: bool,
+
+    /// Record to history again although the config file says paused
+    #[arg(
+        long,
+        help_heading = "History",
+        hide_short_help = true,
+        conflicts_with = "history_paused"
+    )]
+    pub no_history_paused: bool,
+
+    /// Days of history to keep (0 keeps it forever; default 30)
+    #[arg(
+        long,
+        value_name = "DAYS",
+        help_heading = "History",
+        hide_short_help = true
+    )]
+    pub history_retention_days: Option<u32>,
+
+    /// Most dictations to keep in history (0 keeps any number; default 200)
+    #[arg(
+        long,
+        value_name = "N",
+        help_heading = "History",
+        hide_short_help = true
+    )]
+    pub history_max_entries: Option<u32>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -686,6 +732,31 @@ mod tests {
     // =========================================================================
     // Engine flag tests
     // =========================================================================
+
+    #[test]
+    fn history_flags_parse() {
+        let cli = Cli::parse_from([
+            "voxtype",
+            "--history",
+            "--no-history-paused",
+            "--history-retention-days",
+            "0",
+            "--history-max-entries",
+            "50",
+        ]);
+        assert!(cli.history);
+        assert!(!cli.no_history);
+        assert!(cli.no_history_paused);
+        assert_eq!(cli.history_retention_days, Some(0));
+        assert_eq!(cli.history_max_entries, Some(50));
+        let cli = Cli::parse_from(["voxtype", "--no-history", "--history-paused"]);
+        assert!(cli.no_history);
+        assert!(cli.history_paused);
+        assert!(Cli::try_parse_from(["voxtype", "--history", "--no-history"]).is_err());
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(!cli.history && !cli.no_history);
+        assert_eq!(cli.history_max_entries, None);
+    }
 
     #[test]
     fn keyboard_edit_flags() {

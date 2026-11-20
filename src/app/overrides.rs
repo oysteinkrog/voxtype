@@ -401,5 +401,58 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
         config.vad.min_speech_duration_ms = min_speech;
     }
 
+    let history = history_overrides(cli);
+    history.apply(&mut config.history);
+    // The daemon re-reads [history] from disk when it changes; these still
+    // win over the file afterwards.
+    history.set_cli();
+
     top_level_model
+}
+
+/// The `--history*` flags, as overrides of `[history]`.
+fn history_overrides(cli: &Cli) -> config::HistoryOverrides {
+    let pair = |on: bool, off: bool| match (on, off) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    };
+    config::HistoryOverrides {
+        enabled: pair(cli.history, cli.no_history),
+        paused: pair(cli.history_paused, cli.no_history_paused),
+        retention_days: cli.history_retention_days,
+        max_entries: cli.history_max_entries,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn history_flags_win_over_the_config() {
+        let mut config = config::Config::default();
+        config.history.paused = true;
+        let cli = Cli::parse_from([
+            "voxtype",
+            "--history",
+            "--no-history-paused",
+            "--history-max-entries",
+            "9",
+        ]);
+        history_overrides(&cli).apply(&mut config.history);
+        assert!(config.history.recording());
+        assert_eq!(config.history.max_entries, 9);
+        assert_eq!(config.history.retention_days, 30);
+
+        let cli = Cli::parse_from(["voxtype", "--no-history"]);
+        config.history.enabled = true;
+        history_overrides(&cli).apply(&mut config.history);
+        assert!(!config.history.enabled);
+        assert_eq!(
+            history_overrides(&Cli::parse_from(["voxtype"])),
+            Default::default()
+        );
+    }
 }

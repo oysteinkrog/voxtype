@@ -431,6 +431,26 @@ fn load_config_with_env(path: Option<&Path>, env: Env) -> Result<Config, Voxtype
         config.text.filter_filler_words = parse_bool_env(&val);
     }
 
+    // History
+    if let Ok(val) = env("VOXTYPE_HISTORY_ENABLED") {
+        config.history.enabled = parse_bool_env(&val);
+    }
+    if let Ok(val) = env("VOXTYPE_HISTORY_PAUSED") {
+        config.history.paused = parse_bool_env(&val);
+    }
+    if let Ok(val) = env("VOXTYPE_HISTORY_RETENTION_DAYS") {
+        match val.parse::<u32>() {
+            Ok(n) => config.history.retention_days = n,
+            Err(_) => tracing::warn!("VOXTYPE_HISTORY_RETENTION_DAYS: not a number of days"),
+        }
+    }
+    if let Ok(val) = env("VOXTYPE_HISTORY_MAX_ENTRIES") {
+        match val.parse::<u32>() {
+            Ok(n) => config.history.max_entries = n,
+            Err(_) => tracing::warn!("VOXTYPE_HISTORY_MAX_ENTRIES: not a number"),
+        }
+    }
+
     Ok(config)
 }
 
@@ -498,6 +518,27 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn history_env_overrides_the_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[history]\nenabled = false\nmax_entries = 50\n").unwrap();
+        let config = load_alone(&path).unwrap();
+        assert!(!config.history.enabled);
+        assert_eq!(config.history.max_entries, 50);
+        let env = env_of(&[
+            ("VOXTYPE_HISTORY_ENABLED", "true"),
+            ("VOXTYPE_HISTORY_PAUSED", "1"),
+            ("VOXTYPE_HISTORY_RETENTION_DAYS", "7"),
+            ("VOXTYPE_HISTORY_MAX_ENTRIES", "20"),
+        ]);
+        let config = load_config_with_env(Some(&path), &env).unwrap();
+        assert!(config.history.enabled);
+        assert!(config.history.paused);
+        assert_eq!(config.history.retention_days, 7);
+        assert_eq!(config.history.max_entries, 20);
+    }
 
     #[test]
     fn replacements_file_adds_entries_inline_ones_win() {

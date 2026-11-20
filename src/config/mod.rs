@@ -9,6 +9,7 @@
 mod audio;
 mod default_config;
 mod engines;
+mod history;
 mod hotkey;
 mod language;
 mod load;
@@ -33,6 +34,7 @@ pub use engines::{
     SonioxConfig, StreamingWindow, TranscriptionEngine, DEFAULT_STREAMING_PAUSE_COMMIT_SECS,
     DEFAULT_STREAMING_TAIL_SECS,
 };
+pub use history::{HistoryConfig, HistoryOverrides};
 pub use hotkey::{ActivationMode, HotkeyConfig};
 pub use language::LanguageConfig;
 pub use load::{load_config, save_config};
