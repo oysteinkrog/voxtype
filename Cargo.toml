@@ -76,6 +76,9 @@ tempfile = "3"
 # SHA-256 integrity check for R2 model downloads
 sha2 = "0.10"
 
+# Gzip for older dictation history day files
+flate2 = "1"
+
 # Audio playback (for feedback sounds)
 rodio = { version = "0.19", default-features = false, features = ["wav"] }
 

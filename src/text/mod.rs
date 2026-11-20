@@ -5,6 +5,7 @@
 //! - Custom word replacements
 
 pub mod align;
+pub mod diff;
 pub mod learn;
 pub mod spell;
 
