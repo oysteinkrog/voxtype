@@ -1787,6 +1787,25 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Override the theme's stopped glyph.",
     )
     .live(),
+    // The tray starts with the daemon, so both need a restart.
+    spec(
+        "tray.enabled",
+        "tray",
+        "enabled",
+        KeyType::Bool,
+        "Status",
+        "Tray icon",
+        "Show a tray icon (Linux: KDE Plasma, or GNOME with the AppIndicator extension) with the daemon's state, Start/Stop recording, Cancel and recent dictations.",
+    ),
+    spec(
+        "tray.recent",
+        "tray",
+        "recent",
+        KeyType::Int { min: 0, max: 50 },
+        "Status",
+        "Recent dictations in the tray",
+        "How many recent dictations the tray menu lists for copying. 0 hides the list.",
+    ),
     // -- Advanced -----------------------------------------------------------
     spec(
         "engine_isolation",
@@ -3267,6 +3286,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "history.paused" => json!(cfg.history.paused),
         "history.retention_days" => json!(cfg.history.retention_days),
         "history.max_entries" => json!(cfg.history.max_entries),
+
+        "tray.enabled" => json!(cfg.tray.enabled),
+        "tray.recent" => json!(cfg.tray.recent),
 
         _ => return None,
     };

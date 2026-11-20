@@ -407,7 +407,22 @@ pub(crate) fn apply_cli_overrides(config: &mut config::Config, cli: &Cli) -> Opt
     // win over the file afterwards.
     history.set_cli();
 
+    apply_tray_flags(&mut config.tray, cli);
+
     top_level_model
+}
+
+/// The `--tray`, `--no-tray` and `--tray-recent` flags.
+fn apply_tray_flags(tray: &mut config::TrayConfig, cli: &Cli) {
+    if cli.tray {
+        tray.enabled = true;
+    }
+    if cli.no_tray {
+        tray.enabled = false;
+    }
+    if let Some(n) = cli.tray_recent {
+        tray.recent = n;
+    }
 }
 
 /// The `--history*` flags, as overrides of `[history]`.
@@ -429,6 +444,22 @@ fn history_overrides(cli: &Cli) -> config::HistoryOverrides {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn tray_flags_win_over_the_config() {
+        let mut tray = config::TrayConfig::default();
+        apply_tray_flags(&mut tray, &Cli::parse_from(["voxtype"]));
+        assert_eq!(tray, config::TrayConfig::default());
+        apply_tray_flags(
+            &mut tray,
+            &Cli::parse_from(["voxtype", "--tray", "--tray-recent", "3"]),
+        );
+        assert!(tray.enabled);
+        assert_eq!(tray.recent, 3);
+        apply_tray_flags(&mut tray, &Cli::parse_from(["voxtype", "--no-tray"]));
+        assert!(!tray.enabled);
+        assert_eq!(tray.recent, 3);
+    }
 
     #[test]
     fn history_flags_win_over_the_config() {

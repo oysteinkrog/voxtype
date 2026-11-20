@@ -412,6 +412,14 @@ layout = "compact"
 # Most dictations to keep; 0 keeps any number.
 # max_entries = 200
 
+# [tray]
+# Tray icon (Linux: KDE Plasma, or GNOME with the AppIndicator extension):
+# the daemon's state, Start/Stop recording, Cancel, and recent dictations to
+# copy back to the clipboard. Off by default.
+# enabled = false
+# How many recent dictations the menu lists; 0 hides the list.
+# recent = 10
+
 # [profiles]
 # Named profiles for context-specific post-processing
 # Use with: voxtype record start --profile slack

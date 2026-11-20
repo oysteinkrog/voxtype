@@ -451,6 +451,17 @@ fn load_config_with_env(path: Option<&Path>, env: Env) -> Result<Config, Voxtype
         }
     }
 
+    // Tray
+    if let Ok(val) = env("VOXTYPE_TRAY_ENABLED") {
+        config.tray.enabled = parse_bool_env(&val);
+    }
+    if let Ok(val) = env("VOXTYPE_TRAY_RECENT") {
+        match val.parse::<u32>() {
+            Ok(n) => config.tray.recent = n,
+            Err(_) => tracing::warn!("VOXTYPE_TRAY_RECENT: not a number"),
+        }
+    }
+
     Ok(config)
 }
 
@@ -518,6 +529,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn tray_env_overrides_the_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[tray]\nenabled = false\nrecent = 3\n").unwrap();
+        let config = load_alone(&path).unwrap();
+        assert!(!config.tray.enabled);
+        assert_eq!(config.tray.recent, 3);
+        let env = env_of(&[
+            ("VOXTYPE_TRAY_ENABLED", "true"),
+            ("VOXTYPE_TRAY_RECENT", "0"),
+        ]);
+        let config = load_config_with_env(Some(&path), &env).unwrap();
+        assert!(config.tray.enabled);
+        assert_eq!(config.tray.recent, 0);
+    }
 
     #[test]
     fn history_env_overrides_the_file() {

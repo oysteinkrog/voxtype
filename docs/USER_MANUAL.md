@@ -449,6 +449,27 @@ bindsym $mod+Shift+v exec voxtype history copy
 
 On KDE Plasma, add it under System Settings > Keyboard > Shortcuts > Add New > Command or Script.
 
+### Tray icon
+
+On Linux the daemon can show a tray icon (a StatusNotifierItem). It is off by default. Turn it on and restart the daemon:
+
+```toml
+[tray]
+enabled = true
+recent = 10   # how many recent dictations the menu lists; 0 hides the list
+```
+
+Or for one run: `voxtype --tray daemon`.
+
+The icon shows the daemon's state: ready, recording, transcribing or error. Hover over it to see the state as text. The menu has:
+
+- **Start Recording** or **Stop Recording**, the same as `voxtype record toggle`
+- **Cancel**, the same as `voxtype record cancel`
+- **Recent**: the last dictations, newest first, each shown by its first 40 characters. Click one to copy its full text to the clipboard. With history on, this lists up to `recent` entries from history. With history off or paused, it lists the last dictation only.
+- **Copy last dictation**, the same as `voxtype history copy`
+
+KDE Plasma shows the icon as it is. GNOME needs the [AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/) extension; without it the icon does not appear and dictation works as before. See [`[tray]`](CONFIGURATION.md#tray) for the settings.
+
 ### `voxtype meeting`
 
 Continuous meeting transcription with chunked processing and speaker diarization. See [Meeting Mode](#meeting-mode) for full details.

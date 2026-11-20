@@ -719,6 +719,25 @@ pub struct Cli {
     )]
     pub history_max_entries: Option<u32>,
 
+    // -- Tray --
+    /// Show a tray icon (Linux: KDE Plasma, GNOME with AppIndicator)
+    #[arg(
+        long,
+        help_heading = "Tray",
+        long_help = "Show a StatusNotifierItem tray icon with the daemon's state, Start/Stop\n\
+        recording, Cancel and recent dictations to copy ([tray] enabled). Linux\n\
+        only. GNOME needs the AppIndicator extension."
+    )]
+    pub tray: bool,
+
+    /// Do not show the tray icon for this run
+    #[arg(long, help_heading = "Tray", conflicts_with = "tray")]
+    pub no_tray: bool,
+
+    /// Recent dictations the tray menu lists (0 hides the list; default 10)
+    #[arg(long, value_name = "N", help_heading = "Tray", hide_short_help = true)]
+    pub tray_recent: Option<u32>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -732,6 +751,19 @@ mod tests {
     // =========================================================================
     // Engine flag tests
     // =========================================================================
+
+    #[test]
+    fn tray_flags_parse() {
+        let cli = Cli::parse_from(["voxtype", "--tray", "--tray-recent", "0"]);
+        assert!(cli.tray && !cli.no_tray);
+        assert_eq!(cli.tray_recent, Some(0));
+        let cli = Cli::parse_from(["voxtype", "--no-tray"]);
+        assert!(cli.no_tray && !cli.tray);
+        assert!(Cli::try_parse_from(["voxtype", "--tray", "--no-tray"]).is_err());
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(!cli.tray && !cli.no_tray);
+        assert_eq!(cli.tray_recent, None);
+    }
 
     #[test]
     fn history_flags_parse() {

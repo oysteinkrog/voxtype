@@ -4117,6 +4117,58 @@ voxtype --history-max-entries 1000 daemon
 
 ---
 
+## [tray]
+
+A tray icon on Linux (a StatusNotifierItem, shown by KDE Plasma, and by GNOME with the AppIndicator extension). It shows the daemon's state and has a menu with Start/Stop recording, Cancel, the recent dictations to copy back to the clipboard, and Copy last dictation. See [Tray icon](USER_MANUAL.md#tray-icon).
+
+The tray starts with the daemon, so a change to `[tray]` needs a daemon restart. On macOS these keys are read but do nothing.
+
+### enabled
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Show the tray icon. If no tray host is running (for example GNOME without the AppIndicator extension), the daemon logs a warning and dictation works as before.
+
+**Example:**
+```toml
+[tray]
+enabled = true
+```
+
+**CLI override:**
+```bash
+voxtype --tray daemon       # on for this run
+voxtype --no-tray daemon    # off for this run
+```
+
+**Environment variable:** `VOXTYPE_TRAY_ENABLED=true`
+
+### recent
+
+**Type:** Integer (0 - 50)
+**Default:** `10`
+**Required:** No
+
+How many recent dictations the tray's Recent submenu lists, newest first. With history on they come from history; with history off or paused the submenu lists only the last dictation. `0` hides the submenu. Copy last dictation stays in the menu either way.
+
+**Example:**
+```toml
+[tray]
+enabled = true
+recent = 5
+```
+
+**CLI override:**
+```bash
+voxtype --tray-recent 5 daemon
+```
+
+**Environment variable:** `VOXTYPE_TRAY_RECENT=5`
+
+---
+
 ## [status]
 
 Controls status display icons for Waybar and other tray integrations.
@@ -4302,6 +4354,8 @@ Most configuration options can be overridden via command line:
 | history.paused | `--history-paused`, `--no-history-paused` |
 | history.retention_days | `--history-retention-days` |
 | history.max_entries | `--history-max-entries` |
+| tray.enabled | `--tray`, `--no-tray` |
+| tray.recent | `--tray-recent` |
 | Verbosity | `-v`, `-vv`, `-q` |
 
 **Example:**
@@ -4415,6 +4469,13 @@ Any config file setting can be overridden via environment variable. These are ap
 | `VOXTYPE_HISTORY_PAUSED` | bool | `history.paused` |
 | `VOXTYPE_HISTORY_RETENTION_DAYS` | integer | `history.retention_days` |
 | `VOXTYPE_HISTORY_MAX_ENTRIES` | integer | `history.max_entries` |
+
+**Tray:**
+
+| Variable | Type | Config equivalent |
+|----------|------|-------------------|
+| `VOXTYPE_TRAY_ENABLED` | bool | `tray.enabled` |
+| `VOXTYPE_TRAY_RECENT` | integer | `tray.recent` |
 
 Boolean values: `true`, `1` to enable; `false`, `0` to disable.
 

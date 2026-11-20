@@ -23,6 +23,7 @@ pub mod schema;
 mod status;
 mod streaming;
 pub(crate) mod text;
+mod tray;
 mod vad;
 mod whisper;
 
@@ -51,6 +52,7 @@ pub use root::Config;
 pub use status::{ResolvedIcons, StatusConfig, StatusIconOverrides};
 pub use streaming::StreamingConfig;
 pub use text::TextConfig;
+pub use tray::TrayConfig;
 pub use vad::{VadBackend, VadConfig};
 pub use whisper::{WhisperConfig, WhisperMode};
 

@@ -231,6 +231,10 @@ pub struct Config {
     #[serde(default)]
     pub history: super::HistoryConfig,
 
+    /// Tray icon (Linux). Off unless enabled.
+    #[serde(default)]
+    pub tray: super::TrayConfig,
+
     /// Optional path to state file for external integrations (e.g., Waybar)
     /// When set, the daemon writes current state ("idle", "recording", "transcribing")
     /// to this file whenever state changes.
@@ -287,6 +291,7 @@ impl Default for Config {
             osd: crate::osd::config::OsdConfig::default(),
             meeting: MeetingConfig::default(),
             history: super::HistoryConfig::default(),
+            tray: super::TrayConfig::default(),
             state_file: default_state_file(),
             profiles: HashMap::new(),
         }
