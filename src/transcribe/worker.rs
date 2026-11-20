@@ -720,7 +720,8 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         let path = super::parakeet::resolve_model_path(name).map_err(|e| e.to_string())?;
         // The sound strip runs an encoder with one more output and a probe
         // on it; without it the worker loads the plain encoder as before.
-        match sound_probe(config, &path) {
+        let probe = sound_probe(config, &path);
+        match &probe {
             Some(p) => ParakeetUnifiedHandle::load_with_layer(
                 &path,
                 Some((
@@ -731,7 +732,7 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             ),
             None => ParakeetUnifiedHandle::load(&path, Some(exec)),
         }
-        .map(|handle| (handle, path))
+        .map(|handle| (handle, path, probe))
         .map_err(|e| e.to_string())
     };
     // With live_preview_gpu, a preview that stays on the CPU (no room on the
@@ -756,9 +757,9 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
             load(cpu_model, live_execution_config())
         }
     };
-    let (handle, model_path) = match loaded {
-        Ok((handle, path)) => (Ok(handle), Ok(path)),
-        Err(e) => (Err(e.clone()), Err(e)),
+    let (handle, model_path, probe) = match loaded {
+        Ok((handle, path, probe)) => (Ok(handle), Ok(path), probe),
+        Err(e) => (Err(e.clone()), Err(e), None),
     };
     // The model signals (word details, frame levels, the lookahead tail)
     // are for the OSD: without it the worker sends none, and skips the
