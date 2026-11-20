@@ -300,6 +300,27 @@ pub(super) fn sleeping_threads(config: ExecutionConfig) -> ExecutionConfig {
     })
 }
 
+/// The CUDA execution provider for the live preview model
+/// (`live_preview_gpu`), with sleeping threads for the nodes left on the CPU:
+/// `None` when this build has no CUDA or the CUDA runtime does not load.
+// Each cfg block returns; which one ends the body depends on the features.
+#[allow(clippy::needless_return)]
+pub(super) fn live_gpu_execution_config() -> Option<ExecutionConfig> {
+    #[cfg(feature = "parakeet-cuda")]
+    {
+        if probe_cuda_runtime() {
+            return Some(sleeping_threads(
+                ExecutionConfig::new().with_execution_provider(ExecutionProvider::Cuda),
+            ));
+        }
+        return None;
+    }
+    #[cfg(not(feature = "parakeet-cuda"))]
+    {
+        None
+    }
+}
+
 /// The GPU execution provider compiled in and usable, if any.
 // Each cfg block returns; which one ends the body depends on the features.
 #[allow(clippy::needless_return)]

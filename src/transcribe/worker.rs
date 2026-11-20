@@ -723,20 +723,32 @@ pub fn run_live_worker(config: &crate::config::Config, live_model: &str) -> anyh
         .as_ref()
         .ok()
         .and_then(|path| sound_probe(config, path));
-    let handle = model_path.clone().and_then(|path| {
-        match &probe {
-            Some(p) => ParakeetUnifiedHandle::load_with_layer(
-                &path,
-                Some((
-                    &path.join(super::sound_probe::ENCODER_FILE),
-                    p.output.as_str(),
-                )),
-                Some(live_execution_config()),
-            ),
-            None => ParakeetUnifiedHandle::load(&path, Some(live_execution_config())),
-        }
-        .map_err(|e| e.to_string())
-    });
+    let load = |exec: parakeet_rs::ExecutionConfig| {
+        model_path.clone().and_then(|path| {
+            match &probe {
+                Some(p) => ParakeetUnifiedHandle::load_with_layer(
+                    &path,
+                    Some((
+                        &path.join(super::sound_probe::ENCODER_FILE),
+                        p.output.as_str(),
+                    )),
+                    Some(exec),
+                ),
+                None => ParakeetUnifiedHandle::load(&path, Some(exec)),
+            }
+            .map_err(|e| e.to_string())
+        })
+    };
+    let handle = match live_gpu_config(config) {
+        Some(gpu) => load(gpu).or_else(|e| {
+            eprintln!(
+                "[worker] Live preview model failed to load on the GPU ({}); using the CPU",
+                e
+            );
+            load(live_execution_config())
+        }),
+        None => load(live_execution_config()),
+    };
     // The model signals (word details, frame levels, the lookahead tail)
     // are for the OSD: without it the worker sends none, and skips the
     // lookahead decode (a few ms per step).
@@ -1638,8 +1650,37 @@ impl PauseCommit {
     }
 }
 
-/// The live model's ONNX Runtime settings: the CPU, since the GPU is left
-/// to the engine model, with threads that sleep between runs. ORT's default
+/// The CUDA settings for the live model when `live_preview_gpu` is on, the
+/// build has CUDA, and the GPU has `live_preview_min_free_vram_mib` free
+/// (when nvidia-smi can tell). `None` keeps the model on the CPU, with one
+/// line in the log saying why when the key is on.
+#[cfg(feature = "parakeet")]
+fn live_gpu_config(config: &crate::config::Config) -> Option<parakeet_rs::ExecutionConfig> {
+    if !config.live_preview_gpu {
+        return None;
+    }
+    let min_free = config.live_preview_min_free_vram_mib;
+    if let Some(free) = free_vram_mib().filter(|&f| f < min_free) {
+        eprintln!(
+            "[worker] Live preview on the CPU: {} MiB of GPU memory free, {} needed \
+             (live_preview_min_free_vram_mib)",
+            free, min_free
+        );
+        return None;
+    }
+    let gpu = super::parakeet::live_gpu_execution_config();
+    match &gpu {
+        Some(_) => eprintln!("[worker] Live preview model on the GPU (CUDA)"),
+        None => eprintln!(
+            "[worker] Live preview on the CPU: this build has no CUDA, or the CUDA \
+             runtime did not load"
+        ),
+    }
+    gpu
+}
+
+/// The live model's ONNX Runtime settings on the CPU (the default: the GPU
+/// is left to the engine model), with threads that sleep between runs. ORT's default
 /// lets them spin, which kept 5 to 6 cores busy while dictating for the same
 /// text and tick times.
 #[cfg(feature = "parakeet")]

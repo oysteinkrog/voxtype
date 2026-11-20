@@ -1808,6 +1808,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Load the engine model only with at least this much free GPU memory (MiB); otherwise the preview text is the final text. 0: no check.",
     ),
     spec(
+        "live_preview_gpu",
+        "",
+        "live_preview_gpu",
+        KeyType::Bool,
+        "Advanced",
+        "Live preview on the GPU",
+        "Run the live preview model on the GPU (CUDA) when the build has CUDA and the GPU has live_preview_min_free_vram_mib free. It then holds GPU memory while the worker is loaded. Off: the CPU.",
+    ),
+    spec(
         "live_preview_keep_engine",
         "",
         "live_preview_keep_engine",
@@ -2856,6 +2865,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }
         "live_preview_min_free_vram_mib" => json!(cfg.live_preview_min_free_vram_mib),
         "live_preview_keep_engine" => json!(cfg.live_preview_keep_engine),
+        "live_preview_gpu" => json!(cfg.live_preview_gpu),
         "live_preview_corpus_dir" => opt_str(cfg.live_preview_corpus_dir.as_ref()),
         "live_preview_revisions_dir" => opt_str(cfg.live_preview_revisions_dir.as_ref()),
 

@@ -43,7 +43,8 @@ pub struct Config {
 
     /// Live preview while recording (needs `engine_isolation = true` and the
     /// engine's `on_demand_loading = false`). The worker runs this Parakeet
-    /// cache-aware streaming model on the CPU, e.g. "parakeet-unified-en-0.6b",
+    /// cache-aware streaming model on the CPU (on the GPU with
+    /// `live_preview_gpu`), e.g. "parakeet-unified-en-0.6b",
     /// and the OSD shows its running transcript. The engine's own model still
     /// produces the text that gets typed; it loads in the background while
     /// you speak. Partials are never typed at the cursor, so push-to-talk
@@ -124,6 +125,13 @@ pub struct Config {
     /// final. 0 turns the check off.
     #[serde(default)]
     pub live_preview_min_free_vram_mib: u64,
+
+    /// Run the live preview model on the GPU (CUDA) instead of the CPU, when
+    /// the build has CUDA and the GPU has `live_preview_min_free_vram_mib`
+    /// free. It then holds GPU memory while the worker is loaded, also while
+    /// a warm worker waits. Off (the default) keeps it on the CPU.
+    #[serde(default)]
+    pub live_preview_gpu: bool,
 
     /// Keep the engine model (e.g. Cohere) loaded in the warm live worker
     /// between recordings, and load it as soon as the worker starts. The
@@ -239,6 +247,7 @@ impl Default for Config {
             live_preview_revisions_dir: None,
             live_preview_final: default_live_preview_final(),
             live_preview_min_free_vram_mib: 0,
+            live_preview_gpu: false,
             live_preview_keep_engine: false,
             parakeet: None,
             moonshine: None,

@@ -135,7 +135,7 @@ engine_isolation = true
 **Default:** unset (no live preview)
 **Required:** No
 
-Show your words in the popup while you speak. The worker runs this Parakeet cache-aware streaming model on the CPU, for example `"parakeet-unified-en-0.6b"`, and the OSD shows its running transcript. The engine's own model still makes the text that gets typed; it loads in the background while you speak. Preview words are not typed at the cursor unless `live_typing = true`.
+Show your words in the popup while you speak. The worker runs this Parakeet cache-aware streaming model on the CPU (or on the GPU with `live_preview_gpu = true`), for example `"parakeet-unified-en-0.6b"`, and the OSD shows its running transcript. The engine's own model still makes the text that gets typed; it loads in the background while you speak. Preview words are not typed at the cursor unless `live_typing = true`.
 
 Needs `engine_isolation = true` and the engine's `on_demand_loading = false`.
 
@@ -183,6 +183,20 @@ With a live preview, load the engine model only when the GPU has at least this m
 live_preview_min_free_vram_mib = 4096
 ```
 
+## live_preview_gpu
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Run the live preview model on the GPU (the CUDA execution provider) instead of the CPU. Use it when the preview falls behind your speech on a busy CPU. It needs a voxtype build with CUDA (`parakeet-cuda`). The worker checks `live_preview_min_free_vram_mib` first: with less free GPU memory, or without CUDA, the preview stays on the CPU and the log says why. If the GPU load fails, the worker loads the model on the CPU.
+
+On the GPU the preview model holds GPU memory as long as its worker is loaded, also while a warm worker waits (`live_preview_warm_secs`, `live_preview_warm_idle_secs`). The preview loads before the engine model, so the engine's own `live_preview_min_free_vram_mib` check sees that memory as used.
+
+```toml
+live_preview_gpu = true
+```
+
 ## live_preview_keep_engine
 
 **Type:** Boolean
@@ -201,7 +215,7 @@ live_preview_keep_engine = true
 **Default:** `0`
 **Required:** No
 
-With a live preview (`live_preview_model`), keep a live worker with the preview model loaded for this many seconds after each recording, and load one when the daemon starts. The next recording then shows words at once instead of after the model's load time (about 1.6 s for `parakeet-unified-en-0.6b-int8`, longer under load). A waiting worker holds the preview model in RAM (about 1 GB, no VRAM). `0` loads a fresh worker for every recording.
+With a live preview (`live_preview_model`), keep a live worker with the preview model loaded for this many seconds after each recording, and load one when the daemon starts. The next recording then shows words at once instead of after the model's load time (about 1.6 s for `parakeet-unified-en-0.6b-int8`, longer under load). A waiting worker holds the preview model in RAM (about 1 GB, no VRAM; with `live_preview_gpu = true` it holds GPU memory instead). `0` loads a fresh worker for every recording.
 
 Not used when `live_preview_warm_idle_secs` is set.
 
