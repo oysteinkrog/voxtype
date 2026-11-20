@@ -4129,7 +4129,7 @@ The tray starts with the daemon, so a change to `[tray]` needs a daemon restart.
 **Default:** `false`
 **Required:** No
 
-Show the tray icon. If no tray host is running (for example GNOME without the AppIndicator extension), the daemon logs a warning and dictation works as before.
+Show the tray icon. If no tray host is running (for example GNOME without the AppIndicator extension), there is no icon, the daemon logs that it waits for a host, and dictation works as before. The icon appears when a host starts.
 
 **Example:**
 ```toml

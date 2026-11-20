@@ -98,6 +98,8 @@ pub mod state;
 pub mod status_json;
 pub mod text;
 pub mod transcribe;
+#[cfg(target_os = "linux")]
+pub mod tray;
 pub mod tui;
 pub mod vad;
 

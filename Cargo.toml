@@ -179,6 +179,8 @@ nix = { version = "0.29", features = ["signal", "process"] }  # Unix signals for
 # instead of shelling out to playerctl lets us see MPRIS-compliant players
 # that playerctl silently filters out, and surfaces real errors on resume.
 zbus = { version = "4", default-features = false, features = ["tokio"] }
+# StatusNotifierItem tray icon ([tray], src/tray.rs). Linux only.
+ksni = { version = "0.3.7", default-features = false, features = ["tokio"] }
 
 [features]
 default = []
